@@ -1,0 +1,16 @@
+[package]
+name = "noxide-cli"
+version.workspace = true
+edition.workspace = true
+readme.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line tools for Noxide"
+
+[[bin]]
+name = "noxide"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+noxide.workspace = true

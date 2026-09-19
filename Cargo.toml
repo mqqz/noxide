@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/noxide",
+    "crates/noxide-cli",
+    "crates/noxide-macros",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mqqz/noxide"
+
+[workspace.dependencies]
+noxide = { path = "crates/noxide", version = "0.1.0" }
+noxide-macros = { path = "crates/noxide-macros", version = "0.1.0" }
