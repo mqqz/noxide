@@ -1,0 +1,11 @@
+[package]
+name = "noxide"
+version.workspace = true
+edition.workspace = true
+readme.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A server-rendered Rust web framework for NoJS applications"
+
+[dependencies]
+noxide-macros.workspace = true

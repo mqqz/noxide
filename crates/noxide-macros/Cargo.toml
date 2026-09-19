@@ -1,0 +1,11 @@
+[package]
+name = "noxide-macros"
+version.workspace = true
+edition.workspace = true
+readme.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Procedural macros for Noxide"
+
+[lib]
+proc-macro = true
