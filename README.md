@@ -92,6 +92,12 @@ In more detail:
     The type system should encode meaningful security properties whenever doing so improves correctness without
     making ordinary code painful.
 
+## Runtime design
+
+The [HTTP/application runtime design](docs/runtime-architecture.md) records the
+Wasmtime boundary, host-rendered document protocol, explicit authorization,
+transactional actions, and isolated builds.
+
 ## License
 
 This project's code is licensed under either the [MIT License](LICENSE-MIT) or the
