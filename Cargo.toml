@@ -4,11 +4,13 @@ members = [
     "crates/noxide",
     "crates/noxide-cli",
     "crates/noxide-macros",
+    "crates/noxide-protocol",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mqqz/noxide"
@@ -16,3 +18,12 @@ repository = "https://github.com/mqqz/noxide"
 [workspace.dependencies]
 noxide = { path = "crates/noxide", version = "0.1.0" }
 noxide-macros = { path = "crates/noxide-macros", version = "0.1.0" }
+noxide-protocol = { path = "crates/noxide-protocol", version = "0.1.0" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0

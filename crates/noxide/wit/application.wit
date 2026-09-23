@@ -1,0 +1,15 @@
+package noxide:application@0.1.0;
+
+// Fixed-width calls prevent canonical lifting of guest-sized host allocations.
+interface host {
+    request-length: func() -> u32;
+    request-chunk: func(offset: u32) -> u64;
+    emit: func(word: u64, length: u32);
+    invoke: func(operation: u32, target: u64) -> u32;
+    result-chunk: func(offset: u32) -> u64;
+}
+
+world application {
+    import host;
+    export handle: func();
+}
