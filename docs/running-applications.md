@@ -125,10 +125,10 @@ For PostgreSQL, replace the database setting with a local connection, for exampl
 {"postgres":"postgresql://noxide@localhost/notes?host=/run/postgresql"}
 ```
 
-Create that database and role through normal PostgreSQL administration first.
-Give the runtime role authority over only its dedicated database. Use one
-authoritative database; receipts and application writes share its transaction.
-Remote PostgreSQL connections and cross-provider transactions are unsupported.
+Create the database and role through PostgreSQL administration, and restrict the
+runtime role to its dedicated database. Receipts and application writes must
+share one authoritative database and transaction. Remote PostgreSQL connections
+and cross-provider transactions are unsupported.
 
 ## Provision accounts and serve
 
@@ -166,24 +166,24 @@ cannot alter cookie or security-header policy.
 
 ## Failures, upgrades, and recovery
 
-Every save carries a host-authenticated token that expires after 15 minutes. A
-repeated POST with the same canonical input recovers its existing outcome. A used
-form with changed input returns a conflict and cannot save again. Validation
-pages preserve entered text; an uncertain save retains the original token and
-read-only input so the user can check that save before starting another one.
+Every save carries a host-authenticated token with a 15-minute expiry. Repeat the
+POST with the same canonical input to recover its outcome; changing the input
+on a used form returns a conflict and cannot save again. Validation pages preserve
+entered text. For an uncertain save, the page keeps the original token and makes
+the input read-only so the user can check that save before starting another one.
 
 Resources are released before sending a committed response. A slow browser does
 not retain a Store or database transaction. Shutdown stops accepting connections,
 allows three seconds for active connections, then cancels them. A disconnected
 client may still have a committed result and must use the same submission token.
 
-Activation checks the persistent resource schema before changing deployments.
-Schema changes require a separately reviewed migration; arbitrary application
-migrations are unavailable. Component bytes and the approved declaration digest
-identify a deployment. Changing either retires its generation and rejects old
-forms, including old receipt requests. Rolling back code creates another
-generation and cannot revive previously issued forms. Plan a drain period if
-outstanding submissions must finish before replacement.
+Activation checks the persisted resource schema. To change that schema, use a
+separately reviewed migration; applications cannot run arbitrary migrations.
+Changing the component bytes or approved declaration digest creates a new
+deployment identity, retires the previous generation, and rejects old forms,
+including receipt requests. Code rollback creates another generation, so it
+cannot revive previously issued forms. Allow a drain period if outstanding
+submissions must finish before replacement.
 
 On backup restoration, a database fork, or lossy failover, stop serving, generate
 new keys, update the configuration's `keys` path, and restart:

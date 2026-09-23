@@ -98,7 +98,8 @@ pub enum Predicate {
     Role { name: String, tenant_scoped: bool },
 }
 
-/// Disjunction of conjunctions. Empty rules deny. Nesting is deliberately finite.
+/// Grants access if every predicate in at least one nonempty rule matches.
+/// An empty policy denies access. Rules are flat lists of predicates.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
