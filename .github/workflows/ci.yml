@@ -1,0 +1,190 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RUSTUP_TOOLCHAIN: 1.98.0
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: '2'
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  runtime:
+    name: Runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:18.4
+        env:
+          POSTGRES_USER: noxide
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: noxide_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U noxide -d noxide_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      NOXIDE_TEST_POSTGRES: postgresql://noxide:ci-only-password@127.0.0.1:5432/noxide_ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+      - name: Fetch locked framework dependencies
+        run: cargo fetch --locked
+      - name: Check formatting
+        run: |
+          cargo fmt --all --check
+          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs
+      - name: Lint all framework targets
+        run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+      - name: Test SQLite and PostgreSQL
+        # Include ignored provider tests. The crash worker is invoked by its
+        # parent test; the browser fixture runs in the application job below.
+        run: >-
+          cargo test --workspace --locked --offline --
+          --include-ignored
+          --skip failure_tests::crash_worker
+          --skip postgres_nojs_browser_flow
+      - name: Check documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked --offline
+      - name: Test build input validation
+        run: python3 tools/test_build_inputs.py
+      - name: Lint CI bootstrap
+        run: shellcheck tools/ci/setup-vm.sh
+
+  application:
+    name: Packaged SDK and browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:18.4
+        env:
+          POSTGRES_USER: noxide
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: noxide_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U noxide -d noxide_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      NOXIDE_TEST_POSTGRES: postgresql://noxide:ci-only-password@127.0.0.1:5432/noxide_ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust and Wasm standard library
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown
+      - name: Install VM prerequisites
+        run: bash tools/ci/setup-vm.sh
+      - name: Locate browser tools
+        run: |
+          driver="$(command -v geckodriver || true)"
+          if [[ -z "$driver" ]]; then
+            driver="${GECKOWEBDRIVER:?runner image must include geckodriver}/geckodriver"
+          fi
+          "$driver" --version
+          firefox --version
+          echo "NOXIDE_GECKODRIVER=$driver" >> "$GITHUB_ENV"
+      - name: Fetch locked framework dependencies
+        run: cargo fetch --locked
+      - name: Build trusted host CLI
+        run: cargo build -p noxide-cli --locked --offline
+      - name: Build application from SDK archives inside a VM
+        run: |
+          python3 tools/test_sdk_package.py \
+            --kernel "$NOXIDE_CI_KERNEL" \
+            --toolchain "$(rustc --print sysroot)" \
+            --cargo-home "${CARGO_HOME:-$HOME/.cargo}" \
+            --output "$RUNNER_TEMP/noxide-ci/sdk"
+          target/debug/noxide component \
+            "$RUNNER_TEMP/noxide-ci/sdk/private_notes.wasm" \
+            "$RUNNER_TEMP/noxide-ci/sdk/private_notes.component.wasm"
+          echo "NOXIDE_TEST_COMPONENT=$RUNNER_TEMP/noxide-ci/sdk/private_notes.component.wasm" >> "$GITHUB_ENV"
+      - name: Test NoJS browser flow with SQLite
+        run: |
+          python3 tools/test_browser.py \
+            --component "$NOXIDE_TEST_COMPONENT" \
+            --geckodriver "$NOXIDE_GECKODRIVER" \
+            --output "$RUNNER_TEMP/noxide-ci/browser-sqlite"
+      - name: Test NoJS browser flow with PostgreSQL
+        run: |
+          mkdir -p "$RUNNER_TEMP/noxide-ci/postgres"
+          TMPDIR="$RUNNER_TEMP/noxide-ci/postgres" \
+            cargo test -p noxide-host --test browser --locked --offline -- \
+            --ignored --exact postgres_nojs_browser_flow --nocapture
+      - name: Upload build and browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: application-diagnostics
+          retention-days: 7
+          if-no-files-found: ignore
+          include-hidden-files: true # Failed PostgreSQL fixtures use .tmp directories.
+          path: |
+            ${{ runner.temp }}/noxide-ci/**/*.log
+            ${{ runner.temp }}/noxide-ci/**/*.metrics.json
+            ${{ runner.temp }}/noxide-ci/**/*.png
+            ${{ runner.temp }}/noxide-ci/**/requests.json
+            ${{ runner.temp }}/noxide-ci/**/blocked-browser-requests.json
+
+  hostile-builds:
+    name: Hostile application builds
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust and Wasm standard library
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown
+      - name: Install VM prerequisites
+        run: bash tools/ci/setup-vm.sh
+      - name: Fetch locked framework dependencies
+        run: cargo fetch --locked
+      - name: Test hostile build scripts and procedural macros
+        run: |
+          python3 tools/test_build_vm.py \
+            --kernel "$NOXIDE_CI_KERNEL" \
+            --toolchain "$(rustc --print sysroot)" \
+            --output "$RUNNER_TEMP/noxide-ci/hostile"
+      - name: Upload build boundary diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hostile-build-diagnostics
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/noxide-ci/hostile/**/*.log
+            ${{ runner.temp }}/noxide-ci/hostile/**/*.metrics.json

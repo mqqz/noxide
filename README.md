@@ -43,6 +43,9 @@ Shared package metadata and local dependencies are defined in the root `Cargo.to
 Workspace crates share the root `Cargo.lock` and `target/` directory. The isolated
 application example has its own lockfile and is excluded from host workspace builds.
 
+[Continuous integration](docs/ci.md) covers both databases, packaged SDK builds,
+NoJS browser acceptance, and scheduled hostile-build checks.
+
 ## Design principles
 
 These principles guide development for both small and large applications. Keep
