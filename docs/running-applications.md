@@ -177,8 +177,22 @@ not retain a Store or database transaction. Shutdown stops accepting connections
 allows three seconds for active connections, then cancels them. A disconnected
 client may still have a committed result and must use the same submission token.
 
-Activation checks the persisted resource schema. To change that schema, use a
-separately reviewed migration; applications cannot run arbitrary migrations.
+Existing version-1 runtime databases require an offline storage migration. Stop
+all serving processes and other writers, make a backup, then run the new CLI:
+
+```sh
+target/debug/noxide migrate /tmp/noxide-notes-run/runtime.json
+```
+
+The command preserves existing records, assigns each a fresh incarnation and
+revision 1, and atomically replaces the storage layout. It retires old deployment
+forms. Restart with the approved application bundle. `init` and serving refuse
+unmigrated storage; repeating a successful migration is safe. The migration is bounded to
+five minutes and requires room for a transactional copy of the records.
+
+This command only upgrades framework storage. Activation also checks the persisted
+application resource schema, which must still match. Arbitrary application schema
+migrations remain unsupported.
 Changing the component bytes or approved declaration digest creates a new
 deployment identity, retires the previous generation, and rejects old forms,
 including receipt requests. Code rollback creates another generation, so it

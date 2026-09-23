@@ -100,7 +100,7 @@ async fn main() -> Result<()> {
     match command {
         "help" | "--help" | "-h" => {
             println!(
-                "Noxide {}\n\nCommands:\n  init CONFIG.json\n  account CONFIG.json USER PASSWORD_FILE [TENANT]\n  contract-hash MANIFEST.json\n  component CORE.wasm COMPONENT.wasm\n  serve CONFIG.json\n  maintain CONFIG.json\n  keygen NEW_KEYS.json\n\nApplication builds must use the isolated VM recipe. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
+                "Noxide {}\n\nCommands:\n  init CONFIG.json\n  account CONFIG.json USER PASSWORD_FILE [TENANT]\n  contract-hash MANIFEST.json\n  component CORE.wasm COMPONENT.wasm\n  serve CONFIG.json\n  maintain CONFIG.json\n  migrate CONFIG.json (stop serving first)\n  keygen NEW_KEYS.json\n\nApplication builds must use the isolated VM recipe. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
                 env!("CARGO_PKG_VERSION")
             );
         }
@@ -119,6 +119,15 @@ async fn main() -> Result<()> {
                 &serde_json::to_vec(&HostKeys::generate()?)?,
                 true,
             )?;
+        }
+        "migrate" => {
+            ensure!(
+                args.len() == 2,
+                "usage: noxide migrate CONFIG.json (stop serving first)"
+            );
+            let (config, base) = config(Path::new(&args[1]))?;
+            database(&config.database, &base)?.migrate().await?;
+            println!("Runtime storage is current. Restart with the approved application bundle.");
         }
         "maintain" => {
             ensure!(args.len() == 2, "usage: noxide maintain CONFIG.json");

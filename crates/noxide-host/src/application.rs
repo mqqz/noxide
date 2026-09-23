@@ -80,6 +80,7 @@ impl Application {
             .database
             .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
             .await?;
+        tx.check_storage().await?;
         tx.bind_schema(&self.manifest).await?;
         let generation = tx
             .deployment(&self.deployment, self.keys.incarnation(), true)
@@ -97,6 +98,7 @@ impl Application {
     }
 
     async fn admission(&self, tx: &mut Transaction, activate: bool) -> Result<()> {
+        tx.check_storage().await?;
         tx.bind_schema(&self.manifest).await?;
         let generation = tx
             .deployment(&self.deployment, self.keys.incarnation(), activate)

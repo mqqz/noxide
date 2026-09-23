@@ -86,8 +86,8 @@ impl Effects {
                     id,
                     fields: self.request.input.clone(),
                 };
-                self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields) VALUES($1,$2,$3,$4,$5)",&[
-                    Param::Number(op.resource.into()),Param::Number(id as i64),self.principal.id.clone().into(),self.principal.tenant.clone().into(),serde_json::to_string(&record.fields)?.into()
+                self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES($1,$2,$3,$4,$5,$6,1)",&[
+                    Param::Number(op.resource.into()),Param::Number(id as i64),self.principal.id.clone().into(),self.principal.tenant.clone().into(),serde_json::to_string(&record.fields)?.into(), crate::security::random_id()?.into()
                 ]).await?;
                 #[cfg(test)]
                 crate::failure_tests::after_effect(&mut self.tx).await?;

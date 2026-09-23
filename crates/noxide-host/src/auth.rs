@@ -39,6 +39,7 @@ impl Database {
         let mut tx = self
             .begin(std::time::Instant::now() + std::time::Duration::from_secs(5))
             .await?;
+        tx.check_storage().await?;
         tx.execute(
             "INSERT INTO nx_accounts(id,password,tenant,epoch) VALUES($1,$2,$3,1)",
             &[id.into(), hash.into(), tenant.into()],
