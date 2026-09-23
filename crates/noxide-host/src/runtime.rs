@@ -114,8 +114,9 @@ pub(crate) struct Attempt {
 }
 
 impl Runtime {
-    /// Admission accepts portable binary components only. Compilation is
-    /// synchronous; run it before listening, within deployment process limits.
+    /// Admission accepts portable binary components only and bounds component
+    /// expansion before invoking Wasmtime. Compilation is synchronous; run it
+    /// before listening for requests, within the deployment's process limits.
     pub fn compile(bytes: &[u8], limits: Limits) -> Result<Self> {
         ensure!(
             (1..=64).contains(&limits.concurrency)
