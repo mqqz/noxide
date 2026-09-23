@@ -156,7 +156,7 @@ async fn stored_bounds(db: &Database) {
         .unwrap();
     for id in [2_i64, 9, 10, 99, 100, 101] {
         tx.execute(
-            "INSERT INTO nx_records(resource,id,owner,tenant,fields) VALUES(1,$1,'alice','',$2)",
+            "INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES(1,$1,'alice','',$2,'fixture-incarnation',1)",
             &[id.into(), serde_json::to_string(&fields).unwrap().into()],
         )
         .await

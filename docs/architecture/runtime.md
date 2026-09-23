@@ -246,6 +246,16 @@ Both providers must implement the same semantic protocol and pass the same
 hostile acceptance suite on real databases, including independent connections
 and host processes. Provider SQL, locking, and error classification can differ.
 
+Runtime storage version 2 adds record incarnation and revision fields.
+`noxide migrate CONFIG.json` upgrades legacy storage in one transaction while
+serving is stopped. It preserves content and authorization fields, assigns each
+record a random incarnation and revision 1, then stamps the storage version.
+Migration also changes the deployment generation to retire old forms. Interrupting
+the operation leaves the old layout or the complete new layout. Required columns
+without defaults reject legacy inserts. Current hosts check the version at
+activation and admission; they do not migrate implicitly. Application resource
+schema changes and guest-provided migrations remain unsupported.
+
 The adapters use SQLite WAL with `BEGIN IMMEDIATE` and PostgreSQL `SERIALIZABLE`.
 Every transaction owns a dedicated connection, including read routes and host
 security bookkeeping; unresolved connections are discarded. SQLite permits one active
