@@ -9,3 +9,9 @@ description = "A server-rendered Rust web framework for NoJS applications"
 
 [dependencies]
 noxide-macros.workspace = true
+noxide-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = "=0.46.0"
