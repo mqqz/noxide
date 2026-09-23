@@ -459,6 +459,50 @@ impl Application {
         Err(RequestError::Busy)
     }
 
+    pub(crate) async fn recover_form(
+        &self,
+        cookie: &str,
+        action: u32,
+        submission: &str,
+        csrf: &str,
+        input: &Fields,
+        unknown: bool,
+    ) -> Result<Rendered> {
+        let _permit = self.permits.try_acquire()?;
+        let deadline = Instant::now() + self.runtime.limits().wall_time;
+        timeout_at(deadline,async {
+            let a=manifest::action(&self.manifest,action)?;
+            let mut tx=self.database.begin(deadline.into_std()).await?;
+            self.admission(&mut tx,false).await?;
+            let now=security::now()?;
+            let token=self.keys.verify(submission,now)?;
+            security::observe_clock(&mut tx,now).await?;
+            ensure!(token.kind==TokenKind::Submission{contract:self.submission_contract(),action,version:a.version},"retired submission");
+            let (session,_)=auth::authenticate(&mut tx,&self.keys,cookie,now).await?;
+            ensure!(session.nonce==token.subject,"submission subject");
+            self.keys.verify_csrf(&session.nonce,csrf)?;
+            let sql=format!("SELECT subject,contract,input,{} FROM nx_receipts WHERE nonce=$1",tx.bounded_text("outcome",1024));
+            let rows=tx.fetch::<4>(&sql,&[token.nonce.into()]).await?;
+            if let Some([subject,contract,digest,outcome])=rows.first() {
+                ensure!(*subject==session.nonce && *contract==self.contract,"receipt scope differs");
+                let expected=URL_SAFE_NO_PAD.encode(Sha256::digest(serde_json::to_vec(&(VERSION,a.version,input))?));
+                let response=if digest==&expected {
+                    let intent:ResponseIntent=serde_json::from_str(outcome)?;
+                    ensure!(matches!(intent,ResponseIntent::Created{..}),"invalid receipt");
+                    render::render(&intent,&RenderContext{manifest:Some(&self.manifest),..RenderContext::empty()})?
+                } else {
+                    let mut response=render::render(&ResponseIntent::Page(Document::new("Form already used",vec![Instruction::Text("This form already saved different content. Return home to start a new form.".into()),Instruction::Link{destination:RouteRef{route:self.manifest.routes.iter().find(|r|r.path=="/").expect("index route").id,target:None},text:"Return home".into()}])),&RenderContext{manifest:Some(&self.manifest),..RenderContext::empty()})?;
+                    response.status=409;response
+                };
+                tx.commit().await?;
+                return Ok(response);
+            }
+            let rendered=render::recovery(&self.manifest,action,&FormCredentials{csrf:csrf.into(),submission:submission.into()},input,unknown)?;
+            tx.commit().await?;
+            Ok(rendered)
+        }).await?
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn prepare(
         &self,

@@ -17,6 +17,9 @@ tokio.workspace = true
 wasmtime = { version = "=48.0.2", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "async"] }
 wasmparser = "0.245"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 argon2 = "0.5"
 hmac = "0.12"
 rand = "0.8"
@@ -26,3 +29,4 @@ url = "2"
 [dev-dependencies]
 tempfile = "3"
 wat = "1"
+tower = { version = "0.5", features = ["util"] }

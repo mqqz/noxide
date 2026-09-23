@@ -248,6 +248,88 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
     })
 }
 
+/// Trusted form recovery never passes the saved submission or entered values
+/// through a guest. Every retry retains the original action identity.
+pub(crate) fn recovery(
+    m: &Manifest,
+    action: u32,
+    credentials: &FormCredentials,
+    input: &Fields,
+    unknown: bool,
+) -> Result<Rendered> {
+    let a = crate::manifest::action(m, action)?;
+    let op = crate::manifest::operation(m, a.operation)?;
+    let resource = crate::manifest::resource(m, op.resource)?;
+    ensure!(
+        input
+            .keys()
+            .all(|name| resource.fields.iter().any(|f| &f.name == name)),
+        "unexpected field"
+    );
+    let mut out = Buffer(String::new());
+    out.push("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Save result</title><link rel=\"stylesheet\" href=\"/_noxide/style.css\"></head><body><main><h1>Save result</h1><p role=\"status\">")?;
+    out.push(if unknown {
+        "The result is not yet confirmed. Check this save before starting another one."
+    } else {
+        "The save has no confirmed result. Check the fields and retry this form."
+    })?;
+    out.push(&format!(
+        "</p><form method=\"post\" action=\"/_noxide/action/{action}\" accept-charset=\"utf-8\">"
+    ))?;
+    for (name, value) in [
+        ("_csrf", &credentials.csrf),
+        ("_submission", &credentials.submission),
+    ] {
+        out.push(&format!("<input type=\"hidden\" name=\"{name}\" value=\""))?;
+        out.text(value)?;
+        out.push("\">")?;
+    }
+    for field in &resource.fields {
+        let value = input.get(&field.name).map(String::as_str).unwrap_or("");
+        let invalid = value.trim().is_empty() || value.len() > field.max_bytes as usize;
+        out.push("<label>")?;
+        out.text(&field.label)?;
+        out.push(&format!(
+            "<textarea name=\"{}\" maxlength=\"{}\" required",
+            field.name, field.max_bytes
+        ))?;
+        if unknown {
+            out.push(" readonly")?;
+        }
+        if invalid {
+            out.push(&format!(
+                " aria-invalid=\"true\" aria-describedby=\"error-{}\"",
+                field.name
+            ))?;
+        }
+        out.push(">")?;
+        // HTML discards one initial LF in textarea content. Preserve the
+        // canonical entered value, including during an uncertain-outcome retry.
+        if value.starts_with('\n') {
+            out.push("\n")?;
+        }
+        out.text(value)?;
+        out.push("</textarea></label>")?;
+        if invalid {
+            out.push(&format!(
+                "<p id=\"error-{}\">Enter between 1 and {} UTF-8 bytes.</p>",
+                field.name, field.max_bytes
+            ))?;
+        }
+    }
+    out.push(if unknown {
+        "<button>Check this submission</button>"
+    } else {
+        "<button>Retry this submission</button>"
+    })?;
+    out.push("</form><a href=\"/\">Return to notes</a></main></body></html>")?;
+    Ok(Rendered {
+        status: if unknown { 503 } else { 422 },
+        body: out.0.into_bytes(),
+        location: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
