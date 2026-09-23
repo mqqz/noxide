@@ -90,8 +90,8 @@ async fn conformance(
         app.submit(&alice, 1, &submission, &csrf, fields.clone())
     );
     assert_eq!(one.unwrap().location, two.unwrap().location);
-    // A genuinely new token is raced across independently instantiated hosts.
-    // This also models loss of the first HTTP response after commit.
+    // Race an unused token across independently instantiated hosts, then recover
+    // an earlier submission as a client would after losing its committed response.
     let restarted = Application::new(
         &support::component(None),
         &bytes,

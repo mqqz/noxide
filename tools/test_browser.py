@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""No-JavaScript Firefox acceptance against the real admitted Rust component.
+"""Test the admitted Rust component in Firefox with JavaScript disabled.
 
-Requires an operator-installed Firefox/geckodriver and built noxide CLI. All
-browser HTTP(S) is forced through a local allowlisting test proxy. The onion
-origin case exercises browser rules; it does not emulate Tor's anonymity.
+Requires Firefox, geckodriver, and a built noxide CLI. All browser HTTP(S) passes
+through a local proxy, which allows requests only to the test origin. The onion
+case tests browser rules without emulating Tor's anonymity.
 """
 import argparse
 import base64

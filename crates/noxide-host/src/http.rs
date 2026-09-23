@@ -158,10 +158,10 @@ fn error(error: RequestError) -> Response {
         .into_response()
 }
 
-// Admitted fields total at most 8 KiB. Browser newline normalization can double
-// that before percent encoding triples it (48 KiB). Reserve the remainder for
-// eight field names, the 2 KiB token limit, CSRF, and separators. The canonical
-// input budget remains separate and is checked after decoding/normalization.
+// Browser newline normalization can double the admitted 8 KiB of field values;
+// percent encoding can triple that to 48 KiB. The rest of this cap covers eight
+// field names, the 2 KiB token limit, CSRF, and separators. Check the separate
+// canonical-input budget after decoding and normalization.
 const MAX_ENCODED_FORM_BYTES: usize = 64 * 1024;
 
 fn decode_form(bytes: &[u8]) -> Result<BTreeMap<String, String>> {

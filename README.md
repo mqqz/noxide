@@ -1,11 +1,11 @@
 # Noxide
 
-> A batteries-included, server-rendered Rust web framework for large NoJS applications,
-> with anonymity and security properties enforced by default.
+Noxide is a server-rendered Rust web framework for NoJS applications, with
+anonymity and security policies enforced by default.
 
 > [!WARNING]
-> this project is not security audited or battle-tested yet.
-> It's very much still in its infancy. So use at your own risk.
+> Noxide is experimental and has not had a security audit or production validation.
+> Use it at your own risk.
 
 ## Workspace
 
@@ -17,12 +17,13 @@
 | `noxide-protocol` | Library | Constrained document and application contracts |
 | `noxide-host` | Trusted library | Wasmtime, HTTP, authentication, policy, SQLite/PostgreSQL |
 
-The runtime now supports a complete private-notes application with host-owned
-forms, sessions and authorization, fresh guest instances, and transactional replay
-protection on SQLite and PostgreSQL. Ordinary applications emit a constrained
-Document IR. Raw HTML, arbitrary URLs/headers, WASI, and generic SQL/network access
-are unavailable. The initial SDK uses typed Rust values; template macros remain
-future work.
+The private-notes example uses host-owned forms, sessions and authorization. Each
+request runs in a fresh guest instance, with transactional replay protection on
+SQLite and PostgreSQL. Applications return a constrained Document IR for the host
+to render.
+
+Raw HTML, arbitrary URLs/headers, WASI, and generic SQL/network access are
+unavailable. The SDK uses typed Rust values; template macros remain future work.
 
 Follow [Running an application](docs/running-applications.md) to build the example
 inside a disposable VM, approve its declarative permissions, provision accounts,
@@ -42,65 +43,60 @@ Shared package metadata and local dependencies are defined in the root `Cargo.to
 Workspace crates share the root `Cargo.lock` and `target/` directory. The isolated
 application example has its own lockfile and is excluded from host workspace builds.
 
+## Design principles
 
----
-## Design Principles
+These principles guide development for both small and large applications. Keep
+the implementation auditable by people and tools, and account for high network
+latency when designing APIs and page flows.
 
-_Secure by construction. Anonymous-network native. Zero JavaScript. Self-contained. Typed at trust boundaries.
-Server-rendered. Fast under high latency. Ergonomic enough that developers do not bypass safety. 
-Scalable from a single page to a large application. Auditable by both humans and tooling._
+1. Enforce security by default.
 
-In more detail:
+    Handle escaping, CSRF protection, hardened cookies, CSP, request limits,
+    redirects, local assets, and URL validation in the framework. Any exception
+    that weakens a security invariant must be explicit, through an API such as
+    `unsafe_*` or `dangerous::*`, or a capability declaration.
 
-1. Secure by construction, not by configuration.
+2. Design for anonymity networks.
 
-    The safe path should also be the easiest path. Escaping, CSRF protection, hardened cookies,
-    CSP, request limits, safe redirects, local assets, and strict URL handling should happen automatically.
-    Anything that weakens a security invariant should require an explicit, visually obvious escape hatch
-    such as `unsafe_*`, `dangerous::*`, or a capability declaration.
+    Support deployment behind Tor/I2P over loopback or Unix sockets. Expect high
+    latency and strict browser settings. Keep logging sensitive to privacy and
+    treat accidental clearnet access as a security failure that can deanonymize
+    users.
 
-2. Designed for anonymity networks first.
+3. Require no client-side scripts.
 
-    Tor/I2P should not be an afterthought. Assumptions should include high latency, users with strict browser settings,
-    no external resources, privacy-sensitive logging, possible clearnet deanonymization risks, and deployment behind
-    Tor/I2P over loopback or Unix sockets. The framework should treat accidental clearnet access as a serious security failure.
+    Core functionality must work with HTML, CSS, URLs, forms, and server-side
+    rendering. Prefer native browser features for interaction: `<details>`,
+    popovers, dialogs, `:has()`, `:target`, and container queries.
 
-3. Zero client-side scripting.
+4. Keep runtime dependencies local.
 
-    The framework should assume JavaScript is unavailable. Core functionality must work using HTML, CSS, URLs, forms,
-    and server-side rendering only. Interactive UI should prefer native browser primitives such as `<details>`, popovers, 
-    dialogs, forms, `:has()` `:target`, container queries, and other declarative features.
+    Applications should be self-contained by default. External fonts, scripts,
+    stylesheets, icons, analytics, avatars, CDNs, APIs, and other resources require
+    explicit permission.
 
+5. Grant capabilities explicitly.
 
-4. No hidden external dependencies at runtime.
+    Access to networking, files, processes, raw HTML, and raw SQL must require
+    a capability. Application code must not receive that authority by default.
 
-    Fonts, scripts, stylesheets, icons, analytics, avatars, CDNs, APIs, and other external resources should not appear
-    unless explicitly permitted. A default application should be completely self-contained.
+6. Use secure defaults.
 
-5. Capability-oriented access to dangerous resources.
+    Common operations should require little configuration. Choose secure
+    defaults for routing, headers, sessions, forms, error handling, logging,
+    assets, and deployment; reserve configuration for intentional deviations.
 
-    Networking, filesystem access, process execution, raw HTML, raw SQL, and similar powerful operations should not
-    be ambient capabilities.
+7. Make the secure API easier to use.
 
-6. Convention over configuration.
+    Typed forms, route generation, authentication, and database access should
+    need less code than working with raw HTTP or HTML. Apply the same standard
+    to server-side components, validation, layouts, flash messages, pagination,
+    and testing, so developers have little reason to bypass framework checks.
 
-    Common operations should require almost no configuration: The framework should choose secure defaults for routing,
-    headers, sessions, forms, error handling, logging, assets, and deployment. Configuration should mostly exist for
-    intentional deviations.
+8. Encode trust boundaries in types.
 
-7. Ergonomics are part of security.
-
-    If the secure API is unpleasant, developers will bypass it. Typed forms, route generation, authentication,
-    database access, server-side components, validation, layouts, flash messages, pagination, and testing should all
-    be easy enough that there is little incentive to drop down to raw HTTP or HTML.
-
-    "The secure way should require less code than the insecure way."
-
-8. Strong types at trust boundaries.
-
-    Avoid passing undifferentiated strings around.
-    The type system should encode meaningful security properties whenever doing so improves correctness without
-    making ordinary code painful.
+    Use types to distinguish values with different security properties wherever
+    that improves correctness without making application code harder to write.
 
 ## Runtime design
 

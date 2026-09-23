@@ -6,7 +6,7 @@ execution. Application source and all application dependencies are untrusted
 during both compilation and execution.
 
 The first architectural milestone is a private-notes application with a complete
-transactional form flow on **both SQLite and PostgreSQL**. A preceding rendering
+transactional form flow on both SQLite and PostgreSQL. A preceding rendering
 spike tests the execution and output boundaries.
 
 ## Trust and authority
@@ -43,15 +43,16 @@ transaction may serialize before a revocation even if its acknowledgement arrive
 later. Every retry re-reads authoritative policy. A stronger acknowledgement fence
 would require a separately specified ordering protocol.
 
-A declaration in an application bundle requests authority; it does not approve
-it. The deployment policy must constrain approved resources, operations, policy
-rules, and action contracts. Installation and upgrades must not silently widen
-those permissions.
+Application declarations request authority. Approval comes from deployment
+policy, which must constrain resources, operations, policy rules, and action
+contracts. Installation and upgrades must preserve those constraints unless the
+operator explicitly approves wider permissions.
 
 Grants apply to reads as well as writes. A request to delete note 42 cannot delete
-note 43 merely because the principal owns both. A read route has no application
-mutation grant. Compound actions must declare their bounded effects. Framework
-session maintenance and security bookkeeping use separate host-owned interfaces.
+note 43 merely because the principal owns both. Read routes have no application
+mutation grants; compound actions must declare their bounded effects. Separate
+host-owned interfaces handle framework session maintenance and security
+bookkeeping.
 
 These boundaries cannot establish that a malicious application is honest about
 data it is legitimately allowed to read or display. All dependencies in one
@@ -98,9 +99,9 @@ configuration; it does not authorize dirty instance or request-context reuse.
 
 ## Boundary protocol and rendering
 
-The Rust contracts live in `noxide-protocol`; its `wit/application.wit` defines the
-versioned import world. Host request grants are internal state, never guest-selected
-resource handles.
+The Rust contracts live in `noxide-protocol`. The SDK's
+`crates/noxide/wit/application.wit` defines the versioned import world. Request
+grants stay inside the host; guests cannot select them through resource handles.
 
 | Contract | Contents and authority |
 | --- | --- |
@@ -119,10 +120,10 @@ escaped by context; there is no guest escape function that confers trust.
 
 The IR has a finite vocabulary with element-specific attributes. It contains no
 raw HTML, arbitrary tag or attribute names, inline event handlers, script,
-iframe, generic style attributes, or generic URL strings. RouteRef, AssetRef, and
-fragment references are future vocabulary. The current IR exposes only RouteRef
-links and framework-owned styles. IDs and references never
-confer authority by themselves. Redirects use the same route policy.
+iframe, generic style attributes, or generic URL strings. The current IR supports
+RouteRef links and framework-owned styles; AssetRef and fragment references are
+future work. Every ID and reference still requires authorization, including
+redirect destinations, which use the same route policy.
 
 The validator checks HTML content models and parsing contexts as well as balanced
 structure, attributes, reference permissions, nesting, node counts, text bytes,
@@ -143,9 +144,9 @@ commit; live guest page streaming and compatibility HTML are out of scope.
 Static styles and assets require host admission. Style identifiers resolve to
 approved classes. The trusted asset pipeline parses CSS and rejects disallowed
 resource references, including imports, fonts, images, cursors, and image sets.
-Asset types also need explicit policy; local HTML or SVG can contain active
-content. The initial notes fixture can use framework-owned CSS and no uploaded
-assets. Arbitrary application CSS support is not a prerequisite for M1.
+Because local HTML or SVG can contain active content, the asset policy must cover
+file types as well as resource references. M1 can use framework-owned CSS without
+uploaded assets or support for arbitrary application CSS.
 CSP provides an additional browser constraint.
 ([CSS URLs](https://www.w3.org/TR/css-values-4/#urls),
 [Content Security Policy](https://www.w3.org/TR/CSP3/))
@@ -165,13 +166,13 @@ application native adapters, raw SQL, user-defined SQL functions, or arbitrary
 migration execution. Schema changes use approved host-managed operations.
 
 For the notes fixture, the model has a host-generated NoteId, protected
-owner identity, and bounded body text. CreateNote grants at most one creation for
-the authenticated owner. Ownership comes from the host principal, never a form
-field. Owner-scoped ListNotes and ReadNote expose only the data needed by their
-route. Every created ordinary field is fixed by validated input; the guest can
-neither supply another value nor choose owner, tenant, or generated ID. One create
-is permitted per action. Resource schemas are persisted at activation and must
-match on subsequent requests; schema migration is a separate trusted operation.
+owner identity, and bounded body text. CreateNote permits one creation per action,
+with ownership set from the authenticated host principal. Form fields cannot
+select an owner. Owner-scoped ListNotes and ReadNote expose only the data their
+route needs. Validated input fixes every ordinary field; the guest can neither
+substitute values nor choose the tenant or generated ID. Resource schemas are
+persisted at activation and must match on subsequent requests. Schema migration
+requires a separate trusted operation.
 
 Policy checks and writes use a transactionally coherent view. Shared conformance
 fixtures cover target predicates, nullability, integer ranges, ordering, and
@@ -186,9 +187,9 @@ values occupy a separate namespace and cannot change identity or roles.
 Inventory every persistent host effect before exposing it. Application-visible
 session changes and flash state must participate in the action transaction or
 remain unavailable in M1; the same restriction applies to cache publication.
-The host separately governs session lifecycle and security accounting, including
-quota charges. Identify which of these effects persist after a failed attempt.
-Fresh Stores do not roll back host state already published.
+For host-managed session lifecycle and security accounting, specify which effects
+persist after failure, including quota charges. A fresh Store cannot undo host
+state already published.
 
 ## Transactional action lifecycle
 
@@ -210,11 +211,11 @@ Fresh Stores do not roll back host state already published.
 9. After a known successful commit, release guest/transaction resources and send
    the response under separate transmission limits.
 
-Any failure before commit begins aborts the attempt and discards output. Database
-cleanup must confirm rollback or discard an unusable connection. After commit
-has been requested, cancellation or connection loss may leave the result unknown.
-Recovery uses the authoritative submission protocol; it cannot interpret a stale
-replica's missing row as permission to execute again.
+Before commit begins, a failure aborts the attempt: discard output and confirm
+rollback, or discard the connection if rollback cannot be confirmed.
+Once commit has been requested, cancellation or connection loss can leave its
+outcome unknown. Recovery must use the authoritative submission protocol. A
+missing row on a stale replica cannot authorize another execution.
 
 Every transactional action requires replay protection. Reusing a token with the
 same canonical validated input recovers its outcome. Reusing it with different
@@ -232,13 +233,12 @@ their own reads. External delivery would require an outbox contract and separate
 delivery guarantees; M1 does not need an external delivery subsystem.
 
 Automatic retries are bounded and restricted to specifically classified,
-definitely aborted conflicts. Each retry repeats authorization and guest execution
-with a fresh transaction, Store, and grants, retaining the same submission/input.
-The original request retains its wall-time and work budgets across retries, with
-a separate cap on total attempts.
-Pin the admitted bundle/contract for these attempts; a deployment must not change
-the executing code midway through a retry. Policy revocation can stop further
-attempts. Unknown commit outcomes enter recovery instead of this retry path.
+definitely aborted conflicts. Each attempt repeats authorization and guest
+execution with a fresh transaction, Store, and grants while retaining the original
+submission and input. Retries share the request's wall-time and work budgets, and
+the total number of attempts is capped. Pin the admitted bundle and contract
+throughout: a deployment must not replace code midway through a retry.
+Revocation can stop further attempts. Unknown commit outcomes require recovery.
 
 ## SQLite and PostgreSQL
 
@@ -252,18 +252,18 @@ security bookkeeping; unresolved connections are discarded. SQLite permits one a
 writer, so guest execution and rendering consume part of the write-lock budget.
 ([SQLite isolation](https://www.sqlite.org/isolation.html))
 
-The adapter must distinguish an active transaction from an aborted one. For
-example, SQLite can leave a transaction active after a failed commit. PostgreSQL
-serialization retries must repeat the entire transaction logic. Do not classify
-all database errors or uniqueness conflicts as retryable.
+Track whether a transaction remains active after an error. SQLite can leave it
+active after a failed commit; a PostgreSQL serialization retry must repeat the
+entire transaction. Do not treat every database error or uniqueness conflict as
+retryable.
 ([SQLite transaction errors](https://www.sqlite.org/lang_transaction.html),
 [PostgreSQL retry rules](https://www.postgresql.org/docs/current/mvcc-serialization-failure-handling.html))
 
-Receipt retention depends on the token's expiry and key lifecycle. Cleanup must
-account for trusted time, clock rollback/skew, in-flight attempts, and restart.
-Deletion of a receipt must never make its token executable again. Deployment
-changes must define whether an old action version remains supported for execution,
-supports recovery only, or is rejected; new code cannot silently reinterpret it.
+Deleting a receipt must never make its token executable again. Set retention from
+the token's expiry and key lifecycle, accounting for clock rollback/skew, trusted
+time, in-flight attempts, and restart. Deployment changes must define whether an
+old action version remains supported for execution, supports recovery only, or is
+rejected; new code cannot silently reinterpret it.
 
 The enforced durability baseline is SQLite WAL with `synchronous=FULL`, and
 PostgreSQL with `fsync=on`, `full_page_writes=on`, and `synchronous_commit=on`.
@@ -323,18 +323,20 @@ the compiler, database, or operating system. Apply a service memory/process limi
 and storage quotas appropriate to the trusted deployment. The VM has its own
 enforced resource envelope, described in the runnable guide.
 
-Wasmtime's ResourceLimiter does not account for all runtime or host allocations.
-Fuel and epoch interruption do not cancel a blocked host function. Host operations
-need deadlines, cancellation, and confirmed cleanup of transactions/resources.
+Wasmtime's ResourceLimiter covers only some runtime and host allocations, and
+neither fuel nor epoch interruption cancels a blocked host function. Give host
+operations their own deadlines and cancellation, then confirm transaction and
+resource cleanup.
 Unsupported features that bypass the selected controls must be rejected at
 admission; guest threads/shared memory are not needed for M1.
 ([ResourceLimiter](https://docs.rs/wasmtime/48.0.2/wasmtime/trait.ResourceLimiter.html),
 [execution interruption](https://docs.rs/wasmtime/48.0.2/wasmtime/struct.Config.html#method.epoch_interruption))
 
-High-latency browser transfer and short database transaction deadlines are separate
-phases. A slow client cannot retain a live guest or write transaction. An observed
-disconnect before commit cancels work. The HTTP engine may observe a disconnect
-after a commit, so every uncertain client outcome requires submission recovery.
+Release the guest and write transaction before transferring a response to a slow
+browser. Database execution and browser transfer have separate deadlines. Cancel
+work when a disconnect is observed before commit. If the HTTP engine observes it
+after commit, the client must use submission recovery to resolve the uncertain
+outcome.
 
 Logs contain bounded host-defined events. Application text, note contents,
 credentials, tokens, cookies, and raw request identifiers are not default log
@@ -406,11 +408,11 @@ encodings are rejected; Unicode normalization is not implicit. Receipts store
 only canonical input digests and Created/RouteRef outcomes. Collection is bounded
 and obeys a persisted clock high-water mark and expiry grace period.
 
-The encoded HTTP form budget accounts for CRLF and percent-encoding expansion;
-canonical input retains its separate 32 KiB limit. Request time is sampled after
-transaction acquisition and admission, so writer-lock waits cannot appear as
-clock rollback. Declared forms denied by policy are omitted from authorized read
-pages; undeclared forms remain invalid.
+The encoded HTTP form budget accounts for CRLF and percent-encoding expansion.
+Canonical input has a separate 32 KiB limit. To avoid treating writer-lock waits
+as clock rollback, sample request time after transaction acquisition and admission.
+Authorized read pages omit declared forms denied by policy; undeclared forms
+remain invalid.
 
 Deployment identity includes the component bytes and approved manifest digest.
 Activation precedes request acceptance but follows listener preparation; failed
@@ -435,9 +437,12 @@ cross-build canaries; a native build loop must hit the VM deadline.
 
 On the tested host, the locked notes VM build took 153.8 seconds with a measured
 peak QEMU RSS of 3.61 GiB. The hostile runtime concurrency fixture peaked at
-82.3 MiB process RSS and completed cleanup in about 59 ms. These are acceptance
-observations, not throughput guarantees. Test commands and operational limits are
-in [Running an application](../running-applications.md). The implementation has
-not undergone an external security audit or hardware power-loss certification.
+82.3 MiB process RSS and completed cleanup in about 59 ms. These measurements
+describe the acceptance runs and do not establish throughput guarantees.
+Test commands and operational limits are in
+[Running an application](../running-applications.md).
+
+The implementation has not undergone an external security audit or hardware
+power-loss certification.
 
 Primary sources above were checked on 2026-09-19.
