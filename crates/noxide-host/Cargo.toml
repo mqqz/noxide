@@ -10,5 +10,19 @@ description = "Trusted Noxide application runtime"
 [dependencies]
 noxide-protocol.workspace = true
 anyhow.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tokio.workspace = true
+wasmtime = { version = "=48.0.2", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "async"] }
+wasmparser = "0.245"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
+argon2 = "0.5"
+hmac = "0.12"
+rand = "0.8"
+base64 = "0.22"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+wat = "1"
