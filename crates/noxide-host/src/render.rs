@@ -7,6 +7,7 @@ pub const CSP: &str = "default-src 'none'; style-src 'self'; form-action 'self';
 pub struct FormCredentials {
     pub csrf: String,
     pub submission: String,
+    pub values: Fields,
 }
 
 pub struct RenderContext<'a> {
@@ -103,7 +104,7 @@ fn flow(stack: &[Container]) -> bool {
 
 pub fn resolve(m: &Manifest, reference: &RouteRef) -> Result<String> {
     let r = crate::manifest::route(m, reference.route)?;
-    match (r.record, reference.target) {
+    match (r.resource.is_some(), reference.target) {
         (false, None) => Ok(r.path.clone()),
         (true, Some(id)) if id > 0 && id <= i64::MAX as u64 => {
             Ok(format!("{}/{id}", r.path.trim_end_matches('/')))
@@ -119,6 +120,12 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
         ResponseIntent::Redirect(dest)
         | ResponseIntent::Created {
             destination: dest, ..
+        }
+        | ResponseIntent::Updated {
+            destination: dest, ..
+        }
+        | ResponseIntent::Deleted {
+            destination: dest, ..
         } => {
             let m = context
                 .manifest
@@ -129,6 +136,7 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
                 location: Some(resolve(m, dest)?),
             });
         }
+        ResponseIntent::Rejected { .. } => anyhow::bail!("rejection requires action context"),
     };
     ensure!(
         doc.title.len() <= 128 && doc.nodes.len() <= MAX_NODES,
@@ -207,30 +215,16 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
                 let Some(credentials) = credentials else {
                     continue;
                 };
-                let op = crate::manifest::operation(m, a.operation)?;
-                let resource = crate::manifest::resource(m, op.resource)?;
-                out.push(&format!("<form method=\"post\" action=\"/_noxide/action/{action}\" accept-charset=\"utf-8\">"))?;
-                for (name, value) in [
-                    ("_csrf", &credentials.csrf),
-                    ("_submission", &credentials.submission),
-                ] {
-                    out.push(&format!("<input type=\"hidden\" name=\"{name}\" value=\""))?;
-                    out.text(value)?;
-                    out.push("\">")?;
-                }
-                for field in &resource.fields {
-                    out.push("<label>")?;
-                    out.text(&field.label)?;
-                    out.push("<textarea name=\"")?;
-                    out.text(&field.name)?;
-                    out.push(&format!(
-                        "\" maxlength=\"{}\" required></textarea></label>",
-                        field.max_bytes
-                    ))?;
-                }
-                out.push("<button type=\"submit\">")?;
-                out.text(&a.name)?;
-                out.push("</button></form>")?;
+                form(
+                    &mut out,
+                    m,
+                    a,
+                    credentials,
+                    &credentials.values,
+                    false,
+                    &Fields::new(),
+                    None,
+                )?;
             }
         }
     }
@@ -248,33 +242,28 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
     })
 }
 
-/// Trusted form recovery never passes the saved submission or entered values
-/// through a guest. Every retry retains the original action identity.
-pub(crate) fn recovery(
+#[allow(clippy::too_many_arguments)]
+fn form(
+    out: &mut Buffer,
     m: &Manifest,
-    action: u32,
+    action: &Action,
     credentials: &FormCredentials,
     input: &Fields,
-    unknown: bool,
-) -> Result<Rendered> {
-    let a = crate::manifest::action(m, action)?;
-    let op = crate::manifest::operation(m, a.operation)?;
-    let resource = crate::manifest::resource(m, op.resource)?;
+    readonly: bool,
+    errors: &Fields,
+    button: Option<&str>,
+) -> Result<()> {
+    let fields = crate::manifest::action_fields(m, action)?;
     ensure!(
         input
             .keys()
-            .all(|name| resource.fields.iter().any(|f| &f.name == name)),
-        "unexpected field"
+            .chain(errors.keys())
+            .all(|name| action.fields.contains(name)),
+        "unexpected form field"
     );
-    let mut out = Buffer(String::new());
-    out.push("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Save result</title><link rel=\"stylesheet\" href=\"/_noxide/style.css\"></head><body><main><h1>Save result</h1><p role=\"status\">")?;
-    out.push(if unknown {
-        "The result is not yet confirmed. Check this save before starting another one."
-    } else {
-        "The save has no confirmed result. Check the fields and retry this form."
-    })?;
     out.push(&format!(
-        "</p><form method=\"post\" action=\"/_noxide/action/{action}\" accept-charset=\"utf-8\">"
+        "<form method=\"post\" action=\"/_noxide/action/{}\" accept-charset=\"utf-8\">",
+        action.id
     ))?;
     for (name, value) in [
         ("_csrf", &credentials.csrf),
@@ -284,50 +273,202 @@ pub(crate) fn recovery(
         out.text(value)?;
         out.push("\">")?;
     }
-    for field in &resource.fields {
+    for field in fields {
         let value = input.get(&field.name).map(String::as_str).unwrap_or("");
-        let invalid = value.trim().is_empty() || value.len() > field.max_bytes as usize;
+        let invalid = !input.is_empty()
+            && (value.trim().is_empty() || value.len() > field.max_bytes as usize);
+        let error = errors.get(&field.name);
         out.push("<label>")?;
         out.text(&field.label)?;
         out.push(&format!(
             "<textarea name=\"{}\" maxlength=\"{}\" required",
             field.name, field.max_bytes
         ))?;
-        if unknown {
+        if readonly {
             out.push(" readonly")?;
         }
-        if invalid {
+        if invalid || error.is_some() {
             out.push(&format!(
-                " aria-invalid=\"true\" aria-describedby=\"error-{}\"",
-                field.name
+                " aria-invalid=\"true\" aria-describedby=\"error-{}-{}\"",
+                action.id, field.name
             ))?;
         }
         out.push(">")?;
-        // HTML discards one initial LF in textarea content. Preserve the
-        // canonical entered value, including during an uncertain-outcome retry.
         if value.starts_with('\n') {
             out.push("\n")?;
         }
         out.text(value)?;
         out.push("</textarea></label>")?;
-        if invalid {
-            out.push(&format!(
-                "<p id=\"error-{}\">Enter between 1 and {} UTF-8 bytes.</p>",
-                field.name, field.max_bytes
-            ))?;
+        if invalid || error.is_some() {
+            out.push(&format!("<p id=\"error-{}-{}\">", action.id, field.name))?;
+            if let Some(error) = error {
+                out.text(error)?;
+            } else {
+                out.push(&format!(
+                    "Enter between 1 and {} UTF-8 bytes.",
+                    field.max_bytes
+                ))?;
+            }
+            out.push("</p>")?;
         }
     }
-    out.push(if unknown {
-        "<button>Check this submission</button>"
-    } else {
-        "<button>Retry this submission</button>"
-    })?;
-    out.push("</form><a href=\"/\">Return to notes</a></main></body></html>")?;
+    let default_button =
+        if crate::manifest::operation(m, action.operation)?.kind == OperationKind::Delete {
+            "Delete record"
+        } else {
+            &action.name
+        };
+    out.push("<button type=\"submit\">")?;
+    out.text(button.unwrap_or(default_button))?;
+    out.push("</button></form>")
+}
+
+pub(crate) enum Recovery<'a> {
+    Retry {
+        unknown: bool,
+    },
+    Conflict {
+        current: &'a Fields,
+    },
+    Rejected {
+        errors: &'a Fields,
+        message: &'a str,
+    },
+}
+
+/// Only host-authenticated scope and freshly authorized values reach this page.
+pub(crate) fn recovery(
+    m: &Manifest,
+    action: u32,
+    credentials: &FormCredentials,
+    input: &Fields,
+    reason: Recovery<'_>,
+) -> Result<Rendered> {
+    let a = crate::manifest::action(m, action)?;
+    let empty = Fields::new();
+    let (title, explanation, status, readonly, button, errors) = match &reason {
+        Recovery::Retry { unknown: true } => (
+            "Submission result",
+            "The result is not yet confirmed. Check this submission before starting another one.",
+            503,
+            true,
+            "Check this submission",
+            &empty,
+        ),
+        Recovery::Retry { unknown: false } => (
+            "Submission result",
+            "No change is confirmed. Check the fields and retry this form.",
+            422,
+            false,
+            "Retry this submission",
+            &empty,
+        ),
+        Recovery::Conflict { .. } => (
+            "This record changed",
+            "Your changes were not saved. Review the current values before submitting again.",
+            409,
+            false,
+            if crate::manifest::operation(m, a.operation)?.kind == OperationKind::Delete {
+                "Delete current version"
+            } else {
+                "Save these changes"
+            },
+            &empty,
+        ),
+        Recovery::Rejected { errors, .. } => (
+            "No changes saved",
+            "The application declined this change. Review its explanation and try again.",
+            422,
+            false,
+            "Retry this submission",
+            *errors,
+        ),
+    };
+    let mut out = Buffer(String::new());
+    out.push("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>")?;
+    out.text(title)?;
+    out.push(
+        "</title><link rel=\"stylesheet\" href=\"/_noxide/style.css\"></head><body><main><h1>",
+    )?;
+    out.text(title)?;
+    out.push("</h1><p role=\"status\">")?;
+    out.text(explanation)?;
+    out.push("</p>")?;
+    if let Recovery::Conflict { current } = &reason {
+        out.push("<section aria-label=\"Current values\"><h2>Current values</h2>")?;
+        let resource =
+            crate::manifest::resource(m, crate::manifest::operation(m, a.operation)?.resource)?;
+        for (name, value) in *current {
+            let field = resource
+                .fields
+                .iter()
+                .find(|f| &f.name == name)
+                .ok_or_else(|| anyhow::anyhow!("unknown current field"))?;
+            out.push("<p>")?;
+            out.text(&field.label)?;
+            out.push("</p><pre>\n")?;
+            out.text(value)?;
+            out.push("</pre>")?;
+        }
+        out.push("</section>")?;
+        if !a.fields.is_empty() {
+            out.push("<h2>Your changes</h2>")?;
+        }
+    }
+    if let Recovery::Rejected { errors, message } = &reason {
+        ensure!(
+            message.len() <= 1024
+                && errors.len() <= 8
+                && errors.values().all(|e| !e.is_empty() && e.len() <= 256),
+            "rejection limit"
+        );
+        out.push("<p class=\"application-error\">")?;
+        out.text(message)?;
+        out.push("</p>")?;
+    }
+    form(
+        &mut out,
+        m,
+        a,
+        credentials,
+        input,
+        readonly,
+        errors,
+        Some(button),
+    )?;
+    out.push("<a href=\"/\">Return home</a></main></body></html>")?;
     Ok(Rendered {
-        status: if unknown { 503 } else { 422 },
+        status,
         body: out.0.into_bytes(),
         location: None,
     })
+}
+
+pub(crate) fn unavailable(m: &Manifest) -> Result<Rendered> {
+    render(
+        &ResponseIntent::NotFound(Document::new(
+            "Record unavailable",
+            vec![
+                Instruction::Text("This record is no longer available for this action.".into()),
+                Instruction::Link {
+                    destination: RouteRef {
+                        route: m
+                            .routes
+                            .iter()
+                            .find(|r| r.path == "/")
+                            .expect("index route")
+                            .id,
+                        target: None,
+                    },
+                    text: "Return home".into(),
+                },
+            ],
+        )),
+        &RenderContext {
+            manifest: Some(m),
+            ..RenderContext::empty()
+        },
+    )
 }
 
 #[cfg(test)]

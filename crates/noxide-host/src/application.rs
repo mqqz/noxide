@@ -3,9 +3,9 @@ use crate::{
     database::{Param, Transaction, retryable},
     manifest,
     render::{self, FormCredentials, RenderContext, Rendered},
-    repository::Effects,
+    repository::{self, Effects, StoredRecord},
     runtime::{Limits, Runtime},
-    security::{self, Token, TokenKind},
+    security::{self, RecordTarget, Token, TokenKind},
 };
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -250,45 +250,255 @@ impl Application {
         tx.commit().await.map_err(|_| RequestError::Busy)
     }
 
-    fn forms(
+    fn credentials(
         &self,
+        action: &Action,
+        session: &Token,
+        now: i64,
+        target: Option<RecordTarget>,
+        values: Fields,
+    ) -> Result<FormCredentials> {
+        let (_, submission) = self.keys.issue(
+            TokenKind::Submission {
+                contract: self.submission_contract(),
+                action: action.id,
+                version: action.version,
+                target,
+            },
+            &session.nonce,
+            now,
+            900,
+        )?;
+        Ok(FormCredentials {
+            csrf: self.keys.csrf(&session.nonce),
+            submission,
+            values,
+        })
+    }
+
+    fn submission_target(&self, token: &Token, action: &Action) -> Result<Option<RecordTarget>> {
+        let TokenKind::Submission {
+            contract,
+            action: id,
+            version,
+            target,
+        } = &token.kind
+        else {
+            anyhow::bail!(RequestError::InvalidRequest)
+        };
+        ensure!(
+            contract == &self.submission_contract()
+                && *id == action.id
+                && *version == action.version,
+            RequestError::InvalidRequest
+        );
+        let op = manifest::operation(&self.manifest, action.operation)?;
+        match (&op.kind, target) {
+            (OperationKind::Create, None) => {}
+            (OperationKind::Update | OperationKind::Delete, Some(target)) => {
+                let route = manifest::route(&self.manifest, target.route)?;
+                ensure!(
+                    target.resource == op.resource
+                        && target.id > 0
+                        && target.id <= i64::MAX as u64
+                        && target.revision > 0
+                        && !target.incarnation.is_empty()
+                        && target.incarnation.len() <= 64
+                        && route.resource == Some(op.resource)
+                        && route.forms.contains(&action.id),
+                    RequestError::InvalidRequest
+                );
+            }
+            _ => anyhow::bail!(RequestError::InvalidRequest),
+        }
+        Ok(target.clone())
+    }
+
+    fn target_allowed(
+        &self,
+        action: &Action,
         route: u32,
+        principal: &auth::Principal,
+        stored: &StoredRecord,
+    ) -> Result<bool> {
+        let op = manifest::operation(&self.manifest, action.operation)?;
+        let permitted = |op: &Operation| {
+            repository::allowed(&op.policy, principal, &stored.owner, &stored.tenant)
+        };
+        let route = manifest::route(&self.manifest, route)?;
+        let readable = route
+            .operations
+            .iter()
+            .any(|id| manifest::operation(&self.manifest, *id).is_ok_and(permitted));
+        let inspection = action
+            .inspect
+            .as_ref()
+            .map(|i| manifest::operation(&self.manifest, i.operation).map(permitted))
+            .transpose()?
+            .unwrap_or(true);
+        Ok(route.resource == Some(op.resource)
+            && stored.record.resource == op.resource
+            && readable
+            && inspection
+            && permitted(op))
+    }
+
+    async fn current_target(
+        &self,
+        tx: &mut Transaction,
+        action: &Action,
+        target: &RecordTarget,
+        principal: &auth::Principal,
+    ) -> Result<Option<StoredRecord>> {
+        let stored = repository::load(tx, &self.manifest, target.resource, target.id).await?;
+        match stored {
+            Some(stored)
+                if stored.incarnation == target.incarnation
+                    && self.target_allowed(action, target.route, principal, &stored)? =>
+            {
+                Ok(Some(stored))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn forms(
+        &self,
+        tx: &mut Transaction,
+        route: u32,
+        target: Option<u64>,
         session: &Token,
         principal: &auth::Principal,
         now: i64,
     ) -> Result<BTreeMap<u32, Option<FormCredentials>>> {
-        let mut forms = BTreeMap::new();
-        for id in &manifest::route(&self.manifest, route)?.forms {
-            let action = manifest::action(&self.manifest, *id)?;
-            let operation = manifest::operation(&self.manifest, action.operation)?;
-            if !crate::repository::allowed(
-                &operation.policy,
-                principal,
-                &principal.id,
-                &principal.tenant,
-            ) {
-                forms.insert(*id, None);
-                continue;
+        let r = manifest::route(&self.manifest, route)?;
+        let stored = match (r.resource, target) {
+            (Some(resource), Some(id)) => {
+                repository::load(tx, &self.manifest, resource, id).await?
             }
-            let (_, submission) = self.keys.issue(
-                TokenKind::Submission {
-                    contract: self.submission_contract(),
-                    action: *id,
-                    version: action.version,
-                },
-                &session.nonce,
-                now,
-                900,
-            )?;
-            forms.insert(
-                *id,
-                Some(FormCredentials {
-                    csrf: self.keys.csrf(&session.nonce),
-                    submission,
-                }),
-            );
+            _ => None,
+        };
+        let mut forms = BTreeMap::new();
+        for id in &r.forms {
+            let action = manifest::action(&self.manifest, *id)?;
+            let op = manifest::operation(&self.manifest, action.operation)?;
+            let credentials = if op.kind == OperationKind::Create {
+                if repository::allowed(&op.policy, principal, &principal.id, &principal.tenant) {
+                    Some(self.credentials(action, session, now, None, Fields::new())?)
+                } else {
+                    None
+                }
+            } else if let Some(record) = &stored {
+                if self.target_allowed(action, route, principal, record)? {
+                    let grant = RecordTarget {
+                        resource: op.resource,
+                        id: record.record.id,
+                        incarnation: record.incarnation.clone(),
+                        revision: record.revision,
+                        route,
+                    };
+                    let values = action
+                        .fields
+                        .iter()
+                        .map(|name| (name.clone(), record.record.fields[name].clone()))
+                        .collect();
+                    Some(self.credentials(action, session, now, Some(grant), values)?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            forms.insert(*id, credentials);
         }
         Ok(forms)
+    }
+
+    fn conflict(
+        &self,
+        action: &Action,
+        session: &Token,
+        now: i64,
+        mut target: RecordTarget,
+        stored: &StoredRecord,
+        input: &Fields,
+    ) -> Result<Rendered> {
+        target.revision = stored.revision;
+        let credentials = self.credentials(action, session, now, Some(target), Fields::new())?;
+        let current = if manifest::operation(&self.manifest, action.operation)?.kind
+            == OperationKind::Delete
+        {
+            stored.record.fields.clone()
+        } else {
+            action
+                .fields
+                .iter()
+                .map(|name| (name.clone(), stored.record.fields[name].clone()))
+                .collect()
+        };
+        render::recovery(
+            &self.manifest,
+            action.id,
+            &credentials,
+            input,
+            render::Recovery::Conflict { current: &current },
+        )
+    }
+
+    fn receipt(
+        &self,
+        action: &Action,
+        target: Option<&RecordTarget>,
+        outcome: &str,
+    ) -> Result<Rendered> {
+        let intent: ResponseIntent = serde_json::from_str(outcome)?;
+        let op = manifest::operation(&self.manifest, action.operation)?;
+        let (kind, resource, id, destination) = match &intent {
+            ResponseIntent::Created {
+                resource,
+                id,
+                destination,
+            } => (OperationKind::Create, *resource, *id, destination),
+            ResponseIntent::Updated {
+                resource,
+                id,
+                destination,
+            } => (OperationKind::Update, *resource, *id, destination),
+            ResponseIntent::Deleted {
+                resource,
+                id,
+                destination,
+            } => (OperationKind::Delete, *resource, *id, destination),
+            _ => anyhow::bail!("invalid receipt"),
+        };
+        ensure!(
+            kind == op.kind
+                && resource == op.resource
+                && id > 0
+                && id <= i64::MAX as u64
+                && destination.route == action.redirect,
+            "receipt outcome differs"
+        );
+        ensure!(
+            destination.target
+                == if kind == OperationKind::Delete {
+                    None
+                } else {
+                    Some(id)
+                },
+            "receipt destination differs"
+        );
+        if let Some(target) = target {
+            ensure!(id == target.id, "receipt target differs");
+        }
+        render::render(
+            &intent,
+            &RenderContext {
+                manifest: Some(&self.manifest),
+                ..RenderContext::empty()
+            },
+        )
     }
 
     pub async fn view(
@@ -331,20 +541,24 @@ impl Application {
                 .await
                 .map_err(|_| RequestError::Authentication)?;
             let forms = self
-                .forms(route, &session, &principal, now)
+                .forms(&mut tx, route, target, &session, &principal, now)
+                .await
                 .map_err(|_| RequestError::Rejected)?;
             let request = RequestView {
                 version: VERSION,
                 kind: RequestKind::Route(route),
                 target,
                 input: Fields::new(),
+                inspection: None,
             };
             let effects = Effects {
                 tx,
                 manifest: self.manifest.clone(),
                 principal,
                 request: request.clone(),
-                created: None,
+                outcome: None,
+                grant: None,
+                record: None,
                 calls: 16,
                 cursor,
                 more: None,
@@ -361,7 +575,10 @@ impl Application {
                 .await;
             let mut effects = attempt.effects.ok_or(RequestError::Rejected)?;
             let response = attempt.result.map_err(|_| RequestError::Rejected)?;
-            if matches!(response, ResponseIntent::Created { .. }) {
+            if !matches!(
+                response,
+                ResponseIntent::Page(_) | ResponseIntent::NotFound(_) | ResponseIntent::Redirect(_)
+            ) {
                 return Err(RequestError::Rejected);
             }
             let next_page = effects.more.map(|id| {
@@ -400,14 +617,8 @@ impl Application {
         let _permit = self.permits.try_acquire().map_err(|_| RequestError::Busy)?;
         let a =
             manifest::action(&self.manifest, action).map_err(|_| RequestError::InvalidRequest)?;
-        let op = manifest::operation(&self.manifest, a.operation)
+        manifest::validate_input(&self.manifest, a, &input)
             .map_err(|_| RequestError::InvalidRequest)?;
-        manifest::validate_fields(
-            manifest::resource(&self.manifest, op.resource)
-                .map_err(|_| RequestError::InvalidRequest)?,
-            &input,
-        )
-        .map_err(|_| RequestError::InvalidRequest)?;
         let input_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(
             serde_json::to_vec(&(VERSION, a.version, &input))
                 .map_err(|_| RequestError::InvalidRequest)?,
@@ -446,6 +657,9 @@ impl Application {
                 }
                 Ok(Ok(prepared)) => prepared,
             };
+            let Some(mut tx) = tx.take() else {
+                return Ok(response);
+            };
             match timeout_at(deadline, tx.commit()).await {
                 Ok(Ok(())) => return Ok(response),
                 Ok(Err(error)) if retryable(&error) => {
@@ -472,34 +686,43 @@ impl Application {
     ) -> Result<Rendered> {
         let _permit = self.permits.try_acquire()?;
         let deadline = Instant::now() + self.runtime.limits().wall_time;
-        timeout_at(deadline,async {
-            let a=manifest::action(&self.manifest,action)?;
-            let mut tx=self.database.begin(deadline.into_std()).await?;
-            self.admission(&mut tx,false).await?;
-            let now=security::now()?;
-            let token=self.keys.verify(submission,now)?;
-            security::observe_clock(&mut tx,now).await?;
-            ensure!(token.kind==TokenKind::Submission{contract:self.submission_contract(),action,version:a.version},"retired submission");
-            let (session,_)=auth::authenticate(&mut tx,&self.keys,cookie,now).await?;
-            ensure!(session.nonce==token.subject,"submission subject");
-            self.keys.verify_csrf(&session.nonce,csrf)?;
-            let sql=format!("SELECT subject,contract,input,{} FROM nx_receipts WHERE nonce=$1",tx.bounded_text("outcome",1024));
-            let rows=tx.fetch::<4>(&sql,&[token.nonce.into()]).await?;
-            if let Some([subject,contract,digest,outcome])=rows.first() {
-                ensure!(*subject==session.nonce && *contract==self.contract,"receipt scope differs");
-                let expected=URL_SAFE_NO_PAD.encode(Sha256::digest(serde_json::to_vec(&(VERSION,a.version,input))?));
-                let response=if digest==&expected {
-                    let intent:ResponseIntent=serde_json::from_str(outcome)?;
-                    ensure!(matches!(intent,ResponseIntent::Created{..}),"invalid receipt");
-                    render::render(&intent,&RenderContext{manifest:Some(&self.manifest),..RenderContext::empty()})?
-                } else {
-                    let mut response=render::render(&ResponseIntent::Page(Document::new("Form already used",vec![Instruction::Text("This form already saved different content. Return home to start a new form.".into()),Instruction::Link{destination:RouteRef{route:self.manifest.routes.iter().find(|r|r.path=="/").expect("index route").id,target:None},text:"Return home".into()}])),&RenderContext{manifest:Some(&self.manifest),..RenderContext::empty()})?;
-                    response.status=409;response
+        timeout_at(deadline, async {
+            let a = manifest::action(&self.manifest, action)?;
+            let mut tx = self.database.begin(deadline.into_std()).await?;
+            self.admission(&mut tx, false).await?;
+            let now = security::now()?;
+            let token = self.keys.verify(submission, now)?;
+            let target = self.submission_target(&token, a)?;
+            security::observe_clock(&mut tx, now).await?;
+            let (session, principal) = auth::authenticate(&mut tx, &self.keys, cookie, now).await?;
+            ensure!(session.nonce == token.subject, "submission subject");
+            self.keys.verify_csrf(&session.nonce, csrf)?;
+            let sql = format!("SELECT subject,contract,input,{} FROM nx_receipts WHERE nonce=$1", tx.bounded_text("outcome", 1024));
+            let rows = tx.fetch::<4>(&sql, &[token.nonce.into()]).await?;
+            if let Some([subject, contract, digest, outcome]) = rows.first() {
+                ensure!(*subject == session.nonce && *contract == self.contract, "receipt scope differs");
+                let expected = URL_SAFE_NO_PAD.encode(Sha256::digest(serde_json::to_vec(&(VERSION, a.version, input))?));
+                let response = if digest == &expected { self.receipt(a, target.as_ref(), outcome)? } else {
+                    let mut response = render::render(&ResponseIntent::Page(Document::new("Form already used", vec![
+                        Instruction::Text("This form already committed different input. Return home to start a new form.".into()),
+                        Instruction::Link { destination: RouteRef { route: self.manifest.routes.iter().find(|r| r.path == "/").expect("index route").id, target: None }, text: "Return home".into() },
+                    ])), &RenderContext { manifest: Some(&self.manifest), ..RenderContext::empty() })?;
+                    response.status = 409; response
                 };
                 tx.commit().await?;
                 return Ok(response);
             }
-            let rendered=render::recovery(&self.manifest,action,&FormCredentials{csrf:csrf.into(),submission:submission.into()},input,unknown)?;
+            if let Some(target) = target {
+                let Some(stored) = self.current_target(&mut tx, a, &target, &principal).await? else { return render::unavailable(&self.manifest); };
+                if stored.revision != target.revision && !unknown {
+                    return self.conflict(a, &session, now, target, &stored, input);
+                }
+            } else {
+                let op = manifest::operation(&self.manifest, a.operation)?;
+                ensure!(repository::allowed(&op.policy, &principal, &principal.id, &principal.tenant), "policy denied");
+            }
+            let credentials = FormCredentials { csrf: csrf.into(), submission: submission.into(), values: Fields::new() };
+            let rendered = render::recovery(&self.manifest, action, &credentials, input, render::Recovery::Retry { unknown })?;
             tx.commit().await?;
             Ok(rendered)
         }).await?
@@ -518,7 +741,7 @@ impl Application {
         calls: &mut u32,
         db_calls: &mut u32,
         deadline: Instant,
-    ) -> Result<(Transaction, Rendered)> {
+    ) -> Result<(Option<Transaction>, Rendered)> {
         let a = manifest::action(&self.manifest, action)?;
         let mut tx = self.database.begin(deadline.into_std()).await?;
         self.admission(&mut tx, false).await?;
@@ -527,15 +750,7 @@ impl Application {
             .keys
             .verify(submission, now)
             .map_err(|_| RequestError::InvalidRequest)?;
-        ensure!(
-            token.kind
-                == TokenKind::Submission {
-                    contract: self.submission_contract(),
-                    action,
-                    version: a.version
-                },
-            RequestError::InvalidRequest
-        );
+        let target = self.submission_target(&token, a)?;
         security::observe_clock(&mut tx, now).await?;
         let (session, principal) = auth::authenticate(&mut tx, &self.keys, cookie, now)
             .await
@@ -544,8 +759,8 @@ impl Application {
         self.keys
             .verify_csrf(&session.nonce, csrf)
             .map_err(|_| RequestError::InvalidRequest)?;
-        let claimed=tx.execute("INSERT INTO nx_receipts(nonce,subject,contract,action,input,outcome,expires) VALUES($1,$2,$3,$4,$5,'',$6) ON CONFLICT(nonce) DO NOTHING",&[
-            token.nonce.as_str().into(),session.nonce.as_str().into(),self.contract.as_str().into(),Param::Number(action.into()),input_hash.into(),Param::Number(token.expires)
+        let claimed = tx.execute("INSERT INTO nx_receipts(nonce,subject,contract,action,input,outcome,expires) VALUES($1,$2,$3,$4,$5,'',$6) ON CONFLICT(nonce) DO NOTHING", &[
+            token.nonce.as_str().into(), session.nonce.as_str().into(), self.contract.as_str().into(), Param::Number(action.into()), input_hash.into(), Param::Number(token.expires),
         ]).await?;
         if claimed == 0 {
             let sql = format!(
@@ -560,32 +775,54 @@ impl Application {
                 *subject == session.nonce && *contract == self.contract && digest == input_hash,
                 RequestError::InvalidRequest
             );
-            let intent: ResponseIntent = serde_json::from_str(outcome)?;
-            ensure!(
-                matches!(intent, ResponseIntent::Created { .. }),
-                "invalid receipt"
-            );
-            let response = render::render(
-                &intent,
-                &RenderContext {
-                    manifest: Some(&self.manifest),
-                    ..RenderContext::empty()
-                },
-            )?;
-            return Ok((tx, response));
+            let response = self.receipt(a, target.as_ref(), outcome)?;
+            return Ok((Some(tx), response));
         }
+        let record = if let Some(target) = &target {
+            let Some(stored) = self.current_target(&mut tx, a, target, &principal).await? else {
+                let response = render::unavailable(&self.manifest)?;
+                tx.rollback().await?;
+                return Ok((None, response));
+            };
+            if stored.revision != target.revision {
+                let response = self.conflict(a, &session, now, target.clone(), &stored, input)?;
+                tx.rollback().await?;
+                return Ok((None, response));
+            }
+            Some(stored)
+        } else {
+            let op = manifest::operation(&self.manifest, a.operation)?;
+            ensure!(
+                repository::allowed(&op.policy, &principal, &principal.id, &principal.tenant),
+                "policy denied"
+            );
+            None
+        };
+        let inspection = a.inspect.as_ref().map(|inspect| {
+            let stored = record
+                .as_ref()
+                .expect("validated inspection requires a target");
+            inspect
+                .fields
+                .iter()
+                .map(|name| (name.clone(), stored.record.fields[name].clone()))
+                .collect()
+        });
         let request = RequestView {
             version: VERSION,
             kind: RequestKind::Action(action),
-            target: None,
+            target: target.as_ref().map(|t| t.id),
             input: input.clone(),
+            inspection,
         };
         let effects = Effects {
             tx,
             manifest: self.manifest.clone(),
             principal,
             request: request.clone(),
-            created: None,
+            outcome: None,
+            grant: target,
+            record,
             calls: *db_calls,
             cursor: None,
             more: None,
@@ -607,19 +844,30 @@ impl Application {
                 return Err(error);
             }
         };
-        let expected = effects
-            .created
-            .as_ref()
-            .map(|record| ResponseIntent::Created {
-                resource: record.resource,
-                id: record.id,
-                destination: RouteRef {
-                    route: a.redirect,
-                    target: Some(record.id),
+        if let ResponseIntent::Rejected {
+            field_errors,
+            message,
+        } = &outcome
+        {
+            let response = render::recovery(
+                &self.manifest,
+                action,
+                &FormCredentials {
+                    csrf: csrf.into(),
+                    submission: submission.into(),
+                    values: Fields::new(),
                 },
-            });
+                input,
+                render::Recovery::Rejected {
+                    errors: field_errors,
+                    message,
+                },
+            )?;
+            effects.tx.rollback().await?;
+            return Ok((None, response));
+        }
         ensure!(
-            expected.as_ref() == Some(&outcome),
+            effects.outcome.as_ref() == Some(&outcome),
             "action outcome differs from granted mutation"
         );
         let response = render::render(
@@ -637,6 +885,6 @@ impl Application {
             )
             .await?;
         ensure!(Instant::now() < deadline, "request deadline");
-        Ok((effects.tx, response))
+        Ok((Some(effects.tx), response))
     }
 }

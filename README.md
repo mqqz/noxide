@@ -17,10 +17,11 @@ anonymity and security policies enforced by default.
 | `noxide-protocol` | Library | Constrained document and application contracts |
 | `noxide-host` | Trusted library | Wasmtime, HTTP, authentication, policy, SQLite/PostgreSQL |
 
-The private-notes example uses host-owned forms, sessions and authorization. Each
-request runs in a fresh guest instance, with transactional replay protection on
-SQLite and PostgreSQL. Applications return a constrained Document IR for the host
-to render.
+The private-notes example supports creation, editing and deletion through
+host-owned forms. Each request runs in a fresh guest instance, with authorization
+and transactional replay protection on SQLite and PostgreSQL. Stale edits preserve
+the user's input for review before resubmission. Applications return a constrained
+Document IR for the host to render.
 
 Raw HTML, arbitrary URLs/headers, WASI, and generic SQL/network access are
 unavailable. The SDK uses typed Rust values; template macros remain future work.

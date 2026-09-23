@@ -3,12 +3,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const MAX_IR_BYTES: usize = 65_536;
 pub const MAX_NODES: usize = 1_024;
 pub const MAX_DEPTH: usize = 32;
 pub const MAX_OUTPUT_BYTES: usize = 262_144;
 pub const MAX_INPUT_BYTES: usize = 32_768;
+pub const MAX_REQUEST_BYTES: usize = 65_536;
 pub const MAX_RESULT_BYTES: usize = 65_536;
 pub const MAX_MANIFEST_BYTES: usize = 32_768;
 
@@ -72,6 +73,20 @@ pub enum ResponseIntent {
         id: u64,
         destination: RouteRef,
     },
+    Updated {
+        resource: u32,
+        id: u64,
+        destination: RouteRef,
+    },
+    Deleted {
+        resource: u32,
+        id: u64,
+        destination: RouteRef,
+    },
+    Rejected {
+        field_errors: Fields,
+        message: String,
+    },
 }
 
 pub fn decode_response(bytes: &[u8]) -> Result<ResponseIntent, String> {
@@ -128,6 +143,8 @@ pub enum OperationKind {
     List,
     Read,
     Create,
+    Update,
+    Delete,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -144,7 +161,8 @@ pub struct Operation {
 pub struct Route {
     pub id: u32,
     pub path: String,
-    pub record: bool,
+    /// A record route addresses exactly one declared resource.
+    pub resource: Option<u32>,
     pub operations: Vec<u32>,
     pub forms: Vec<u32>,
 }
@@ -157,6 +175,17 @@ pub struct Action {
     pub name: String,
     pub operation: u32,
     pub redirect: u32,
+    /// Every listed field is required; all other application fields are rejected.
+    pub fields: Vec<String>,
+    #[serde(default)]
+    pub inspect: Option<Inspection>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Inspection {
+    pub operation: u32,
+    pub fields: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -193,4 +222,6 @@ pub struct RequestView {
     pub kind: RequestKind,
     pub target: Option<u64>,
     pub input: Fields,
+    /// Original target values permitted by the action's explicit read projection.
+    pub inspection: Option<Fields>,
 }

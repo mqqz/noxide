@@ -27,6 +27,16 @@ impl Context {
         self.invoke(operation, 0)
     }
 
+    /// Updates the action's bound target with its validated field projection.
+    pub fn update(&mut self, operation: u32) -> ResponseIntent {
+        self.invoke(operation, 0)
+    }
+
+    /// Deletes the action's bound target and returns its semantic outcome.
+    pub fn delete(&mut self, operation: u32) -> ResponseIntent {
+        self.invoke(operation, 0)
+    }
+
     #[cfg(target_arch = "wasm32")]
     fn invoke<T: serde::de::DeserializeOwned>(&mut self, operation: u32, target: u64) -> T {
         let len = bindings::noxide::application::host::invoke(operation, target);

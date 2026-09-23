@@ -207,7 +207,7 @@ def main():
         assert first[:2] == second[:2] == (303, urllib.parse.urlsplit(location).path)
         changed = urllib.parse.urlencode({"_csrf": csrf, "_submission": submission, "body": "different input"}).encode()
         status, _, conflict = raw_post(changed)
-        assert status == 409 and "already saved different content" in conflict
+        assert status == 409 and "already committed different input" in conflict
         assert '_submission' not in conflict
         visit("/")
         assert webdriver("/source").count("Alice only") == 1

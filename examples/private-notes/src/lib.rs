@@ -18,6 +18,8 @@ impl Handler for Notes {
                     },
                 }
             }
+            RequestKind::Action(2) => context.update(4),
+            RequestKind::Action(3) => context.delete(5),
             RequestKind::Route(1) => {
                 let records = context.list(1);
                 let mut nodes = vec![
@@ -57,6 +59,8 @@ impl Handler for Notes {
                         N::Begin(C::Pre),
                         N::Text(record.fields["body"].clone()),
                         N::End,
+                        N::Form { action: 2 },
+                        N::Form { action: 3 },
                         N::Link {
                             destination: RouteRef {
                                 route: 1,

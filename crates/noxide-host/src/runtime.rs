@@ -288,7 +288,7 @@ impl Runtime {
             .try_acquire()
             .map_err(|_| anyhow::anyhow!("runtime capacity"))?;
         let request = serde_json::to_vec(&request)?;
-        ensure!(request.len() <= MAX_INPUT_BYTES, "request limit");
+        ensure!(request.len() <= MAX_REQUEST_BYTES, "request limit");
         let mut store = Store::new(
             &self.engine,
             State {

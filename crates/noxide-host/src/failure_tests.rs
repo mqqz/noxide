@@ -13,6 +13,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "../tests/support/record_actions.rs"]
+mod record_actions;
+
 #[derive(Debug)]
 pub(crate) struct Aborted;
 impl std::fmt::Display for Aborted {
@@ -145,6 +148,7 @@ async fn stored_bounds(db: &Database) {
         label: "Extra".into(),
         max_bytes: 4096,
     });
+    m.actions[0].fields.push("extra".into());
     let fields = Fields::from([
         ("body".into(), "\\".repeat(4096)),
         ("extra".into(), "\"".repeat(4096)),
@@ -175,8 +179,11 @@ async fn stored_bounds(db: &Database) {
             kind: RequestKind::Route(1),
             target: None,
             input: Fields::new(),
+            inspection: None,
         },
-        created: None,
+        outcome: None,
+        grant: None,
+        record: None,
         calls: 50,
         cursor: None,
         more: None,
@@ -530,6 +537,266 @@ async fn sqlite_failure_protocol() {
     faults(Database::sqlite(temp.path().join("failure.db"))).await;
 }
 
+async fn record_application(db: &Database, keys: &[u8]) -> Arc<Application> {
+    let m = record_actions::declarations();
+    let app = Arc::new(
+        Application::new(
+            &record_actions::component("ok"),
+            &serde_json::to_vec(&m).unwrap(),
+            manifest::digest(&m).unwrap(),
+            db.clone(),
+            serde_json::from_slice(keys).unwrap(),
+            Limits::default(),
+        )
+        .unwrap(),
+    );
+    app.activate().await.unwrap();
+    app
+}
+
+async fn record_mutation_state(db: &Database) -> (Vec<[String; 5]>, Vec<[String; 2]>) {
+    let mut tx = db
+        .begin(std::time::Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    let record = tx
+        .fetch::<5>(
+            "SELECT owner,tenant,fields,incarnation,CAST(revision AS TEXT) FROM nx_records WHERE resource=1 AND id=42",
+            &[],
+        )
+        .await
+        .unwrap();
+    let receipts = tx
+        .fetch::<2>("SELECT input,outcome FROM nx_receipts ORDER BY nonce", &[])
+        .await
+        .unwrap();
+    (record, receipts)
+}
+
+async fn record_mutation_failures(db: Database) {
+    use noxide_protocol::{ResponseIntent, RouteRef};
+    db.initialize().await.unwrap();
+    db.create_account("alice", "private test password", "")
+        .await
+        .unwrap();
+    let mut tx = db
+        .begin(std::time::Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    tx.execute(
+        "INSERT INTO nx_roles(principal,name,tenant) VALUES('alice','writer','')",
+        &[],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let keys = serde_json::to_vec(&HostKeys::generate().unwrap()).unwrap();
+    let app = record_application(&db, &keys).await;
+    let session = account(&app).await;
+    for action in [2, 3] {
+        for case in ["retry", "cancel", "lost", "unconfirmed"] {
+            let mut tx = db
+                .begin(std::time::Instant::now() + Duration::from_secs(2))
+                .await
+                .unwrap();
+            tx.execute("DELETE FROM nx_records", &[]).await.unwrap();
+            tx.execute("DELETE FROM nx_receipts", &[]).await.unwrap();
+            let incarnation = format!("fault-{action}-{case}");
+            tx.execute(
+                "INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES(1,42,'alice','','{\"body\":\"original\",\"tag\":\"protected tag\"}',$1,1)",
+                &[incarnation.clone().into()],
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            let page =
+                String::from_utf8(app.view(&session, 2, Some(42)).await.unwrap().body).unwrap();
+            let form = page
+                .split_once(&format!("action=\"/_noxide/action/{action}\""))
+                .unwrap()
+                .1;
+            let submission = fixture::hidden(form, "_submission");
+            let csrf = fixture::hidden(form, "_csrf");
+            let input = if action == 2 {
+                Fields::from([("body".into(), "committed edit".into())])
+            } else {
+                Fields::new()
+            };
+            match case {
+                "unconfirmed" => {
+                    let mut tx = db
+                        .begin(std::time::Instant::now() + Duration::from_secs(2))
+                        .await
+                        .unwrap();
+                    tx.execute(
+                        "UPDATE nx_records SET fields='{\"body\":\"newer private text\",\"tag\":\"protected tag\"}',revision=2 WHERE resource=1 AND id=42",
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+                    tx.commit().await.unwrap();
+                    let before = record_mutation_state(&db).await;
+                    let recovery = app
+                        .recover_form(&session, action, &submission, &csrf, &input, true)
+                        .await
+                        .unwrap();
+                    assert_eq!(recovery.status, 503);
+                    let html = String::from_utf8(recovery.body).unwrap();
+                    assert_eq!(fixture::hidden(&html, "_submission"), submission);
+                    assert!(!html.contains("newer private text"));
+                    if action == 2 {
+                        assert!(html.contains("readonly") && html.contains("committed edit"));
+                    }
+                    let conflict = app
+                        .recover_form(&session, action, &submission, &csrf, &input, false)
+                        .await
+                        .unwrap();
+                    assert_eq!(conflict.status, 409);
+                    let html = String::from_utf8(conflict.body).unwrap();
+                    assert_ne!(fixture::hidden(&html, "_submission"), submission);
+                    assert!(html.contains("newer private text"));
+                    assert_eq!(record_mutation_state(&db).await, before);
+                    continue;
+                }
+                "retry" => {
+                    let retry = plan(Point::Effect, Mode::Abort, 1);
+                    let response = FAULT
+                        .scope(
+                            retry.clone(),
+                            app.submit(&session, action, &submission, &csrf, input.clone()),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status, 303);
+                    assert_eq!(retry.hits.load(Ordering::SeqCst), 2);
+                }
+                "cancel" => {
+                    let before = record_mutation_state(&db).await;
+                    let cancelled = plan(Point::Effect, Mode::Pause, 1);
+                    let request = {
+                        let (app, session, submission, csrf, input, cancelled) = (
+                            app.clone(),
+                            session.clone(),
+                            submission.clone(),
+                            csrf.clone(),
+                            input.clone(),
+                            cancelled.clone(),
+                        );
+                        tokio::spawn(async move {
+                            FAULT
+                                .scope(
+                                    cancelled,
+                                    app.submit(&session, action, &submission, &csrf, input),
+                                )
+                                .await
+                        })
+                    };
+                    tokio::time::timeout(Duration::from_secs(1), async {
+                        while cancelled.hits.load(Ordering::SeqCst) == 0 {
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    request.abort();
+                    assert!(request.await.unwrap_err().is_cancelled());
+                    assert_eq!(record_mutation_state(&db).await, before);
+                    assert_eq!(
+                        app.submit(&session, action, &submission, &csrf, input.clone())
+                            .await
+                            .unwrap()
+                            .status,
+                        303,
+                        "cancellation must release the receipt claim and restore the target"
+                    );
+                }
+                "lost" => {
+                    let lost = plan(Point::Commit, Mode::LoseAck, 1);
+                    assert!(matches!(
+                        FAULT
+                            .scope(
+                                lost.clone(),
+                                app.submit(&session, action, &submission, &csrf, input.clone())
+                            )
+                            .await,
+                        Err(RequestError::OutcomeUnknown)
+                    ));
+                    assert_eq!(lost.hits.load(Ordering::SeqCst), 1);
+                }
+                _ => unreachable!(),
+            }
+            let committed = record_mutation_state(&db).await;
+            assert_eq!(committed.1.len(), 1, "{case} action {action}");
+            let expected = if action == 2 {
+                assert_eq!(committed.0.len(), 1);
+                let [owner, tenant, fields, stored_incarnation, revision] = &committed.0[0];
+                assert_eq!((owner.as_str(), tenant.as_str()), ("alice", ""));
+                assert_eq!(stored_incarnation, &incarnation);
+                assert_eq!(revision, "2", "a retry must advance the revision only once");
+                assert_eq!(
+                    serde_json::from_str::<Fields>(fields).unwrap(),
+                    Fields::from([
+                        ("body".into(), "committed edit".into()),
+                        ("tag".into(), "protected tag".into())
+                    ])
+                );
+                ResponseIntent::Updated {
+                    resource: 1,
+                    id: 42,
+                    destination: RouteRef {
+                        route: 2,
+                        target: Some(42),
+                    },
+                }
+            } else {
+                assert!(
+                    committed.0.is_empty(),
+                    "hard deletion must remove the target"
+                );
+                ResponseIntent::Deleted {
+                    resource: 1,
+                    id: 42,
+                    destination: RouteRef {
+                        route: 1,
+                        target: None,
+                    },
+                }
+            };
+            assert_eq!(
+                serde_json::from_str::<ResponseIntent>(&committed.1[0][1]).unwrap(),
+                expected
+            );
+            let restarted = record_application(&db, &keys).await;
+            let recovery = restarted
+                .recover_form(&session, action, &submission, &csrf, &input, true)
+                .await
+                .unwrap();
+            assert_eq!(recovery.status, 303);
+            let must_not_execute = plan(Point::Effect, Mode::Abort, 10);
+            let recovered = FAULT
+                .scope(
+                    must_not_execute.clone(),
+                    restarted.submit(&session, action, &submission, &csrf, input),
+                )
+                .await
+                .unwrap();
+            assert_eq!(recovered.status, 303);
+            assert_eq!(
+                recovered.location.as_deref(),
+                Some(if action == 2 { "/notes/42" } else { "/" })
+            );
+            assert_eq!(must_not_execute.hits.load(Ordering::SeqCst), 0);
+            assert_eq!(record_mutation_state(&db).await, committed);
+        }
+    }
+}
+
+#[tokio::test]
+async fn sqlite_record_mutation_failures() {
+    let temp = tempfile::tempdir().unwrap();
+    record_mutation_failures(Database::sqlite(temp.path().join("record-faults.db"))).await;
+}
+
 async fn crashes(db: Database, descriptor: serde_json::Value) {
     db.initialize().await.unwrap();
     db.create_account("alice", "private test password", "")
@@ -684,6 +951,23 @@ async fn postgres_failure_protocol() {
         serde_json::json!({"postgres":case.as_str()}),
     )
     .await;
+    sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let name = format!(
+        "nx_record_fault_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    case.set_path(&format!("/{name}"));
+    record_mutation_failures(Database::postgres(case.as_str()).unwrap()).await;
     sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
         .execute(&mut admin)
         .await
