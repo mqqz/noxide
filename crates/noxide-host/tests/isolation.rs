@@ -7,6 +7,7 @@ fn request() -> RequestView {
         kind: RequestKind::Route(1),
         target: None,
         input: Default::default(),
+        inspection: None,
     }
 }
 
@@ -65,6 +66,23 @@ async fn fresh_memory_and_globals_on_every_request() {
     }
     let (a, b) = tokio::join!(app.render_only(request()), app.render_only(request()));
     assert!(a.is_ok() && b.is_ok());
+}
+
+#[tokio::test]
+async fn action_input_and_inspection_fit_the_request_envelope() {
+    let app = Runtime::compile(&component(&emit_page(), ""), Limits::default()).unwrap();
+    let mut request = request();
+    request.kind = RequestKind::Action(1);
+    request.target = Some(42);
+    for field in ["body", "tag"] {
+        request.input.insert(field.into(), "\\".repeat(4096));
+    }
+    request.inspection = Some(request.input.clone());
+    assert!(serde_json::to_vec(&request).unwrap().len() > noxide_protocol::MAX_INPUT_BYTES);
+    app.render_only(request.clone()).await.unwrap();
+
+    request.input.insert("body".into(), "\\".repeat(65_536));
+    assert!(app.render_only(request).await.is_err());
 }
 
 #[tokio::test]

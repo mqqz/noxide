@@ -106,25 +106,45 @@ pub fn validate(m: &Manifest) -> Result<()> {
         unique(r.operations.iter().copied())?;
         unique(r.forms.iter().copied())?;
         ensure!(
-            r.record || r.operations.len() <= 1,
+            r.resource.is_some() || r.operations.len() <= 1,
             "a list route has one cursor scope"
         );
         for id in &r.operations {
             let op = operation(m, *id)?;
             ensure!(
                 matches!(
-                    (&op.kind, r.record),
+                    (&op.kind, r.resource.is_some()),
                     (OperationKind::List, false) | (OperationKind::Read, true)
                 ),
                 "route operation mismatch"
             );
+            ensure!(
+                r.resource.is_none_or(|resource| resource == op.resource),
+                "route resource mismatch"
+            );
+        }
+        if let Some(id) = r.resource {
+            resource(m, id)?;
+            ensure!(
+                !r.operations.is_empty(),
+                "record route requires a read operation"
+            );
         }
         for id in &r.forms {
-            action(m, *id)?;
+            let a = action(m, *id)?;
+            let op = operation(m, a.operation)?;
+            if op.kind != OperationKind::Create {
+                ensure!(
+                    r.resource == Some(op.resource),
+                    "mutation form requires its record route"
+                );
+            }
         }
     }
     ensure!(
-        m.routes.iter().any(|r| r.path == "/" && !r.record),
+        m.routes
+            .iter()
+            .any(|r| r.path == "/" && r.resource.is_none()),
         "missing index route"
     );
     for a in &m.actions {
@@ -136,18 +156,34 @@ pub fn validate(m: &Manifest) -> Result<()> {
             "invalid action"
         );
         let op = operation(m, a.operation)?;
-        ensure!(
-            op.kind == OperationKind::Create,
-            "action must declare creation"
-        );
+        let fields = action_fields(m, a)?;
+        match op.kind {
+            OperationKind::Create => ensure!(
+                fields.len() == resource(m, op.resource)?.fields.len(),
+                "creation requires every field"
+            ),
+            OperationKind::Update => ensure!(!fields.is_empty(), "update requires writable fields"),
+            OperationKind::Delete => ensure!(fields.is_empty(), "delete has no writable fields"),
+            _ => anyhow::bail!("action must declare a mutation"),
+        }
+        if let Some(inspect) = &a.inspect {
+            let read = operation(m, inspect.operation)?;
+            ensure!(
+                op.kind != OperationKind::Create
+                    && read.kind == OperationKind::Read
+                    && read.resource == op.resource,
+                "invalid inspection operation"
+            );
+            ensure!(!inspect.fields.is_empty(), "empty inspection");
+            projected_fields(resource(m, op.resource)?, &inspect.fields)?;
+        }
         let r = route(m, a.redirect)?;
         ensure!(
-            r.record
-                && r.operations
-                    .iter()
-                    .any(|id| operation(m, *id).is_ok_and(
-                        |read| read.resource == op.resource && read.kind == OperationKind::Read
-                    )),
+            if op.kind == OperationKind::Delete {
+                r.resource.is_none()
+            } else {
+                r.resource == Some(op.resource)
+            },
             "invalid outcome route"
         );
     }
@@ -181,19 +217,59 @@ pub fn action(m: &Manifest, id: u32) -> Result<&Action> {
 pub fn validate_fields(resource: &Resource, fields: &Fields) -> Result<()> {
     ensure!(fields.len() == resource.fields.len(), "unexpected fields");
     for f in &resource.fields {
-        let Some(value) = fields.get(&f.name) else {
-            bail!("missing field")
-        };
-        ensure!(
-            !value.trim().is_empty() && value.len() <= f.max_bytes as usize,
-            "field length"
-        );
-        ensure!(
-            !value
-                .chars()
-                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')),
-            "invalid field text"
-        );
+        validate_field(f, fields)?;
     }
+    Ok(())
+}
+
+fn projected_fields<'a>(resource: &'a Resource, names: &[String]) -> Result<Vec<&'a TextField>> {
+    ensure!(
+        names.len() <= resource.fields.len(),
+        "field projection limit"
+    );
+    let mut seen = BTreeSet::new();
+    names
+        .iter()
+        .map(|name| {
+            ensure!(seen.insert(name), "duplicate projected field");
+            resource
+                .fields
+                .iter()
+                .find(|field| &field.name == name)
+                .ok_or_else(|| anyhow::anyhow!("unknown projected field"))
+        })
+        .collect()
+}
+
+pub(crate) fn action_fields<'a>(m: &'a Manifest, action: &Action) -> Result<Vec<&'a TextField>> {
+    projected_fields(
+        resource(m, operation(m, action.operation)?.resource)?,
+        &action.fields,
+    )
+}
+
+pub(crate) fn validate_input(m: &Manifest, action: &Action, fields: &Fields) -> Result<()> {
+    let declared = action_fields(m, action)?;
+    ensure!(fields.len() == declared.len(), "unexpected action fields");
+    for field in declared {
+        validate_field(field, fields)?;
+    }
+    Ok(())
+}
+
+fn validate_field(f: &TextField, fields: &Fields) -> Result<()> {
+    let Some(value) = fields.get(&f.name) else {
+        bail!("missing field")
+    };
+    ensure!(
+        !value.trim().is_empty() && value.len() <= f.max_bytes as usize,
+        "field length"
+    );
+    ensure!(
+        !value
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')),
+        "invalid field text"
+    );
     Ok(())
 }

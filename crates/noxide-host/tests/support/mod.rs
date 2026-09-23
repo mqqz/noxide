@@ -39,14 +39,14 @@ pub fn manifest() -> Manifest {
             Route {
                 id: 1,
                 path: "/".into(),
-                record: false,
+                resource: None,
                 operations: vec![1],
                 forms: vec![1],
             },
             Route {
                 id: 2,
                 path: "/notes".into(),
-                record: true,
+                resource: Some(1),
                 operations: vec![2],
                 forms: vec![],
             },
@@ -57,6 +57,8 @@ pub fn manifest() -> Manifest {
             name: "Save note".into(),
             operation: 3,
             redirect: 2,
+            fields: vec!["body".into()],
+            inspect: None,
         }],
     }
 }

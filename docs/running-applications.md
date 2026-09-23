@@ -1,8 +1,8 @@
 # Running an application
 
-The first supported workflow is a private-notes application: sign in, save a note,
-recover a repeated save, and sign out. The runtime supports SQLite and PostgreSQL.
-Pages and forms work without JavaScript. Application code runs in fresh Wasmtime
+The private-notes application supports creating, editing, and deleting notes,
+including recovery of repeated submissions. The runtime supports SQLite and
+PostgreSQL. Pages and forms work without JavaScript. Application code runs in fresh Wasmtime
 components; the host owns HTML, authentication, permissions, and transactions.
 
 The implementation is new and has not had an external security audit. The tested
@@ -81,11 +81,11 @@ against the fixed catalog inside the VM and returns its lockfile for review.
 ## Approve the contract and initialize storage
 
 Read [the notes declarations](../examples/private-notes/manifest.json). They request
-owner-scoped list/read operations and one create operation. A create can write
-exactly the submitted `body`; ownership and tenant come from the host. The guest
-cannot change those bindings. The separate deployment configuration records the
-operator's approval digest; a manifest shipped by an application cannot approve
-itself.
+owner-scoped list/read, create, update, and delete operations. An update writes
+exactly the submitted `body` to the note bound to its form. Ownership, tenant,
+record incarnation, and revision come from the host. The separate deployment
+configuration records the operator's approval digest; a manifest shipped by an
+application cannot approve itself.
 
 After reviewing that contract, create a private runtime directory and configuration:
 
@@ -154,6 +154,25 @@ tag, and confirm it appears literally. Provision Bob the same way to verify that
 his list and direct note requests cannot expose Alice's content. Lists have a
 host-owned next-page link, and every authenticated page offers sign-out.
 
+Open a note in two tabs. Save an edit in one, then submit the other tab's edit.
+The conflict page shows the current text alongside the entered text. Review it
+and select **Save these changes** to submit against the current revision. The
+**Delete record** button removes the note with one POST; there is no confirmation
+round trip or trash view.
+
+Declarations use protocol version 2. A record route declares `"resource": 1`;
+list routes use `null`. Every action declares a `fields` list: all resource fields
+for creation, a nonempty subset for updates, and an empty list for deletion.
+The host rejects missing or extra fields and preserves fields outside an update's
+list. `Context::update(operation)` and `Context::delete(operation)` return the
+host's outcome for the bound target; return that outcome from the handler.
+
+Actions receive no stored values by default. An optional declaration such as
+`"inspect": {"operation": 2, "fields": ["body"]}` supplies those original values
+in `RequestView.inspection`, after the host checks the declared read policy.
+The snapshot stays unchanged during the attempt, including after a staged update
+or delete. It grants no general read import.
+
 The host accepts only the configured Host and Origin. It ignores forwarding
 headers. TCP listeners bind only loopback; `{"unix":"/private/run/noxide.sock"}`
 selects a Unix socket in a directory controlled by the operator. Normal shutdown
@@ -166,11 +185,24 @@ cannot alter cookie or security-header policy.
 
 ## Failures, upgrades, and recovery
 
-Every save carries a host-authenticated token with a 15-minute expiry. Repeat the
-POST with the same canonical input to recover its outcome; changing the input
+Every mutation carries a host-authenticated token with a 15-minute expiry. Repeat
+the POST with the same canonical input to recover its outcome; changing the input
 on a used form returns a conflict and cannot save again. Validation pages preserve
 entered text. For an uncertain save, the page keeps the original token and makes
-the input read-only so the user can check that save before starting another one.
+the input read-only so the user can check that submission before starting another
+one.
+
+Edit and delete tokens bind the note's incarnation and revision. A stale revision
+returns a host-rendered conflict before guest execution and issues a fresh token
+only after current permissions pass. A missing or unauthorized target returns
+the same unavailable page. A completed receipt can still recover its redirect
+after deletion or revoked mutation permission; the session, token, and deployment
+must remain valid, and following the redirect performs normal read authorization.
+
+A handler may return `ResponseIntent::Rejected { field_errors, message }`.
+The host validates the errors, rolls back all staged effects and the receipt
+claim, and renders an editable form with the same token. Corrected input can be
+submitted with that token because the rejected attempt committed nothing.
 
 Resources are released before sending a committed response. A slow browser does
 not retain a Store or database transaction. Shutdown stops accepting connections,
@@ -186,8 +218,9 @@ target/debug/noxide migrate /tmp/noxide-notes-run/runtime.json
 
 The command preserves existing records, assigns each a fresh incarnation and
 revision 1, and atomically replaces the storage layout. It retires old deployment
-forms. Restart with the approved application bundle. `init` and serving refuse
-unmigrated storage; repeating a successful migration is safe. The migration is bounded to
+forms. Rebuild the application with the version-2 SDK, review its new declarations,
+update `approved_contract`, then restart. `init` and serving refuse unmigrated
+storage; repeating a successful migration is safe. The migration is bounded to
 five minutes and requires room for a transactional copy of the records.
 
 This command only upgrades framework storage. Activation also checks the persisted
@@ -236,9 +269,10 @@ ignored by the default suite, so run them separately:
 
 ```sh
 export NOXIDE_TEST_POSTGRES='postgresql://test@localhost/postgres?host=/private/test/socket'
-cargo test -p noxide-host --test providers postgres_transactional_contract --locked --offline -- --ignored
-cargo test -p noxide-host --lib failure_tests::postgres_failure_protocol --locked --offline -- --ignored
-cargo test -p noxide-host --lib review_tests::postgres_clock_conflicts_are_busy --locked --offline -- --ignored
+cargo test --workspace --locked --offline -- \
+  --include-ignored \
+  --skip failure_tests::crash_worker \
+  --skip postgres_nojs_browser_flow
 ```
 
 For VM and browser acceptance:

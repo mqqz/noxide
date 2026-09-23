@@ -1,14 +1,133 @@
 {
-  "version": 1,
-  "resources": [{"id": 1, "name": "notes", "fields": [{"name": "body", "label": "Note", "max_bytes": 4096}]}],
+  "version": 2,
+  "resources": [
+    {
+      "id": 1,
+      "name": "notes",
+      "fields": [
+        {
+          "name": "body",
+          "label": "Note",
+          "max_bytes": 4096
+        }
+      ]
+    }
+  ],
   "operations": [
-    {"id": 1, "resource": 1, "kind": "list", "policy": {"any": [["owner"]]}},
-    {"id": 2, "resource": 1, "kind": "read", "policy": {"any": [["owner"]]}},
-    {"id": 3, "resource": 1, "kind": "create", "policy": {"any": [["owner"]]}}
+    {
+      "id": 1,
+      "resource": 1,
+      "kind": "list",
+      "policy": {
+        "any": [
+          [
+            "owner"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "resource": 1,
+      "kind": "read",
+      "policy": {
+        "any": [
+          [
+            "owner"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "resource": 1,
+      "kind": "create",
+      "policy": {
+        "any": [
+          [
+            "owner"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "resource": 1,
+      "kind": "update",
+      "policy": {
+        "any": [
+          [
+            "owner"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "resource": 1,
+      "kind": "delete",
+      "policy": {
+        "any": [
+          [
+            "owner"
+          ]
+        ]
+      }
+    }
   ],
   "routes": [
-    {"id": 1, "path": "/", "record": false, "operations": [1], "forms": [1]},
-    {"id": 2, "path": "/notes", "record": true, "operations": [2], "forms": []}
+    {
+      "id": 1,
+      "path": "/",
+      "operations": [
+        1
+      ],
+      "forms": [
+        1
+      ],
+      "resource": null
+    },
+    {
+      "id": 2,
+      "path": "/notes",
+      "operations": [
+        2
+      ],
+      "forms": [
+        2,
+        3
+      ],
+      "resource": 1
+    }
   ],
-  "actions": [{"id": 1, "version": 1, "name": "Save note", "operation": 3, "redirect": 2}]
+  "actions": [
+    {
+      "id": 1,
+      "version": 1,
+      "name": "Save note",
+      "operation": 3,
+      "redirect": 2,
+      "fields": [
+        "body"
+      ]
+    },
+    {
+      "id": 2,
+      "version": 1,
+      "name": "Save changes",
+      "operation": 4,
+      "redirect": 2,
+      "fields": [
+        "body"
+      ]
+    },
+    {
+      "id": 3,
+      "version": 1,
+      "name": "Delete note",
+      "operation": 5,
+      "redirect": 1,
+      "fields": []
+    }
+  ]
 }

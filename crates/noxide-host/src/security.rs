@@ -24,7 +24,19 @@ pub(crate) enum TokenKind {
         contract: String,
         action: u32,
         version: u32,
+        target: Option<RecordTarget>,
     },
+}
+
+/// Private, authenticated scope. Guest-supplied record values never construct it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecordTarget {
+    pub resource: u32,
+    pub id: u64,
+    pub incarnation: String,
+    pub revision: i64,
+    pub route: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

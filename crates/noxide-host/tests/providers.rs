@@ -175,6 +175,7 @@ async fn conformance(
     // An approved replacement must still satisfy the persisted resource schema.
     let mut incompatible = declarations.clone();
     incompatible.resources[0].fields[0].name = "other".into();
+    incompatible.actions[0].fields = vec!["other".into()];
     let replacement = Application::new(
         &support::component(None),
         &serde_json::to_vec(&incompatible).unwrap(),

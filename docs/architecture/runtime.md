@@ -5,9 +5,8 @@ host controls browser output, authentication, authorization, persistence, and
 execution. Application source and all application dependencies are untrusted
 during both compilation and execution.
 
-The first architectural milestone is a private-notes application with a complete
-transactional form flow on both SQLite and PostgreSQL. A preceding rendering
-spike tests the execution and output boundaries.
+The private-notes application exercises creation, editing, and hard deletion on
+both SQLite and PostgreSQL, including stale-form recovery and transactional retries.
 
 ## Trust and authority
 
@@ -99,7 +98,7 @@ configuration; it does not authorize dirty instance or request-context reuse.
 
 ## Boundary protocol and rendering
 
-The Rust contracts live in `noxide-protocol`. The SDK's
+The version-2 Rust/JSON contracts live in `noxide-protocol`. The SDK's
 `crates/noxide/wit/application.wit` defines the versioned import world. Request
 grants stay inside the host; guests cannot select them through resource handles.
 
@@ -161,18 +160,49 @@ bounded message with Serde's recursion guard and validates the document's struct
 ## Data, sessions, and action scope
 
 Applications declare data operations. The host interprets an approved finite
-operation set; the guest SDK supplies list/read/create helpers. M1 has no
-application native adapters, raw SQL, user-defined SQL functions, or arbitrary
+operation set; the guest SDK supplies list/read/create/update/delete helpers.
+There are no application native adapters, raw SQL, user-defined SQL functions, or arbitrary
 migration execution. Schema changes use approved host-managed operations.
 
-For the notes fixture, the model has a host-generated NoteId, protected
-owner identity, and bounded body text. CreateNote permits one creation per action,
-with ownership set from the authenticated host principal. Form fields cannot
-select an owner. Owner-scoped ListNotes and ReadNote expose only the data their
-route needs. Validated input fixes every ordinary field; the guest can neither
-substitute values nor choose the tenant or generated ID. Resource schemas are
-persisted at activation and must match on subsequent requests. Schema migration
-requires a separate trusted operation.
+For the notes fixture, the model has a host-generated NoteId, protected owner
+identity, and bounded body text. Each row also has a host-generated immutable
+incarnation and a positive revision. CreateNote permits one creation per action,
+with ownership set from the authenticated host principal. Owner-scoped ListNotes
+and ReadNote expose only the data their route needs. Resource schemas are
+persisted at activation and must match on subsequent requests.
+
+Every action declares its writable fields. Creation requires all resource fields;
+updates require a nonempty subset; deletion requires none. Missing and extra input
+fields fail validation. The host writes the canonical input exactly and preserves
+other fields. Guests cannot choose owner, tenant, target, incarnation, or revision.
+
+A record route declares the resource it addresses. `Form { action }` on that route
+lets the host bind the form to the current record ID, incarnation, revision, and
+issuing route. A delete form performs one POST. Update and delete imports take no
+guest-selected target; the host checks the private grant, current authorization,
+and conditional write predicate. A successful update increments the revision once.
+Deletion removes the live row and retains only the submission receipt. Reusing a
+deleted numeric ID cannot make its old forms valid against a new incarnation.
+
+Actions have no general repository read authority. An optional `inspect`
+declaration names a read operation and a field projection on the target resource.
+The host checks that policy and supplies the original values in
+`RequestView.inspection` from the same transaction. The snapshot remains unchanged
+after a staged mutation; absent a declaration, inspection is `None`.
+
+The host checks record existence and current read/mutation permissions before
+guest execution. A stale revision produces a 409 conflict with the entered input
+and currently authorized values. The new form binds to the current revision and
+requires explicit resubmission. Missing, reincarnated, and unauthorized targets
+share a 404 response. An uncertain commit keeps the original token and read-only
+input until the submission protocol resolves it.
+
+A guest can return `Rejected { field_errors, message }`, including after a staged
+mutation. The host bounds and escapes the explanation, checks error names against
+the declared fields, and rolls back the mutation and receipt claim. The resulting
+422 form preserves editable input and the original token/revision. Message text is
+limited to 1,024 bytes; at most eight field errors may contain 256 bytes each.
+Corrected input can use the same token because no execution committed.
 
 Policy checks and writes use a transactionally coherent view. Shared conformance
 fixtures cover target predicates, nullability, integer ranges, ordering, and
@@ -203,6 +233,8 @@ state already published.
 4. For a new attempt, begin a transaction and claim the submission atomically.
    A database uniqueness constraint arbitrates competing claims.
 5. Resolve authoritative facts and derive request grants in that transaction.
+   Check a targeted action's incarnation and expected revision. Return a trusted
+   conflict or unavailable response before guest execution if those checks fail.
 6. Instantiate a fresh guest under limits, initialize without authority, enable
    its grants, and execute the handler.
 7. Obtain bounded output, validate the entire intent/IR, resolve references, and
@@ -228,9 +260,12 @@ Mutation and submission claim share one transaction with the completed receipt
 and any declared outbox entry. The guarantee is at most one committed
 transactional execution per valid submission. Rolled-back attempts may repeat.
 The receipt stores outcome references, never a private rendered page or secrets.
-Receipt recovery rechecks disclosure policy, and destination routes authorize
-their own reads. External delivery would require an outbox contract and separate
-delivery guarantees; M1 does not need an external delivery subsystem.
+A matching completed receipt is recovered before current mutation authority or
+target existence is checked. Recovery still requires the original valid session,
+token, action/input binding, and deployment. Its redirect discloses no record
+contents; destination routes authorize their own reads. External delivery would
+require an outbox contract and separate delivery guarantees; M1 does not need an
+external delivery subsystem.
 
 Automatic retries are bounded and restricted to specifically classified,
 definitely aborted conflicts. Each attempt repeats authorization and guest
@@ -308,7 +343,8 @@ The selected defaults are:
 | Guest memory / table allocation | 64 MiB aggregate; four memories/tables, 4,096 elements per table, eight instances |
 | Request execution | 10 million fuel, two seconds, at most three fresh attempts |
 | Host calls / repository invocations | 32,768 / 16, cumulative across retries |
-| Input / repository result / IR | 32 KiB / 64 KiB / 64 KiB |
+| Canonical input / serialized request including inspection | 32 KiB / 64 KiB |
+| Repository result / IR | 64 KiB / 64 KiB |
 | Document | 1,024 nodes, depth 32, eight forms, 256 KiB serialized output |
 | Repository list | Three records, cursor bound to the request; stored fields guarded at 20,000 bytes before transfer |
 | Persistent records | 10,000 per resource and owner |
@@ -415,8 +451,9 @@ expiry, and a host-key incarnation. Sessions last one hour; login/form challenge
 last 15 minutes. Canonical input is a sorted map of exact UTF-8 field values with
 form newlines normalized to LF. Duplicate fields and malformed percent/UTF-8
 encodings are rejected; Unicode normalization is not implicit. Receipts store
-only canonical input digests and Created/RouteRef outcomes. Collection is bounded
-and obeys a persisted clock high-water mark and expiry grace period.
+only canonical input digests and Created/Updated/Deleted outcomes with route
+references. Collection is bounded and obeys a persisted clock high-water mark and
+expiry grace period.
 
 The encoded HTTP form budget accounts for CRLF and percent-encoding expansion.
 Canonical input has a separate 32 KiB limit. To avoid treating writer-lock waits
@@ -441,7 +478,10 @@ The suites cover hostile output/imports, fresh memory/globals/tables, initializa
 resource limits, bounded stored values and SQL, rollback, concurrent duplicate
 claims, role-revocation ordering, authentication epochs, known-aborted retries,
 lost commit acknowledgements, process crashes, expired-token collection, schema and
-deployment fencing, and browser privacy boundaries. Build scripts and procedural
+deployment fencing, and browser privacy boundaries. Record-action tests cover
+revision races, exact field writes, explicit inspection, rejection rollback,
+read-policy revocation, and receipts after deletion. The browser flow exercises
+two-tab conflicts and one-POST deletion. Build scripts and procedural
 macros are tested inside fresh VMs against filesystem, network, host-socket, and
 cross-build canaries; a native build loop must hit the VM deadline.
 

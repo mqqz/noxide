@@ -246,6 +246,7 @@ async fn browser_encoded_maximum_fields_save_and_recover() {
         label: "Extra".into(),
         max_bytes: 4096,
     });
+    m.actions[0].fields.push("extra".into());
     let app = app(Database::sqlite(temp.path().join("forms.db")), m).await;
     let challenge = app.login_challenge().await.unwrap();
     let session = app

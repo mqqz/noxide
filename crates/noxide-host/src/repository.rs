@@ -2,6 +2,7 @@ use crate::{
     auth::Principal,
     database::{Param, Transaction},
     manifest,
+    security::RecordTarget,
 };
 use anyhow::{Result, ensure};
 use noxide_protocol::*;
@@ -12,10 +13,63 @@ pub(crate) struct Effects {
     pub manifest: Arc<Manifest>,
     pub principal: Principal,
     pub request: RequestView,
-    pub created: Option<Record>,
+    pub outcome: Option<ResponseIntent>,
+    pub grant: Option<RecordTarget>,
+    pub record: Option<StoredRecord>,
     pub calls: u32,
     pub cursor: Option<u64>,
     pub more: Option<u64>,
+}
+
+pub(crate) struct StoredRecord {
+    pub record: Record,
+    pub owner: String,
+    pub tenant: String,
+    pub incarnation: String,
+    pub revision: i64,
+}
+
+pub(crate) async fn load(
+    tx: &mut Transaction,
+    m: &Manifest,
+    resource: u32,
+    id: u64,
+) -> Result<Option<StoredRecord>> {
+    ensure!(id > 0 && id <= i64::MAX as u64, "invalid resource target");
+    let sql = format!(
+        "SELECT owner,tenant,{}, {},CAST(revision AS TEXT) FROM nx_records WHERE resource=$1 AND id=$2",
+        tx.bounded_text("fields", 20_000),
+        tx.bounded_text("incarnation", 64)
+    );
+    let rows = tx
+        .fetch::<5>(
+            &sql,
+            &[Param::Number(resource.into()), Param::Number(id as i64)],
+        )
+        .await?;
+    rows.into_iter()
+        .next()
+        .map(|[owner, tenant, fields, incarnation, revision]| {
+            let fields = serde_json::from_str(&fields)?;
+            manifest::validate_fields(manifest::resource(m, resource)?, &fields)?;
+            let revision = revision.parse()?;
+            ensure!(
+                revision > 0 && !incarnation.is_empty(),
+                "invalid record metadata"
+            );
+            Ok(StoredRecord {
+                record: Record {
+                    resource,
+                    id,
+                    fields,
+                },
+                owner,
+                tenant,
+                incarnation,
+                revision,
+            })
+        })
+        .transpose()
 }
 
 pub(crate) fn allowed(policy: &Policy, principal: &Principal, owner: &str, tenant: &str) -> bool {
@@ -52,15 +106,21 @@ impl Effects {
                         && target == self.request.target.unwrap_or(0),
                     "operation outside request grant"
                 );
-                ensure!(op.kind != OperationKind::Create, "read route mutation");
+                ensure!(
+                    matches!(op.kind, OperationKind::List | OperationKind::Read),
+                    "read route mutation"
+                );
             }
             RequestKind::Action(id) => {
                 let action = manifest::action(&self.manifest, *id)?;
                 ensure!(
                     action.operation == operation
-                        && op.kind == OperationKind::Create
+                        && matches!(
+                            op.kind,
+                            OperationKind::Create | OperationKind::Update | OperationKind::Delete
+                        )
                         && target == 0
-                        && self.created.is_none(),
+                        && self.outcome.is_none(),
                     "operation outside action grant"
                 );
             }
@@ -86,13 +146,95 @@ impl Effects {
                     id,
                     fields: self.request.input.clone(),
                 };
+                ensure!(self.grant.is_none(), "creation has no existing target");
                 self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES($1,$2,$3,$4,$5,$6,1)",&[
                     Param::Number(op.resource.into()),Param::Number(id as i64),self.principal.id.clone().into(),self.principal.tenant.clone().into(),serde_json::to_string(&record.fields)?.into(), crate::security::random_id()?.into()
                 ]).await?;
                 #[cfg(test)]
                 crate::failure_tests::after_effect(&mut self.tx).await?;
-                self.created = Some(record.clone());
+                let RequestKind::Action(action) = self.request.kind else {
+                    anyhow::bail!("missing action")
+                };
+                self.outcome = Some(ResponseIntent::Created {
+                    resource: op.resource,
+                    id,
+                    destination: RouteRef {
+                        route: manifest::action(&self.manifest, action)?.redirect,
+                        target: Some(id),
+                    },
+                });
                 serde_json::to_vec(&record)?
+            }
+            OperationKind::Update | OperationKind::Delete => {
+                let RequestKind::Action(action) = self.request.kind else {
+                    anyhow::bail!("missing action")
+                };
+                let a = manifest::action(&self.manifest, action)?;
+                let grant = self
+                    .grant
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("missing target grant"))?;
+                let stored = self
+                    .record
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("missing target snapshot"))?;
+                ensure!(
+                    grant.resource == op.resource
+                        && self.request.target == Some(grant.id)
+                        && stored.record.resource == grant.resource
+                        && stored.record.id == grant.id
+                        && stored.incarnation == grant.incarnation
+                        && stored.revision == grant.revision,
+                    "target outside grant"
+                );
+                ensure!(
+                    allowed(&op.policy, &self.principal, &stored.owner, &stored.tenant),
+                    "policy denied"
+                );
+                manifest::validate_input(&self.manifest, a, &self.request.input)?;
+                let mut params = vec![
+                    Param::Number(op.resource.into()),
+                    Param::Number(grant.id as i64),
+                    grant.incarnation.as_str().into(),
+                    grant.revision.into(),
+                ];
+                let outcome = if op.kind == OperationKind::Update {
+                    let next = grant
+                        .revision
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!("record revision exhausted"))?;
+                    let mut fields = stored.record.fields.clone();
+                    fields.extend(self.request.input.clone());
+                    manifest::validate_fields(
+                        manifest::resource(&self.manifest, op.resource)?,
+                        &fields,
+                    )?;
+                    params.push(serde_json::to_string(&fields)?.into());
+                    params.push(next.into());
+                    ensure!(self.tx.execute("UPDATE nx_records SET fields=$5,revision=$6 WHERE resource=$1 AND id=$2 AND incarnation=$3 AND revision=$4", &params).await? == 1, "record changed");
+                    ResponseIntent::Updated {
+                        resource: op.resource,
+                        id: grant.id,
+                        destination: RouteRef {
+                            route: a.redirect,
+                            target: Some(grant.id),
+                        },
+                    }
+                } else {
+                    ensure!(self.tx.execute("DELETE FROM nx_records WHERE resource=$1 AND id=$2 AND incarnation=$3 AND revision=$4", &params).await? == 1, "record changed");
+                    ResponseIntent::Deleted {
+                        resource: op.resource,
+                        id: grant.id,
+                        destination: RouteRef {
+                            route: a.redirect,
+                            target: None,
+                        },
+                    }
+                };
+                #[cfg(test)]
+                crate::failure_tests::after_effect(&mut self.tx).await?;
+                self.outcome = Some(outcome.clone());
+                serde_json::to_vec(&outcome)?
             }
             OperationKind::Read => {
                 ensure!(
