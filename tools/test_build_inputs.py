@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Host-side snapshot/transport tests; no application code is executed."""
 import base64
+import gzip
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -83,6 +85,106 @@ class Inputs(unittest.TestCase):
                                     cwd=Path(build_vm.__file__).parent,
                                     capture_output=True, text=True, timeout=3)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class ToolchainSnapshot(unittest.TestCase):
+    def test_library_aliases_are_preserved_in_initramfs(self):
+        image = Image()
+        image.add("lib/x86_64-linux-gnu/libmvec.so.1", b"math library")
+        image.add("usr/lib64/ld-linux-x86-64.so.2", b"loader")
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "image.cpio.gz"
+            image.write(path)
+            data = gzip.decompress(path.read_bytes())
+        entries = {}
+        offset = 0
+        while True:
+            self.assertEqual(data[offset:offset + 6], b"070701")
+            fields = [int(data[offset + 6 + i * 8:offset + 14 + i * 8], 16)
+                      for i in range(13)]
+            mode, size, name_size = fields[1], fields[6], fields[11]
+            offset += 110
+            name = data[offset:offset + name_size - 1].decode()
+            offset = (offset + name_size + 3) & ~3
+            if name == "TRAILER!!!":
+                break
+            self.assertNotIn(name, entries)
+            entries[name] = (stat.S_IFMT(mode), data[offset:offset + size])
+            offset = (offset + size + 3) & ~3
+        self.assertEqual(entries["lib"], (stat.S_IFLNK, b"usr/lib"))
+        self.assertEqual(entries["lib64"], (stat.S_IFLNK, b"usr/lib64"))
+        self.assertEqual(entries["usr/lib/x86_64-linux-gnu/libmvec.so.1"],
+                         (stat.S_IFREG, b"math library"))
+        self.assertEqual(entries["usr/lib64/ld-linux-x86-64.so.2"],
+                         (stat.S_IFREG, b"loader"))
+        self.assertFalse(any(name.startswith(("lib/", "lib64/")) for name in entries))
+
+    def test_alias_paths_cannot_duplicate_or_replace_fixed_metadata(self):
+        image = Image()
+        image.add("lib/library.so", b"library")
+        for name in ("usr/lib/library.so", "/lib/./library.so", "lib//library.so"):
+            with self.assertRaises(ValueError):
+                image.add(name, b"duplicate")
+        for name in ("lib", "lib64", "bin", "sbin", "usr/sbin", "lib/."):
+            with self.assertRaises(ValueError):
+                Image().add(name, b"replace fixed alias")
+        with tempfile.TemporaryDirectory() as folder:
+            library = Path(folder) / "library.so"
+            library.write_bytes(b"trusted library")
+            image = Image()
+            image.trusted(library, "lib/library.so")
+            image.trusted(library, "usr/lib/library.so")
+            self.assertEqual(list(image.files), ["usr/lib/library.so"])
+
+    def check_gcc_layout(self, split_directories):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            helpers = root / "usr/libexec/gcc/x86_64-linux-gnu/13"
+            libraries = (root / "usr/lib/gcc/x86_64-linux-gnu/13"
+                         if split_directories else helpers)
+            helpers.mkdir(parents=True)
+            libraries.mkdir(parents=True, exist_ok=True)
+            binary = root / "binary"
+            binary.write_bytes(b"trusted tool fixture")
+            for name in ("collect2", "cc1", "lto-wrapper", "lto1"):
+                (helpers / name).write_bytes(b"compiler helper")
+            startup = ("crtbegin.o", "crtbeginS.o", "crtend.o", "crtendS.o")
+            archives = ("libgcc.a", "libgcc_eh.a")
+            shared = ("liblto_plugin.so",)
+            system = ("crt1.o", "crti.o", "crtn.o", "Scrt1.o", "libc_nonshared.a",
+                      "libc.so.6", "libm.so.6", "libmvec.so.1",
+                      "ld-linux-x86-64.so.2", "libgcc_s.so.1")
+            for name in startup + archives + shared + system:
+                (libraries / name).write_bytes(name.encode())
+
+            def query(compiler, option):
+                self.assertEqual(compiler, "gcc")
+                if option == "-print-prog-name=collect2":
+                    return str(helpers / "collect2")
+                if option == "-print-libgcc-file-name":
+                    return str(libraries / "libgcc.a")
+                self.assertTrue(option.startswith("-print-file-name="), option)
+                name = option.split("=", 1)[1]
+                path = libraries / name
+                return str(path) if path.is_file() else name
+
+            image = Image()
+            with mock.patch.object(image, "executable"), \
+                 mock.patch("build_vm.shutil.which", return_value=str(binary)), \
+                 mock.patch("build_vm.command", side_effect=query):
+                build_vm.toolchain(image, root / "rust")
+
+            for name in startup + archives + shared:
+                path = libraries / name
+                key = str(path).lstrip("/")
+                self.assertIn(key, image.files, f"missing GCC runtime input: {name}")
+                self.assertEqual(image.files[key][0].read_bytes(), name.encode())
+
+    def test_gcc_helpers_and_runtime_can_share_a_directory(self):
+        self.check_gcc_layout(split_directories=False)
+
+    def test_gcc_runtime_is_copied_when_helpers_live_in_libexec(self):
+        self.check_gcc_layout(split_directories=True)
 
 
 class VmOutput(unittest.TestCase):
