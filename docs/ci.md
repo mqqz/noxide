@@ -18,8 +18,10 @@ excluded.
 private-notes example against their versioned archive directories inside a fresh
 QEMU VM. This exercises the distributed WIT contract without relying on sibling
 monorepo paths. The trusted CLI admits the resulting component. Firefox then
-exercises the NoJS form flow with SQLite on localhost and PostgreSQL through the
-test onion-origin proxy. This proxy does not establish Tor transport behavior.
+exercises creation, two-tab edit conflicts, explicit resubmission, deletion, and
+receipt recovery with JavaScript disabled. It uses SQLite on localhost and
+PostgreSQL through the test onion-origin proxy. This proxy does not establish Tor
+transport behavior.
 
 `Hostile application builds` runs weekly and on manual dispatch. It checks
 build-script and procedural-macro containment in two fresh VMs, including host
