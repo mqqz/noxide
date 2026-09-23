@@ -11,15 +11,24 @@
 
 | Crate | Target | Purpose |
 | --- | --- | --- |
-| `noxide` | Library | Framework API |
+| `noxide` | Library | Framework API and packaged WIT world |
 | `noxide-macros` | Procedural macro library | Framework macros |
 | `noxide-cli` | `noxide` binary | Command-line tools |
+| `noxide-protocol` | Library | Constrained document and application contracts |
+| `noxide-host` | Trusted library | Wasmtime, HTTP, authentication, policy, SQLite/PostgreSQL |
 
-The crates currently contain scaffolding. Framework APIs, macros, and CLI commands
-are not implemented yet.
+The runtime now supports a complete private-notes application with host-owned
+forms, sessions and authorization, fresh guest instances, and transactional replay
+protection on SQLite and PostgreSQL. Ordinary applications emit a constrained
+Document IR. Raw HTML, arbitrary URLs/headers, WASI, and generic SQL/network access
+are unavailable. The initial SDK uses typed Rust values; template macros remain
+future work.
 
-Run these commands from the repository root with a Rust toolchain that supports
-edition 2024:
+Follow [Running an application](docs/running-applications.md) to build the example
+inside a disposable VM, approve its declarative permissions, provision accounts,
+and run it. Application build scripts and macros must execute inside that VM.
+
+Build and check the trusted framework from the repository root with Rust 1.98.0:
 
 ```sh
 cargo build --workspace --locked
@@ -30,7 +39,8 @@ cargo run -p noxide-cli --bin noxide --locked
 ```
 
 Shared package metadata and local dependencies are defined in the root `Cargo.toml`.
-All crates share the root `Cargo.lock` and `target/` directory.
+Workspace crates share the root `Cargo.lock` and `target/` directory. The isolated
+application example has its own lockfile and is excluded from host workspace builds.
 
 
 ---
@@ -94,7 +104,7 @@ In more detail:
 
 ## Runtime design
 
-The [HTTP/application runtime design](docs/runtime-architecture.md) records the
+The [HTTP/application runtime design](docs/architecture/runtime.md) records the
 Wasmtime boundary, host-rendered document protocol, explicit authorization,
 transactional actions, and isolated builds.
 
@@ -102,4 +112,3 @@ transactional actions, and isolated builds.
 
 This project's code is licensed under either the [MIT License](LICENSE-MIT) or the
 [Apache License, Version 2.0](LICENSE-APACHE), at your option.
-

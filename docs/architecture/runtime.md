@@ -38,9 +38,10 @@ repository extensions are deferred beyond M1.
 | Roles and membership | Host-managed security records; changes require separately approved actions |
 | Deployment permissions | Operator-approved policy revision, bound to admitted application contracts |
 
-Before M1, specify whether a revocation takes effect at transaction serialization
-or must prevent every later commit after its acknowledgement. The latter requires
-additional ordering; a policy read by itself does not establish it.
+Revocation takes effect at transaction serialization. An overlapping authorized
+transaction may serialize before a revocation even if its acknowledgement arrives
+later. Every retry re-reads authoritative policy. A stronger acknowledgement fence
+would require a separately specified ordering protocol.
 
 A declaration in an application bundle requests authority; it does not approve
 it. The deployment policy must constrain approved resources, operations, policy
@@ -72,7 +73,7 @@ are absent. Wasm isolation depends on the host imports it provides.
 | Engine and compiled component | Store and component instance |
 | Immutable linker definitions | Linear memory, globals, tables, resource handles |
 | Approved route/asset/policy registries | Identity view, grants, budgets, request buffers |
-| Database connection pools | Transaction, host request state, render buffers |
+| Database connection configuration | Dedicated connection, transaction, host state, render buffers |
 
 A retry creates a new attempt with a new Store and instance. A completed receipt
 can be recovered without executing the application. No guest-created resource
@@ -84,8 +85,10 @@ storage, and job capabilities can follow later.
 Limits are installed before instantiation. Imports check the host execution phase:
 initializers can neither inspect request secrets nor perform application effects.
 Request capabilities become usable only for handler execution. Initialization,
-component cleanup, and host work remain bounded. Disable application effects again
-when the handler returns, before any guest post-return cleanup.
+component cleanup, and host work remain bounded. This implementation rejects
+canonical post-return hooks, asynchronous canonical functions, and resource
+intrinsics at admission. Wasmtime 48 performs post-return processing during calls;
+excluding hooks keeps application effects out of cleanup entirely.
 
 Compiled code can be reused without retaining guest state. Pooling is an optional
 optimization after tests verify fresh-state behavior for the selected Wasmtime
@@ -95,7 +98,9 @@ configuration; it does not authorize dirty instance or request-context reuse.
 
 ## Boundary protocol and rendering
 
-The following contracts define semantics. Rust and WIT definitions remain open.
+The Rust contracts live in `noxide-protocol`; its `wit/application.wit` defines the
+versioned import world. Host request grants are internal state, never guest-selected
+resource handles.
 
 | Contract | Contents and authority |
 | --- | --- |
@@ -115,7 +120,8 @@ escaped by context; there is no guest escape function that confers trust.
 The IR has a finite vocabulary with element-specific attributes. It contains no
 raw HTML, arbitrary tag or attribute names, inline event handlers, script,
 iframe, generic style attributes, or generic URL strings. RouteRef, AssetRef, and
-fragment references resolve through host registries. IDs and references never
+fragment references are future vocabulary. The current IR exposes only RouteRef
+links and framework-owned styles. IDs and references never
 confer authority by themselves. Redirects use the same route policy.
 
 The validator checks HTML content models and parsing contexts as well as balanced
@@ -144,26 +150,28 @@ CSP provides an additional browser constraint.
 ([CSS URLs](https://www.w3.org/TR/css-values-4/#urls),
 [Content Security Policy](https://www.w3.org/TR/CSP3/))
 
-A flat instruction representation with bounded string/value tables is the proposed
-wire shape. The SDK may expose a tree API. The transport must bound allocation
-before component argument/result lifting creates host collections, including host
-import arguments and exported results. Test nested lists, strings, transcoding,
-and malicious encoded lengths. Validating an already allocated large list is too
-late. The exact WIT world and transport are an M0 gate.
+A flat, bounded JSON instruction sequence is transported using fixed scalar calls.
+The guest exports `handle: () -> ()`. Imports read request/result chunks as u64,
+invoke a declared operation by numeric ID/target, and emit at most eight bytes per
+call. No guest-sized string, list, or collection is lifted across the component
+boundary. The host checks byte budgets before appending output, then decodes the
+bounded message with Serde's recursion guard and validates the document's structure.
 
 ## Data, sessions, and action scope
 
 Applications declare data operations. The host interprets an approved finite
-operation set; generated typed guest repositories provide ergonomics. M1 has no
+operation set; the guest SDK supplies list/read/create helpers. M1 has no
 application native adapters, raw SQL, user-defined SQL functions, or arbitrary
 migration execution. Schema changes use approved host-managed operations.
 
-For the notes fixture, the proposed model has a host-generated NoteId, protected
+For the notes fixture, the model has a host-generated NoteId, protected
 owner identity, and bounded body text. CreateNote grants at most one creation for
 the authenticated owner. Ownership comes from the host principal, never a form
 field. Owner-scoped ListNotes and ReadNote expose only the data needed by their
-route. The action contract must state which mutation fields are fixed by validated
-input and which, if any, the guest may choose; this cannot be implicit.
+route. Every created ordinary field is fixed by validated input; the guest can
+neither supply another value nor choose owner, tenant, or generated ID. One create
+is permitted per action. Resource schemas are persisted at activation and must
+match on subsequent requests; schema migration is a separate trusted operation.
 
 Policy checks and writes use a transactionally coherent view. Shared conformance
 fixtures cover target predicates, nullability, integer ranges, ordering, and
@@ -238,9 +246,9 @@ Both providers must implement the same semantic protocol and pass the same
 hostile acceptance suite on real databases, including independent connections
 and host processes. Provider SQL, locking, and error classification can differ.
 
-Proposed baseline: SQLite WAL with explicit write admission and `BEGIN IMMEDIATE`;
-PostgreSQL `SERIALIZABLE` for transactional actions. These are implementation
-proposals requiring contention and failure tests. SQLite permits one active
+The adapters use SQLite WAL with `BEGIN IMMEDIATE` and PostgreSQL `SERIALIZABLE`.
+Every transaction owns a dedicated connection, including read routes and host
+security bookkeeping; unresolved connections are discarded. SQLite permits one active
 writer, so guest execution and rendering consume part of the write-lock budget.
 ([SQLite isolation](https://www.sqlite.org/isolation.html))
 
@@ -257,7 +265,7 @@ Deletion of a receipt must never make its token executable again. Deployment
 changes must define whether an old action version remains supported for execution,
 supports recovery only, or is rejected; new code cannot silently reinterpret it.
 
-The proposed durability baseline is SQLite WAL with `synchronous=FULL`, and
+The enforced durability baseline is SQLite WAL with `synchronous=FULL`, and
 PostgreSQL with `fsync=on`, `full_page_writes=on`, and `synchronous_commit=on`.
 Verify effective settings when establishing provider connections, and document
 storage/flush assumptions. WAL with SQLite `synchronous=NORMAL` and asynchronous
@@ -281,8 +289,39 @@ Bound guest CPU and wall time, aggregate linear memory, memory/table/instance
 counts, host calls, query work/results, input parsing, IR lifting/validation,
 rendering, output bytes, and compilation. Configure per-request limits together
 with process-wide concurrency, queues, connection limits, and memory admission.
-Numerical defaults remain an implementation gate; earlier illustrative budgets
-are not selected defaults.
+The selected defaults are:
+
+| Budget | Limit |
+| --- | --- |
+| Portable component | 2 MiB, 4,096 defined functions, 500,000 operators |
+| Component expansion before compilation | 1,024 core/component instances including the root; 8 MiB expanded component bytes; 32 lexical component levels including the root |
+| Guest memory / table allocation | 64 MiB aggregate; four memories/tables, 4,096 elements per table, eight instances |
+| Request execution | 10 million fuel, two seconds, at most three fresh attempts |
+| Host calls / repository invocations | 32,768 / 16, cumulative across retries |
+| Input / repository result / IR | 32 KiB / 64 KiB / 64 KiB |
+| Document | 1,024 nodes, depth 32, eight forms, 256 KiB serialized output |
+| Repository list | Three records, cursor bound to the request; stored fields guarded at 20,000 bytes before transfer |
+| Persistent records | 10,000 per resource and owner |
+| HTTP admission | 64 connections; 16 active application requests; two password workers |
+| HTTP parsing and transfer | 64 headers, 32 KiB header buffer, 64 KiB encoded form body, 30-second header/body phases, 60-second connection lifetime |
+| Database work | Request deadline; PostgreSQL 1.5-second statement and 250 ms lock timeouts; SQLite progress interruption and 250 ms busy timeout |
+| Cleanup | 500 ms for the entire explicit rollback, including SQLite handle acquisition |
+
+Before creating a Wasmtime engine or compiling, admission summarizes each component
+definition and charges its full transitive cost at every instantiation. Outer
+aliases and component export aliases preserve that cost; repeated references are
+charged separately. The byte estimate includes each component's complete encoded
+body, including nested definitions, and is deliberately conservative. Each
+definition must fit these bounds, including unused definitions. Component-valued
+imports and component-valued instance-export aliases are rejected because their
+instantiation costs depend on supplied values. Ordinary host-function imports
+remain supported. This bounds the instantiation graph without expanding it in the
+admission checker; Store limits and request deadlines only apply after compilation.
+
+These bounds cover protocol buffers and declared work, not every allocator inside
+the compiler, database, or operating system. Apply a service memory/process limit
+and storage quotas appropriate to the trusted deployment. The VM has its own
+enforced resource envelope, described in the runnable guide.
 
 Wasmtime's ResourceLimiter does not account for all runtime or host allocations.
 Fuel and epoch interruption do not cancel a blocked host function. Host operations
@@ -293,8 +332,9 @@ admission; guest threads/shared memory are not needed for M1.
 [execution interruption](https://docs.rs/wasmtime/48.0.2/wasmtime/struct.Config.html#method.epoch_interruption))
 
 High-latency browser transfer and short database transaction deadlines are separate
-phases. A slow client cannot retain a live guest or write transaction. Disconnects
-before commit cancel work; disconnects during commit enter outcome recovery.
+phases. A slow client cannot retain a live guest or write transaction. An observed
+disconnect before commit cancels work. The HTTP engine may observe a disconnect
+after a commit, so every uncertain client outcome requires submission recovery.
 
 Logs contain bounded host-defined events. Application text, note contents,
 credentials, tokens, cookies, and raw request identifiers are not default log
@@ -302,9 +342,11 @@ fields. Guest logging is a separately budgeted capability, not ambient stdout.
 
 ## Build and deployment boundary
 
-M1 uses an **existing disposable Linux VM runner**, locally or remotely, with a
-fixed build contract. The concrete runner and image recipe remain open. A
-framework-managed cross-platform builder is deferred.
+The initial runner is QEMU with TCG and a freshly generated initramfs. The tested
+recipe has two virtual CPUs, 6 GiB RAM, a 2 GiB scratch tmpfs, no NIC or disks, no
+host shares, and a 600-second deadline. QEMU's seccomp sandbox is enabled; native
+build code runs as an unprivileged guest user. See [the runnable recipe](../running-applications.md).
+A framework-managed cross-platform builder remains deferred.
 
 Cargo build scripts and procedural macros execute native code during compilation.
 Targeting Wasm does not contain them.
@@ -341,30 +383,61 @@ by the trusted runtime for its exact engine configuration; deserializing untrust
 native artifacts can execute arbitrary code.
 ([Wasmtime deserialization contract](https://docs.rs/wasmtime/48.0.2/wasmtime/struct.Module.html#method.deserialize))
 
-## Implementation boundaries and open gates
+## Selected implementation and verification
 
-Proposed crate layout: retain `noxide` for guest-facing APIs, `noxide-macros` for
-guest ergonomics, and `noxide-cli` for commands; introduce internal `noxide-host`
-and `noxide-protocol` crates as needed. Provider and transport dependency types
-must not enter guest APIs. Tokio/Hyper and a custom Component Model WIT world are
-candidates, not selected dependencies. Do not implement a custom HTTP parser.
+The workspace separates `noxide` (guest SDK and packaged WIT), `noxide-protocol` (semantic types),
+`noxide-host` (trusted runtime), and `noxide-cli` (operator tools). Template macros
+remain future work. The guest API does not expose transport/provider dependencies.
 
-Before code depends on them, resolve:
+The tested configuration uses Rust 1.98.0, Wasmtime 48.0.2 with Cranelift and its
+component/async runtime, wit-bindgen 0.46.0, wit-component 0.254.0 for wrapping,
+Tokio 1.53.1, Hyper 1.11.1, Axum 0.8.9, and SQLx 0.8.6 with only PostgreSQL/SQLite
+backends. No WASI implementation is linked. Current Wasmtime advisories through
+the August 2026 fixes are patched in this release; SQLx's protocol truncation fix
+is included. Recheck advisories on dependency changes.
+([Wasmtime advisories](https://rustsec.org/packages/wasmtime.html),
+[SQLx fix](https://rustsec.org/advisories/RUSTSEC-2024-0363.html))
 
-- Compatible stable Rust, Wasmtime, binding-generator, HTTP, and database-driver
-  versions, supported features, and current advisories. The Wasmtime API links
-  here use 48.0.2 as research evidence. Dependency approval remains open.
-- The external VM runner/image and supported host setup.
-- Bounded component transport, IR version/vocabulary, and declaration grammar.
-- Host login/account provisioning, session/key/auth-epoch lifecycle, and tested
-  cookie/origin behavior for the supported onion/local browser deployment.
-- Listener and proxy trust, shutdown, privacy logging, numeric budgets, provider
-  error protocol, token codec/time/GC, and action-version rollout policy.
+Tokens use HMAC-SHA256, 256-bit random nonces, explicit token domains, authenticated
+expiry, and a host-key incarnation. Sessions last one hour; login/form challenges
+last 15 minutes. Canonical input is a sorted map of exact UTF-8 field values with
+form newlines normalized to LF. Duplicate fields and malformed percent/UTF-8
+encodings are rejected; Unicode normalization is not implicit. Receipts store
+only canonical input digests and Created/RouteRef outcomes. Collection is bounded
+and obeys a persisted clock high-water mark and expiry grace period.
 
-The [milestone plan](runtime-milestones.md) assigns these gates to the first stage
-that needs them. Reopening an agreed boundary requires an explicit design change;
-implementation inconvenience does not create an escape hatch.
+The encoded HTTP form budget accounts for CRLF and percent-encoding expansion;
+canonical input retains its separate 32 KiB limit. Request time is sampled after
+transaction acquisition and admission, so writer-lock waits cannot appear as
+clock rollback. Declared forms denied by policy are omitted from authorized read
+pages; undeclared forms remain invalid.
 
-Primary sources linked above were checked on 2026-09-19. The design does not claim
-that the scaffold implements these properties or that the proposed configuration
-has passed a security audit.
+Deployment identity includes the component bytes and approved manifest digest.
+Activation precedes request acceptance but follows listener preparation; failed
+preparation cannot retire a working deployment. A changed identity retires old
+tokens. Code rollback creates a fresh generation. Restoring lost database history
+also requires new keys supplied outside the restored state.
+
+Firefox's no-JavaScript flow is exercised against SQLite/local and
+PostgreSQL/test-onion origins. Referrer-Policy is `same-origin`: `no-referrer`
+makes navigation POST Origin opaque, which conflicts with strict Origin checks.
+Cross-origin referrers remain suppressed.
+([Fetch Origin processing](https://fetch.spec.whatwg.org/#append-a-request-origin-header),
+[same-origin policy](https://w3c.github.io/webappsec-referrer-policy/#referrer-policy-same-origin))
+
+The suites cover hostile output/imports, fresh memory/globals/tables, initialization,
+resource limits, bounded stored values and SQL, rollback, concurrent duplicate
+claims, role-revocation ordering, authentication epochs, known-aborted retries,
+lost commit acknowledgements, process crashes, expired-token collection, schema and
+deployment fencing, and browser privacy boundaries. Build scripts and procedural
+macros are tested inside fresh VMs against filesystem, network, host-socket, and
+cross-build canaries; a native build loop must hit the VM deadline.
+
+On the tested host, the locked notes VM build took 153.8 seconds with a measured
+peak QEMU RSS of 3.61 GiB. The hostile runtime concurrency fixture peaked at
+82.3 MiB process RSS and completed cleanup in about 59 ms. These are acceptance
+observations, not throughput guarantees. Test commands and operational limits are
+in [Running an application](../running-applications.md). The implementation has
+not undergone an external security audit or hardware power-loss certification.
+
+Primary sources above were checked on 2026-09-19.
