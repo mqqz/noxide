@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "resources": [{"id": 1, "name": "notes", "fields": [{"name": "body", "label": "Note", "max_bytes": 4096}]}],
+  "operations": [
+    {"id": 1, "resource": 1, "kind": "list", "policy": {"any": [["owner"]]}},
+    {"id": 2, "resource": 1, "kind": "read", "policy": {"any": [["owner"]]}},
+    {"id": 3, "resource": 1, "kind": "create", "policy": {"any": [["owner"]]}}
+  ],
+  "routes": [
+    {"id": 1, "path": "/", "record": false, "operations": [1], "forms": [1]},
+    {"id": 2, "path": "/notes", "record": true, "operations": [2], "forms": []}
+  ],
+  "actions": [{"id": 1, "version": 1, "name": "Save note", "operation": 3, "redirect": 2}]
+}

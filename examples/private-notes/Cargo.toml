@@ -1,0 +1,17 @@
+[package]
+name = "private-notes"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+noxide = { path = "../../crates/noxide" }
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+panic = "abort"
+strip = true
