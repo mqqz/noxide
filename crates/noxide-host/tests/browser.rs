@@ -47,7 +47,7 @@ async fn postgres_nojs_browser_flow() {
     let row=sqlx::query("SELECT (SELECT count(*) FROM nx_records) AS records,(SELECT count(*) FROM nx_receipts) AS receipts").fetch_one(&mut connection).await.unwrap();
     assert_eq!(
         (row.get::<i64, _>("records"), row.get::<i64, _>("receipts")),
-        (1, 1)
+        (0, 4)
     );
     connection.close().await.unwrap();
     sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))

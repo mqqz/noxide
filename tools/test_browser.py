@@ -155,6 +155,10 @@ def main():
         def text(selector, value):
             webdriver("/element/" + element(selector) + "/value", "POST", {"text": value})
 
+        def replace(selector, value):
+            webdriver("/element/" + element(selector) + "/clear", "POST", {})
+            text(selector, value)
+
         def click(selector):
             webdriver("/element/" + element(selector) + "/click", "POST", {})
 
@@ -188,9 +192,9 @@ def main():
         assert not session_cookie["secure"]  # Both tested origins use HTTP.
         saved = urllib.parse.urlencode({"_csrf": csrf, "_submission": submission, "body": note}).encode()
 
-        def raw_post(body):
+        def raw_post(body, action=1):
             connection = http.client.HTTPConnection("127.0.0.1", backend_port, timeout=5)
-            connection.request("POST", "/_noxide/action/1", body,
+            connection.request("POST", f"/_noxide/action/{action}", body,
                                {"Host": authority, "Origin": origin, "Content-Type": "application/x-www-form-urlencoded",
                                 "Cookie": "noxide_session=" + session_cookie["value"]})
             response = connection.getresponse()
@@ -228,12 +232,64 @@ def main():
         visit(urllib.parse.urlsplit(location).path)
         assert "Alice only" not in webdriver("/source")
         assert "This note is not available." in webdriver("/source")
+
+        click('nav form[action="/logout"] button')
+        login("alice", "Alice private test password")
+        session_cookie = next(c for c in webdriver("/cookie") if c["name"] == "noxide_session")
+        note_path = urllib.parse.urlsplit(location).path
+        visit(note_path)
+        edit = 'form[action="/_noxide/action/2"]'
+        delete = 'form[action="/_noxide/action/3"]'
+        original_edit = attribute(edit + ' [name="_submission"]', "value")
+        original_delete = attribute(delete + ' [name="_submission"]', "value")
+        csrf = attribute(edit + ' [name="_csrf"]', "value")
+        assert webdriver("/element/" + element(edit + ' [name="body"]') + "/property/value") == note
+        draft = '\n<script>draft()</script>\nAlice kept this draft'
+        replace(edit + ' [name="body"]', draft)
+        first_tab = webdriver("/window")
+        second_tab = webdriver("/window/new", "POST", {"type": "tab"})["handle"]
+        webdriver("/window", "POST", {"handle": second_tab})
+        visit(note_path)
+        current = "Saved from Alice's second tab"
+        replace(edit + ' [name="body"]', current)
+        click(edit + " button")
+        assert webdriver("/element/" + element("pre") + "/property/textContent") == current
+
+        webdriver("/window", "POST", {"handle": first_tab})
+        click(edit + " button")
+        source = webdriver("/source")
+        assert "This record changed" in source and current in source
+        assert "Your changes were not saved" in source
+        assert webdriver("/element/" + element(edit + ' [name="body"]') + "/property/value") == draft
+        assert attribute(edit + ' [name="_submission"]', "value") != original_edit
+        assert not webdriver("/elements", "POST", {"using": "css selector", "value": "script,img,iframe"})
+        (args.output / "conflict.png").write_bytes(base64.b64decode(webdriver("/screenshot")))
+        click(edit + " button")
+        assert webdriver("/element/" + element("pre") + "/property/textContent") == draft
+        (args.output / "edited-note.png").write_bytes(base64.b64decode(webdriver("/screenshot")))
+
+        stale_delete = urllib.parse.urlencode({"_csrf": csrf, "_submission": original_delete}).encode()
+        status, _, conflict = raw_post(stale_delete, action=3)
+        assert status == 409 and "This record changed" in conflict
+        assert "Delete current version" in conflict
+        delete_token = attribute(delete + ' [name="_submission"]', "value")
+        saved_delete = urllib.parse.urlencode({"_csrf": csrf, "_submission": delete_token}).encode()
+        before = sum(r["method"] == "POST" and r["path"] == "/_noxide/action/3" for r in requests)
+        click(delete + " button")
+        assert "No notes yet" in webdriver("/source")
+        after = sum(r["method"] == "POST" and r["path"] == "/_noxide/action/3" for r in requests)
+        assert after == before + 1, "deletion must need exactly one POST"
+        assert raw_post(saved_delete, action=3)[:2] == (303, "/")
+        assert raw_post(stale_delete, action=3)[0] == 404
+        visit(note_path)
+        assert "This note is not available." in webdriver("/source")
+        assert "Alice kept this draft" not in webdriver("/source")
         assert all(p.startswith(("/",)) for p in paths)
         assert not any("attacker" in p for p in paths)
         assert not any("attacker.invalid" in destination for destination in blocked), "browser attempted to load the injected external image"
         print(json.dumps({"browser": result["capabilities"]["browserVersion"], "origin": origin,
                           "javascript": False, "cookie_policy": "HttpOnly; SameSite=Strict; HTTP transport",
-                          "flow": "create, literal escaping, replay, field recovery, logout, cross-user denial passed"}))
+                          "flow": "create, escaping, replay, field recovery, cross-user denial, two-tab edit conflict, explicit resubmit, one-POST delete, deleted receipt recovery passed"}))
     except Exception:
         if session:
             try:
