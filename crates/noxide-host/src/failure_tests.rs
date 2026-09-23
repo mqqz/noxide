@@ -154,7 +154,7 @@ async fn stored_bounds(db: &Database) {
         .begin(std::time::Instant::now() + Duration::from_secs(2))
         .await
         .unwrap();
-    for id in 1..=4_i64 {
+    for id in [2_i64, 9, 10, 99, 100, 101] {
         tx.execute(
             "INSERT INTO nx_records(resource,id,owner,tenant,fields) VALUES(1,$1,'alice','',$2)",
             &[id.into(), serde_json::to_string(&fields).unwrap().into()],
@@ -185,12 +185,27 @@ async fn stored_bounds(db: &Database) {
     let bytes = effects.invoke(1, 0).await.unwrap();
     assert!(bytes.len() <= noxide_protocol::MAX_RESULT_BYTES);
     let records: Vec<Record> = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(records.iter().map(|r| r.id).collect::<Vec<_>>(), [4, 3, 2]);
+    assert_eq!(
+        records.iter().map(|r| r.id).collect::<Vec<_>>(),
+        [101, 100, 99],
+        "record IDs must sort numerically across digit widths"
+    );
     assert!(records.iter().all(|r| r.fields == fields));
-    effects.cursor = effects.more;
+    assert_eq!(effects.more, Some(99));
+    effects.cursor = effects.more.take();
     let records: Vec<Record> =
         serde_json::from_slice(&effects.invoke(1, 0).await.unwrap()).unwrap();
-    assert_eq!(records.iter().map(|r| r.id).collect::<Vec<_>>(), [1]);
+    assert_eq!(
+        records.iter().map(|r| r.id).collect::<Vec<_>>(),
+        [10, 9, 2],
+        "cursor continuation must neither skip nor repeat records"
+    );
+    assert_eq!(effects.more, Some(2));
+    effects.cursor = effects.more.take();
+    let records: Vec<Record> =
+        serde_json::from_slice(&effects.invoke(1, 0).await.unwrap()).unwrap();
+    assert!(records.is_empty());
+    assert!(effects.more.is_none());
     effects.cursor = None;
     effects.request.kind = RequestKind::Action(1);
     assert!(
@@ -198,7 +213,7 @@ async fn stored_bounds(db: &Database) {
         "an action cannot borrow unrelated read authority"
     );
     effects.request.kind = RequestKind::Route(2);
-    effects.request.target = Some(4);
+    effects.request.target = Some(101);
     assert!(
         effects.invoke(2, 3).await.is_err(),
         "a route grant cannot change target"
@@ -212,7 +227,10 @@ async fn stored_bounds(db: &Database) {
     ] {
         effects
             .tx
-            .execute("UPDATE nx_records SET fields=$1 WHERE id=4", &[bad.into()])
+            .execute(
+                "UPDATE nx_records SET fields=$1 WHERE id=101",
+                &[bad.into()],
+            )
             .await
             .unwrap();
         assert!(
@@ -220,8 +238,8 @@ async fn stored_bounds(db: &Database) {
             "stored values must be validated before disclosure"
         );
         effects.request.kind = RequestKind::Route(2);
-        effects.request.target = Some(4);
-        assert!(effects.invoke(2, 4).await.is_err());
+        effects.request.target = Some(101);
+        assert!(effects.invoke(2, 101).await.is_err());
         effects.request.kind = RequestKind::Route(1);
         effects.request.target = None;
     }

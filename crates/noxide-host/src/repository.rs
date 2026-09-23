@@ -180,7 +180,7 @@ impl Effects {
                 }
                 params.push(Param::Number(self.cursor.unwrap_or(i64::MAX as u64) as i64));
                 let sql = format!(
-                    "SELECT CAST(id AS TEXT),owner,tenant,{} FROM nx_records WHERE resource=$1 AND ({}) AND id<${} ORDER BY id DESC LIMIT 3",
+                    "SELECT CAST(id AS TEXT),owner,tenant,{} FROM nx_records WHERE resource=$1 AND ({}) AND id<${} ORDER BY nx_records.id DESC LIMIT 3",
                     self.tx.bounded_text("fields", 20_000),
                     clauses.join(" OR "),
                     params.len()
