@@ -36,18 +36,31 @@ def command(*args):
 class Image:
     """An allowlisted newc archive; no link following in application inputs."""
 
+    ALIASES = {"bin": "usr/bin", "sbin": "usr/bin", "usr/sbin": "usr/bin",
+               "lib": "usr/lib", "lib64": "usr/lib64"}
+
     def __init__(self):
         self.files = {}
 
+    def _name(self, name):
+        path = Path(str(name).lstrip("/"))
+        name = str(path)
+        if name == "." or ".." in path.parts or name in self.ALIASES:
+            raise ValueError(f"unsafe image entry: {name}")
+        for alias, target in self.ALIASES.items():
+            if name.startswith(alias + "/"):
+                return target + name[len(alias):]
+        return name
+
     def add(self, name, data, mode=0o644):
-        name = str(name).lstrip("/")
-        if not name or ".." in Path(name).parts or name in self.files:
+        name = self._name(name)
+        if name in self.files:
             raise ValueError(f"duplicate or unsafe image entry: {name}")
         self.files[name] = (data, mode)
 
     def trusted(self, source, destination=None):
         source = Path(source)
-        name = os.path.normpath(str(destination or source)).lstrip("/")
+        name = self._name(os.path.normpath(str(destination or source)))
         if name not in self.files:
             self.add(name, source.resolve(), source.stat().st_mode & 0o777)
 
@@ -64,15 +77,15 @@ class Image:
             self.trusted(library, destination)
 
     def write(self, path):
-        directories = {"dev", "proc", "sys", "tmp", "root"}
+        directories = {"dev", "proc", "sys", "tmp", "root", "usr", *self.ALIASES.values()}
         for name in self.files:
             directories.update(str(p) for p in Path(name).parents if str(p) != ".")
         entries = [(d, b"", stat.S_IFDIR | 0o755) for d in sorted(directories)]
         entries += [(n, d, stat.S_IFREG | m) for n, (d, m) in sorted(self.files.items())]
-        # Root aliases are trusted, fixed image metadata, never archive inputs.
-        entries += [("bin", b"usr/bin", stat.S_IFLNK | 0o777),
-                    ("sbin", b"usr/bin", stat.S_IFLNK | 0o777),
-                    ("usr/sbin", b"bin", stat.S_IFLNK | 0o777)]
+        # Linker scripts and ELF interpreters can use either /lib or /usr/lib.
+        # These aliases are fixed image metadata, never archive inputs.
+        entries += [(alias, os.path.relpath(target, Path(alias).parent).encode(),
+                     stat.S_IFLNK | 0o777) for alias, target in self.ALIASES.items()]
         with path.open("wb") as file, gzip.GzipFile(filename="",fileobj=file,mode="wb",compresslevel=1,mtime=0) as out:
             for index, (name, data, mode) in enumerate(entries + [("TRAILER!!!", b"", 0)]):
                 size = data.stat().st_size if isinstance(data, Path) else len(data)
@@ -217,12 +230,13 @@ def toolchain(image, path):
     gcc = Path(command("gcc", "-print-prog-name=collect2")).parent
     for name in ("collect2", "cc1", "lto-wrapper", "lto1"):
         image.executable(gcc / name, gcc / name)
-    for path in gcc.glob("*.o"):
-        image.trusted(path)
-    for path in gcc.glob("*.a"):
-        image.trusted(path)
-    for path in gcc.glob("*.so"):
-        image.trusted(path)
+    # Ubuntu puts helpers in libexec and startup objects/libraries in lib.
+    # Ask GCC for its runtime directory instead of assuming they are colocated.
+    runtime = Path(command("gcc", "-print-libgcc-file-name")).parent
+    for directory in {gcc, runtime}:
+        for pattern in ("*.o", "*.a", "*.so"):
+            for path in directory.glob(pattern):
+                image.trusted(path)
     for name in ("crt1.o", "crti.o", "crtn.o", "Scrt1.o", "libc_nonshared.a"):
         path = command("gcc", f"-print-file-name={name}")
         image.trusted(path)
