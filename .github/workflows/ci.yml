@@ -119,6 +119,11 @@ jobs:
         run: cargo fetch --locked
       - name: Build trusted host CLI
         run: cargo build -p noxide-cli --locked --offline
+      - name: Test textarea newline preservation in Firefox
+        run: |
+          python3 tools/test_render_browser.py \
+            --geckodriver "$NOXIDE_GECKODRIVER" \
+            --output "$RUNNER_TEMP/noxide-ci/render"
       - name: Build application from SDK archives inside a VM
         run: |
           python3 tools/test_sdk_package.py \

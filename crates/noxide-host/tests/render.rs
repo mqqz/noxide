@@ -9,6 +9,7 @@ mod record_actions;
 #[test]
 fn textarea_preserves_browser_normalized_newlines() {
     let manifest = record_actions::declarations();
+    let mut fixtures = Vec::new();
     for (input, expected) in [
         ("", ""),
         ("Alice", "Alice"),
@@ -44,13 +45,18 @@ fn textarea_preserves_browser_normalized_newlines() {
         let content = content.split_once('>').unwrap().1;
         let content = content.split_once("</textarea>").unwrap().0;
         // HTML normalizes CR/CRLF before dropping one initial textarea LF.
-        // These fixtures contain only plain text and line endings.
+        // These fixtures contain only plain text and line endings. The browser
+        // suite also checks their actual DOM values with JavaScript disabled.
         let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
         assert_eq!(
             normalized.strip_prefix('\n').unwrap_or(&normalized),
             expected,
             "input {input:?}"
         );
+        fixtures.push(serde_json::json!({"input": input, "expected": expected, "html": html}));
+    }
+    if let Some(path) = std::env::var_os("NOXIDE_TEST_FORM_FIXTURES") {
+        std::fs::write(path, serde_json::to_vec(&fixtures).unwrap()).unwrap();
     }
 }
 
