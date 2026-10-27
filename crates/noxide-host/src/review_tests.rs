@@ -242,6 +242,8 @@ async fn browser_encoded_maximum_fields_save_and_recover() {
     let temp = tempfile::tempdir().unwrap();
     let mut m = fixture::manifest();
     m.resources[0].fields.push(TextField {
+        kind: noxide_protocol::FieldKind::Text,
+        optional: false,
         name: "extra".into(),
         label: "Extra".into(),
         max_bytes: 4096,
@@ -302,7 +304,7 @@ async fn browser_encoded_maximum_fields_save_and_recover() {
     let fresh = fixture::hidden(&page, "_submission");
     let invalid = router
         .clone()
-        .oneshot(request(encoded(" ", &fresh)))
+        .oneshot(request(encoded("xx", &fresh)))
         .await
         .unwrap();
     assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -314,7 +316,7 @@ async fn browser_encoded_maximum_fields_save_and_recover() {
     )
     .unwrap();
     assert!(html.contains("aria-invalid=\"true\"") && html.contains(&fresh));
-    assert!(html.contains(&format!(">{} </textarea>", "\n".repeat(4096))));
+    assert!(html.contains(&format!(">{}xx</textarea>", "\n".repeat(4096))));
     let oversized = router.oneshot(request("x".repeat(65_537))).await.unwrap();
     assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }

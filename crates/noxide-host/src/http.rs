@@ -264,16 +264,8 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
             Ok(s) => s,
             Err(_) => return redirect("/login"),
         };
-        let route = gateway.app.manifest.routes.iter().find_map(|r| {
-            if r.resource.is_none() && r.path == path {
-                Some((r.id, None))
-            } else if r.resource.is_some() {
-                path.strip_prefix(&format!("{}/", r.path.trim_end_matches('/')))
-                    .and_then(|id| id.parse::<u64>().ok())
-                    .map(|id| (r.id, Some(id)))
-            } else {
-                None
-            }
+        let route = gateway.app.manifest.routes.iter().find_map(|route| {
+            crate::render::match_path(route, &path).map(|target| (route.id, target))
         });
         return match route {
             Some((route, target)) => {

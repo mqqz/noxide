@@ -144,6 +144,8 @@ async fn stored_bounds(db: &Database) {
     use noxide_protocol::{Record, RequestKind, RequestView, TextField, VERSION};
     let mut m = fixture::manifest();
     m.resources[0].fields.push(TextField {
+        kind: noxide_protocol::FieldKind::Text,
+        optional: false,
         name: "extra".into(),
         label: "Extra".into(),
         max_bytes: 4096,
@@ -175,6 +177,7 @@ async fn stored_bounds(db: &Database) {
             roles: vec![],
         },
         request: RequestView {
+            available_forms: Vec::new(),
             version: VERSION,
             kind: RequestKind::Route(1),
             target: None,
