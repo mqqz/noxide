@@ -96,7 +96,7 @@ async fn conformance(db: Database, mut inspect: InspectDb) {
     let alice = login(&app, "alice").await;
     let bob = login(&app, "bob").await;
     let page = String::from_utf8(app.view(&alice, 2, Some(42)).await.unwrap().body).unwrap();
-    assert!(page.contains("required>original</textarea>"));
+    assert!(page.contains("required>\noriginal</textarea>"));
     assert!(!page.contains("private tag"));
     let bob_page = String::from_utf8(app.view(&bob, 2, Some(42)).await.unwrap().body).unwrap();
     assert!(!bob_page.contains("_submission"));
