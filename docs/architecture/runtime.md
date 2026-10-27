@@ -455,9 +455,13 @@ is included. Recheck advisories on dependency changes.
 ([Wasmtime advisories](https://rustsec.org/packages/wasmtime.html),
 [SQLx fix](https://rustsec.org/advisories/RUSTSEC-2024-0363.html))
 
-Tokens use HMAC-SHA256, 256-bit random nonces, explicit token domains, authenticated
-expiry, and a host-key incarnation. Sessions last one hour; login/form challenges
-last 15 minutes. Canonical input is a sorted map of exact UTF-8 field values with
+Tokens use XChaCha20-Poly1305 authenticated encryption, with a fresh 192-bit
+encryption nonce and a domain-separated key derived using HMAC-SHA256. The
+encrypted payload binds a 256-bit random submission/session nonce, token kind,
+subject, issue/expiry time, and host-key incarnation. Browser-visible tokens
+contain no readable timestamps or authority metadata. CSRF values remain
+domain-separated HMAC-SHA256 authenticators. Sessions last one hour; login/form
+challenges last 15 minutes. Canonical input is a sorted map of exact UTF-8 field values with
 form newlines normalized to LF. Duplicate fields and malformed percent/UTF-8
 encodings are rejected; Unicode normalization is not implicit. Receipts store
 only canonical input digests and Created/Updated/Deleted outcomes with route

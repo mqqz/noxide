@@ -134,7 +134,9 @@ default. Cookie names default to `session` and `login`; host endpoints use
 `/login`, `/logout`, and `/actions/{id}`. The former `noxide_*` cookies and
 `/_noxide/*` endpoints have no compatibility aliases. Existing users must sign
 in again after this upgrade and reopen outstanding forms; old cookies expire on
-their original schedule.
+their original schedule. Tokens now use authenticated encryption so browser
+values hide their issue/expiry timestamps and authority metadata. Readable tokens
+from older versions are rejected. Each service should have its own host key file.
 
 The trusted operator can add a `presentation` object to the runtime configuration:
 
