@@ -87,12 +87,12 @@ async fn conformance(db: Database, mut inspect: InspectDb) {
             .await
             .unwrap();
     }
+    let keys = serde_json::to_vec(&HostKeys::generate().unwrap()).unwrap();
+    let app = application(&db, &keys, "ok").await;
     inspect
         .execute("INSERT INTO nx_roles(principal,name,tenant) VALUES('alice','writer','')")
         .await;
     inspect.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES(1,42,'alice','one','{\"body\":\"original\",\"tag\":\"private tag\"}','first-incarnation',1),(1,43,'alice','one','{\"body\":\"other\",\"tag\":\"other tag\"}','other-incarnation',1)").await;
-    let keys = serde_json::to_vec(&HostKeys::generate().unwrap()).unwrap();
-    let app = application(&db, &keys, "ok").await;
     let alice = login(&app, "alice").await;
     let bob = login(&app, "bob").await;
     let page = String::from_utf8(app.view(&alice, 2, Some(42)).await.unwrap().body).unwrap();
