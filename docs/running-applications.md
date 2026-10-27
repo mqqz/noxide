@@ -55,8 +55,8 @@ target/debug/noxide build \
 ```
 
 The build command performs Cargo resolution and application compilation inside QEMU.
-It uses two virtual CPUs, 6 GiB RAM, a 2 GiB scratch tmpfs, a 600-second outer
-deadline, and no NIC, disk, host share, or monitor socket. Native build code runs
+It uses two virtual CPUs, 6 GiB RAM, a 2 GiB scratch tmpfs, a 900-second guest
+build deadline, a 1,020-second outer deadline, and no NIC, disk, host share, or monitor socket. Native build code runs
 without capabilities as UID 65534 with `no_new_privs`. Every build gets fresh
 scratch. Inputs are root-owned and read-only to the build user. The source reader
 rejects links, special files, hidden inputs, oversized trees, and directory escape.

@@ -28,6 +28,9 @@ MAX_SOURCE = 16 * 1024 * 1024
 MAX_OUTPUT = 2 * 1024 * 1024
 MAX_CONTRACT = 32_768
 MAX_LOG = 16 * 1024 * 1024
+# Two compilation targets plus metadata collection run within one bounded VM.
+GUEST_BUILD_SECONDS = 900
+DEFAULT_VM_SECONDS = GUEST_BUILD_SECONDS + 120
 
 
 def command(*args):
@@ -283,7 +286,7 @@ ulimit -c 0
 ulimit -n 128
 ulimit -u 128
 ulimit -f 524288
-timeout -k 2 480 setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs env -i PATH=/toolchain/bin:/usr/bin LD_LIBRARY_PATH=/usr/lib:/usr/lib64 HOME=/tmp CARGO_HOME=/tmp/cargo CARGO_TARGET_DIR=/tmp/target RUST_BACKTRACE=0 /bin/sh /build-command
+timeout -k 2 @BUILD_SECONDS@ setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs env -i PATH=/toolchain/bin:/usr/bin LD_LIBRARY_PATH=/usr/lib:/usr/lib64 HOME=/tmp CARGO_HOME=/tmp/cargo CARGO_TARGET_DIR=/tmp/target RUST_BACKTRACE=0 /bin/sh /build-command
 status=$?
 echo "NOXIDE_BUILD_STATUS=$status"
 if [ "$status" = 0 ]; then
@@ -295,7 +298,7 @@ if [ "$status" = 0 ]; then
     echo NOXIDE_LOCK_END
 fi
 poweroff -f
-'''
+'''.replace('@BUILD_SECONDS@', str(GUEST_BUILD_SECONDS))
 
 BUILD = r'''#!/bin/sh
 set -eu
@@ -339,6 +342,14 @@ cargo run --quiet --locked --offline --release --bin noxide-contract -j 2 > /tmp
                             "    echo NOXIDE_CONTRACT_END\n"
                             "    echo NOXIDE_LOCK_BEGIN\n")
     return init, build
+
+
+def check_build_status(output):
+    statuses = re.findall(rb"(?m)^NOXIDE_BUILD_STATUS=(\d+)$", output)
+    if statuses == [b"124"]:
+        raise ValueError("VM build deadline exceeded; inspect sanitized VM log")
+    if statuses != [b"0"]:
+        raise ValueError("VM build failed; inspect sanitized VM log")
 
 
 def limits():
@@ -416,7 +427,7 @@ def main():
     parser.add_argument("--check", action="store_true", help="type-check instead of emitting Wasm")
     parser.add_argument("--metadata", action="store_true", help="extract generated contract inside the VM")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--seconds", type=int, default=600)
+    parser.add_argument("--seconds", type=int, default=DEFAULT_VM_SECONDS)
     options = parser.parse_args()
     init, build = recipe(options.name, options.check, options.metadata)
     options.output.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -442,9 +453,7 @@ def main():
         image.write(initrd)
         print("Building in a fresh QEMU VM (no NIC, disks, host shares, or sockets)...", flush=True)
         output = run_vm(options.kernel, initrd, options.output / "build.log", options.seconds)
-    statuses = re.findall(rb"(?m)^NOXIDE_BUILD_STATUS=(\d+)$", output)
-    if statuses != [b"0"]:
-        raise ValueError("VM build failed; inspect sanitized VM log")
+    check_build_status(output)
     outputs = [("Cargo.lock", artifact(output, "LOCK", 131072))]
     if not options.check:
         wasm = artifact(output, "WASM", MAX_OUTPUT)

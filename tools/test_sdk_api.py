@@ -11,8 +11,9 @@ import re
 import shlex
 import tempfile
 
-from build_vm import (ROOT, MAX_OUTPUT, MAX_CONTRACT, Image, recipe, toolchain,
-                      catalog, source_files, run_vm, artifact)
+from build_vm import (ROOT, DEFAULT_VM_SECONDS, MAX_OUTPUT, MAX_CONTRACT, Image,
+                      recipe, toolchain, catalog, source_files, run_vm, artifact,
+                      check_build_status)
 
 
 def replace_once(source, old, new):
@@ -168,9 +169,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="noxide-sdk-api-") as folder:
         initrd = Path(folder) / "input.cpio.gz"
         image.write(initrd)
-        output = run_vm(args.kernel, initrd, args.output / "build.log", 600)
-    if re.findall(rb"(?m)^NOXIDE_BUILD_STATUS=(\d+)$", output) != [b"0"]:
-        raise ValueError("SDK fixture VM failed; inspect sanitized build.log")
+        output = run_vm(args.kernel, initrd, args.output / "build.log", DEFAULT_VM_SECONDS)
+    check_build_status(output)
     compiled = re.findall(rb"(?m)^NOXIDE_API_PASS_OK=([a-z-]+)$", output)
     if compiled != [name.encode() for name, _ in passing]:
         raise ValueError("missing or ambiguous SDK compile-pass results")
