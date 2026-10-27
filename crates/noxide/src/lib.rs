@@ -99,3 +99,21 @@ macro_rules! export {
         };
     };
 }
+
+mod typed;
+pub use noxide_macros::{Choice, Resource, action, application, form, html, page, query};
+pub use noxide_protocol::{ChoiceVariant, Control, FieldKind, FormInstruction};
+pub use typed::*;
+#[doc(hidden)]
+pub mod __private {
+    pub use noxide_protocol::*;
+}
+
+/// Common application declarations, capabilities, and rendering types.
+pub mod prelude {
+    pub use crate::{
+        ActionError, ActionResult, Choice, Form, FormFields, FormLayout, Fragment, Id, NotFound,
+        Page, PageResult, Query, Resource, Submission, action, application, form, html, page,
+        query,
+    };
+}
