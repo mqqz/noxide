@@ -3,6 +3,7 @@ use noxide_protocol::{RequestKind, RequestView, VERSION};
 
 fn request() -> RequestView {
     RequestView {
+        available_forms: Vec::new(),
         version: VERSION,
         kind: RequestKind::Route(1),
         target: None,

@@ -6,6 +6,20 @@ use noxide::{
 struct Notes;
 impl Handler for Notes {
     fn handle(request: RequestView, context: &mut Context) -> ResponseIntent {
+        if matches!(&request.kind, RequestKind::Action(1 | 2))
+            && request
+                .input
+                .get("body")
+                .is_some_and(|body| body.trim().is_empty())
+        {
+            return ResponseIntent::Rejected {
+                field_errors: std::collections::BTreeMap::from([(
+                    "body".into(),
+                    "Enter a note.".into(),
+                )]),
+                message: "Review the highlighted fields.".into(),
+            };
+        }
         match request.kind {
             RequestKind::Action(1) => {
                 let record = context.create(3);

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub const MAX_IR_BYTES: usize = 65_536;
 pub const MAX_NODES: usize = 1_024;
 pub const MAX_DEPTH: usize = 32;
@@ -16,6 +16,11 @@ pub const MAX_MANIFEST_BYTES: usize = 32_768;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Container {
+    Main,
+    Nav,
+    Header,
+    Footer,
+    Div,
     Article,
     Section,
     Heading1,
@@ -43,6 +48,8 @@ pub enum Instruction {
     End,
     Text(String),
     Link { destination: RouteRef, text: String },
+    BeginLink { destination: RouteRef },
+    EndLink,
     Form { action: u32 },
 }
 
@@ -124,9 +131,56 @@ pub struct Policy {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TextField {
+    #[serde(default)]
+    pub kind: FieldKind,
+    #[serde(default)]
+    pub optional: bool,
     pub name: String,
     pub label: String,
     pub max_bytes: u32,
+}
+
+/// Portable scalar schemas. Values cross the boundary in canonical text form.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum FieldKind {
+    #[default]
+    Text,
+    Boolean,
+    Integer {
+        min: Option<i64>,
+        max: Option<i64>,
+    },
+    Choice {
+        variants: Vec<ChoiceVariant>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChoiceVariant {
+    pub key: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Control {
+    Auto,
+    TextInput,
+    Textarea { rows: u8 },
+    Checkbox,
+    Select,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum FormInstruction {
+    Begin(Container),
+    End,
+    Text(String),
+    Field { name: String, control: Control },
+    Submit { label: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -170,6 +224,8 @@ pub struct Route {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Action {
+    #[serde(default)]
+    pub layout: Vec<FormInstruction>,
     pub id: u32,
     pub version: u32,
     pub name: String,
@@ -224,4 +280,50 @@ pub struct RequestView {
     pub input: Fields,
     /// Original target values permitted by the action's explicit read projection.
     pub inspection: Option<Fields>,
+    #[serde(default)]
+    pub available_forms: Vec<u32>,
+}
+
+impl TextField {
+    /// Host-defined canonical scalar encoding; optional absence is the empty string.
+    pub fn canonical(&self, input: &str) -> Result<String, String> {
+        if self.optional && input.is_empty() {
+            return Ok(String::new());
+        }
+        let value = match &self.kind {
+            FieldKind::Text => {
+                let value = input.replace("\r\n", "\n").replace('\r', "\n");
+                if value.is_empty()
+                    || value
+                        .chars()
+                        .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+                {
+                    return Err("Enter text.".into());
+                }
+                value
+            }
+            FieldKind::Boolean => match input {
+                "true" | "on" => "true".into(),
+                "false" => "false".into(),
+                _ => return Err("Choose true or false.".into()),
+            },
+            FieldKind::Integer { min, max } => {
+                let value: i64 = input.parse().map_err(|_| "Enter a whole number.")?;
+                if min.is_some_and(|min| value < min) || max.is_some_and(|max| value > max) {
+                    return Err("Number is outside the permitted range.".into());
+                }
+                value.to_string()
+            }
+            FieldKind::Choice { variants } => {
+                if !variants.iter().any(|variant| variant.key == input) {
+                    return Err("Choose a listed value.".into());
+                }
+                input.into()
+            }
+        };
+        if value.len() > self.max_bytes as usize {
+            return Err(format!("Use at most {} UTF-8 bytes.", self.max_bytes));
+        }
+        Ok(value)
+    }
 }

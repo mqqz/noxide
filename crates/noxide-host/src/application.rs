@@ -545,6 +545,10 @@ impl Application {
                 .await
                 .map_err(|_| RequestError::Rejected)?;
             let request = RequestView {
+                available_forms: forms
+                    .iter()
+                    .filter_map(|(id, form)| form.as_ref().map(|_| *id))
+                    .collect(),
                 version: VERSION,
                 kind: RequestKind::Route(route),
                 target,
@@ -617,6 +621,8 @@ impl Application {
         let _permit = self.permits.try_acquire().map_err(|_| RequestError::Busy)?;
         let a =
             manifest::action(&self.manifest, action).map_err(|_| RequestError::InvalidRequest)?;
+        let input = manifest::canonical_input(&self.manifest, a, &input)
+            .map_err(|_| RequestError::InvalidRequest)?;
         manifest::validate_input(&self.manifest, a, &input)
             .map_err(|_| RequestError::InvalidRequest)?;
         let input_hash = URL_SAFE_NO_PAD.encode(Sha256::digest(
@@ -701,8 +707,10 @@ impl Application {
             let rows = tx.fetch::<4>(&sql, &[token.nonce.into()]).await?;
             if let Some([subject, contract, digest, outcome]) = rows.first() {
                 ensure!(*subject == session.nonce && *contract == self.contract, "receipt scope differs");
-                let expected = URL_SAFE_NO_PAD.encode(Sha256::digest(serde_json::to_vec(&(VERSION, a.version, input))?));
-                let response = if digest == &expected { self.receipt(a, target.as_ref(), outcome)? } else {
+                let canonical = manifest::canonical_input(&self.manifest, a, input).ok();
+                let expected = canonical.as_ref().map(|input| serde_json::to_vec(&(VERSION, a.version, input))).transpose()?.map(|bytes| URL_SAFE_NO_PAD.encode(Sha256::digest(bytes)));
+
+                let response = if expected.as_ref() == Some(digest) { self.receipt(a, target.as_ref(), outcome)? } else {
                     let mut response = render::render(&ResponseIntent::Page(Document::new("Form already used", vec![
                         Instruction::Text("This form already committed different input. Return home to start a new form.".into()),
                         Instruction::Link { destination: RouteRef { route: self.manifest.routes.iter().find(|r| r.path == "/").expect("index route").id, target: None }, text: "Return home".into() },
@@ -809,6 +817,7 @@ impl Application {
                 .collect()
         });
         let request = RequestView {
+            available_forms: Vec::new(),
             version: VERSION,
             kind: RequestKind::Action(action),
             target: target.as_ref().map(|t| t.id),

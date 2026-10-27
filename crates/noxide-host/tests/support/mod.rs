@@ -10,6 +10,8 @@ pub fn manifest() -> Manifest {
             id: 1,
             name: "notes".into(),
             fields: vec![TextField {
+                kind: FieldKind::Text,
+                optional: false,
                 name: "body".into(),
                 label: "Note".into(),
                 max_bytes: 4096,
@@ -52,6 +54,7 @@ pub fn manifest() -> Manifest {
             },
         ],
         actions: vec![Action {
+            layout: Vec::new(),
             id: 1,
             version: 1,
             name: "Save note".into(),
