@@ -293,10 +293,9 @@ fn form(
                 action.id, field.name
             ))?;
         }
-        out.push(">")?;
-        if value.starts_with('\n') {
-            out.push("\n")?;
-        }
+        // HTML normalizes CR/CRLF and consumes one initial textarea LF.
+        // Supply that LF so prefilled values keep every leading newline.
+        out.push(">\n")?;
         out.text(value)?;
         out.push("</textarea></label>")?;
         if invalid || error.is_some() {

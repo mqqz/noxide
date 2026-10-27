@@ -1,5 +1,58 @@
-use noxide_host::render::{RenderContext, render};
-use noxide_protocol::{Container, Document, Instruction, ResponseIntent};
+use noxide_host::render::{FormCredentials, RenderContext, render};
+use noxide_protocol::{Container, Document, Fields, Instruction, ResponseIntent};
+use std::collections::BTreeMap;
+
+#[allow(dead_code)]
+#[path = "support/record_actions.rs"]
+mod record_actions;
+
+#[test]
+fn textarea_preserves_browser_normalized_newlines() {
+    let manifest = record_actions::declarations();
+    for (input, expected) in [
+        ("", ""),
+        ("Alice", "Alice"),
+        ("\rAlice", "\nAlice"),
+        ("\r\nAlice", "\nAlice"),
+        ("\nAlice", "\nAlice"),
+        ("\r\r\nAlice", "\n\nAlice"),
+        ("\n\nAlice", "\n\nAlice"),
+        ("A\rB\r\nC\nD", "A\nB\nC\nD"),
+    ] {
+        let context = RenderContext {
+            manifest: Some(&manifest),
+            forms: BTreeMap::from([(
+                2,
+                Some(FormCredentials {
+                    csrf: "fixture".into(),
+                    submission: "fixture".into(),
+                    values: Fields::from([("body".into(), input.into())]),
+                }),
+            )]),
+            ..RenderContext::empty()
+        };
+        let page = render(
+            &ResponseIntent::Page(Document::new(
+                "Edit note",
+                vec![Instruction::Form { action: 2 }],
+            )),
+            &context,
+        )
+        .unwrap();
+        let html = String::from_utf8(page.body).unwrap();
+        let content = html.split_once("<textarea").unwrap().1;
+        let content = content.split_once('>').unwrap().1;
+        let content = content.split_once("</textarea>").unwrap().0;
+        // HTML normalizes CR/CRLF before dropping one initial textarea LF.
+        // These fixtures contain only plain text and line endings.
+        let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+        assert_eq!(
+            normalized.strip_prefix('\n').unwrap_or(&normalized),
+            expected,
+            "input {input:?}"
+        );
+    }
+}
 
 #[test]
 fn text_is_literal_and_headers_are_not_part_of_the_protocol() {
