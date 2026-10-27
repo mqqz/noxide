@@ -26,6 +26,7 @@ import tomllib
 ROOT = Path(__file__).resolve().parent.parent
 MAX_SOURCE = 16 * 1024 * 1024
 MAX_OUTPUT = 2 * 1024 * 1024
+MAX_CONTRACT = 32_768
 MAX_LOG = 16 * 1024 * 1024
 
 
@@ -155,8 +156,16 @@ def source_files(image, root, prefix):
             if len(data) != before.st_size:
                 raise ValueError("source changed during snapshot")
             image.add(f"{prefix}/{child}", data)
-    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    # Resolve path components through directory descriptors. Calling resolve()
+    # first would erase a linked source root before O_NOFOLLOW can reject it.
+    components = Path(os.path.abspath(root)).parts
+    descriptor = os.open(components[0], os.O_RDONLY | os.O_DIRECTORY)
     try:
+        for component in components[1:]:
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
         walk(descriptor, "", 0)
     finally:
         os.close(descriptor)
@@ -297,6 +306,41 @@ cargo build -vv --locked --offline --release --target wasm32-unknown-unknown -j 
 '''
 
 
+def recipe(name="private_notes", check=False, metadata=False):
+    """Select trusted commands; never interpolate application-provided shell code."""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name):
+        raise ValueError("artifact name must be a Rust crate identifier")
+    init = INIT.replace("/release/private_notes.wasm", f"/release/{name}.wasm")
+    build = BUILD
+    if check:
+        build = build.replace("cargo build -vv", "cargo check -vv")
+        init = init.replace(
+            "    echo NOXIDE_WASM_BEGIN\n"
+            f"    base64 /tmp/target/wasm32-unknown-unknown/release/{name}.wasm\n"
+            "    echo NOXIDE_WASM_END\n", "")
+    if metadata:
+        # The application and its generated collector execute only inside the VM.
+        # A separate bin avoids requiring a direct serde_json application dependency:
+        # application! exposes noxide_manifest() as a JSON String.
+        build += f'''cat >>Cargo.toml <<'COLLECTOR_TARGET'
+
+[[bin]]
+name = "noxide-contract"
+path = "noxide-contract.rs"
+COLLECTOR_TARGET
+cat >noxide-contract.rs <<'COLLECTOR_SOURCE'
+fn main() {{ print!("{{}}", {name}::noxide_manifest()); }}
+COLLECTOR_SOURCE
+cargo run --quiet --locked --offline --release --bin noxide-contract -j 2 > /tmp/work/noxide-contract.json
+'''
+        init = init.replace("    echo NOXIDE_LOCK_BEGIN\n",
+                            "    echo NOXIDE_CONTRACT_BEGIN\n"
+                            "    base64 /tmp/work/noxide-contract.json\n"
+                            "    echo NOXIDE_CONTRACT_END\n"
+                            "    echo NOXIDE_LOCK_BEGIN\n")
+    return init, build
+
+
 def limits():
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
@@ -366,10 +410,15 @@ def main():
     parser.add_argument("--kernel", type=Path, required=True)
     parser.add_argument("--toolchain", type=Path, required=True)
     parser.add_argument("--cargo-home", type=Path, default=Path.home() / ".cargo")
-    parser.add_argument("--source", type=Path, default=ROOT / "examples/private-notes")
+    parser.add_argument("--source", "--app", dest="source", type=Path,
+                        default=ROOT / "examples/private-notes")
+    parser.add_argument("--name", default="private_notes", help="Rust library artifact name")
+    parser.add_argument("--check", action="store_true", help="type-check instead of emitting Wasm")
+    parser.add_argument("--metadata", action="store_true", help="extract generated contract inside the VM")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seconds", type=int, default=600)
     options = parser.parse_args()
+    init, build = recipe(options.name, options.check, options.metadata)
     options.output.mkdir(mode=0o700, parents=True, exist_ok=False)
     image = Image()
     toolchain(image, options.toolchain.resolve())
@@ -384,22 +433,35 @@ def main():
     workspace = (ROOT / "Cargo.toml").read_text().replace('    "crates/noxide-cli",\n', '').replace('    "crates/noxide-host",\n', '')
     image.add("src/Cargo.toml", workspace.encode())
     image.add("src/README.md", (ROOT / "README.md").read_bytes())
-    source_files(image, options.source.resolve(), "src/examples/private-notes")
-    image.add("init", INIT.encode(), 0o755)
-    image.add("build-command", BUILD.encode(), 0o755)
+    source_files(image, options.source.absolute(), "src/examples/private-notes")
+    image.add("init", init.encode(), 0o755)
+    image.add("build-command", build.encode(), 0o755)
     print("Writing immutable VM input image...", flush=True)
     with tempfile.TemporaryDirectory(prefix="noxide-build-") as temporary:
         initrd = Path(temporary) / "input.cpio.gz"
         image.write(initrd)
         print("Building in a fresh QEMU VM (no NIC, disks, host shares, or sockets)...", flush=True)
         output = run_vm(options.kernel, initrd, options.output / "build.log", options.seconds)
-    wasm = artifact(output, "WASM", MAX_OUTPUT)
-    if not wasm.startswith(b"\0asm\x01\0\0\0"):
-        raise ValueError("VM did not produce portable core Wasm")
-    for name, data in (("private_notes.wasm", wasm), ("Cargo.lock", artifact(output, "LOCK", 131072))):
+    statuses = re.findall(rb"(?m)^NOXIDE_BUILD_STATUS=(\d+)$", output)
+    if statuses != [b"0"]:
+        raise ValueError("VM build failed; inspect sanitized VM log")
+    outputs = [("Cargo.lock", artifact(output, "LOCK", 131072))]
+    if not options.check:
+        wasm = artifact(output, "WASM", MAX_OUTPUT)
+        if not wasm.startswith(b"\0asm\x01\0\0\0"):
+            raise ValueError("VM did not produce portable core Wasm")
+        outputs.append((f"{options.name}.wasm", wasm))
+    if options.metadata:
+        contract = artifact(output, "CONTRACT", MAX_CONTRACT)
+        if not isinstance(json.loads(contract), dict):
+            raise ValueError("VM contract must be a JSON object")
+        outputs.append(("manifest.json", contract))
+    for name, data in outputs:
         with (options.output / name).open("xb") as file:
             file.write(data)
-    print("Build finished. Outputs remain untrusted; use noxide component and contract admission.")
+    print("Check finished." if options.check else
+          "Build finished. Outputs remain untrusted; use noxide component and contract admission.")
+
 
 
 if __name__ == "__main__":

@@ -6,14 +6,15 @@ resolution, binding generation and compilation take place inside the VM, with
 versioned package directories and no monorepo SDK paths available.
 """
 import argparse
+import json
 from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
 import tomllib
 
-from build_vm import (ROOT, MAX_OUTPUT, MAX_SOURCE, Image, INIT, BUILD, toolchain,
-                      catalog, source_files, run_vm, artifact)
+from build_vm import (ROOT, MAX_OUTPUT, MAX_SOURCE, MAX_CONTRACT, Image, recipe,
+                      toolchain, catalog, source_files, run_vm, artifact)
 
 
 def main():
@@ -22,6 +23,8 @@ def main():
     parser.add_argument("--toolchain", type=Path, required=True)
     parser.add_argument("--cargo-home", type=Path, default=Path.home() / ".cargo")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--metadata", action="store_true",
+                        help="extract the example contract inside the VM")
     args = parser.parse_args()
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
     packages = ("noxide-macros", "noxide-protocol", "noxide")
@@ -60,8 +63,9 @@ def main():
         for package in packages[:-1])
     image.add("src/examples/private-notes/Cargo.toml", manifest.encode())
     image.add("src/examples/private-notes/Cargo.lock", (source / "Cargo.lock").read_bytes())
-    image.add("init", INIT.encode(), 0o755)
-    image.add("build-command", BUILD.encode(), 0o755)
+    init, build = recipe(metadata=args.metadata)
+    image.add("init", init.encode(), 0o755)
+    image.add("build-command", build.encode(), 0o755)
     print("Building only from the packaged SDK in a fresh VM...", flush=True)
     with tempfile.TemporaryDirectory(prefix="noxide-sdk-package-") as folder:
         initrd = Path(folder) / "input.cpio.gz"
@@ -71,6 +75,11 @@ def main():
     assert wasm.startswith(b"\0asm\x01\0\0\0")
     (args.output / "private_notes.wasm").write_bytes(wasm)
     (args.output / "Cargo.lock").write_bytes(artifact(output, "LOCK", 131072))
+    if args.metadata:
+        contract = artifact(output, "CONTRACT", MAX_CONTRACT)
+        assert isinstance(json.loads(contract), dict), "contract must be a JSON object"
+        assert json.loads(contract) == json.loads((source / "manifest.json").read_text()), "checked-in contract differs from generated declarations"
+        (args.output / "manifest.json").write_bytes(contract)
     print("Packaged SDK Wasm build passed without sibling monorepo paths.")
 
 
