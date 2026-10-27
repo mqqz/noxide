@@ -34,7 +34,7 @@ def main():
         manifest = (source / "Cargo.toml").read_text().replace('[dependencies]', '[dependencies]\nprobe-macro = { path = "probe-macro" }')
         (source / "Cargo.toml").write_text(manifest)
         library = source / "src/lib.rs"
-        library.write_text(library.read_text() + '\nprobe_macro::verify!();\n')
+        library.write_text(library.read_text() + '\n#[cfg(target_arch="wasm32")]\nprobe_macro::verify!();\n')
         with socket.socket() as network, socket.socket(socket.AF_UNIX) as host_socket:
             network.bind(("127.0.0.1", 0))
             network.listen()
@@ -63,15 +63,25 @@ fn probe(phase: &str) {
             probe = ('const CANARY:&str=' + json.dumps(str(canary)) + ';\n'
                      'const SOCKET:&str=' + json.dumps(str(socket_path)) + ';\n'
                      'const ADDRESS:&str=' + json.dumps(f"127.0.0.1:{network.getsockname()[1]}") + ';\n' + probe)
-            (source / "build.rs").write_text(probe + '\nfn main(){probe("build-script");println!("cargo:warning=BUILD_BOUNDARY_PROBE_PASSED");}\n')
+            (source / "build.rs").write_text(probe + '\nfn main(){probe(&format!("build-script-{}",std::env::var("TARGET").unwrap()));println!("cargo:warning=BUILD_BOUNDARY_PROBE_PASSED");}\n')
             (macro / "lib.rs").write_text(probe + '\n#[proc_macro] pub fn verify(_:proc_macro::TokenStream)->proc_macro::TokenStream {probe("procedural-macro");proc_macro::TokenStream::new()}\n')
+            # Custom layout collection executes native application code too.
+            # Exercise that phase under the same containment probes as builds.
+            library.write_text(library.read_text().replace(
+                'fn note_editor(fields: FormFields<EditNote>) -> FormLayout {',
+                'fn note_editor(fields: FormFields<EditNote>) -> FormLayout {\n'
+                '    #[cfg(not(target_arch="wasm32"))]\n'
+                '    metadata_boundary::verify();') +
+                '\n#[cfg(not(target_arch="wasm32"))]\nmod metadata_boundary {\n' +
+                probe + '\npub fn verify(){probe("metadata");eprintln!("METADATA_BOUNDARY_PROBE_PASSED");}\n}\n')
             base = [sys.executable, str(ROOT / "tools/build_vm.py"), "--kernel", args.kernel, "--toolchain", args.toolchain, "--source", str(source)]
             for number in (() if args.exhaustion_only else (1, 2)):
                 output = args.output / f"fresh-{number}"
-                subprocess.run(base + ["--output", str(output)], check=True)
+                subprocess.run(base + ["--metadata", "--output", str(output)], check=True)
                 assert "BUILD_BOUNDARY_PROBE_PASSED" in (output / "build.log").read_text()
+                assert "METADATA_BOUNDARY_PROBE_PASSED" in (output / "build.log").read_text()
                 assert canary.read_text() == "inert host canary: must never enter a build VM"
-                print(f"Fresh VM {number}: build script and macro containment passed", flush=True)
+                print(f"Fresh VM {number}: build script, macro, and metadata containment passed", flush=True)
             # A native build-script loop must be stopped by the VM deadline.
             # No dependencies: the deadline must test the loop itself rather
             # than time out an earlier compiler invocation. Cargo -vv streams

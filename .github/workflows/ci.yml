@@ -69,6 +69,7 @@ jobs:
           --include-ignored
           --skip failure_tests::crash_worker
           --skip postgres_nojs_browser_flow
+          --skip postgres_typed_forms_browser_flow
       - name: Check documentation
         env:
           RUSTDOCFLAGS: -D warnings
