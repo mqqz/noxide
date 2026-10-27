@@ -16,6 +16,16 @@ from build_vm import Image, source_files, artifact
 
 
 class Inputs(unittest.TestCase):
+    def test_linked_source_roots_and_ancestors_are_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "outside" / "source").mkdir(parents=True)
+            (root / "outside" / "source" / "lib.rs").write_text("inert")
+            (root / "linked").symlink_to(root / "outside", target_is_directory=True)
+            for source in (root / "linked", root / "linked" / "source"):
+                with self.assertRaises(OSError):
+                    source_files(Image(), source, "src")
+
     def test_links_hidden_files_and_devices_are_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)
@@ -185,6 +195,43 @@ class ToolchainSnapshot(unittest.TestCase):
 
     def test_gcc_runtime_is_copied_when_helpers_live_in_libexec(self):
         self.check_gcc_layout(split_directories=True)
+
+
+class Recipes(unittest.TestCase):
+    def test_artifact_names_cannot_inject_shell_code(self):
+        for name in ("bad-name", "x;poweroff", "$(id)", "`id`", "../../escape",
+                     "quote'", "line\nbreak", "", "a" * 65):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                build_vm.recipe(name=name, metadata=True)
+        init, build = build_vm.recipe(name="task_board", metadata=True)
+        self.assertIn("/release/task_board.wasm", init)
+        self.assertIn("task_board::noxide_manifest()", build)
+
+    def test_metadata_collection_is_inside_the_unprivileged_vm_command(self):
+        init, build = build_vm.recipe(metadata=True)
+        self.assertIn("--no-new-privs env -i", init)
+        self.assertIn("/bin/sh /build-command", init)
+        self.assertIn("cargo run --quiet --locked --offline", build)
+        self.assertIn("NOXIDE_CONTRACT_BEGIN", init)
+        self.assertNotIn("cargo run", init)
+        wire = (b"NOXIDE_CONTRACT_BEGIN\n" + base64.b64encode(b"{}")
+                + b"\nNOXIDE_CONTRACT_END\n")
+        self.assertEqual(artifact(wire, "CONTRACT", build_vm.MAX_CONTRACT), b"{}")
+        for data, limit in ((wire, 1), (wire + wire, build_vm.MAX_CONTRACT)):
+            with self.assertRaises(ValueError):
+                artifact(data, "CONTRACT", limit)
+
+    def test_check_mode_emits_metadata_and_lock_but_no_wasm_frame(self):
+        init, build = build_vm.recipe(name="task_board", check=True, metadata=True)
+        self.assertIn("cargo check -vv --locked --offline", build)
+        self.assertIn("NOXIDE_CONTRACT_BEGIN", init)
+        self.assertIn("NOXIDE_LOCK_BEGIN", init)
+        self.assertNotIn("NOXIDE_WASM_BEGIN", init)
+        self.assertNotIn("NOXIDE_WASM_END", init)
+        self.assertNotIn("cargo build -vv", build)
+
+    def test_default_recipe_remains_compatible(self):
+        self.assertEqual(build_vm.recipe(), (build_vm.INIT, build_vm.BUILD))
 
 
 class VmOutput(unittest.TestCase):
