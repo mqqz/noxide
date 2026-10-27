@@ -199,7 +199,9 @@ noxide schema import CONFIG original-manifest.json
 ```
 
 Import verifies its resource IDs and field declarations against the stored legacy
-schema digest. It preserves records, owners, tenants, incarnations, and revisions.
+schema digest, validates the original text constraints, and normalizes CR/CRLF
+line endings to LF in the same transaction. It preserves owners, tenants, record
+IDs, incarnations, and revisions. Invalid legacy data rolls back the entire import.
 Then activate the matching typed application bundle.
 
 For subsequent application changes, build the new bundle and generate a draft:
