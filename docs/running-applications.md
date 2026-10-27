@@ -47,24 +47,21 @@ Run from the repository root, substituting the installed kernel and toolchain
 paths. `--output` must name a new directory.
 
 ```sh
-python3 tools/build_vm.py \
+target/debug/noxide build \
+  --app examples/private-notes --name private_notes \
   --kernel /boot/vmlinuz-6.18.41_1 \
   --toolchain "$HOME/.rustup/toolchains/stable-x86_64-unknown-linux-gnu" \
   --output /tmp/noxide-notes-build
-
-target/debug/noxide component \
-  /tmp/noxide-notes-build/private_notes.wasm \
-  /tmp/noxide-notes-build/private_notes.component.wasm
 ```
 
-The first command performs Cargo resolution and application compilation inside QEMU.
+The build command performs Cargo resolution and application compilation inside QEMU.
 It uses two virtual CPUs, 6 GiB RAM, a 2 GiB scratch tmpfs, a 600-second outer
 deadline, and no NIC, disk, host share, or monitor socket. Native build code runs
 without capabilities as UID 65534 with `no_new_privs`. Every build gets fresh
 scratch. Inputs are root-owned and read-only to the build user. The source reader
 rejects links, special files, hidden inputs, oversized trees, and directory escape.
 
-The second command wraps portable core Wasm into a component and independently
+The build command also wraps portable core Wasm into a component and independently
 checks the runtime import/feature contract. It never loads native Wasmtime caches.
 Neither a successful compiler exit nor builder metadata grants runtime authority.
 Before compilation, the host also bounds the expanded component graph to 1,024
@@ -95,7 +92,7 @@ mkdir /tmp/noxide-notes-run
 python3 - <<'PY'
 import json, pathlib, subprocess
 root = pathlib.Path.cwd()
-manifest = root / 'examples/private-notes/manifest.json'
+manifest = pathlib.Path('/tmp/noxide-notes-build/manifest.json')
 approved = subprocess.check_output(
     [root / 'target/debug/noxide', 'contract-hash', manifest], text=True).strip()
 config = {
@@ -160,12 +157,13 @@ and select **Save these changes** to submit against the current revision. The
 **Delete record** button removes the note with one POST; there is no confirmation
 round trip or trash view.
 
-Declarations use protocol version 2. A record route declares `"resource": 1`;
+Declarations use protocol version 3. A record route declares its generated resource ID;
 list routes use `null`. Every action declares a `fields` list: all resource fields
 for creation, a nonempty subset for updates, and an empty list for deletion.
-The host rejects missing or extra fields and preserves fields outside an update's
-list. `Context::update(operation)` and `Context::delete(operation)` return the
-host's outcome for the bound target; return that outcome from the handler.
+The host rejects extra fields and missing required values, supplies false/None
+for omitted checkboxes/optional fields, and preserves fields outside an update's
+projection. Generated action handlers return the host's outcome for the bound
+target. Custom handlers use `Submission<Action>::apply()`.
 
 Actions receive no stored values by default. An optional declaration such as
 `"inspect": {"operation": 2, "fields": ["body"]}` supplies those original values
@@ -218,14 +216,17 @@ target/debug/noxide migrate /tmp/noxide-notes-run/runtime.json
 
 The command preserves existing records, assigns each a fresh incarnation and
 revision 1, and atomically replaces the storage layout. It retires old deployment
-forms. Rebuild the application with the version-2 SDK, review its new declarations,
+forms. Rebuild the application with the version-3 SDK, review its new declarations,
 update `approved_contract`, then restart. `init` and serving refuse unmigrated
 storage; repeating a successful migration is safe. The migration is bounded to
 five minutes and requires room for a transactional copy of the records.
 
 This command only upgrades framework storage. Activation also checks the persisted
-application resource schema, which must still match. Arbitrary application schema
-migrations remain unsupported.
+application resource schema. Runtime storage version 3 adds a stable resource
+catalog and migration history. After upgrading v2 storage, explicitly import its
+original approved manifest with `noxide schema import CONFIG LEGACY_MANIFEST`.
+See [schema evolution](application-api.md#schema-evolution) for declarative
+application migrations on both databases.
 Changing the component bytes or approved declaration digest creates a new
 deployment identity, retires the previous generation, and rejects old forms,
 including receipt requests. Code rollback creates another generation, so it

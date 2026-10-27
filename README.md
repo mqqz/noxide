@@ -24,7 +24,7 @@ the user's input for review before resubmission. Applications return a constrain
 Document IR for the host to render.
 
 Raw HTML, arbitrary URLs/headers, WASI, and generic SQL/network access are
-unavailable. The SDK uses typed Rust values; template macros remain future work.
+unavailable. The SDK provides typed declarations, route handles, form layouts, and template macros that emit Document IR.
 
 Follow [Running an application](docs/running-applications.md) to build the example
 inside a disposable VM, approve its declarative permissions, provision accounts,
@@ -112,3 +112,5 @@ transactional actions, and isolated builds.
 
 This project's code is licensed under either the [MIT License](LICENSE-MIT) or the
 [Apache License, Version 2.0](LICENSE-APACHE), at your option.
+
+The [application API guide](docs/application-api.md) covers typed declarations, templates, forms, isolated builds, and schema migrations.

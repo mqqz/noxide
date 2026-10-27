@@ -64,7 +64,7 @@ The exact commands live in the workflow. Start with:
 ```sh
 cargo fetch --locked
 cargo fmt --all --check
-rustfmt --edition 2024 --check examples/private-notes/src/lib.rs
+rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs
 cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 cargo test --workspace --locked --offline
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked --offline
@@ -78,7 +78,8 @@ whose role can create databases, then run:
 cargo test --workspace --locked --offline -- \
   --include-ignored \
   --skip failure_tests::crash_worker \
-  --skip postgres_nojs_browser_flow
+  --skip postgres_nojs_browser_flow \
+  --skip postgres_typed_forms_browser_flow
 ```
 
 See [Running an application](running-applications.md) for local VM prerequisites
@@ -87,3 +88,14 @@ and browser commands. `tools/test_sdk_package.py` accepts the same `--kernel`,
 `private_notes.wasm` with `noxide component` before running the browser suite.
 `tools/ci/setup-vm.sh` installs packages with sudo and is intended only for the
 disposable Ubuntu CI runner.
+
+The application job also builds task-board and seven compile-fail SDK fixtures
+inside a VM. It checks typed routes, field projections, control compatibility,
+and constrained templates. Both examples exercise NoJS browser flows; generated
+manifests travel with their components. PostgreSQL runs the same typed form flow
+as SQLite. Framework tests cover atomic application migrations and explicit
+legacy schema import on both providers.
+
+Native form-layout metadata collection runs the same host-file, socket, network,
+UID, and capability probes as build scripts. Two fresh VMs verify containment
+and scratch isolation; the native-loop fixture checks deadline enforcement.

@@ -98,7 +98,7 @@ configuration; it does not authorize dirty instance or request-context reuse.
 
 ## Boundary protocol and rendering
 
-The version-2 Rust/JSON contracts live in `noxide-protocol`. The SDK's
+The version-3 Rust/JSON contracts live in `noxide-protocol`. The SDK's
 `crates/noxide/wit/application.wit` defines the versioned import world. Request
 grants stay inside the host; guests cannot select them through resource handles.
 
@@ -288,8 +288,16 @@ record a random incarnation and revision 1, then stamps the storage version.
 Migration also changes the deployment generation to retire old forms. Interrupting
 the operation leaves the old layout or the complete new layout. Required columns
 without defaults reject legacy inserts. Current hosts check the version at
-activation and admission; they do not migrate implicitly. Application resource
-schema changes and guest-provided migrations remain unsupported.
+activation and admission; they do not migrate implicitly.
+
+Runtime storage version 3 additionally stores a stable resource-key catalog and
+normalized application schemas. Application schema changes use bounded,
+operator-approved declarative migrations under exclusive database access. Schema
+fingerprints ignore bundle IDs, ordering, and presentation labels. Explicit
+legacy import verifies the original stored resource digest before mapping old
+numeric storage identities. Guest-provided migration code remains unsupported.
+See [the application API](../application-api.md) for migration authoring and the
+isolated SDK workflow.
 
 The adapters use SQLite WAL with `BEGIN IMMEDIATE` and PostgreSQL `SERIALIZABLE`.
 Every transaction owns a dedicated connection, including read routes and host
