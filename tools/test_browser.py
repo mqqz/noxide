@@ -57,10 +57,16 @@ def main():
     parser.add_argument("--database", help="URL of an empty disposable PostgreSQL database; default SQLite")
     parser.add_argument("--onion", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path, help="generated application manifest")
+    parser.add_argument("--tasks", action="store_true", help="exercise the typed task-board example")
     args = parser.parse_args()
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
     binary = ROOT / "target/debug/noxide"
-    manifest = ROOT / "examples/private-notes/manifest.json"
+    manifest = args.manifest or ROOT / "examples/private-notes/manifest.json"
+    declarations = json.loads(manifest.read_text())
+    operation_kinds = {op["id"]: op["kind"] for op in declarations["operations"]}
+    action_ids = {operation_kinds[action["operation"]]: action["id"] for action in declarations["actions"]}
+    create_id, edit_id, delete_id = (action_ids[kind] for kind in ("create", "update", "delete"))
     approved = subprocess.check_output([binary, "contract-hash", manifest], text=True).strip()
     backend_port, driver_port = port(), port()
     authority = ("a" * 56 + ".onion") if args.onion else f"localhost:{backend_port}"
@@ -175,6 +181,57 @@ def main():
             click("main button")
 
         login("alice", "Alice private test password")
+        if args.tasks:
+            assert "No tasks yet" in webdriver("/source")
+            initial_token = attribute('[name="_submission"]', "value")
+            initial_csrf = attribute('main [name="_csrf"]', "value")
+            text('[name="title"]', 'Prepare release <script>')
+            text('[name="details"]', '\nReview both database providers.')
+            text('[name="estimate"]', '2')
+            click('select[name="priority"] option[value="urgent"]')
+            click('[name="completed"]')
+            click('main button')
+            assert "Prepare release &lt;script&gt;" in webdriver("/source")
+            assert "Priority: Urgent" in webdriver("/source")
+            assert webdriver("/element/" + element('[name="estimate"]') + "/property/value") == '2'
+            assert webdriver("/element/" + element('[name="completed"]') + "/property/checked") is True
+            assert webdriver("/element/" + element('[name="details"]') + "/property/value") == '\nReview both database providers.'
+            initial_location = urllib.parse.urlsplit(webdriver("/url")).path
+            session_cookie = next(c for c in webdriver("/cookie") if c["name"] == "noxide_session")
+            canonical_retry = urllib.parse.urlencode({
+                "_csrf": initial_csrf, "_submission": initial_token,
+                "title": "Prepare release <script>",
+                "details": "\r\nReview both database providers.",
+                "estimate": "+02", "priority": "urgent", "completed": "on",
+            }).encode()
+            connection = http.client.HTTPConnection("127.0.0.1", backend_port, timeout=5)
+            connection.request("POST", f"/_noxide/action/{create_id}", canonical_retry,
+                               {"Host": authority, "Origin": origin,
+                                "Content-Type": "application/x-www-form-urlencoded",
+                                "Cookie": "noxide_session=" + session_cookie["value"]})
+            response = connection.getresponse()
+            assert response.status == 303 and response.getheader("Location") == initial_location
+            response.read()
+            connection.close()
+            edit = f'form[action="/_noxide/action/{edit_id}"]'
+            replace(edit + ' [name="estimate"]', 'not a number')
+            click(edit + ' button')
+            assert 'aria-invalid="true"' in webdriver("/source")
+            assert webdriver("/element/" + element('[name="estimate"]') + "/property/value") == 'not a number'
+            assert webdriver("/element/" + element('[name="completed"]') + "/property/checked") is True
+            assert len(webdriver("/elements", "POST", {"using":"css selector","value":"form section"})) == 2
+            replace('[name="estimate"]', '3')
+            webdriver('/element/' + element('[name="details"]') + '/clear', 'POST', {})
+            click('[name="completed"]')
+            click('main button')
+            assert webdriver("/element/" + element('[name="estimate"]') + "/property/value") == '3'
+            assert webdriver("/element/" + element('[name="details"]') + "/property/value") == ''
+            assert webdriver("/element/" + element('[name="completed"]') + "/property/checked") is False
+            click(f'form[action="/_noxide/action/{delete_id}"] button')
+            assert "No tasks yet" in webdriver("/source")
+            (args.output / "requests.json").write_text(json.dumps(requests, indent=2))
+            print(json.dumps({"flow":"typed task controls, layout recovery, optional absence, checkbox update, deletion passed"}))
+            return
         assert "No notes yet" in webdriver("/source")
         submission = attribute('[name="_submission"]', "value")
         csrf = attribute('main [name="_csrf"]', "value")
@@ -192,7 +249,7 @@ def main():
         assert not session_cookie["secure"]  # Both tested origins use HTTP.
         saved = urllib.parse.urlencode({"_csrf": csrf, "_submission": submission, "body": note}).encode()
 
-        def raw_post(body, action=1):
+        def raw_post(body, action=create_id):
             connection = http.client.HTTPConnection("127.0.0.1", backend_port, timeout=5)
             connection.request("POST", f"/_noxide/action/{action}", body,
                                {"Host": authority, "Origin": origin, "Content-Type": "application/x-www-form-urlencoded",
@@ -231,15 +288,15 @@ def main():
         assert "No notes yet" in webdriver("/source")
         visit(urllib.parse.urlsplit(location).path)
         assert "Alice only" not in webdriver("/source")
-        assert "This note is not available." in webdriver("/source")
+        assert "This page is not available." in webdriver("/source")
 
         click('nav form[action="/logout"] button')
         login("alice", "Alice private test password")
         session_cookie = next(c for c in webdriver("/cookie") if c["name"] == "noxide_session")
         note_path = urllib.parse.urlsplit(location).path
         visit(note_path)
-        edit = 'form[action="/_noxide/action/2"]'
-        delete = 'form[action="/_noxide/action/3"]'
+        edit = f'form[action="/_noxide/action/{edit_id}"]'
+        delete = f'form[action="/_noxide/action/{delete_id}"]'
         original_edit = attribute(edit + ' [name="_submission"]', "value")
         original_delete = attribute(delete + ' [name="_submission"]', "value")
         csrf = attribute(edit + ' [name="_csrf"]', "value")
@@ -269,20 +326,20 @@ def main():
         (args.output / "edited-note.png").write_bytes(base64.b64decode(webdriver("/screenshot")))
 
         stale_delete = urllib.parse.urlencode({"_csrf": csrf, "_submission": original_delete}).encode()
-        status, _, conflict = raw_post(stale_delete, action=3)
+        status, _, conflict = raw_post(stale_delete, action=delete_id)
         assert status == 409 and "This record changed" in conflict
         assert "Delete current version" in conflict
         delete_token = attribute(delete + ' [name="_submission"]', "value")
         saved_delete = urllib.parse.urlencode({"_csrf": csrf, "_submission": delete_token}).encode()
-        before = sum(r["method"] == "POST" and r["path"] == "/_noxide/action/3" for r in requests)
+        before = sum(r["method"] == "POST" and r["path"] == f"/_noxide/action/{delete_id}" for r in requests)
         click(delete + " button")
         assert "No notes yet" in webdriver("/source")
-        after = sum(r["method"] == "POST" and r["path"] == "/_noxide/action/3" for r in requests)
+        after = sum(r["method"] == "POST" and r["path"] == f"/_noxide/action/{delete_id}" for r in requests)
         assert after == before + 1, "deletion must need exactly one POST"
-        assert raw_post(saved_delete, action=3)[:2] == (303, "/")
-        assert raw_post(stale_delete, action=3)[0] == 404
+        assert raw_post(saved_delete, action=delete_id)[:2] == (303, "/")
+        assert raw_post(stale_delete, action=delete_id)[0] == 404
         visit(note_path)
-        assert "This note is not available." in webdriver("/source")
+        assert "This page is not available." in webdriver("/source")
         assert "Alice kept this draft" not in webdriver("/source")
         assert all(p.startswith(("/",)) for p in paths)
         assert not any("attacker" in p for p in paths)

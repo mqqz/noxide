@@ -2,10 +2,12 @@
   "version": 3,
   "resources": [
     {
-      "id": 1,
+      "id": 2206293706,
       "name": "notes",
       "fields": [
         {
+          "kind": "text",
+          "optional": false,
           "name": "body",
           "label": "Note",
           "max_bytes": 4096
@@ -15,9 +17,9 @@
   ],
   "operations": [
     {
-      "id": 1,
-      "resource": 1,
-      "kind": "list",
+      "id": 1374915834,
+      "resource": 2206293706,
+      "kind": "delete",
       "policy": {
         "any": [
           [
@@ -27,32 +29,8 @@
       }
     },
     {
-      "id": 2,
-      "resource": 1,
-      "kind": "read",
-      "policy": {
-        "any": [
-          [
-            "owner"
-          ]
-        ]
-      }
-    },
-    {
-      "id": 3,
-      "resource": 1,
-      "kind": "create",
-      "policy": {
-        "any": [
-          [
-            "owner"
-          ]
-        ]
-      }
-    },
-    {
-      "id": 4,
-      "resource": 1,
+      "id": 1511218517,
+      "resource": 2206293706,
       "kind": "update",
       "policy": {
         "any": [
@@ -63,9 +41,33 @@
       }
     },
     {
-      "id": 5,
-      "resource": 1,
-      "kind": "delete",
+      "id": 2330643300,
+      "resource": 2206293706,
+      "kind": "read",
+      "policy": {
+        "any": [
+          [
+            "owner"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 3137046913,
+      "resource": 2206293706,
+      "kind": "list",
+      "policy": {
+        "any": [
+          [
+            "owner"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 4226205441,
+      "resource": 2206293706,
+      "kind": "create",
       "policy": {
         "any": [
           [
@@ -77,57 +79,83 @@
   ],
   "routes": [
     {
-      "id": 1,
-      "path": "/",
+      "id": 3362413297,
+      "path": "/notes/{note}",
+      "resource": 2206293706,
       "operations": [
-        1
+        2330643300
       ],
       "forms": [
-        1
-      ],
-      "resource": null
+        4088484768,
+        3614109451
+      ]
     },
     {
-      "id": 2,
-      "path": "/notes",
+      "id": 4280382251,
+      "path": "/",
+      "resource": null,
       "operations": [
-        2
+        3137046913
       ],
       "forms": [
-        2,
-        3
-      ],
-      "resource": 1
+        2924443456
+      ]
     }
   ],
   "actions": [
     {
-      "id": 1,
+      "layout": [],
+      "id": 2924443456,
       "version": 1,
-      "name": "Save note",
-      "operation": 3,
-      "redirect": 2,
+      "name": "Create note",
+      "operation": 4226205441,
+      "redirect": 3362413297,
       "fields": [
         "body"
-      ]
+      ],
+      "inspect": null
     },
     {
-      "id": 2,
-      "version": 1,
-      "name": "Save changes",
-      "operation": 4,
-      "redirect": 2,
-      "fields": [
-        "body"
-      ]
-    },
-    {
-      "id": 3,
+      "layout": [],
+      "id": 3614109451,
       "version": 1,
       "name": "Delete note",
-      "operation": 5,
-      "redirect": 1,
-      "fields": []
+      "operation": 1374915834,
+      "redirect": 4280382251,
+      "fields": [],
+      "inspect": null
+    },
+    {
+      "layout": [
+        {
+          "begin": "section"
+        },
+        {
+          "field": {
+            "name": "body",
+            "control": {
+              "textarea": {
+                "rows": 12
+              }
+            }
+          }
+        },
+        "end",
+        {
+          "submit": {
+            "label": "Save note"
+          }
+        }
+      ],
+      "id": 4088484768,
+      "version": 1,
+      "name": "Edit note",
+      "operation": 1511218517,
+      "redirect": 3362413297,
+      "fields": [
+        "body"
+      ],
+      "inspect": null
     }
   ]
 }

@@ -1,99 +1,92 @@
 use noxide::{
-    Container as C, Context, Document, Handler, Instruction as N, RequestKind, RequestView,
-    ResponseIntent, RouteRef,
+    ActionResult, Form, FormFields, FormLayout, Fragment, Id, NotFound, Page, PageResult, Query,
+    Resource, Submission, action, form, html, page, query,
 };
 
-struct Notes;
-impl Handler for Notes {
-    fn handle(request: RequestView, context: &mut Context) -> ResponseIntent {
-        if matches!(&request.kind, RequestKind::Action(1 | 2))
-            && request
-                .input
-                .get("body")
-                .is_some_and(|body| body.trim().is_empty())
-        {
-            return ResponseIntent::Rejected {
-                field_errors: std::collections::BTreeMap::from([(
-                    "body".into(),
-                    "Enter a note.".into(),
-                )]),
-                message: "Review the highlighted fields.".into(),
-            };
-        }
-        match request.kind {
-            RequestKind::Action(1) => {
-                let record = context.create(3);
-                ResponseIntent::Created {
-                    resource: record.resource,
-                    id: record.id,
-                    destination: RouteRef {
-                        route: 2,
-                        target: Some(record.id),
-                    },
-                }
-            }
-            RequestKind::Action(2) => context.update(4),
-            RequestKind::Action(3) => context.delete(5),
-            RequestKind::Route(1) => {
-                let records = context.list(1);
-                let mut nodes = vec![
-                    N::Begin(C::Heading1),
-                    N::Text("Private notes".into()),
-                    N::End,
-                ];
-                if records.is_empty() {
-                    nodes.push(N::Text("No notes yet".into()));
-                }
-                for record in records {
-                    nodes.extend([
-                        N::Begin(C::Article),
-                        N::Begin(C::Pre),
-                        N::Text(record.fields["body"].clone()),
-                        N::End,
-                        N::Link {
-                            destination: RouteRef {
-                                route: 2,
-                                target: Some(record.id),
-                            },
-                            text: "Open note".into(),
-                        },
-                        N::End,
-                    ]);
-                }
-                nodes.push(N::Form { action: 1 });
-                ResponseIntent::Page(Document::new("Private notes", nodes))
-            }
-            RequestKind::Route(2) => match context.read(2, request.target.expect("record route")) {
-                Some(record) => ResponseIntent::Page(Document::new(
-                    "Private note",
-                    vec![
-                        N::Begin(C::Heading1),
-                        N::Text("Private note".into()),
-                        N::End,
-                        N::Begin(C::Pre),
-                        N::Text(record.fields["body"].clone()),
-                        N::End,
-                        N::Form { action: 2 },
-                        N::Form { action: 3 },
-                        N::Link {
-                            destination: RouteRef {
-                                route: 1,
-                                target: None,
-                            },
-                            text: "All notes".into(),
-                        },
-                    ],
-                )),
-                None => ResponseIntent::NotFound(Document::new(
-                    "Not found",
-                    vec![N::Text("This note is not available.".into())],
-                )),
-            },
-            _ => ResponseIntent::NotFound(Document::new(
-                "Not found",
-                vec![N::Text("This page is not available.".into())],
-            )),
-        }
+#[derive(Resource)]
+#[resource(key = "notes")]
+pub struct Note {
+    #[id]
+    id: Id<Self>,
+    #[field(key = "body", label = "Note", max_bytes = 4096)]
+    body: String,
+}
+
+#[query(list(Note), allow = owner)]
+struct ListNotes;
+#[query(read(Note), allow = owner)]
+struct ReadNote;
+
+#[action(create(Note), fields(body), allow = owner, redirect = show_note)]
+struct CreateNote;
+#[action(update(Note), fields(body), allow = owner, redirect = show_note)]
+struct EditNote;
+#[action(delete(Note), allow = owner, redirect = index)]
+struct DeleteNote;
+
+fn create_note(submission: Submission<CreateNote>) -> ActionResult<CreateNote> {
+    if submission.input().body.trim().is_empty() {
+        return Err(CreateNote::body.error("Enter a note."));
+    }
+    submission.apply()
+}
+fn edit_note(submission: Submission<EditNote>) -> ActionResult<EditNote> {
+    if submission.input().body.trim().is_empty() {
+        return Err(EditNote::body.error("Enter a note."));
+    }
+    submission.apply()
+}
+fn note_editor(fields: FormFields<EditNote>) -> FormLayout {
+    form! {
+        section { (fields.body.textarea().rows(12)) }
+        (fields.submit("Save note"))
     }
 }
-noxide::export!(Notes);
+fn layout(title: &str, content: Fragment) -> Page {
+    Page::new(title, html! { main { (content) } })
+}
+
+#[page(path = "/")]
+fn index(mut notes: Query<ListNotes>, create: Form<CreateNote>) -> Page {
+    let notes = notes.fetch();
+    layout(
+        "Private notes",
+        html! {
+            h1 { "Private notes" }
+            @if notes.is_empty() { p { "No notes yet" } }
+            @for note in &notes {
+                article {
+                    pre { (&note.body) }
+                    a href=(routes::show_note(note.id)) { "Open note" }
+                }
+            }
+            (create)
+        },
+    )
+}
+
+#[page(path = "/notes/{note}")]
+fn show_note(
+    note: Id<Note>,
+    mut read: Query<ReadNote>,
+    edit: Form<EditNote>,
+    delete: Form<DeleteNote>,
+) -> PageResult {
+    let note = read.get(note).ok_or(NotFound)?;
+    Ok(layout(
+        "Private note",
+        html! {
+            h1 { "Private note" }
+            pre { (&note.body) }
+            (edit)
+            (delete)
+            a href=(routes::index()) { "All notes" }
+        },
+    ))
+}
+
+noxide::application! {
+    pages: [index, show_note],
+    actions: [CreateNote => create_note, EditNote => edit_note, DeleteNote],
+    forms: [EditNote => note_editor],
+}
