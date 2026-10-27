@@ -3,6 +3,7 @@ mod database;
 pub mod manifest;
 pub mod render;
 pub mod runtime;
+pub mod schema;
 pub use database::Database;
 mod auth;
 mod security;

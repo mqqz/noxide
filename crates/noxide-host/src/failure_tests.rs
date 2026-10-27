@@ -160,6 +160,7 @@ async fn stored_bounds(db: &Database) {
         .begin(std::time::Instant::now() + Duration::from_secs(2))
         .await
         .unwrap();
+    tx.bind_schema(&m).await.unwrap();
     for id in [2_i64, 9, 10, 99, 100, 101] {
         tx.execute(
             "INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES(1,$1,'alice','',$2,'fixture-incarnation',1)",

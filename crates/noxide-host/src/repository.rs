@@ -36,6 +36,7 @@ pub(crate) async fn load(
     id: u64,
 ) -> Result<Option<StoredRecord>> {
     ensure!(id > 0 && id <= i64::MAX as u64, "invalid resource target");
+    let storage_resource = tx.storage_resource(m, resource).await?;
     let sql = format!(
         "SELECT owner,tenant,{}, {},CAST(revision AS TEXT) FROM nx_records WHERE resource=$1 AND id=$2",
         tx.bounded_text("fields", 20_000),
@@ -44,7 +45,7 @@ pub(crate) async fn load(
     let rows = tx
         .fetch::<5>(
             &sql,
-            &[Param::Number(resource.into()), Param::Number(id as i64)],
+            &[Param::Number(storage_resource), Param::Number(id as i64)],
         )
         .await?;
     rows.into_iter()
@@ -125,6 +126,10 @@ impl Effects {
                 );
             }
         }
+        let storage_resource = self
+            .tx
+            .storage_resource(&self.manifest, op.resource)
+            .await?;
         let value = match op.kind {
             OperationKind::Create => {
                 ensure!(
@@ -138,7 +143,7 @@ impl Effects {
                 );
                 let resource = manifest::resource(&self.manifest, op.resource)?;
                 manifest::validate_fields(resource, &self.request.input)?;
-                let used=self.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM (SELECT id FROM nx_records WHERE resource=$1 AND owner=$2 LIMIT 10000) AS quota",&[Param::Number(op.resource.into()),self.principal.id.as_str().into()]).await?;
+                let used=self.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM (SELECT id FROM nx_records WHERE resource=$1 AND owner=$2 LIMIT 10000) AS quota",&[Param::Number(storage_resource),self.principal.id.as_str().into()]).await?;
                 ensure!(used[0][0].parse::<usize>()? < 10_000, "record quota");
                 let id = crate::security::record_id()?;
                 let record = Record {
@@ -148,7 +153,7 @@ impl Effects {
                 };
                 ensure!(self.grant.is_none(), "creation has no existing target");
                 self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES($1,$2,$3,$4,$5,$6,1)",&[
-                    Param::Number(op.resource.into()),Param::Number(id as i64),self.principal.id.clone().into(),self.principal.tenant.clone().into(),serde_json::to_string(&record.fields)?.into(), crate::security::random_id()?.into()
+                    Param::Number(storage_resource),Param::Number(id as i64),self.principal.id.clone().into(),self.principal.tenant.clone().into(),serde_json::to_string(&record.fields)?.into(), crate::security::random_id()?.into()
                 ]).await?;
                 #[cfg(test)]
                 crate::failure_tests::after_effect(&mut self.tx).await?;
@@ -193,7 +198,7 @@ impl Effects {
                 );
                 manifest::validate_input(&self.manifest, a, &self.request.input)?;
                 let mut params = vec![
-                    Param::Number(op.resource.into()),
+                    Param::Number(storage_resource),
                     Param::Number(grant.id as i64),
                     grant.incarnation.as_str().into(),
                     grant.revision.into(),
@@ -250,7 +255,7 @@ impl Effects {
                     .fetch::<3>(
                         &sql,
                         &[
-                            Param::Number(op.resource.into()),
+                            Param::Number(storage_resource),
                             Param::Number(target as i64),
                         ],
                     )
@@ -275,7 +280,7 @@ impl Effects {
                 serde_json::to_vec(&record)?
             }
             OperationKind::List => {
-                let mut params = vec![Param::Number(op.resource.into())];
+                let mut params = vec![Param::Number(storage_resource)];
                 let mut clauses = Vec::new();
                 for rule in &op.policy.any {
                     let mut terms = Vec::new();
