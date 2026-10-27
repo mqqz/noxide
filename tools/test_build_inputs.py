@@ -16,6 +16,21 @@ from build_vm import Image, source_files, artifact
 
 
 class Inputs(unittest.TestCase):
+    def test_build_status_is_checked_before_artifact_decoding(self):
+        build_vm.check_build_status(b"NOXIDE_BUILD_STATUS=0\n")
+        for output in (b"", b"NOXIDE_BUILD_STATUS=1\n",
+                       b"NOXIDE_BUILD_STATUS=0\nNOXIDE_BUILD_STATUS=0\n"):
+            with self.assertRaisesRegex(ValueError, "VM build failed"):
+                build_vm.check_build_status(output)
+        with self.assertRaisesRegex(ValueError, "deadline exceeded"):
+            build_vm.check_build_status(b"NOXIDE_BUILD_STATUS=124\n")
+
+    def test_guest_and_outer_build_deadlines_remain_bounded(self):
+        self.assertIn(f"timeout -k 2 {build_vm.GUEST_BUILD_SECONDS} setpriv", build_vm.INIT)
+        self.assertEqual(build_vm.GUEST_BUILD_SECONDS, 900)
+        self.assertEqual(build_vm.DEFAULT_VM_SECONDS, 1020)
+        self.assertGreater(build_vm.DEFAULT_VM_SECONDS, build_vm.GUEST_BUILD_SECONDS)
+
     def test_linked_source_roots_and_ancestors_are_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

@@ -13,8 +13,9 @@ import tarfile
 import tempfile
 import tomllib
 
-from build_vm import (ROOT, MAX_OUTPUT, MAX_SOURCE, MAX_CONTRACT, Image, recipe,
-                      toolchain, catalog, source_files, run_vm, artifact)
+from build_vm import (ROOT, DEFAULT_VM_SECONDS, MAX_OUTPUT, MAX_SOURCE,
+                      MAX_CONTRACT, Image, recipe, toolchain, catalog,
+                      source_files, run_vm, artifact, check_build_status)
 
 
 def main():
@@ -70,7 +71,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="noxide-sdk-package-") as folder:
         initrd = Path(folder) / "input.cpio.gz"
         image.write(initrd)
-        output = run_vm(args.kernel, initrd, args.output / "build.log", 600)
+        output = run_vm(args.kernel, initrd, args.output / "build.log", DEFAULT_VM_SECONDS)
+    check_build_status(output)
     wasm = artifact(output, "WASM", MAX_OUTPUT)
     assert wasm.startswith(b"\0asm\x01\0\0\0")
     (args.output / "private_notes.wasm").write_bytes(wasm)
