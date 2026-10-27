@@ -270,11 +270,11 @@ async fn browser_encoded_maximum_fields_save_and_recover() {
     let request = |body| {
         Request::builder()
             .method("POST")
-            .uri("/_noxide/action/1")
+            .uri("/actions/1")
             .header("Host", "localhost:8080")
             .header("Origin", "http://localhost:8080")
             .header("Content-Type", "application/x-www-form-urlencoded")
-            .header("Cookie", format!("noxide_session={session}"))
+            .header("Cookie", format!("session={session}"))
             .body(Body::from(body))
             .unwrap()
     };

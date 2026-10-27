@@ -12,10 +12,6 @@ use axum::{
 };
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-const SESSION: &str = "noxide_session";
-const LOGIN: &str = "noxide_login";
-const STYLE: &str = "html{color-scheme:light dark;font:1.1rem/1.6 system-ui}body{margin:2rem auto;max-width:48rem;padding:0 1rem}label{display:block;margin:1rem 0}input,textarea,button{font:inherit}textarea{display:block;width:100%;min-height:8rem;box-sizing:border-box}button{padding:.5rem 1rem}article{border-block-end:1px solid;padding-block:1rem}pre{white-space:pre-wrap;overflow-wrap:anywhere}a{overflow-wrap:anywhere}:focus-visible{outline:3px solid Highlight;outline-offset:3px}";
-
 #[derive(Clone)]
 pub struct Origin {
     serialized: String,
@@ -140,12 +136,12 @@ fn rendered(value: Rendered) -> Response {
     }
     response
 }
-fn redirect(location: &'static str) -> Response {
+fn redirect(location: &str) -> Response {
     (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
 }
-fn error(error: RequestError) -> Response {
+fn error(error: RequestError, login_path: &str) -> Response {
     let status = match error {
-        RequestError::Authentication => return redirect("/login"),
+        RequestError::Authentication => return redirect(login_path),
         RequestError::InvalidRequest => StatusCode::BAD_REQUEST,
         RequestError::Rejected => StatusCode::UNPROCESSABLE_ENTITY,
         RequestError::Busy | RequestError::OutcomeUnknown => StatusCode::SERVICE_UNAVAILABLE,
@@ -217,6 +213,7 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
     finish(dispatch_inner(gateway, request).await)
 }
 async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
+    let presentation = &gateway.app.presentation;
     let headers = request.headers();
     if headers.get_all(header::HOST).iter().count() != 1
         || headers.get(header::HOST).and_then(|h| h.to_str().ok())
@@ -239,30 +236,50 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     };
     let path = request.uri().path().to_owned();
     if request.method() == axum::http::Method::GET {
-        if path == "/_noxide/style.css" {
-            return ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], STYLE).into_response();
+        if path == presentation.stylesheet_path
+            && let Some(css) = &presentation.stylesheet
+        {
+            return (
+                [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+                css.clone(),
+            )
+                .into_response();
         }
-        if path == "/login" {
+        if path == presentation.login_path {
             return match gateway.app.login_challenge().await {
-                Err(e) => error(e),
+                Err(e) => error(e, &presentation.login_path),
                 Ok(challenge) => {
                     let html = format!(
-                        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Sign in</title><link rel=\"stylesheet\" href=\"/_noxide/style.css\"></head><body><main><h1>Sign in</h1><form method=\"post\" action=\"/login\"><input type=\"hidden\" name=\"_csrf\" value=\"{}\"><label>Username<input name=\"username\" autocomplete=\"username\" maxlength=\"32\" required></label><label>Password<input type=\"password\" name=\"password\" autocomplete=\"current-password\" maxlength=\"256\" required></label><button>Sign in</button></form></main></body></html>",
+                        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Sign in</title>{}</head><body><main><h1>Sign in</h1><form method=\"post\" action=\"{}\"><input type=\"hidden\" name=\"_csrf\" value=\"{}\"><label>Username<input name=\"username\" autocomplete=\"username\" maxlength=\"32\" required></label><label>Password<input type=\"password\" name=\"password\" autocomplete=\"current-password\" maxlength=\"256\" required></label><button>Sign in</button></form></main></body></html>",
+                        if presentation.stylesheet.is_some() {
+                            format!(
+                                "<link rel=\"stylesheet\" href=\"{}\">",
+                                presentation.stylesheet_path
+                            )
+                        } else {
+                            String::new()
+                        },
+                        presentation.login_path,
                         challenge.csrf
                     );
                     let mut response = ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
                         .into_response();
                     response.headers_mut().insert(
                         header::SET_COOKIE,
-                        set_cookie(LOGIN, &challenge.cookie, gateway.origin.secure, 900),
+                        set_cookie(
+                            &presentation.login_cookie,
+                            &challenge.cookie,
+                            gateway.origin.secure,
+                            900,
+                        ),
                     );
                     response
                 }
             };
         }
-        let session = match cookie(headers, SESSION) {
+        let session = match cookie(headers, &presentation.session_cookie) {
             Ok(s) => s,
-            Err(_) => return redirect("/login"),
+            Err(_) => return redirect(&presentation.login_path),
         };
         let route = gateway.app.manifest.routes.iter().find_map(|route| {
             crate::render::match_path(route, &path).map(|target| (route.id, target))
@@ -271,7 +288,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
             Some((route, target)) => {
                 match gateway.app.view_page(&session, route, target, cursor).await {
                     Ok(r) => rendered(r),
-                    Err(e) => error(e),
+                    Err(e) => error(e, &presentation.login_path),
                 }
             }
             None => StatusCode::NOT_FOUND.into_response(),
@@ -304,8 +321,8 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     {
         return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
     }
-    let session = cookie(headers, SESSION);
-    let login = cookie(headers, LOGIN);
+    let session = cookie(headers, &presentation.session_cookie);
+    let login = cookie(headers, &presentation.login_cookie);
     let bytes = match tokio::time::timeout(
         Duration::from_secs(30),
         to_bytes(request.into_body(), MAX_ENCODED_FORM_BYTES),
@@ -322,7 +339,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     let Some(csrf) = form.remove("_csrf") else {
         return StatusCode::FORBIDDEN.into_response();
     };
-    if path == "/login" {
+    if path == presentation.login_path {
         let (Some(username), Some(password)) = (form.remove("username"), form.remove("password"))
         else {
             return StatusCode::BAD_REQUEST.into_response();
@@ -339,11 +356,16 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                 let mut response = redirect("/");
                 response.headers_mut().append(
                     header::SET_COOKIE,
-                    set_cookie(SESSION, &signed, gateway.origin.secure, 3600),
+                    set_cookie(
+                        &presentation.session_cookie,
+                        &signed,
+                        gateway.origin.secure,
+                        3600,
+                    ),
                 );
                 response.headers_mut().append(
                     header::SET_COOKIE,
-                    set_cookie(LOGIN, "", gateway.origin.secure, 0),
+                    set_cookie(&presentation.login_cookie, "", gateway.origin.secure, 0),
                 );
                 response
             }
@@ -355,26 +377,26 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
         };
     }
     let Ok(session) = session else {
-        return redirect("/login");
+        return redirect(&presentation.login_path);
     };
-    if path == "/logout" {
+    if path == presentation.logout_path {
         if !form.is_empty() {
             return StatusCode::BAD_REQUEST.into_response();
         }
         return match gateway.app.logout(&session, &csrf).await {
             Ok(()) => {
-                let mut r = redirect("/login");
+                let mut r = redirect(&presentation.login_path);
                 r.headers_mut().insert(
                     header::SET_COOKIE,
-                    set_cookie(SESSION, "", gateway.origin.secure, 0),
+                    set_cookie(&presentation.session_cookie, "", gateway.origin.secure, 0),
                 );
                 r
             }
-            Err(e) => error(e),
+            Err(e) => error(e, &presentation.login_path),
         };
     }
     let Some(action) = path
-        .strip_prefix("/_noxide/action/")
+        .strip_prefix(&format!("{}/", presentation.action_path))
         .and_then(|n| n.parse::<u32>().ok())
     else {
         return StatusCode::NOT_FOUND.into_response();
@@ -396,7 +418,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                 .await
             {
                 Ok(r) => rendered(r),
-                Err(_) => error(e),
+                Err(_) => error(e, &presentation.login_path),
             }
         }
     }
@@ -481,7 +503,7 @@ pub async fn serve(
                 connections.spawn(async move {
                     let _permit=permit;
                     let mut http=hyper::server::conn::http1::Builder::new();
-                    http.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(Duration::from_secs(30)).max_headers(64).max_buf_size(32*1024);
+                    http.auto_date_header(false).timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(Duration::from_secs(30)).max_headers(64).max_buf_size(32*1024);
                     let connection=http.serve_connection(hyper_util::rt::TokioIo::new(stream),service);
                     let _=tokio::time::timeout(Duration::from_secs(60),connection).await;
                 });
@@ -520,6 +542,182 @@ mod tests {
         assert!(Listener::unix(&path).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
     }
+    async fn exchange(address: std::net::SocketAddr, request: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        let response = String::from_utf8(bytes).unwrap();
+        let headers = response
+            .split_once("\r\n\r\n")
+            .unwrap()
+            .0
+            .to_ascii_lowercase();
+        assert!(!headers.contains("\r\ndate:"), "{headers}");
+        assert!(!headers.contains("\r\nserver:"), "{headers}");
+        assert!(!response.contains("noxide"), "{response}");
+        response
+    }
+
+    #[tokio::test]
+    async fn socket_responses_use_deployment_presentation_without_clock_headers() {
+        use crate::{
+            Database, HostKeys, Presentation, manifest, runtime::Limits, test_support as fixture,
+        };
+        for custom in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let db = Database::sqlite(temp.path().join("http.db"));
+            db.initialize().await.unwrap();
+            db.create_account("alice", "socket test password", "")
+                .await
+                .unwrap();
+            let m = fixture::manifest();
+            let p = if custom {
+                Presentation {
+                    session_cookie: "account".into(),
+                    login_cookie: "challenge".into(),
+                    login_path: "/signin".into(),
+                    logout_path: "/signout".into(),
+                    action_path: "/submit".into(),
+                    stylesheet_path: "/theme.css".into(),
+                    stylesheet: Some("body { color: #123; margin: 1rem }".into()),
+                }
+            } else {
+                Presentation::default()
+            };
+            let app = Arc::new(
+                Application::new(
+                    &fixture::component(Some("trap")),
+                    &serde_json::to_vec(&m).unwrap(),
+                    manifest::digest(&m).unwrap(),
+                    db,
+                    HostKeys::generate().unwrap(),
+                    Limits::default(),
+                )
+                .unwrap()
+                .with_presentation(p.clone())
+                .unwrap(),
+            );
+            app.activate().await.unwrap();
+            let listener = Listener::loopback("127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let address = match &listener.0 {
+                ListenerKind::Tcp(tcp) => tcp.local_addr().unwrap(),
+                #[cfg(unix)]
+                _ => unreachable!(),
+            };
+            let origin = format!("http://{address}");
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let serving = tokio::spawn(serve(
+                listener,
+                app,
+                Origin::parse(&origin).unwrap(),
+                async {
+                    let _ = stopped.await;
+                },
+            ));
+            let get = |path: &str, cookie: &str| {
+                format!(
+                    "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nCookie: {cookie}\r\n\r\n"
+                )
+            };
+            let post = |path: &str, cookie: &str, body: &str| {
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: {address}\r\nOrigin: {origin}\r\nConnection: close\r\nContent-Type: application/x-www-form-urlencoded\r\nCookie: {cookie}\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+            };
+            let cookie = |response: &str, name: &str| {
+                response
+                    .split_once(&format!("set-cookie: {name}="))
+                    .unwrap()
+                    .1
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            };
+            let redirected = exchange(address, &get("/", "")).await;
+            assert!(redirected.starts_with("HTTP/1.1 303"));
+            assert!(redirected.contains(&format!("location: {}\r\n", p.login_path)));
+            if !custom {
+                let absent_css = exchange(address, &get(&p.stylesheet_path, "")).await;
+                // An unconfigured asset must behave like any unknown path,
+                // rather than retaining a distinctive anonymous 404 endpoint.
+                assert_eq!(absent_css, redirected);
+            }
+            let login = exchange(address, &get(&p.login_path, "")).await;
+            assert!(login.starts_with("HTTP/1.1 200"));
+            assert!(login.contains("HttpOnly; SameSite=Strict"));
+            assert_eq!(login.contains("rel=\"stylesheet\""), custom);
+            let csrf = fixture::hidden(&login, "_csrf");
+            let challenge = cookie(&login, &p.login_cookie);
+            let body = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("_csrf", &csrf)
+                .append_pair("username", "alice")
+                .append_pair("password", "socket test password")
+                .finish();
+            let signed = exchange(
+                address,
+                &post(
+                    &p.login_path,
+                    &format!("{}={challenge}", p.login_cookie),
+                    &body,
+                ),
+            )
+            .await;
+            assert!(signed.starts_with("HTTP/1.1 303"));
+            let session = cookie(&signed, &p.session_cookie);
+            let cookie_header = format!("{}={session}", p.session_cookie);
+            let page = exchange(address, &get("/", &cookie_header)).await;
+            assert!(page.starts_with("HTTP/1.1 200"));
+            assert!(page.contains(&format!("action=\"{}/1\"", p.action_path)));
+            assert!(page.contains(&format!("action=\"{}\"", p.logout_path)));
+            assert_eq!(page.contains("rel=\"stylesheet\""), custom);
+            let submission = fixture::hidden(&page, "_submission");
+            // The account navigation has a CSRF field too; it uses the same session token.
+            let csrf = fixture::hidden(&page, "_csrf");
+            let body = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("_csrf", &csrf)
+                .append_pair("_submission", &submission)
+                .append_pair("body", "a note")
+                .finish();
+            let recovery = exchange(
+                address,
+                &post(&format!("{}/1", p.action_path), &cookie_header, &body),
+            )
+            .await;
+            assert!(recovery.starts_with("HTTP/1.1 422"));
+            assert!(recovery.contains(&format!("action=\"{}/1\"", p.action_path)));
+            assert_eq!(recovery.contains("rel=\"stylesheet\""), custom);
+            let css = exchange(address, &get(&p.stylesheet_path, &cookie_header)).await;
+            if custom {
+                assert!(css.starts_with("HTTP/1.1 200"));
+                assert!(css.ends_with(p.stylesheet.as_ref().unwrap()));
+            } else {
+                assert!(css.starts_with("HTTP/1.1 404"));
+            }
+            let missing = exchange(address, &get("/missing", &cookie_header)).await;
+            assert!(missing.starts_with("HTTP/1.1 404"));
+            let logout = exchange(
+                address,
+                &post(&p.logout_path, &cookie_header, &format!("_csrf={csrf}")),
+            )
+            .await;
+            assert!(logout.starts_with("HTTP/1.1 303"));
+            assert!(logout.contains(&format!("set-cookie: {}=;", p.session_cookie)));
+            let malformed = exchange(address, "GET / HTTP/1.1\r\nbad header\r\n\r\n").await;
+            assert!(malformed.starts_with("HTTP/1.1 400"));
+            stop.send(()).unwrap();
+            serving.await.unwrap().unwrap();
+        }
+    }
+
     #[test]
     fn strict_form_canonicalization() {
         assert_eq!(

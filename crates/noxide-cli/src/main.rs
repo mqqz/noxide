@@ -23,6 +23,8 @@ struct Config {
     approved_contract: String,
     origin: String,
     listen: ListenConfig,
+    #[serde(default)]
+    presentation: noxide_host::Presentation,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -203,14 +205,17 @@ async fn main() -> Result<()> {
                 .decode(&config.approved_contract)?
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("invalid approved contract digest"))?;
-            let app = Arc::new(Application::new(
-                &read(&base.join(config.component), 2 * 1024 * 1024)?,
-                &read(&base.join(config.manifest), 32_768)?,
-                approved,
-                database(&config.database, &base)?,
-                keys,
-                Limits::default(),
-            )?);
+            let app = Arc::new(
+                Application::new(
+                    &read(&base.join(config.component), 2 * 1024 * 1024)?,
+                    &read(&base.join(config.manifest), 32_768)?,
+                    approved,
+                    database(&config.database, &base)?,
+                    keys,
+                    Limits::default(),
+                )?
+                .with_presentation(config.presentation)?,
+            );
             let origin = Origin::parse(&config.origin)?;
             let shutdown = shutdown_signal()?;
             let listener = match config.listen {

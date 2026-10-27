@@ -11,6 +11,7 @@ pub struct FormCredentials {
 }
 
 pub struct RenderContext<'a> {
+    pub presentation: &'a crate::Presentation,
     pub manifest: Option<&'a Manifest>,
     /// Missing entries are undeclared; None is declared but denied by policy.
     pub forms: BTreeMap<u32, Option<FormCredentials>>,
@@ -21,6 +22,7 @@ pub struct RenderContext<'a> {
 impl RenderContext<'_> {
     pub fn empty() -> Self {
         Self {
+            presentation: &crate::presentation::DEFAULT,
             manifest: None,
             forms: BTreeMap::new(),
             logout_csrf: None,
@@ -34,6 +36,15 @@ pub struct Rendered {
     pub status: u16,
     pub body: Vec<u8>,
     pub location: Option<String>,
+}
+
+fn stylesheet(out: &mut Buffer, presentation: &crate::Presentation) -> Result<()> {
+    if presentation.stylesheet.is_some() {
+        out.push("<link rel=\"stylesheet\" href=\"")?;
+        out.text(&presentation.stylesheet_path)?;
+        out.push("\">")?;
+    }
+    Ok(())
 }
 
 struct Buffer(String);
@@ -162,15 +173,7 @@ fn path_segments(route: &Route) -> Result<Vec<PathSegment<'_>>> {
 
 /// Check the finite route grammar independently of guest-generated handles.
 pub fn validate_path(route: &Route) -> Result<()> {
-    let segments = path_segments(route)?;
-    ensure!(
-        !matches!(segments.first(), Some(PathSegment::Static("_noxide"))),
-        "reserved route"
-    );
-    ensure!(
-        match_path(route, "/login").is_none() && match_path(route, "/logout").is_none(),
-        "reserved route"
-    );
+    path_segments(route)?;
     Ok(())
 }
 
@@ -279,9 +282,15 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
     let mut out = Buffer(String::new());
     out.push("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>")?;
     out.text(&doc.title)?;
-    out.push("</title><link rel=\"stylesheet\" href=\"/_noxide/style.css\"></head><body>")?;
+    out.push("</title>")?;
+    stylesheet(&mut out, context.presentation)?;
+    out.push("</head><body>")?;
     if let Some(csrf) = &context.logout_csrf {
-        out.push("<nav aria-label=\"Account\"><a href=\"/\">Home</a><form method=\"post\" action=\"/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"")?;
+        out.push(
+            "<nav aria-label=\"Account\"><a href=\"/\">Home</a><form method=\"post\" action=\"",
+        )?;
+        out.text(&context.presentation.logout_path)?;
+        out.push("\"><input type=\"hidden\" name=\"_csrf\" value=\"")?;
         out.text(csrf)?;
         out.push("\"><button>Sign out</button></form></nav>")?;
     }
@@ -401,6 +410,7 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
                     &Fields::new(),
                     None,
                     forms,
+                    context.presentation,
                 )?;
             }
         }
@@ -436,6 +446,7 @@ fn form(
     errors: &Fields,
     button: Option<&str>,
     instance: usize,
+    presentation: &crate::Presentation,
 ) -> Result<()> {
     let fields = crate::manifest::action_fields(m, action)?;
     ensure!(
@@ -446,8 +457,8 @@ fn form(
         "unexpected form field"
     );
     out.push(&format!(
-        "<form method=\"post\" action=\"/_noxide/action/{}\" accept-charset=\"utf-8\">",
-        action.id
+        "<form method=\"post\" action=\"{}/{}\" accept-charset=\"utf-8\">",
+        presentation.action_path, action.id
     ))?;
     for (name, value) in [
         ("_csrf", &credentials.csrf),
@@ -759,6 +770,7 @@ pub(crate) enum Recovery<'a> {
 
 /// Only host-authenticated scope and freshly authorized values reach this page.
 pub(crate) fn recovery(
+    presentation: &crate::Presentation,
     m: &Manifest,
     action: u32,
     credentials: &FormCredentials,
@@ -808,9 +820,9 @@ pub(crate) fn recovery(
     let mut out = Buffer(String::new());
     out.push("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>")?;
     out.text(title)?;
-    out.push(
-        "</title><link rel=\"stylesheet\" href=\"/_noxide/style.css\"></head><body><main><h1>",
-    )?;
+    out.push("</title>")?;
+    stylesheet(&mut out, presentation)?;
+    out.push("</head><body><main><h1>")?;
     out.text(title)?;
     out.push("</h1><p role=\"status\">")?;
     out.text(explanation)?;
@@ -857,6 +869,7 @@ pub(crate) fn recovery(
         errors,
         Some(button),
         0,
+        presentation,
     )?;
     out.push("<a href=\"/\">Return home</a></main></body></html>")?;
     Ok(Rendered {
@@ -866,7 +879,7 @@ pub(crate) fn recovery(
     })
 }
 
-pub(crate) fn unavailable(m: &Manifest) -> Result<Rendered> {
+pub(crate) fn unavailable(presentation: &crate::Presentation, m: &Manifest) -> Result<Rendered> {
     render(
         &ResponseIntent::NotFound(Document::new(
             "Record unavailable",
@@ -887,6 +900,7 @@ pub(crate) fn unavailable(m: &Manifest) -> Result<Rendered> {
             ],
         )),
         &RenderContext {
+            presentation,
             manifest: Some(m),
             ..RenderContext::empty()
         },
@@ -936,6 +950,7 @@ mod tests {
             &Fields::new(),
             Some("Retry"),
             0,
+            &crate::presentation::DEFAULT,
         )
         .unwrap();
         out.0
@@ -1104,21 +1119,20 @@ mod tests {
     }
 
     #[test]
-    fn route_grammar_rejects_reserved_and_ambiguous_patterns() {
+    fn route_grammar_rejects_ambiguous_patterns() {
         for path in [
             "/tasks/{one}/{two}",
             "/tasks/{Bad}",
             "/tasks//details",
             "/tasks/",
             "/tasks/{task}suffix",
-            "/_noxide/{task}",
         ] {
             assert!(validate_path(&record_route(path)).is_err(), "{path}");
         }
         for path in ["/login", "/logout"] {
             let mut route = record_route(path);
             route.resource = None;
-            assert!(validate_path(&route).is_err());
+            assert!(validate_path(&route).is_ok());
         }
         let mut collection = record_route("/tasks/{task}");
         collection.resource = None;

@@ -40,7 +40,7 @@ async fn login(app: &Application, user: &str) -> String {
 async fn form(app: &Application, cookie: &str, action: u32) -> (String, String) {
     let html = String::from_utf8(app.view(cookie, 2, Some(42)).await.unwrap().body).unwrap();
     let part = html
-        .split_once(&format!("action=\"/_noxide/action/{action}\""))
+        .split_once(&format!("action=\"/actions/{action}\""))
         .unwrap()
         .1;
     (

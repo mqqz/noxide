@@ -39,7 +39,7 @@ async fn run_browser(component_key: &str, manifest_key: &str, tasks: bool) {
         browser.args(["--manifest", &manifest]);
     }
     if tasks {
-        browser.arg("--tasks");
+        browser.args(["--tasks", "--custom-presentation"]);
     }
     let status = browser
         .args([
