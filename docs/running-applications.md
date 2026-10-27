@@ -127,6 +127,55 @@ runtime role to its dedicated database. Receipts and application writes must
 share one authoritative database and transaction. Remote PostgreSQL connections
 and cross-provider transactions are unsupported.
 
+## Deployment presentation
+
+The HTTP server omits `Date` and `Server` headers. It serves no stylesheet by
+default. Cookie names default to `session` and `login`; host endpoints use
+`/login`, `/logout`, and `/actions/{id}`. The former `noxide_*` cookies and
+`/_noxide/*` endpoints have no compatibility aliases. Existing users must sign
+in again after this upgrade and reopen outstanding forms; old cookies expire on
+their original schedule.
+
+The trusted operator can add a `presentation` object to the runtime configuration:
+
+```json
+{
+  "presentation": {
+    "session_cookie": "account",
+    "login_cookie": "challenge",
+    "login_path": "/signin",
+    "logout_path": "/signout",
+    "action_path": "/submit",
+    "stylesheet_path": "/theme.css",
+    "stylesheet": "body { max-width: 50rem; margin: 2rem auto } pre { white-space: pre-wrap; overflow-wrap: anywhere }"
+  }
+}
+```
+
+Omitted settings retain their defaults. All pages, including sign-in and form
+recovery, use these settings. Cookie security attributes remain host-controlled.
+Names must be distinct ASCII letters, digits, underscores, or hyphens, with at
+most 64 bytes. Endpoint paths must be distinct local paths without escapes,
+queries, or fragments; paths that overlap application routes are rejected before
+activation. Action path segments use the application route identifier grammar:
+a lowercase letter followed by lowercase letters, digits, or underscores, up to
+32 bytes per segment.
+
+CSS is deployment-owned data, never guest output. The `stylesheet` string accepts
+literal selectors and declarations, with a 64 KiB limit; the CLI's total runtime
+configuration limit is 16 KiB. Strings, escapes, comments, functions, at-rules,
+and nested rules are rejected. This subset permits ordinary layout and text
+styling without resource-loading syntax. Set `stylesheet` to `null` to omit both
+the link and the asset. The content security policy continues to forbid remote
+styles and other resources.
+
+Choose presentation separately for services that should not share an appearance.
+Reusing this example verbatim creates another shared marker. These settings
+reduce explicit framework identifiers; common markup, authentication flows,
+token formats, response timing, and infrastructure still permit fingerprinting.
+They do not establish unlinkability. Check the public endpoint too: a reverse
+proxy can reintroduce its own `Date` or `Server` headers.
+
 ## Provision accounts and serve
 
 Passwords contain 12–256 UTF-8 bytes. Provisioning is a trusted operator command;

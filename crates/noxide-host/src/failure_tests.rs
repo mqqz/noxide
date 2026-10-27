@@ -616,7 +616,7 @@ async fn record_mutation_failures(db: Database) {
             let page =
                 String::from_utf8(app.view(&session, 2, Some(42)).await.unwrap().body).unwrap();
             let form = page
-                .split_once(&format!("action=\"/_noxide/action/{action}\""))
+                .split_once(&format!("action=\"/actions/{action}\""))
                 .unwrap()
                 .1;
             let submission = fixture::hidden(form, "_submission");

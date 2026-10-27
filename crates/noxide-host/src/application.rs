@@ -56,6 +56,7 @@ impl std::fmt::Display for RequestError {
 impl std::error::Error for RequestError {}
 
 pub struct Application {
+    pub(crate) presentation: crate::Presentation,
     pub(crate) manifest: Arc<Manifest>,
     pub(crate) keys: Arc<HostKeys>,
     database: Database,
@@ -76,6 +77,7 @@ impl Application {
     /// Validate persisted schema compatibility before accepting any traffic.
     /// Data requests repeat this fence inside their transaction.
     pub async fn activate(&self) -> Result<()> {
+        self.presentation.validate(&self.manifest)?;
         let mut tx = self
             .database
             .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
@@ -140,6 +142,7 @@ impl Application {
         let deployment = URL_SAFE_NO_PAD.encode(identity.finalize());
         let runtime = Runtime::compile(component, limits)?;
         Ok(Self {
+            presentation: crate::Presentation::default(),
             manifest: Arc::new(m),
             keys: Arc::new(keys),
             database,
@@ -150,6 +153,13 @@ impl Application {
             permits: Semaphore::new(concurrency),
             login_permits: Arc::new(Semaphore::new(2)),
         })
+    }
+
+    /// Configure trusted HTTP presentation before sharing or activating the application.
+    pub fn with_presentation(mut self, presentation: crate::Presentation) -> Result<Self> {
+        presentation.validate(&self.manifest)?;
+        self.presentation = presentation;
+        Ok(self)
     }
 
     pub async fn login_challenge(&self) -> std::result::Result<LoginChallenge, RequestError> {
@@ -438,6 +448,7 @@ impl Application {
                 .collect()
         };
         render::recovery(
+            &self.presentation,
             &self.manifest,
             action.id,
             &credentials,
@@ -495,6 +506,7 @@ impl Application {
         render::render(
             &intent,
             &RenderContext {
+                presentation: &self.presentation,
                 manifest: Some(&self.manifest),
                 ..RenderContext::empty()
             },
@@ -596,6 +608,7 @@ impl Application {
             let rendered = render::render(
                 &response,
                 &RenderContext {
+                    presentation: &self.presentation,
                     manifest: Some(&self.manifest),
                     forms,
                     logout_csrf: Some(self.keys.csrf(&session.nonce)),
@@ -714,14 +727,14 @@ impl Application {
                     let mut response = render::render(&ResponseIntent::Page(Document::new("Form already used", vec![
                         Instruction::Text("This form already committed different input. Return home to start a new form.".into()),
                         Instruction::Link { destination: RouteRef { route: self.manifest.routes.iter().find(|r| r.path == "/").expect("index route").id, target: None }, text: "Return home".into() },
-                    ])), &RenderContext { manifest: Some(&self.manifest), ..RenderContext::empty() })?;
+                    ])), &RenderContext { presentation: &self.presentation, manifest: Some(&self.manifest), ..RenderContext::empty() })?;
                     response.status = 409; response
                 };
                 tx.commit().await?;
                 return Ok(response);
             }
             if let Some(target) = target {
-                let Some(stored) = self.current_target(&mut tx, a, &target, &principal).await? else { return render::unavailable(&self.manifest); };
+                let Some(stored) = self.current_target(&mut tx, a, &target, &principal).await? else { return render::unavailable(&self.presentation, &self.manifest); };
                 if stored.revision != target.revision && !unknown {
                     return self.conflict(a, &session, now, target, &stored, input);
                 }
@@ -730,7 +743,7 @@ impl Application {
                 ensure!(repository::allowed(&op.policy, &principal, &principal.id, &principal.tenant), "policy denied");
             }
             let credentials = FormCredentials { csrf: csrf.into(), submission: submission.into(), values: Fields::new() };
-            let rendered = render::recovery(&self.manifest, action, &credentials, input, render::Recovery::Retry { unknown })?;
+            let rendered = render::recovery(&self.presentation, &self.manifest, action, &credentials, input, render::Recovery::Retry { unknown })?;
             tx.commit().await?;
             Ok(rendered)
         }).await?
@@ -788,7 +801,7 @@ impl Application {
         }
         let record = if let Some(target) = &target {
             let Some(stored) = self.current_target(&mut tx, a, target, &principal).await? else {
-                let response = render::unavailable(&self.manifest)?;
+                let response = render::unavailable(&self.presentation, &self.manifest)?;
                 tx.rollback().await?;
                 return Ok((None, response));
             };
@@ -859,6 +872,7 @@ impl Application {
         } = &outcome
         {
             let response = render::recovery(
+                &self.presentation,
                 &self.manifest,
                 action,
                 &FormCredentials {
@@ -882,6 +896,7 @@ impl Application {
         let response = render::render(
             &outcome,
             &RenderContext {
+                presentation: &self.presentation,
                 manifest: Some(&self.manifest),
                 ..RenderContext::empty()
             },

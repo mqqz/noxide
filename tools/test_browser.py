@@ -59,6 +59,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, help="generated application manifest")
     parser.add_argument("--tasks", action="store_true", help="exercise the typed task-board example")
+    parser.add_argument("--custom-presentation", action="store_true", help="exercise deployment-specific cookies, endpoints, and CSS")
     args = parser.parse_args()
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
     binary = ROOT / "target/debug/noxide"
@@ -75,6 +76,16 @@ def main():
               "keys": "host-keys.json", "component": str(args.component.resolve()),
               "manifest": str(manifest), "approved_contract": approved,
               "origin": origin, "listen": {"tcp": f"127.0.0.1:{backend_port}"}}
+    presentation = {"session_cookie": "account", "login_cookie": "challenge",
+                    "login_path": "/signin", "logout_path": "/signout",
+                    "action_path": "/submit", "stylesheet_path": "/theme.css",
+                    "stylesheet": "pre { white-space: pre-wrap; overflow-wrap: anywhere }"}
+    if args.custom_presentation:
+        config["presentation"] = presentation
+    session_name = presentation["session_cookie"] if args.custom_presentation else "session"
+    login_path = presentation["login_path"] if args.custom_presentation else "/login"
+    logout_path = presentation["logout_path"] if args.custom_presentation else "/logout"
+    action_path = presentation["action_path"] if args.custom_presentation else "/actions"
     configuration = args.output / "runtime.json"
     configuration.write_text(json.dumps(config))
     subprocess.run([binary, "init", configuration], check=True)
@@ -116,7 +127,9 @@ def main():
                 requests.append({"method": self.command, "path": path, "origin": self.headers.get("Origin"), "status": response.status})
                 payload = response.read(262145)
                 assert len(payload) <= 262144
-                self.send_response(response.status)
+                assert response.getheader("Date") is None
+                assert response.getheader("Server") is None
+                self.send_response_only(response.status)
                 for key, value in response.getheaders():
                     if key.lower() not in ("connection", "transfer-encoding", "content-length"):
                         self.send_header(key, value)
@@ -175,7 +188,7 @@ def main():
             webdriver("/url", "POST", {"url": origin + path})
 
         def login(user, password):
-            visit("/login")
+            visit(login_path)
             text('[name="username"]', user)
             text('[name="password"]', password)
             click("main button")
@@ -197,7 +210,7 @@ def main():
             assert webdriver("/element/" + element('[name="completed"]') + "/property/checked") is True
             assert webdriver("/element/" + element('[name="details"]') + "/property/value") == '\nReview both database providers.'
             initial_location = urllib.parse.urlsplit(webdriver("/url")).path
-            session_cookie = next(c for c in webdriver("/cookie") if c["name"] == "noxide_session")
+            session_cookie = next(c for c in webdriver("/cookie") if c["name"] == session_name)
             canonical_retry = urllib.parse.urlencode({
                 "_csrf": initial_csrf, "_submission": initial_token,
                 "title": "Prepare release <script>",
@@ -205,15 +218,15 @@ def main():
                 "estimate": "+02", "priority": "urgent", "completed": "on",
             }).encode()
             connection = http.client.HTTPConnection("127.0.0.1", backend_port, timeout=5)
-            connection.request("POST", f"/_noxide/action/{create_id}", canonical_retry,
+            connection.request("POST", f"{action_path}/{create_id}", canonical_retry,
                                {"Host": authority, "Origin": origin,
                                 "Content-Type": "application/x-www-form-urlencoded",
-                                "Cookie": "noxide_session=" + session_cookie["value"]})
+                                "Cookie": session_name + "=" + session_cookie["value"]})
             response = connection.getresponse()
             assert response.status == 303 and response.getheader("Location") == initial_location
             response.read()
             connection.close()
-            edit = f'form[action="/_noxide/action/{edit_id}"]'
+            edit = f'form[action="{action_path}/{edit_id}"]'
             replace(edit + ' [name="estimate"]', 'not a number')
             click(edit + ' button')
             assert 'aria-invalid="true"' in webdriver("/source")
@@ -227,7 +240,7 @@ def main():
             assert webdriver("/element/" + element('[name="estimate"]') + "/property/value") == '3'
             assert webdriver("/element/" + element('[name="details"]') + "/property/value") == ''
             assert webdriver("/element/" + element('[name="completed"]') + "/property/checked") is False
-            click(f'form[action="/_noxide/action/{delete_id}"] button')
+            click(f'form[action="{action_path}/{delete_id}"] button')
             assert "No tasks yet" in webdriver("/source")
             (args.output / "requests.json").write_text(json.dumps(requests, indent=2))
             print(json.dumps({"flow":"typed task controls, layout recovery, optional absence, checkbox update, deletion passed"}))
@@ -244,16 +257,16 @@ def main():
         assert not webdriver("/elements", "POST", {"using": "css selector", "value": "script,img,iframe"})
         location = webdriver("/url")
         cookies = webdriver("/cookie")
-        session_cookie = next(c for c in cookies if c["name"] == "noxide_session")
+        session_cookie = next(c for c in cookies if c["name"] == session_name)
         assert session_cookie["httpOnly"] and session_cookie["sameSite"] == "Strict"
         assert not session_cookie["secure"]  # Both tested origins use HTTP.
         saved = urllib.parse.urlencode({"_csrf": csrf, "_submission": submission, "body": note}).encode()
 
         def raw_post(body, action=create_id):
             connection = http.client.HTTPConnection("127.0.0.1", backend_port, timeout=5)
-            connection.request("POST", f"/_noxide/action/{action}", body,
+            connection.request("POST", f"{action_path}/{action}", body,
                                {"Host": authority, "Origin": origin, "Content-Type": "application/x-www-form-urlencoded",
-                                "Cookie": "noxide_session=" + session_cookie["value"]})
+                                "Cookie": session_name + "=" + session_cookie["value"]})
             response = connection.getresponse()
             result = (response.status, response.getheader("Location"), response.read().decode())
             assert response.getheader("Cache-Control") == "no-store"
@@ -283,20 +296,20 @@ def main():
         assert webdriver("/element/" + element('[name="body"]') + "/property/value") == '\n '
         assert 'aria-invalid="true"' in webdriver("/source")
         visit("/")
-        click('nav form[action="/logout"] button')
+        click(f'nav form[action="{logout_path}"] button')
         login("bob", "Bob private test password")
         assert "No notes yet" in webdriver("/source")
         visit(urllib.parse.urlsplit(location).path)
         assert "Alice only" not in webdriver("/source")
         assert "This page is not available." in webdriver("/source")
 
-        click('nav form[action="/logout"] button')
+        click(f'nav form[action="{logout_path}"] button')
         login("alice", "Alice private test password")
-        session_cookie = next(c for c in webdriver("/cookie") if c["name"] == "noxide_session")
+        session_cookie = next(c for c in webdriver("/cookie") if c["name"] == session_name)
         note_path = urllib.parse.urlsplit(location).path
         visit(note_path)
-        edit = f'form[action="/_noxide/action/{edit_id}"]'
-        delete = f'form[action="/_noxide/action/{delete_id}"]'
+        edit = f'form[action="{action_path}/{edit_id}"]'
+        delete = f'form[action="{action_path}/{delete_id}"]'
         original_edit = attribute(edit + ' [name="_submission"]', "value")
         original_delete = attribute(delete + ' [name="_submission"]', "value")
         csrf = attribute(edit + ' [name="_csrf"]', "value")
@@ -331,10 +344,10 @@ def main():
         assert "Delete current version" in conflict
         delete_token = attribute(delete + ' [name="_submission"]', "value")
         saved_delete = urllib.parse.urlencode({"_csrf": csrf, "_submission": delete_token}).encode()
-        before = sum(r["method"] == "POST" and r["path"] == f"/_noxide/action/{delete_id}" for r in requests)
+        before = sum(r["method"] == "POST" and r["path"] == f"{action_path}/{delete_id}" for r in requests)
         click(delete + " button")
         assert "No notes yet" in webdriver("/source")
-        after = sum(r["method"] == "POST" and r["path"] == f"/_noxide/action/{delete_id}" for r in requests)
+        after = sum(r["method"] == "POST" and r["path"] == f"{action_path}/{delete_id}" for r in requests)
         assert after == before + 1, "deletion must need exactly one POST"
         assert raw_post(saved_delete, action=delete_id)[:2] == (303, "/")
         assert raw_post(stale_delete, action=delete_id)[0] == 404

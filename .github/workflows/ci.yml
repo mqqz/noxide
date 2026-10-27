@@ -153,7 +153,7 @@ jobs:
           python3 tools/test_browser.py \
             --component "$RUNNER_TEMP/noxide-ci/task-api/task_board.component.wasm" \
             --manifest "$RUNNER_TEMP/noxide-ci/task-api/manifest.json" \
-            --tasks --geckodriver "$NOXIDE_GECKODRIVER" \
+            --tasks --custom-presentation --geckodriver "$NOXIDE_GECKODRIVER" \
             --output "$RUNNER_TEMP/noxide-ci/task-browser"
       - name: Test NoJS browser flow with SQLite
         run: |

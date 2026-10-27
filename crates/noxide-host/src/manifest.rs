@@ -718,6 +718,7 @@ mod tests {
         reserved.id = 3;
         reserved.path = "/login".into();
         manifest.routes.push(reserved);
-        assert!(validate(&manifest).is_err());
+        validate(&manifest).unwrap();
+        assert!(crate::Presentation::default().validate(&manifest).is_err());
     }
 }
