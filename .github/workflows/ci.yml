@@ -58,7 +58,7 @@ jobs:
       - name: Check formatting
         run: |
           cargo fmt --all --check
-          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs
+          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs
       - name: Lint all framework targets
         run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
       - name: Test SQLite and PostgreSQL
@@ -131,15 +131,35 @@ jobs:
             --kernel "$NOXIDE_CI_KERNEL" \
             --toolchain "$(rustc --print sysroot)" \
             --cargo-home "${CARGO_HOME:-$HOME/.cargo}" \
+            --metadata \
             --output "$RUNNER_TEMP/noxide-ci/sdk"
           target/debug/noxide component \
             "$RUNNER_TEMP/noxide-ci/sdk/private_notes.wasm" \
             "$RUNNER_TEMP/noxide-ci/sdk/private_notes.component.wasm"
           echo "NOXIDE_TEST_COMPONENT=$RUNNER_TEMP/noxide-ci/sdk/private_notes.component.wasm" >> "$GITHUB_ENV"
+          echo "NOXIDE_TEST_MANIFEST=$RUNNER_TEMP/noxide-ci/sdk/manifest.json" >> "$GITHUB_ENV"
+      - name: Test typed SDK and compile failures inside a VM
+        run: |
+          python3 tools/test_sdk_api.py \
+            --kernel "$NOXIDE_CI_KERNEL" \
+            --toolchain "$(rustc --print sysroot)" \
+            --cargo-home "${CARGO_HOME:-$HOME/.cargo}" \
+            --output "$RUNNER_TEMP/noxide-ci/task-api"
+          target/debug/noxide component \
+            "$RUNNER_TEMP/noxide-ci/task-api/task_board.wasm" \
+            "$RUNNER_TEMP/noxide-ci/task-api/task_board.component.wasm"
+          echo "NOXIDE_TASK_COMPONENT=$RUNNER_TEMP/noxide-ci/task-api/task_board.component.wasm" >> "$GITHUB_ENV"
+          echo "NOXIDE_TASK_MANIFEST=$RUNNER_TEMP/noxide-ci/task-api/manifest.json" >> "$GITHUB_ENV"
+          python3 tools/test_browser.py \
+            --component "$RUNNER_TEMP/noxide-ci/task-api/task_board.component.wasm" \
+            --manifest "$RUNNER_TEMP/noxide-ci/task-api/manifest.json" \
+            --tasks --geckodriver "$NOXIDE_GECKODRIVER" \
+            --output "$RUNNER_TEMP/noxide-ci/task-browser"
       - name: Test NoJS browser flow with SQLite
         run: |
           python3 tools/test_browser.py \
             --component "$NOXIDE_TEST_COMPONENT" \
+            --manifest "$NOXIDE_TEST_MANIFEST" \
             --geckodriver "$NOXIDE_GECKODRIVER" \
             --output "$RUNNER_TEMP/noxide-ci/browser-sqlite"
       - name: Test NoJS browser flow with PostgreSQL
@@ -147,7 +167,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/noxide-ci/postgres"
           TMPDIR="$RUNNER_TEMP/noxide-ci/postgres" \
             cargo test -p noxide-host --test browser --locked --offline -- \
-            --ignored --exact postgres_nojs_browser_flow --nocapture
+            --ignored --nocapture
       - name: Upload build and browser diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
