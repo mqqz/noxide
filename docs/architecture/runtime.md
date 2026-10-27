@@ -442,8 +442,9 @@ native artifacts can execute arbitrary code.
 ## Selected implementation and verification
 
 The workspace separates `noxide` (guest SDK and packaged WIT), `noxide-protocol` (semantic types),
-`noxide-host` (trusted runtime), and `noxide-cli` (operator tools). Template macros
-remain future work. The guest API does not expose transport/provider dependencies.
+`noxide-host` (trusted runtime), and `noxide-cli` (operator tools). The SDK provides
+typed declarations, reusable layouts, and templates that emit constrained
+Document IR. The guest API does not expose transport/provider dependencies.
 
 The tested configuration uses Rust 1.98.0, Wasmtime 48.0.2 with Cranelift and its
 component/async runtime, wit-bindgen 0.46.0, wit-component 0.254.0 for wrapping,
