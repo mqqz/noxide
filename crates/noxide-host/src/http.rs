@@ -253,6 +253,10 @@ fn capability_path(path: &str) -> Option<(u32, u64)> {
         .then_some((r, n))
 }
 
+fn registration_failed() -> Response {
+    (StatusCode::UNPROCESSABLE_ENTITY, [(header::CONTENT_TYPE,"text/html; charset=utf-8")], "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Registration failed</title></head><body><main><h1>Registration failed</h1><p>Registration failed. Return to registration and try again.</p><a href=\"/register\">Return to registration</a></main></body></html>").into_response()
+}
+
 async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Response {
     use crate::runtime::limiter::{AdmissionContext, AdmissionIdentity, RequestClass};
     let app = gateway.app.clone();
@@ -289,12 +293,13 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
     {
         return finish(busy());
     }
-    let public = app
-        .manifest
-        .routes
-        .iter()
-        .find(|r| crate::render::match_path(r, path).is_some())
-        .is_some_and(|r| r.access == noxide_protocol::Access::Public);
+    let public = (path == "/register" && app.registration == crate::Registration::Closed)
+        || app
+            .manifest
+            .routes
+            .iter()
+            .find(|r| crate::render::match_path(r, path).is_some())
+            .is_some_and(|r| r.access == noxide_protocol::Access::Public);
     if !public
         && !matches!(class, RequestClass::PasswordHash)
         && let Ok(cookie) = cookie(request.headers(), &app.presentation.session_cookie)
@@ -352,7 +357,38 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
         },
     };
     let path = request.uri().path().to_owned();
+    if path == "/register" && gateway.app.registration == crate::Registration::Closed {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if request.method() == axum::http::Method::GET {
+        if path == "/register" {
+            return match gateway.app.login_challenge().await {
+                Err(e) => error(e, &presentation.login_path),
+                Ok(challenge) => {
+                    let invite = if gateway.app.registration == crate::Registration::Invite {
+                        "<label>Invite code<input type=\"password\" name=\"invite\" autocomplete=\"off\" maxlength=\"43\" required></label>"
+                    } else {
+                        ""
+                    };
+                    let html = format!(
+                        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Create account</title></head><body><main><h1>Create account</h1><form method=\"post\" action=\"/register\"><input type=\"hidden\" name=\"_csrf\" value=\"{}\"><label>Username<input name=\"username\" autocomplete=\"username\" maxlength=\"32\" required></label><label>Password<input type=\"password\" name=\"password\" autocomplete=\"new-password\" maxlength=\"256\" required></label>{invite}<button>Create account</button></form></main></body></html>",
+                        challenge.csrf
+                    );
+                    let mut response = ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
+                        .into_response();
+                    response.headers_mut().insert(
+                        header::SET_COOKIE,
+                        set_cookie(
+                            &presentation.login_cookie,
+                            &challenge.cookie,
+                            gateway.origin.secure,
+                            900,
+                        ),
+                    );
+                    response
+                }
+            };
+        }
         if path == presentation.stylesheet_path
             && let Some(css) = &presentation.stylesheet
         {
@@ -495,11 +531,54 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     };
     let mut form = match decode_form(&bytes) {
         Ok(form) => form,
+        Err(_) if path == "/register" => return registration_failed(),
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
     let Some(csrf) = form.remove("_csrf") else {
-        return StatusCode::FORBIDDEN.into_response();
+        return if path == "/register" {
+            registration_failed()
+        } else {
+            StatusCode::FORBIDDEN.into_response()
+        };
     };
+    if path == "/register" {
+        let (Some(username), Some(password)) = (form.remove("username"), form.remove("password"))
+        else {
+            return registration_failed();
+        };
+        let invite = if gateway.app.registration == crate::Registration::Invite {
+            form.remove("invite")
+        } else {
+            None
+        };
+        if !form.is_empty()
+            || (gateway.app.registration == crate::Registration::Invite && invite.is_none())
+        {
+            return registration_failed();
+        }
+        return match gateway
+            .app
+            .register(
+                &login.unwrap_or_default(),
+                &csrf,
+                &username,
+                &password,
+                invite.as_deref(),
+            )
+            .await
+        {
+            Ok(()) => {
+                let mut response = redirect(&presentation.login_path);
+                response.headers_mut().insert(
+                    header::SET_COOKIE,
+                    set_cookie(&presentation.login_cookie, "", gateway.origin.secure, 0),
+                );
+                response
+            }
+            Err(RequestError::Busy) => busy(),
+            Err(_) => registration_failed(),
+        };
+    }
     if path == presentation.login_path {
         let (Some(username), Some(password)) = (form.remove("username"), form.remove("password"))
         else {

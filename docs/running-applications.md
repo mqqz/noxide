@@ -416,8 +416,9 @@ directories. It verifies that WIT binding generation needs no monorepo paths.
 
 ### Edit keys and fresh capability storage
 
-Anonymous submissions use storage version 4. Initialize fresh storage for this
-layout; older storage is rejected and no storage converter is provided.
+The nullable-owner capability layout was introduced in storage version 4. The
+current runtime requires fresh version-5 storage; older storage is rejected and
+no storage converter is provided.
 `noxide keygen` and `noxide init` create one signing edit key. A manifest with
 public creates or capability actions requires a signing edit key at activation.
 
@@ -435,3 +436,33 @@ also prevents its receipts from recovering an edit secret.
 
 The fixed `noxide_anon` cookie name is reserved. Configured session and login
 cookie names must differ from it.
+
+## Registration
+
+Registration defaults to `"registration": "closed"`; `/register` returns 404.
+Set `"registration": "invite"` to require an operator-issued invite, or
+`"registration": "open"` to allow registration without one. Both enabled modes
+use fixed host-owned pages and the same bounded password-hashing admission as
+login. Registration never signs the visitor in automatically: success redirects
+to the configured login page.
+
+Registration uses fresh storage version 5, including the invite table. Initialize
+fresh storage; version-4 storage is rejected and no converter is provided.
+
+In invite mode, mint a single-use code with the trusted CLI:
+
+```sh
+noxide invite config.json
+noxide invite config.json --expires-days 2
+```
+
+The default expiry is seven days. The CLI prints the code once and stores only
+its SHA-256 hash with the operator as issuer. Give that code to the intended
+visitor outside application URLs. Invite redemption and account creation commit
+in one transaction. Expired, reused and invalid codes produce the same generic
+failure page as other registration failures. There is no inviter role.
+
+New accounts use the existing identifier rules and a password of 12–256 bytes.
+They start with an empty tenant, epoch 1 and no roles. All responses retain
+`Cache-Control: no-store`; the registration form includes a browser-bound
+challenge and CSRF value.
