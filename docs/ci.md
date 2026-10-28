@@ -93,8 +93,8 @@ The application job also builds task-board and seven compile-fail SDK fixtures
 inside a VM. It checks typed routes, field projections, control compatibility,
 and constrained templates. Both examples exercise NoJS browser flows; generated
 manifests travel with their components. PostgreSQL runs the same typed form flow
-as SQLite. Framework tests cover atomic application migrations and explicit
-legacy schema import on both providers.
+as SQLite. Framework tests cover atomic application schema changes on both
+providers.
 
 Native form-layout metadata collection runs the same host-file, socket, network,
 UID, and capability probes as build scripts. Two fresh VMs verify containment

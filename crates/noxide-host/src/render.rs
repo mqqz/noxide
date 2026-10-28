@@ -160,13 +160,9 @@ fn path_segments(route: &Route) -> Result<Vec<PathSegment<'_>>> {
         }
     }
     ensure!(
-        targets <= 1 && (route.resource.is_some() || targets == 0),
+        targets == usize::from(route.resource.is_some()),
         "route parameter mismatch"
     );
-    if route.resource.is_some() && targets == 0 {
-        // Keep admitted pre-template record paths usable during the upgrade.
-        segments.push(PathSegment::Target);
-    }
     ensure!(segments.len() <= 8, "route segment limit");
     Ok(segments)
 }
@@ -1112,15 +1108,16 @@ mod tests {
             )
             .is_err()
         );
-        let legacy = record_route("/tasks");
-        assert_eq!(match_path(&legacy, "/tasks/81"), Some(Some(81)));
-        assert!(paths_overlap(&legacy, &record_route("/tasks/{task}")));
-        assert!(!paths_overlap(&legacy, &record_route("/notes/{note}")));
+        assert!(!paths_overlap(
+            &record_route("/tasks/{task}"),
+            &record_route("/notes/{note}")
+        ));
     }
 
     #[test]
     fn route_grammar_rejects_ambiguous_patterns() {
         for path in [
+            "/tasks",
             "/tasks/{one}/{two}",
             "/tasks/{Bad}",
             "/tasks//details",

@@ -131,12 +131,9 @@ and cross-provider transactions are unsupported.
 
 The HTTP server omits `Date` and `Server` headers. It serves no stylesheet by
 default. Cookie names default to `session` and `login`; host endpoints use
-`/login`, `/logout`, and `/actions/{id}`. The former `noxide_*` cookies and
-`/_noxide/*` endpoints have no compatibility aliases. Existing users must sign
-in again after this upgrade and reopen outstanding forms; old cookies expire on
-their original schedule. Tokens now use authenticated encryption so browser
-values hide their issue/expiry timestamps and authority metadata. Readable tokens
-from older versions are rejected. Each service should have its own host key file.
+`/login`, `/logout`, and `/actions/{id}`. Tokens use authenticated encryption so
+browser values hide their issue/expiry timestamps and authority metadata. Each
+service should have its own host key file.
 
 The trusted operator can add a `presentation` object to the runtime configuration:
 
@@ -232,7 +229,7 @@ trusted TLS terminator and makes cookies Secure; HTTP onion/local origins use
 host-only HttpOnly, SameSite=Strict cookies without Secure. Application code
 cannot alter cookie or security-header policy.
 
-## Failures, upgrades, and recovery
+## Failures and recovery
 
 Every mutation carries a host-authenticated token with a 15-minute expiry. Repeat
 the POST with the same canonical input to recover its outcome; changing the input
@@ -258,26 +255,11 @@ not retain a Store or database transaction. Shutdown stops accepting connections
 allows three seconds for active connections, then cancels them. A disconnected
 client may still have a committed result and must use the same submission token.
 
-Existing version-1 runtime databases require an offline storage migration. Stop
-all serving processes and other writers, make a backup, then run the new CLI:
-
-```sh
-target/debug/noxide migrate /tmp/noxide-notes-run/runtime.json
-```
-
-The command preserves existing records, assigns each a fresh incarnation and
-revision 1, and atomically replaces the storage layout. It retires old deployment
-forms. Rebuild the application with the version-3 SDK, review its new declarations,
-update `approved_contract`, then restart. `init` and serving refuse unmigrated
-storage; repeating a successful migration is safe. The migration is bounded to
-five minutes and requires room for a transactional copy of the records.
-
-This command only upgrades framework storage. Activation also checks the persisted
-application resource schema. Runtime storage version 3 adds a stable resource
-catalog and migration history. After upgrading v2 storage, explicitly import its
-original approved manifest with `noxide schema import CONFIG LEGACY_MANIFEST`.
-See [schema evolution](application-api.md#schema-evolution) for declarative
+Initialization creates the current framework storage layout. Serving rejects
+unsupported or incomplete layouts. Application schema changes remain explicit;
+see [schema evolution](application-api.md#schema-evolution) for declarative
 application migrations on both databases.
+
 Changing the component bytes or approved declaration digest creates a new
 deployment identity, retires the previous generation, and rejects old forms,
 including receipt requests. Code rollback creates another generation, so it
