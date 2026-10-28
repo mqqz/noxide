@@ -127,6 +127,15 @@ impl Application {
         Ok(())
     }
 
+    async fn observe_clock_write(&self, tx: &mut Transaction, now: i64) -> Result<i64> {
+        // Check raw wall time against both watermarks before substituting the
+        // effective time. Persist read-only advances with the write itself.
+        let effective = security::observe_clock_read(tx, now, &self.clock).await?;
+        let effective = security::observe_clock(tx, effective).await?;
+        self.clock.fetch_max(effective, Ordering::Relaxed);
+        Ok(effective)
+    }
+
     pub(crate) async fn checkpoint_clock(&self) -> Result<()> {
         let m = self.clock.load(Ordering::Relaxed);
         let deadline = Instant::now() + security::CLOCK_CHECKPOINT_BEGIN_DEADLINE;
@@ -255,10 +264,10 @@ impl Application {
                 .await
                 .map_err(|_| RequestError::Rejected)?;
             let now = security::now().map_err(|_| RequestError::Rejected)?;
-            let now = security::observe_clock(&mut tx, now)
+            let now = self
+                .observe_clock_write(&mut tx, now)
                 .await
                 .map_err(RequestError::database)?;
-            self.clock.fetch_max(now, Ordering::Relaxed);
             let token = self
                 .keys
                 .verify(challenge, now)
@@ -290,10 +299,10 @@ impl Application {
             .await
             .map_err(|_| RequestError::Rejected)?;
         let now = security::now().map_err(|_| RequestError::Rejected)?;
-        let now = security::observe_clock(&mut tx, now)
+        let now = self
+            .observe_clock_write(&mut tx, now)
             .await
             .map_err(RequestError::database)?;
-        self.clock.fetch_max(now, Ordering::Relaxed);
         let (session, _) = auth::authenticate(&mut tx, &self.keys, cookie, now)
             .await
             .map_err(|_| RequestError::Authentication)?;
@@ -762,8 +771,7 @@ impl Application {
             let mut tx = self.database.begin(deadline.into_std()).await?;
             self.admission(&mut tx, false).await?;
             let now = security::now()?;
-            let now = security::observe_clock(&mut tx, now).await?;
-            self.clock.fetch_max(now, Ordering::Relaxed);
+            let now = self.observe_clock_write(&mut tx, now).await?;
             let token = self.keys.verify(submission, now)?;
             let target = self.submission_target(&token, a)?;
 
@@ -821,8 +829,7 @@ impl Application {
         let mut tx = self.database.begin(deadline.into_std()).await?;
         self.admission(&mut tx, false).await?;
         let now = security::now()?;
-        let now = security::observe_clock(&mut tx, now).await?;
-        self.clock.fetch_max(now, Ordering::Relaxed);
+        let now = self.observe_clock_write(&mut tx, now).await?;
         let token = self
             .keys
             .verify(submission, now)
@@ -966,5 +973,223 @@ impl Application {
             .await?;
         ensure!(Instant::now() < deadline, "request deadline");
         Ok((Some(effects.tx), response))
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    use crate::test_support as fixture;
+    use std::time::Duration;
+
+    async fn read_advance(app: &Application, now: i64) {
+        let mut tx = app
+            .database
+            .begin_read(std::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        security::observe_clock_read(&mut tx, now, &app.clock)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    async fn stored_clock(db: &Database) -> i64 {
+        let mut tx = db
+            .begin_read(std::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        let rows = tx
+            .fetch::<1>(
+                "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
+                &[],
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        rows[0][0].parse().unwrap()
+    }
+
+    async fn write_clock_uses_read_watermark(db: Database) {
+        db.initialize().await.unwrap();
+        db.create_account("alice", "clock regression password", "")
+            .await
+            .unwrap();
+        let m = fixture::manifest();
+        let app = Application::new(
+            &fixture::component(None),
+            &serde_json::to_vec(&m).unwrap(),
+            manifest::digest(&m).unwrap(),
+            db.clone(),
+            HostKeys::generate().unwrap(),
+            Limits::default(),
+        )
+        .unwrap();
+        app.activate().await.unwrap();
+        let wall = security::now().unwrap();
+        let high = wall + 30;
+        read_advance(&app, high).await;
+        assert!(stored_clock(&db).await < high);
+        let challenge = app.login_challenge().await.unwrap();
+        assert_eq!(
+            app.keys.verify(&challenge.cookie, high).unwrap().issued,
+            high
+        );
+        let (expired_challenge, signed) =
+            app.keys.issue(TokenKind::Login, "", wall - 60, 75).unwrap();
+        assert!(app.keys.verify(&signed, wall).is_ok());
+        assert!(matches!(
+            app.login(
+                &signed,
+                &app.keys.csrf(&expired_challenge.nonce),
+                "alice",
+                "clock regression password"
+            )
+            .await,
+            Err(RequestError::InvalidRequest)
+        ));
+        assert!(stored_clock(&db).await < high);
+
+        let session = app
+            .login(
+                &challenge.cookie,
+                &challenge.csrf,
+                "alice",
+                "clock regression password",
+            )
+            .await
+            .unwrap();
+        assert_eq!(app.keys.verify(&session, high).unwrap().issued, high);
+        assert_eq!(stored_clock(&db).await, high);
+
+        read_advance(&app, high + 1).await;
+        let page = app.view(&session, 1, None).await.unwrap();
+        let html = std::str::from_utf8(&page.body).unwrap();
+        let submission = fixture::hidden(html, "_submission");
+        let csrf = fixture::hidden(html, "_csrf");
+        let token = app.keys.verify(&submission, high + 1).unwrap();
+        let (_, expired) = app
+            .keys
+            .issue(token.kind.clone(), &token.subject, wall - 60, 75)
+            .unwrap();
+        assert!(app.keys.verify(&expired, wall).is_ok());
+        let input = Fields::from([("body".into(), "read watermark".into())]);
+        assert!(
+            app.submit(&session, 1, &expired, &csrf, input.clone())
+                .await
+                .is_err()
+        );
+        assert!(
+            app.recover_form(&session, 1, &expired, &csrf, &input, true)
+                .await
+                .is_err()
+        );
+        app.submit(&session, 1, &submission, &csrf, input.clone())
+            .await
+            .unwrap();
+        assert_eq!(stored_clock(&db).await, high + 1);
+        read_advance(&app, high + 2).await;
+        app.recover_form(&session, 1, &submission, &csrf, &input, true)
+            .await
+            .unwrap();
+        assert_eq!(stored_clock(&db).await, high + 2);
+        read_advance(&app, high + 3).await;
+        app.logout(&session, &csrf).await.unwrap();
+        assert_eq!(stored_clock(&db).await, high + 3);
+
+        // The exact boundary is evaluated against raw wall time, not an
+        // already-substituted effective time, even if durable time lags.
+        let mut tx = db
+            .begin(std::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            app.observe_clock_write(&mut tx, high + 3 - 60)
+                .await
+                .unwrap(),
+            high + 3
+        );
+        assert_eq!(
+            app.observe_clock_write(&mut tx, high + 3 - 61)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "clock moved backwards beyond tolerance; use recover-clock with a fresh host key"
+        );
+        tx.rollback().await.unwrap();
+        let durable = stored_clock(&db).await;
+        read_advance(&app, wall + 120).await;
+        let snapshot = {
+            let mut tx = db
+                .begin_read(std::time::Instant::now() + Duration::from_secs(2))
+                .await
+                .unwrap();
+            let rows = tx.snapshot().await.unwrap();
+            tx.commit().await.unwrap();
+            rows
+        };
+        assert!(matches!(
+            app.login(
+                &challenge.cookie,
+                &challenge.csrf,
+                "alice",
+                "clock regression password"
+            )
+            .await,
+            Err(RequestError::Rejected)
+        ));
+        assert!(matches!(
+            app.logout(&session, &csrf).await,
+            Err(RequestError::Rejected)
+        ));
+        assert!(matches!(
+            app.submit(&session, 1, &submission, &csrf, input.clone())
+                .await,
+            Err(RequestError::Rejected)
+        ));
+        assert!(
+            app.recover_form(&session, 1, &submission, &csrf, &input, true)
+                .await
+                .is_err()
+        );
+        assert_eq!(stored_clock(&db).await, durable);
+        let mut tx = db
+            .begin_read(std::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(tx.snapshot().await.unwrap(), snapshot);
+        tx.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_writes_honor_read_clock_before_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        write_clock_uses_read_watermark(Database::sqlite(temp.path().join("read-clock.db"))).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable cluster"]
+    async fn postgres_writes_honor_read_clock_before_checkpoint() {
+        use sqlx::Connection;
+        let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+        let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+        let name = format!(
+            "nx_read_write_clock_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sqlx::query(&format!("CREATE DATABASE {name}"))
+            .execute(&mut admin)
+            .await
+            .unwrap();
+        let mut case = url::Url::parse(&url).unwrap();
+        case.set_path(&format!("/{name}"));
+        write_clock_uses_read_watermark(Database::postgres(case.as_str()).unwrap()).await;
+        sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+            .execute(&mut admin)
+            .await
+            .unwrap();
     }
 }
