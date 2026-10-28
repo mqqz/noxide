@@ -1121,3 +1121,114 @@ async fn postgres_edit_secrets_survive_bundle_rebinding_and_resource_rename() {
         .await
         .unwrap();
 }
+
+async fn capability_conflict_projection_contract(db: Database) {
+    let app = app(db.clone()).await;
+    let create = app.view_page(None, 1, None, None).await.unwrap();
+    let cookie = create.anonymous_cookie.clone().unwrap();
+    let csrf = fixture::hidden(text(&create), "_csrf");
+    let handover = app
+        .submit(
+            &cookie,
+            1,
+            &token(&create, 1),
+            &csrf,
+            Fields::from([
+                ("body".into(), "initial".into()),
+                ("published".into(), "true".into()),
+            ]),
+        )
+        .await
+        .unwrap();
+    let capability = secret(&handover);
+    let mut tx = db
+        .begin_read(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    let id = tx
+        .fetch::<1>("SELECT CAST(id AS TEXT) FROM nx_records", &[])
+        .await
+        .unwrap()[0][0]
+        .parse()
+        .unwrap();
+    tx.commit().await.unwrap();
+    let stale = app
+        .view_page_anonymous(None, Some(&cookie), 2, Some(id), None)
+        .await
+        .unwrap();
+    let csrf = fixture::hidden(text(&stale), "_csrf");
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    let storage = tx.storage_resource(&app.manifest, 1).await.unwrap();
+    let changed = Fields::from([
+        ("body".into(), "current_public_value".into()),
+        ("published".into(), "true".into()),
+        ("private".into(), "capability_private_server_value".into()),
+    ]);
+    tx.execute(
+        "UPDATE nx_records SET fields=$1,revision=revision+1 WHERE resource=$2 AND id=$3",
+        &[
+            serde_json::to_string(&changed).unwrap().into(),
+            storage.into(),
+            (id as i64).into(),
+        ],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    for (action, input) in [
+        (2, Fields::from([("body".into(), "visitor input".into())])),
+        (3, Fields::new()),
+    ] {
+        let response = app
+            .submit_with_capability(
+                &cookie,
+                action,
+                &token(&stale, action),
+                &csrf,
+                input,
+                Some(&capability),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 409);
+        assert!(!text(&response).contains("capability_private_server_value"));
+        assert!(!text(&response).contains(&capability));
+        assert!(!text(&response).contains("aria-label=\"Current values\""));
+    }
+}
+#[tokio::test]
+async fn sqlite_capability_conflicts_never_disclose_nonprojected_fields() {
+    let temp = tempfile::tempdir().unwrap();
+    capability_conflict_projection_contract(Database::sqlite(
+        temp.path().join("conflict-projection.db"),
+    ))
+    .await;
+}
+#[tokio::test]
+#[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable cluster"]
+async fn postgres_capability_conflicts_never_disclose_nonprojected_fields() {
+    use sqlx::Connection;
+    let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+    let name = format!(
+        "nx_cap_conflict_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let mut case = url::Url::parse(&url).unwrap();
+    case.set_path(&format!("/{name}"));
+    capability_conflict_projection_contract(Database::postgres(case.as_str()).unwrap()).await;
+    sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+}
