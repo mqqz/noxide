@@ -127,6 +127,13 @@ pub fn validate(m: &Manifest) -> Result<()> {
                 op.policy.any == [vec![Predicate::Public]],
                 "public policy must stand alone"
             );
+            if op.kind == OperationKind::Create {
+                ensure!(
+                    op.visibility.is_none() && op.fields.is_none(),
+                    "public create cannot project or filter"
+                );
+                continue;
+            }
             ensure!(
                 matches!(op.kind, OperationKind::List | OperationKind::Read),
                 "public operations must read"
@@ -161,6 +168,15 @@ pub fn validate(m: &Manifest) -> Result<()> {
             ensure!(
                 op.visibility.is_none() && op.fields.is_none(),
                 "private operations cannot declare public visibility or fields"
+            );
+        }
+    }
+    for op in &m.operations {
+        if is_capability(op) {
+            ensure!(
+                op.policy.any == [vec![Predicate::Capability]]
+                    && matches!(op.kind, OperationKind::Update | OperationKind::Delete),
+                "capability policy requires standalone update or delete"
             );
         }
     }
@@ -503,6 +519,17 @@ fn validate_layout(m: &Manifest, action: &Action) -> Result<()> {
         "incomplete form layout"
     );
     Ok(())
+}
+
+pub(crate) fn is_capability(op: &Operation) -> bool {
+    op.policy
+        .any
+        .iter()
+        .flatten()
+        .any(|p| matches!(p, Predicate::Capability))
+}
+pub(crate) fn anonymous_action(op: &Operation) -> bool {
+    (is_public(op) && op.kind == OperationKind::Create) || is_capability(op)
 }
 
 #[cfg(test)]
