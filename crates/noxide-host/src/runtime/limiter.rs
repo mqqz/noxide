@@ -203,6 +203,12 @@ impl<K: Clone + Eq + Hash> Buckets<K> {
     }
     fn charge(&self, key: K, cost: u64, drain: bool, now: Instant) -> bool {
         let mut table = self.table.lock().unwrap_or_else(|e| e.into_inner());
+        // Fees may drain an existing bucket, but only request classification
+        // creates entries. An evicted circuit returns fresh on its next request.
+        if drain && !table.entries.contains_key(&key) {
+            return false;
+        }
+
         if !table.entries.contains_key(&key)
             && table.entries.len() == TABLE_CAPACITY
             && let Some((_, oldest)) = table.lru.pop_first()
@@ -701,6 +707,19 @@ mod circuit_tests {
         let table = limits.principals.table.lock().unwrap();
         assert_eq!(table.entries.len(), TABLE_CAPACITY);
         assert_eq!(table.lru.len(), TABLE_CAPACITY);
+    }
+    #[test]
+    fn failed_session_fee_does_not_recreate_an_evicted_circuit() {
+        let limits = AdmissionLimits::new(25, true);
+        let now = Instant::now();
+        assert!(!limits.circuits.charge(42, 20_000, true, now));
+        assert!(limits.circuits.table.lock().unwrap().entries.is_empty());
+        assert!(limits.circuits.charge(42, 1000, false, now));
+        limits.circuits.charge(42, 20_000, true, now);
+        assert_eq!(
+            limits.circuits.table.lock().unwrap().entries[&42].millitokens,
+            0
+        );
     }
     #[test]
     fn reserve_shares_and_public_only_apps_preserve_total_capacity() {
