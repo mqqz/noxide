@@ -27,8 +27,28 @@ env:
   CARGO_INCREMENTAL: '0'
 
 jobs:
+  checks:
+    name: PR checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust formatter
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt
+      - name: Check formatting
+        run: |
+          cargo fmt --all --check
+          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs
+      - name: Test build input validation
+        run: python3 tools/test_build_inputs.py
+      - name: Lint CI bootstrap
+        run: shellcheck tools/ci/setup-vm.sh
+
   runtime:
     name: Runtime
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     services:
@@ -38,6 +58,8 @@ jobs:
           POSTGRES_USER: noxide
           POSTGRES_PASSWORD: ci-only-password
           POSTGRES_DB: noxide_ci
+          # Concurrent GET tests open more than the default 100 connections.
+          POSTGRES_INITDB_ARGS: --set=max_connections=512
         ports:
           - 5432:5432
         options: >-
@@ -81,6 +103,7 @@ jobs:
 
   application:
     name: Packaged SDK and browser
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
