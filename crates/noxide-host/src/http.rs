@@ -277,21 +277,40 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                 }
             };
         }
-        let session = match cookie(headers, &presentation.session_cookie) {
-            Ok(s) => s,
-            Err(_) => return redirect(&presentation.login_path),
-        };
         let route = gateway.app.manifest.routes.iter().find_map(|route| {
-            crate::render::match_path(route, &path).map(|target| (route.id, target))
+            crate::render::match_path(route, &path).map(|target| (route, target))
         });
         return match route {
             Some((route, target)) => {
-                match gateway.app.view_page(&session, route, target, cursor).await {
+                let session = match route.access {
+                    noxide_protocol::Access::Public => None,
+                    noxide_protocol::Access::Authenticated => {
+                        match cookie(headers, &presentation.session_cookie) {
+                            Ok(session) => Some(session),
+                            Err(_) => return redirect(&presentation.login_path),
+                        }
+                    }
+                    noxide_protocol::Access::PublicOptional => {
+                        cookie(headers, &presentation.session_cookie).ok()
+                    }
+                };
+                match gateway
+                    .app
+                    .view_page(session.as_deref(), route.id, target, cursor)
+                    .await
+                {
                     Ok(r) => rendered(r),
                     Err(e) => error(e, &presentation.login_path),
                 }
             }
-            None => StatusCode::NOT_FOUND.into_response(),
+            None => {
+                // Preserve the existing unknown-path response after route lookup.
+                if cookie(headers, &presentation.session_cookie).is_err() {
+                    redirect(&presentation.login_path)
+                } else {
+                    StatusCode::NOT_FOUND.into_response()
+                }
+            }
         };
     }
     if request.method() != axum::http::Method::POST {

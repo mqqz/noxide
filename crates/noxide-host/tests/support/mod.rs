@@ -19,18 +19,24 @@ pub fn manifest() -> Manifest {
         }],
         operations: vec![
             Operation {
+                visibility: None,
+                fields: None,
                 id: 1,
                 resource: 1,
                 kind: OperationKind::List,
                 policy: owner.clone(),
             },
             Operation {
+                visibility: None,
+                fields: None,
                 id: 2,
                 resource: 1,
                 kind: OperationKind::Read,
                 policy: owner.clone(),
             },
             Operation {
+                visibility: None,
+                fields: None,
                 id: 3,
                 resource: 1,
                 kind: OperationKind::Create,
@@ -39,6 +45,7 @@ pub fn manifest() -> Manifest {
         ],
         routes: vec![
             Route {
+                access: noxide_protocol::Access::Authenticated,
                 id: 1,
                 path: "/".into(),
                 resource: None,
@@ -46,6 +53,7 @@ pub fn manifest() -> Manifest {
                 forms: vec![1],
             },
             Route {
+                access: noxide_protocol::Access::Authenticated,
                 id: 2,
                 path: "/notes/{note}".into(),
                 resource: Some(1),

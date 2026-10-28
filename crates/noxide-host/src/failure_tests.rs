@@ -172,11 +172,11 @@ async fn stored_bounds(db: &Database) {
     let mut effects = Effects {
         tx,
         manifest: Arc::new(m),
-        principal: Principal {
+        principal: Principal::User(crate::auth::User {
             id: "alice".into(),
             tenant: String::new(),
             roles: vec![],
-        },
+        }),
         request: RequestView {
             available_forms: Vec::new(),
             version: VERSION,

@@ -706,6 +706,7 @@ mod tests {
 
 #[derive(Clone)]
 enum PolicyAtom {
+    Public,
     Owner,
     Tenant,
     Role(LitStr, bool),
@@ -714,6 +715,7 @@ enum PolicyAtom {
 fn policy(input: ParseStream<'_>) -> syn::Result<Vec<Vec<PolicyAtom>>> {
     let name: Ident = input.parse()?;
     match name.to_string().as_str() {
+        "public" => Ok(vec![vec![PolicyAtom::Public]]),
         "owner" => Ok(vec![vec![PolicyAtom::Owner]]),
         "same_tenant" => Ok(vec![vec![PolicyAtom::Tenant]]),
         "role" | "tenant_role" => {
@@ -739,6 +741,16 @@ fn policy(input: ParseStream<'_>) -> syn::Result<Vec<Vec<PolicyAtom>>> {
             };
             while !content.is_empty() {
                 let term = policy(&content)?;
+                if term
+                    .iter()
+                    .flatten()
+                    .any(|p| matches!(p, PolicyAtom::Public))
+                {
+                    return Err(syn::Error::new(
+                        name.span(),
+                        "public cannot appear inside any or all",
+                    ));
+                }
                 if conjunction {
                     let mut combined = Vec::new();
                     for left in &rules {
@@ -777,6 +789,7 @@ fn policy(input: ParseStream<'_>) -> syn::Result<Vec<Vec<PolicyAtom>>> {
 fn policy_tokens(rules: &[Vec<PolicyAtom>]) -> Tokens {
     let rules = rules.iter().map(|rule| {
         let predicates = rule.iter().map(|atom| match atom {
+            PolicyAtom::Public => quote!(::noxide::__private::Predicate::Public),
             PolicyAtom::Owner => quote!(::noxide::__private::Predicate::Owner),
             PolicyAtom::Tenant => quote!(::noxide::__private::Predicate::SameTenant),
             PolicyAtom::Role(name, tenant_scoped) => quote!(::noxide::__private::Predicate::Role { name: #name.into(), tenant_scoped: #tenant_scoped }),
@@ -793,6 +806,7 @@ struct OperationDeclaration {
     resource: Type,
     policy: Vec<Vec<PolicyAtom>>,
     fields: Vec<Ident>,
+    visible: Option<(Ident, Expr)>,
     redirect: Option<syn::Path>,
     inspect: Option<Type>,
     inspection_fields: Vec<Ident>,
@@ -813,6 +827,7 @@ impl Parse for OperationDeclaration {
             resource: resource_type,
             policy: Vec::new(),
             fields: Vec::new(),
+            visible: None,
             redirect: None,
             inspect: None,
             inspection_fields: Vec::new(),
@@ -835,6 +850,17 @@ impl Parse for OperationDeclaration {
                 "allow" => {
                     input.parse::<Token![=]>()?;
                     result.policy = policy(input)?;
+                }
+                "visible" => {
+                    let content;
+                    parenthesized!(content in input);
+                    let field = content.parse()?;
+                    content.parse::<Token![=]>()?;
+                    let value = content.parse()?;
+                    if !content.is_empty() {
+                        return Err(content.error("expected one visibility predicate"));
+                    }
+                    result.visible = Some((field, value));
                 }
                 "fields" | "inspect_fields" => {
                     let content;
@@ -914,9 +940,20 @@ fn expand_query(declaration: OperationDeclaration, item: syn::ItemStruct) -> syn
             ));
         }
     };
+    let public = declaration
+        .policy
+        .iter()
+        .flatten()
+        .any(|p| matches!(p, PolicyAtom::Public));
+    if public && (declaration.visible.is_none() || declaration.fields.is_empty()) {
+        return Err(syn::Error::new(
+            item.span(),
+            "public queries require visible(...) and nonempty fields(...)",
+        ));
+    }
     if declaration.redirect.is_some()
         || declaration.inspect.is_some()
-        || !declaration.fields.is_empty()
+        || (!public && (!declaration.fields.is_empty() || declaration.visible.is_some()))
         || !declaration.inspection_fields.is_empty()
         || declaration.version != 1
     {
@@ -933,13 +970,62 @@ fn expand_query(declaration: OperationDeclaration, item: syn::ItemStruct) -> syn
     let name = &item.ident;
     let resource = &declaration.resource;
     let policy = policy_tokens(&declaration.policy);
+    let vis = &item.vis;
+    let output_name = format_ident!("{name}Record");
+    let (projection, output, decode, visibility, fields) = if public {
+        let names = &declaration.fields;
+        let mut identity = "__noxide_record_id".to_owned();
+        while names.iter().any(|name| name == identity.as_str()) {
+            identity.push('_');
+        }
+        let identity = format_ident!("{identity}");
+        let hashes: Vec<_> = names
+            .iter()
+            .map(|name| stable_id(&name.to_string()))
+            .collect();
+        let types: Vec<_> = hashes
+            .iter()
+            .map(|hash| quote!(<#resource as ::noxide::FieldSpec<#hash>>::Value))
+            .collect();
+        let keys: Vec<_> = hashes
+            .iter()
+            .map(|hash| quote!(<#resource as ::noxide::FieldSpec<#hash>>::KEY))
+            .collect();
+        let (field, value) = declaration.visible.as_ref().expect("checked visibility");
+        let hash = stable_id(&field.to_string());
+        (
+            quote! {
+                #vis struct #output_name { #identity: ::noxide::Id<#resource>, #(pub #names: #types),* }
+                impl #output_name { pub fn id(&self) -> ::noxide::Id<#resource> { self.#identity } }
+            },
+            quote!(#output_name),
+            quote!({
+                assert_eq!(record.resource, <#resource as ::noxide::ResourceType>::definition().id, "host resource type");
+                #output_name { #identity: ::noxide::Id::new(record.id), #(#names: <#types as ::noxide::FieldValue>::decode(record.fields.get(#keys).expect("host projected field"))),* }
+            }),
+            quote!(Some(::noxide::__private::Visibility { field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into(), equals: ::noxide::FieldValue::encode(&(#value)) })),
+            quote!(Some(vec![#(#keys.into()),*])),
+        )
+    } else {
+        (
+            Tokens::new(),
+            quote!(#resource),
+            quote!(<#resource as ::noxide::ResourceType>::from_record(record)),
+            quote!(None),
+            quote!(None),
+        )
+    };
     Ok(quote! {
         #item
+        #projection
         impl #query_trait for #name {}
         impl ::noxide::QueryType for #name {
             type Resource = #resource;
+            type Output = #output;
+            fn from_record(record: ::noxide::__private::Record) -> Self::Output { #decode }
             fn operation() -> ::noxide::__private::Operation {
                 ::noxide::__private::Operation {
+                    visibility: #visibility, fields: #fields,
                     id: ::noxide::stable_id(concat!("query:", module_path!(), "::", stringify!(#name))),
                     resource: <#resource as ::noxide::ResourceType>::definition().id,
                     kind: #kind, policy: #policy,
@@ -1005,6 +1091,18 @@ fn action_label(identifier: &str) -> String {
 
 fn expand_action(declaration: OperationDeclaration, item: syn::ItemStruct) -> syn::Result<Tokens> {
     marker(&item)?;
+    if declaration.visible.is_some()
+        || declaration
+            .policy
+            .iter()
+            .flatten()
+            .any(|p| matches!(p, PolicyAtom::Public))
+    {
+        return Err(syn::Error::new(
+            item.span(),
+            "public is only available on read queries",
+        ));
+    }
     let kind = match declaration.kind.to_string().as_str() {
         "create" => quote!(::noxide::__private::OperationKind::Create),
         "update" => quote!(::noxide::__private::OperationKind::Update),
@@ -1138,6 +1236,7 @@ fn expand_action(declaration: OperationDeclaration, item: syn::ItemStruct) -> sy
             }
             fn operation() -> ::noxide::__private::Operation {
                 ::noxide::__private::Operation {
+                    visibility: None, fields: None,
                     id: ::noxide::stable_id(concat!("mutation:", module_path!(), "::", stringify!(#name))),
                     resource: <#resource as ::noxide::ResourceType>::definition().id,
                     kind: #kind, policy: #policy,
@@ -1158,6 +1257,7 @@ fn expand_action(declaration: OperationDeclaration, item: syn::ItemStruct) -> sy
 
 struct PageDeclaration {
     path: LitStr,
+    access: Ident,
 }
 impl Parse for PageDeclaration {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
@@ -1170,13 +1270,39 @@ impl Parse for PageDeclaration {
         }
         input.parse::<Token![=]>()?;
         let path: LitStr = input.parse()?;
+        let mut access = Ident::new("Authenticated", path.span());
         if input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
+            if !input.is_empty() {
+                let option: Ident = input.parse()?;
+                if option != "access" {
+                    return Err(syn::Error::new(option.span(), "unknown page option"));
+                }
+                input.parse::<Token![=]>()?;
+                let value: Ident = input.parse()?;
+                access = Ident::new(
+                    match value.to_string().as_str() {
+                        "authenticated" => "Authenticated",
+                        "public" => "Public",
+                        "public_optional" => "PublicOptional",
+                        _ => {
+                            return Err(syn::Error::new(
+                                value.span(),
+                                "expected authenticated, public, or public_optional",
+                            ));
+                        }
+                    },
+                    value.span(),
+                );
+                if input.peek(Token![,]) {
+                    input.parse::<Token![,]>()?;
+                }
+            }
         }
         if !input.is_empty() {
             return Err(input.error("unknown page option"));
         }
-        Ok(Self { path })
+        Ok(Self { path, access })
     }
 }
 
@@ -1236,6 +1362,7 @@ fn expand_page(declaration: PageDeclaration, item: syn::ItemFn) -> syn::Result<T
     let name = &item.sig.ident;
     let vis = &item.vis;
     let path = &declaration.path;
+    let access = &declaration.access;
     let mut target = None;
     let mut query_operations = Vec::new();
     let mut forms = Vec::new();
@@ -1315,6 +1442,7 @@ fn expand_page(declaration: PageDeclaration, item: syn::ItemFn) -> syn::Result<T
             }
             pub fn definition() -> ::noxide::__private::Route {
                 ::noxide::__private::Route {
+                    access: ::noxide::__private::Access::#access,
                     id: self::id(),
                     path: #path.into(), resource: #resource,
                     operations: vec![#(#query_operations.id),*], forms: vec![#(#forms),*],
@@ -1855,5 +1983,65 @@ mod declaration_tests {
             struct Task { #[id] id: Id<Self>, #[field(key = "other")] other: Id<Task> }
         };
         assert!(expand_resource(input).is_err());
+    }
+}
+
+#[cfg(test)]
+mod public_tests {
+    use super::*;
+    #[test]
+    fn public_queries_require_visibility_and_fields() {
+        for declaration in [
+            "list(Article), allow = public",
+            "list(Article), allow = public, visible(published = true)",
+            "list(Article), allow = public, fields(title)",
+            "read(Article), allow = public, visible(published = true), fields()",
+        ] {
+            assert!(
+                expand_query(
+                    syn::parse_str(declaration).unwrap(),
+                    syn::parse_quote!(
+                        struct Articles;
+                    )
+                )
+                .is_err(),
+                "{declaration}"
+            );
+        }
+        for declaration in [
+            "list(Article), allow = any(public)",
+            "list(Article), allow = all(owner, public)",
+            "list(Article), allow = any(owner, all(public))",
+        ] {
+            assert!(
+                syn::parse_str::<OperationDeclaration>(declaration).is_err(),
+                "{declaration}"
+            );
+        }
+        for declaration in [
+            "list(Article), allow = owner, visible(published = true)",
+            "list(Article), allow = owner, fields(title)",
+        ] {
+            assert!(
+                expand_query(
+                    syn::parse_str(declaration).unwrap(),
+                    syn::parse_quote!(
+                        struct Articles;
+                    )
+                )
+                .is_err(),
+                "{declaration}"
+            );
+        }
+        assert!(
+            expand_action(
+                syn::parse_str("create(Article), allow = public, fields(title), redirect = index")
+                    .unwrap(),
+                syn::parse_quote!(
+                    struct CreateArticle;
+                )
+            )
+            .is_err()
+        );
     }
 }

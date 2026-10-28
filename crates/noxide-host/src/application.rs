@@ -449,6 +449,9 @@ impl Application {
         principal: &auth::Principal,
         now: i64,
     ) -> Result<BTreeMap<u32, Option<FormCredentials>>> {
+        if matches!(principal, auth::Principal::Anonymous) {
+            return Ok(BTreeMap::new());
+        }
         let r = manifest::route(&self.manifest, route)?;
         let stored = match (r.resource, target) {
             (Some(resource), Some(id)) => {
@@ -461,7 +464,12 @@ impl Application {
             let action = manifest::action(&self.manifest, *id)?;
             let op = manifest::operation(&self.manifest, action.operation)?;
             let credentials = if op.kind == OperationKind::Create {
-                if repository::allowed(&op.policy, principal, &principal.id, &principal.tenant) {
+                if repository::allowed(
+                    &op.policy,
+                    principal,
+                    &principal.user()?.id,
+                    &principal.user()?.tenant,
+                ) {
                     Some(self.credentials(action, session, now, None, Fields::new())?)
                 } else {
                     None
@@ -586,12 +594,12 @@ impl Application {
         route: u32,
         target: Option<u64>,
     ) -> std::result::Result<Rendered, RequestError> {
-        self.view_page(cookie, route, target, None).await
+        self.view_page(Some(cookie), route, target, None).await
     }
 
     pub async fn view_page(
         &self,
-        cookie: &str,
+        cookie: Option<&str>,
         route: u32,
         target: Option<u64>,
         cursor: Option<u64>,
@@ -618,13 +626,43 @@ impl Application {
                 .map_err(RequestError::database)?;
             self.clock.fetch_max(now, Ordering::Relaxed);
 
-            let (session, principal) = auth::authenticate(&mut tx, &self.keys, cookie, now)
-                .await
-                .map_err(|_| RequestError::Authentication)?;
-            let forms = self
-                .forms(&mut tx, route, target, &session, &principal, now)
-                .await
-                .map_err(|_| RequestError::Rejected)?;
+            let access = &manifest::route(&self.manifest, route)
+                .map_err(|_| RequestError::InvalidRequest)?
+                .access;
+            let authenticated = match access {
+                Access::Public => None,
+                Access::Authenticated => Some(
+                    auth::authenticate(
+                        &mut tx,
+                        &self.keys,
+                        cookie.ok_or(RequestError::Authentication)?,
+                        now,
+                    )
+                    .await
+                    .map_err(|_| RequestError::Authentication)?,
+                ),
+                Access::PublicOptional => match cookie {
+                    None => None,
+                    Some(cookie) => {
+                        match auth::authenticate(&mut tx, &self.keys, cookie, now).await {
+                            Ok(authenticated) => Some(authenticated),
+                            Err(auth::AuthError::Invalid) => None,
+                            Err(auth::AuthError::Unavailable) => return Err(RequestError::Busy),
+                        }
+                    }
+                },
+            };
+            let (session, principal) = match authenticated {
+                Some((token, principal)) => (Some(token), principal),
+                None => (None, auth::Principal::Anonymous),
+            };
+            let forms = match &session {
+                Some(session) => self
+                    .forms(&mut tx, route, target, session, &principal, now)
+                    .await
+                    .map_err(|_| RequestError::Rejected)?,
+                None => BTreeMap::new(),
+            };
             let request = RequestView {
                 available_forms: forms
                     .iter()
@@ -680,7 +718,9 @@ impl Application {
                     presentation: &self.presentation,
                     manifest: Some(&self.manifest),
                     forms,
-                    logout_csrf: Some(self.keys.csrf(&session.nonce)),
+                    logout_csrf: session
+                        .as_ref()
+                        .map(|session| self.keys.csrf(&session.nonce)),
                     next_page,
                 },
             )
@@ -810,7 +850,7 @@ impl Application {
                 }
             } else {
                 let op = manifest::operation(&self.manifest, a.operation)?;
-                ensure!(repository::allowed(&op.policy, &principal, &principal.id, &principal.tenant), "policy denied");
+                ensure!(repository::allowed(&op.policy, &principal, &principal.user()?.id, &principal.user()?.tenant), "policy denied");
             }
             let credentials = FormCredentials { csrf: csrf.into(), submission: submission.into(), values: Fields::new() };
             let rendered = render::recovery(&self.presentation, &self.manifest, action, &credentials, input, render::Recovery::Retry { unknown })?;
@@ -885,7 +925,12 @@ impl Application {
         } else {
             let op = manifest::operation(&self.manifest, a.operation)?;
             ensure!(
-                repository::allowed(&op.policy, &principal, &principal.id, &principal.tenant),
+                repository::allowed(
+                    &op.policy,
+                    &principal,
+                    &principal.user()?.id,
+                    &principal.user()?.tenant
+                ),
                 "policy denied"
             );
             None

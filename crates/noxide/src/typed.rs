@@ -141,7 +141,9 @@ impl<T: FieldValue> FieldValue for Option<T> {
 
 pub trait QueryType {
     type Resource: ResourceType;
+    type Output;
     fn operation() -> Operation;
+    fn from_record(record: Record) -> Self::Output;
 }
 pub trait ListQuery: QueryType {}
 pub trait ReadQuery: QueryType {}
@@ -186,7 +188,7 @@ impl<Q: QueryType> FromRequest for Query<Q> {
     }
 }
 impl<Q: QueryType> Query<Q> {
-    pub fn fetch(&mut self) -> Vec<Q::Resource>
+    pub fn fetch(&mut self) -> Vec<Q::Output>
     where
         Q: ListQuery,
     {
@@ -195,10 +197,10 @@ impl<Q: QueryType> Query<Q> {
         self.context
             .list(operation.id)
             .into_iter()
-            .map(Q::Resource::from_record)
+            .map(Q::from_record)
             .collect()
     }
-    pub fn get(&mut self, id: Id<Q::Resource>) -> Option<Q::Resource>
+    pub fn get(&mut self, id: Id<Q::Resource>) -> Option<Q::Output>
     where
         Q: ReadQuery,
     {
@@ -206,7 +208,7 @@ impl<Q: QueryType> Query<Q> {
         assert!(operation.kind == OperationKind::Read, "not a read query");
         self.context
             .read(operation.id, id.get())
-            .map(Q::Resource::from_record)
+            .map(Q::from_record)
     }
 }
 
