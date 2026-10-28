@@ -211,6 +211,7 @@ impl Application {
         identity.update(digest);
         identity.update(Sha256::digest(component));
         let deployment = URL_SAFE_NO_PAD.encode(identity.finalize());
+        let admission_limits = AdmissionLimits::default().with_wasm_capacity(limits.concurrency);
         let runtime = Runtime::compile(component, limits)?;
         Ok(Self {
             presentation: crate::Presentation::default(),
@@ -223,7 +224,7 @@ impl Application {
             generation: OnceLock::new(),
             clock: AtomicI64::new(0),
             checkpointed: AtomicI64::new(0),
-            admission_limits: AdmissionLimits::default(),
+            admission_limits,
         })
     }
 

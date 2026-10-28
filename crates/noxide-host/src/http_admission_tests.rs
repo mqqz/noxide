@@ -524,3 +524,61 @@ async fn tor_unix_preserves_http_bytes_and_caps_connections_per_circuit() {
     server.await.unwrap().unwrap();
     assert!(!path.exists());
 }
+
+#[tokio::test]
+async fn runtime_concurrency_below_global_cap_returns_busy_at_admission() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    let temp = tempfile::tempdir().unwrap();
+    let db = Database::sqlite(temp.path().join("runtime-capacity.db"));
+    db.initialize().await.unwrap();
+    db.create_account("alice", "admission test password", "")
+        .await
+        .unwrap();
+    let m = fixture::manifest();
+    let app = Arc::new(
+        Application::new(
+            &fixture::component(None),
+            &serde_json::to_vec(&m).unwrap(),
+            manifest::digest(&m).unwrap(),
+            db,
+            HostKeys::generate().unwrap(),
+            Limits {
+                concurrency: 1,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+    );
+    app.activate().await.unwrap();
+    let challenge = app.login_challenge().await.unwrap();
+    let session = app
+        .login(
+            &challenge.cookie,
+            &challenge.csrf,
+            "alice",
+            "admission test password",
+        )
+        .await
+        .unwrap();
+    assert_eq!(app.admission_limits.wasm.available(), 1);
+    let held = app.admission_limits.wasm.acquire().await.unwrap();
+    let response = router(app.clone(), Origin::parse("http://localhost:8080").unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("Host", "localhost:8080")
+                .header("Cookie", format!("session={session}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        to_bytes(response.into_body(), 4096).await.unwrap().as_ref(),
+        BUSY_HTML.as_bytes()
+    );
+    drop(held);
+    assert!(app.view(&session, 1, None).await.is_ok());
+}
