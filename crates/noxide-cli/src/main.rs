@@ -37,6 +37,7 @@ enum DatabaseConfig {
 enum ListenConfig {
     Tcp(std::net::SocketAddr),
     Unix(PathBuf),
+    TorUnix { path: PathBuf, tor_gid: u32 },
 }
 
 fn read(path: &Path, limit: u64) -> Result<Vec<u8>> {
@@ -230,8 +231,14 @@ async fn main() -> Result<()> {
                 ListenConfig::Tcp(address) => Listener::loopback(address).await?,
                 #[cfg(unix)]
                 ListenConfig::Unix(path) => Listener::unix(&base.join(path))?,
+                #[cfg(unix)]
+                ListenConfig::TorUnix { path, tor_gid } => {
+                    Listener::tor_unix(&base.join(path), tor_gid)?
+                }
                 #[cfg(not(unix))]
-                ListenConfig::Unix(_) => bail!("Unix sockets require Unix"),
+                ListenConfig::Unix(_) | ListenConfig::TorUnix { .. } => {
+                    bail!("Unix sockets require Unix")
+                }
             };
             app.activate().await?;
             println!("Runtime listening with the approved application contract.");
@@ -240,4 +247,25 @@ async fn main() -> Result<()> {
         _ => bail!("unknown command; run noxide --help"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod listen_tests {
+    use super::*;
+    #[test]
+    fn tor_unix_configuration_preserves_existing_listener_shapes() {
+        let tor: ListenConfig =
+            serde_json::from_str(r#"{"tor_unix":{"path":"run/app.sock","tor_gid":115}}"#).unwrap();
+        assert!(
+            matches!(tor, ListenConfig::TorUnix { path, tor_gid: 115 } if path == Path::new("run/app.sock"))
+        );
+        assert!(serde_json::from_str::<ListenConfig>(r#"{"unix":"run/app.sock"}"#).is_ok());
+        assert!(serde_json::from_str::<ListenConfig>(r#"{"tcp":"127.0.0.1:8080"}"#).is_ok());
+        assert!(
+            serde_json::from_str::<ListenConfig>(
+                r#"{"tor_unix":{"path":"run/app.sock","tor_gid":115,"extra":true}}"#
+            )
+            .is_err()
+        );
+    }
 }
