@@ -50,11 +50,12 @@ impl Presentation {
             self.session_cookie != self.login_cookie,
             "cookie names must differ"
         );
-        let paths = [
+        let paths: [&str; 5] = [
             &self.login_path,
             &self.logout_path,
             &self.action_path,
             &self.stylesheet_path,
+            crate::http::REGISTRATION_PATH,
         ];
         for (i, path) in paths.iter().enumerate() {
             ensure!(
@@ -240,5 +241,35 @@ mod anonymous_cookie_tests {
         }
         .validate(&m)
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod registration_endpoint_tests {
+    use super::*;
+    #[test]
+    fn fixed_registration_path_cannot_shadow_host_or_application_endpoints() {
+        let manifest = crate::test_support::manifest();
+        for kind in 0..4 {
+            let mut p = Presentation::default();
+            match kind {
+                0 => p.login_path = "/register".into(),
+                1 => p.logout_path = "/register".into(),
+                2 => p.action_path = "/register".into(),
+                _ => p.stylesheet_path = "/register".into(),
+            }
+            assert!(p.validate(&manifest).is_err());
+        }
+        let mut m = manifest;
+        m.routes.push(noxide_protocol::Route {
+            id: 3,
+            path: "/register".into(),
+            resource: None,
+            operations: vec![],
+            forms: vec![],
+            access: noxide_protocol::Access::Authenticated,
+        });
+        crate::manifest::validate(&m).unwrap();
+        assert!(Presentation::default().validate(&m).is_err());
     }
 }
