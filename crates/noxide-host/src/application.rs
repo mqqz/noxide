@@ -324,7 +324,7 @@ impl Application {
             .map_err(|_| RequestError::Busy)?;
         self.admission(&mut tx, false)
             .await
-            .map_err(|_| RequestError::Rejected)?;
+            .map_err(RequestError::database)?;
         let now = security::now().map_err(|_| RequestError::Rejected)?;
         let now = security::observe_clock_read(&mut tx, now, &self.clock)
             .await
@@ -371,7 +371,7 @@ impl Application {
                 .map_err(|_| RequestError::Busy)?;
             self.admission(&mut tx, false)
                 .await
-                .map_err(|_| RequestError::Rejected)?;
+                .map_err(RequestError::database)?;
             let now = security::now().map_err(|_| RequestError::Rejected)?;
             let now = self
                 .observe_clock_write(&mut tx, now)
@@ -434,7 +434,7 @@ impl Application {
             .map_err(|_| RequestError::Busy)?;
         self.admission(&mut tx, false)
             .await
-            .map_err(|_| RequestError::Rejected)?;
+            .map_err(RequestError::database)?;
         let now = security::now().map_err(|_| RequestError::Rejected)?;
         let now = self
             .observe_clock_write(&mut tx, now)
@@ -759,7 +759,7 @@ impl Application {
                 .map_err(|_| RequestError::Busy)?;
             self.admission(&mut tx, false)
                 .await
-                .map_err(|_| RequestError::Rejected)?;
+                .map_err(RequestError::database)?;
             let now = security::now().map_err(|_| RequestError::Rejected)?;
             let now = security::observe_clock_read(&mut tx, now, &self.clock)
                 .await
@@ -843,7 +843,7 @@ impl Application {
                 )
                 .await;
             let mut effects = attempt.effects.ok_or(RequestError::Rejected)?;
-            let response = attempt.result.map_err(|_| RequestError::Rejected)?;
+            let response = attempt.result.map_err(RequestError::database)?;
             if !matches!(
                 response,
                 ResponseIntent::Page(_) | ResponseIntent::NotFound(_) | ResponseIntent::Redirect(_)
@@ -1511,5 +1511,27 @@ mod identity_time_tests {
         app.clock.fetch_max(now + 20, Ordering::Relaxed);
         assert!(!app.session_envelope(&cookie));
         assert!(!temp.path().join("absent.db").exists());
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    #[tokio::test]
+    async fn elapsed_database_work_is_busy_but_schema_rejection_is_not() {
+        let elapsed = tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            RequestError::database(elapsed.into()),
+            RequestError::Busy
+        ));
+        assert!(matches!(
+            RequestError::database(anyhow::anyhow!("stored schema differs from manifest")),
+            RequestError::Rejected
+        ));
     }
 }
