@@ -364,14 +364,14 @@ impl AdmissionLimits {
         }
     }
     pub(crate) fn database(&self) -> &BoundedPermits {
-        if self.is_verified() {
+        if self.is_verified() && self.verified.database.max_waiting != 0 {
             &self.verified.database
         } else {
             &self.database
         }
     }
     pub(crate) fn wasm(&self) -> &BoundedPermits {
-        if self.is_verified() {
+        if self.is_verified() && self.verified.wasm.max_waiting != 0 {
             &self.verified.wasm
         } else {
             &self.wasm
@@ -734,5 +734,45 @@ mod circuit_tests {
             })
             .await;
         assert!(std::ptr::eq(first.requests(), &first.requests));
+    }
+}
+
+#[cfg(test)]
+mod rounded_share_tests {
+    use super::*;
+    #[tokio::test]
+    async fn zero_verified_resource_shares_use_the_shared_anonymous_lane() {
+        for reserve in 1..=6 {
+            let limits = AdmissionLimits::new(reserve, true);
+            let context = AdmissionContext {
+                peer: Peer::Local,
+                identity: AdmissionIdentity::Verified {
+                    principal: "alice".into(),
+                },
+                class: RequestClass::Get,
+            };
+            limits
+                .context(context, async {
+                    assert!(std::ptr::eq(limits.database(), &limits.database));
+                    assert!(std::ptr::eq(limits.wasm(), &limits.wasm));
+                    assert!(limits.database().acquire().await.is_ok());
+                    assert!(limits.wasm().acquire().await.is_ok());
+                })
+                .await;
+        }
+        let limits = AdmissionLimits::new(25, true).with_wasm_capacity(1);
+        let context = AdmissionContext {
+            peer: Peer::Local,
+            identity: AdmissionIdentity::Verified {
+                principal: "alice".into(),
+            },
+            class: RequestClass::Get,
+        };
+        limits
+            .context(context, async {
+                assert!(std::ptr::eq(limits.wasm(), &limits.wasm));
+                assert!(limits.wasm().acquire().await.is_ok());
+            })
+            .await;
     }
 }
