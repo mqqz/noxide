@@ -474,6 +474,12 @@ receipts remain intact. Expired authority cannot revive after receipt collection
 because recovery invalidates its keys, session, and generation. A single small
 correction may extend wall-time token lifetime by up to 60 seconds; request
 execution deadlines remain monotonic.
+
+GETs no longer write the clock. Advances seen only by read requests are persisted
+by a best-effort checkpoint at most every 60 seconds; after a crash the stored
+watermark can lag by that checkpoint gap (or longer if checkpoints could not
+complete). The 60-second rollback tolerance and `recover-clock` are unchanged.
+
 Authorized read pages omit declared forms denied by policy; undeclared forms
 remain invalid.
 

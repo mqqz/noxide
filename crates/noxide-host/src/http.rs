@@ -488,6 +488,16 @@ pub async fn serve(
     origin: Origin,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
+    let checkpoint_app = app.clone();
+    let checkpoint = tokio::spawn(async move { checkpoint_app.checkpoint_clocks().await });
+    // Abort on normal shutdown, errors, and cancellation of serve itself.
+    struct Checkpoint(tokio::task::JoinHandle<()>);
+    impl Drop for Checkpoint {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _checkpoint = Checkpoint(checkpoint);
     let router = router(app, origin);
     let slots = Arc::new(Semaphore::new(64));
     let mut connections = tokio::task::JoinSet::new();

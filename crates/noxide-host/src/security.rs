@@ -224,6 +224,37 @@ pub(crate) async fn observe_clock(tx: &mut Transaction, now: i64) -> Result<i64>
     Ok(now.max(previous))
 }
 
+pub(crate) const CLOCK_CHECKPOINT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(60);
+pub(crate) const CLOCK_CHECKPOINT_BEGIN_DEADLINE: std::time::Duration =
+    std::time::Duration::from_millis(200);
+
+pub(crate) async fn observe_clock_read(
+    tx: &mut Transaction,
+    now: i64,
+    memory: &std::sync::atomic::AtomicI64,
+) -> Result<i64> {
+    use std::sync::atomic::Ordering;
+    let rows = tx
+        .fetch::<1>(
+            "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
+            &[],
+        )
+        .await?;
+    let previous: i64 = rows
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("clock missing"))?[0]
+        .parse()?;
+    ensure!(now >= 0 && previous >= 0, "invalid clock");
+    let prior = memory.fetch_max(now, Ordering::Relaxed);
+    let high = previous.max(prior);
+    ensure!(
+        high.saturating_sub(now) <= CLOCK_ROLLBACK_TOLERANCE,
+        "clock moved backwards beyond tolerance; use recover-clock with a fresh host key"
+    );
+    Ok(now.max(high))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

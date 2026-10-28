@@ -2,15 +2,26 @@
 
 [CI](../.github/workflows/ci.yml) runs on pull requests, pushes to `main`, merge
 queues, manual dispatch, and every Monday at 03:23 UTC. For branch protection,
-require both PR checks: `Runtime` and `Packaged SDK and browser`.
-Publishing and deployment are outside this workflow.
+require `PR checks`. Publishing and deployment are outside this workflow.
+
+Pull requests run formatting, Python build-input validation, and ShellCheck.
+They do not compile Rust, run database tests, or build applications in VMs.
+`Runtime` and `Packaged SDK and browser` run on pushes to `main`, merge queues,
+manual dispatch, and the weekly schedule. Both jobs are skipped on pull requests;
+compilation and integration failures can therefore be discovered after merging
+when a merge queue is not used.
 
 ## Checks
+
+`PR checks` runs on every workflow event using Rust 1.98.0 on Ubuntu 24.04.
+It checks workspace and example formatting, Python build-input validation, and
+ShellCheck without fetching or compiling framework dependencies.
 
 `Runtime` uses Rust 1.98.0 on Ubuntu 24.04. It checks workspace and example
 formatting, Clippy with warnings denied, documentation with warnings denied,
 ShellCheck, Python build-input validation, and the Rust tests against SQLite and
-a disposable PostgreSQL 18.4 service. Ignored PostgreSQL tests are included
+a disposable PostgreSQL 18.4 service configured for 512 connections to support
+the concurrent GET regressions. Ignored PostgreSQL tests are included
 explicitly; the internal crash subprocess and separately run browser fixture are
 excluded.
 
