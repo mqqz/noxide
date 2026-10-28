@@ -13,7 +13,10 @@ use noxide_protocol::*;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicI64, Ordering},
+    },
 };
 use tokio::{
     sync::Semaphore,
@@ -64,6 +67,7 @@ pub struct Application {
     contract: String,
     deployment: String,
     generation: OnceLock<String>,
+    clock: AtomicI64,
     permits: Semaphore,
     login_permits: Arc<Semaphore>,
 }
@@ -91,7 +95,18 @@ impl Application {
             self.generation.get().is_none_or(|g| g == &generation),
             "application generation retired"
         );
+        let rows = tx
+            .fetch::<1>(
+                "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
+                &[],
+            )
+            .await?;
+        let observed = rows
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("clock missing"))?[0]
+            .parse()?;
         tx.commit().await?;
+        self.clock.fetch_max(observed, Ordering::Relaxed);
         ensure!(
             self.generation.get_or_init(|| generation.clone()) == &generation,
             "concurrent activation differs"
@@ -101,7 +116,7 @@ impl Application {
 
     async fn admission(&self, tx: &mut Transaction, activate: bool) -> Result<()> {
         tx.check_storage().await?;
-        tx.bind_schema(&self.manifest).await?;
+        tx.check_schema(&self.manifest).await?;
         let generation = tx
             .deployment(&self.deployment, self.keys.incarnation(), activate)
             .await?;
@@ -110,6 +125,34 @@ impl Application {
             "application is unactivated or retired"
         );
         Ok(())
+    }
+
+    pub(crate) async fn checkpoint_clock(&self) -> Result<()> {
+        let m = self.clock.load(Ordering::Relaxed);
+        let deadline = Instant::now() + security::CLOCK_CHECKPOINT_BEGIN_DEADLINE;
+        timeout_at(deadline, async {
+            let mut tx = self.database.begin(deadline.into_std()).await?;
+            self.admission(&mut tx, false).await?;
+            tx.execute(
+                "UPDATE nx_clock SET observed=$1 WHERE singleton=1 AND observed<$1",
+                &[m.into()],
+            )
+            .await?;
+            tx.commit().await
+        })
+        .await?
+    }
+
+    pub(crate) async fn checkpoint_clocks(&self) {
+        let mut ticks = tokio::time::interval_at(
+            Instant::now() + security::CLOCK_CHECKPOINT_INTERVAL,
+            security::CLOCK_CHECKPOINT_INTERVAL,
+        );
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticks.tick().await;
+            let _ = self.checkpoint_clock().await;
+        }
     }
 
     fn submission_contract(&self) -> String {
@@ -150,6 +193,7 @@ impl Application {
             contract: URL_SAFE_NO_PAD.encode(digest),
             deployment,
             generation: OnceLock::new(),
+            clock: AtomicI64::new(0),
             permits: Semaphore::new(concurrency),
             login_permits: Arc::new(Semaphore::new(2)),
         })
@@ -165,16 +209,17 @@ impl Application {
     pub async fn login_challenge(&self) -> std::result::Result<LoginChallenge, RequestError> {
         let mut tx = self
             .database
-            .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
+            .begin_read(std::time::Instant::now() + std::time::Duration::from_secs(2))
             .await
             .map_err(|_| RequestError::Busy)?;
         self.admission(&mut tx, false)
             .await
             .map_err(|_| RequestError::Rejected)?;
         let now = security::now().map_err(|_| RequestError::Rejected)?;
-        let now = security::observe_clock(&mut tx, now)
+        let now = security::observe_clock_read(&mut tx, now, &self.clock)
             .await
             .map_err(RequestError::database)?;
+        self.clock.fetch_max(now, Ordering::Relaxed);
 
         let (token, cookie) = self
             .keys
@@ -213,6 +258,7 @@ impl Application {
             let now = security::observe_clock(&mut tx, now)
                 .await
                 .map_err(RequestError::database)?;
+            self.clock.fetch_max(now, Ordering::Relaxed);
             let token = self
                 .keys
                 .verify(challenge, now)
@@ -247,6 +293,7 @@ impl Application {
         let now = security::observe_clock(&mut tx, now)
             .await
             .map_err(RequestError::database)?;
+        self.clock.fetch_max(now, Ordering::Relaxed);
         let (session, _) = auth::authenticate(&mut tx, &self.keys, cookie, now)
             .await
             .map_err(|_| RequestError::Authentication)?;
@@ -542,16 +589,17 @@ impl Application {
         timeout_at(deadline, async {
             let mut tx = self
                 .database
-                .begin(deadline.into_std())
+                .begin_read(deadline.into_std())
                 .await
                 .map_err(|_| RequestError::Busy)?;
             self.admission(&mut tx, false)
                 .await
                 .map_err(|_| RequestError::Rejected)?;
             let now = security::now().map_err(|_| RequestError::Rejected)?;
-            let now = security::observe_clock(&mut tx, now)
+            let now = security::observe_clock_read(&mut tx, now, &self.clock)
                 .await
                 .map_err(RequestError::database)?;
+            self.clock.fetch_max(now, Ordering::Relaxed);
 
             let (session, principal) = auth::authenticate(&mut tx, &self.keys, cookie, now)
                 .await
@@ -715,6 +763,7 @@ impl Application {
             self.admission(&mut tx, false).await?;
             let now = security::now()?;
             let now = security::observe_clock(&mut tx, now).await?;
+            self.clock.fetch_max(now, Ordering::Relaxed);
             let token = self.keys.verify(submission, now)?;
             let target = self.submission_target(&token, a)?;
 
@@ -773,6 +822,7 @@ impl Application {
         self.admission(&mut tx, false).await?;
         let now = security::now()?;
         let now = security::observe_clock(&mut tx, now).await?;
+        self.clock.fetch_max(now, Ordering::Relaxed);
         let token = self
             .keys
             .verify(submission, now)
