@@ -829,7 +829,9 @@ pub(crate) fn recovery(
     out.push("</h1><p role=\"status\">")?;
     out.text(explanation)?;
     out.push("</p>")?;
-    if let Recovery::Conflict { current } = &reason {
+    if let Recovery::Conflict { current } = &reason
+        && !current.is_empty()
+    {
         out.push("<section aria-label=\"Current values\"><h2>Current values</h2>")?;
         let resource =
             crate::manifest::resource(m, crate::manifest::operation(m, a.operation)?.resource)?;
