@@ -525,3 +525,145 @@ async fn cancelling_registration_keeps_hash_request_and_database_permits() {
     );
     tx.commit().await.unwrap();
 }
+
+async fn clock_recovery_invites_contract(db: Database) {
+    let old = app(db.clone(), Registration::Invite).await;
+    let redeemed = db.mint_invite(None).await.unwrap();
+    let challenge = old.login_challenge().await.unwrap();
+    old.register(
+        &challenge.cookie,
+        &challenge.csrf,
+        "redeemed",
+        "registration test password",
+        Some(&redeemed),
+    )
+    .await
+    .unwrap();
+    let pending = db.mint_invite(None).await.unwrap();
+    let now = security::now().unwrap();
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(3))
+        .await
+        .unwrap();
+    tx.execute(
+        "UPDATE nx_invites SET expires=$1 WHERE redeemed_at IS NULL",
+        &[(now + 3600).into()],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        "UPDATE nx_clock SET observed=$1 WHERE singleton=1",
+        &[(now + 7200).into()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_invites WHERE redeemed_at IS NULL AND expires>$1", &[(now + 7200).into()]).await.unwrap()[0][0], "0");
+    tx.commit().await.unwrap();
+    let before = snapshot(&db).await;
+    assert!(db.recover_clock(&old.keys).await.is_err());
+    assert_eq!(snapshot(&db).await, before);
+    let keys = HostKeys::generate().unwrap();
+    db.recover_clock(&keys).await.unwrap();
+    let mut tx = db
+        .begin_read(Instant::now() + Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_eq!(
+        tx.fetch::<1>(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM nx_invites WHERE redeemed_at IS NULL",
+            &[]
+        )
+        .await
+        .unwrap()[0][0],
+        "0"
+    );
+    assert_eq!(
+        tx.fetch::<1>(
+            "SELECT redeemed_by FROM nx_invites WHERE redeemed_at IS NOT NULL",
+            &[]
+        )
+        .await
+        .unwrap()[0][0],
+        "redeemed"
+    );
+    tx.commit().await.unwrap();
+    let m = fixture::manifest();
+    let recovered = Application::new(
+        &fixture::component(None),
+        &serde_json::to_vec(&m).unwrap(),
+        manifest::digest(&m).unwrap(),
+        db.clone(),
+        keys,
+        Limits::default(),
+    )
+    .unwrap()
+    .with_registration(Registration::Invite);
+    recovered.activate().await.unwrap();
+    let challenge = recovered.login_challenge().await.unwrap();
+    assert!(
+        recovered
+            .register(
+                &challenge.cookie,
+                &challenge.csrf,
+                "revived",
+                "registration test password",
+                Some(&pending)
+            )
+            .await
+            .is_err()
+    );
+    let fresh = db.mint_invite(None).await.unwrap();
+    recovered
+        .register(
+            &challenge.cookie,
+            &challenge.csrf,
+            "fresh",
+            "registration test password",
+            Some(&fresh),
+        )
+        .await
+        .unwrap();
+    let mut tx = db
+        .begin_read(Instant::now() + Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert!(
+        tx.fetch::<1>("SELECT id FROM nx_accounts WHERE id='revived'", &[])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_clock_recovery_invalidates_outstanding_invites() {
+    let temp = tempfile::tempdir().unwrap();
+    clock_recovery_invites_contract(Database::sqlite(temp.path().join("invite-recovery.db"))).await;
+}
+
+#[tokio::test]
+#[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable cluster"]
+async fn postgres_clock_recovery_invalidates_outstanding_invites() {
+    use sqlx::Connection;
+    let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+    let name = format!(
+        "nx_invite_recovery_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let mut case = url::Url::parse(&url).unwrap();
+    case.set_path(&format!("/{name}"));
+    clock_recovery_invites_contract(Database::postgres(case.as_str()).unwrap()).await;
+    sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+}

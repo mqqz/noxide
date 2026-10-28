@@ -263,6 +263,8 @@ impl Database {
         )
         .await?;
         tx.execute("DELETE FROM nx_sessions", &[]).await?;
+        tx.execute("DELETE FROM nx_invites WHERE redeemed_at IS NULL", &[])
+            .await?;
         let changed = tx
             .execute(
                 "UPDATE nx_clock SET observed=$1 WHERE singleton=1",
