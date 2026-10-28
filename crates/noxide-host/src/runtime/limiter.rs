@@ -341,7 +341,13 @@ impl AdmissionLimits {
 }
 impl AdmissionLimits {
     pub(crate) fn with_wasm_capacity(mut self, concurrency: usize) -> Self {
-        let (anonymous, _, verified) = shares(WASM.min(concurrency), 0, self.reserve, true);
+        let total = WASM.min(concurrency);
+        let (anonymous, _, verified) = shares(total, 0, self.reserve, true);
+        if anonymous == 0 || verified == 0 {
+            self.wasm = BoundedPermits::new(total, WASM_WAITING, WASM_WAIT);
+            self.verified.wasm = BoundedPermits::new(0, 0, WASM_WAIT);
+            return self;
+        }
         self.wasm = BoundedPermits::new(anonymous, anonymous * WASM_WAITING / WASM, WASM_WAIT);
         self.verified.wasm =
             BoundedPermits::new(verified, verified * WASM_WAITING / WASM, WASM_WAIT);
@@ -760,7 +766,9 @@ mod rounded_share_tests {
                 })
                 .await;
         }
-        let limits = AdmissionLimits::new(25, true).with_wasm_capacity(1);
+        let limits = AdmissionLimits::new(50, true).with_wasm_capacity(1);
+        assert_eq!(limits.wasm.available(), 1);
+        assert_eq!(limits.verified.wasm.available(), 0);
         let context = AdmissionContext {
             peer: Peer::Local,
             identity: AdmissionIdentity::Verified {
