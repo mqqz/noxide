@@ -6,6 +6,7 @@ pub mod runtime;
 pub mod schema;
 pub use database::Database;
 mod auth;
+pub use auth::Registration;
 mod security;
 pub use security::HostKeys;
 mod application;
@@ -29,3 +30,6 @@ mod public_tests;
 
 #[cfg(test)]
 mod anonymous_tests;
+
+#[cfg(test)]
+mod registration_tests;

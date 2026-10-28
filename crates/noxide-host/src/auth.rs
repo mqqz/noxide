@@ -9,6 +9,15 @@ use argon2::{
     password_hash::{PasswordHash, SaltString, rand_core::OsRng},
 };
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Registration {
+    #[default]
+    Closed,
+    Invite,
+    Open,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum Principal {
     Anonymous,
@@ -164,4 +173,89 @@ pub(crate) async fn authenticate(
             roles: roles.into_iter().map(|[r, t]| (r, t)).collect(),
         }),
     ))
+}
+
+impl Database {
+    /// Mint an operator invitation. Only its SHA-256 digest is persisted.
+    pub async fn mint_invite(&self, expires_days: Option<u64>) -> Result<String> {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let code = crate::security::random_id()?;
+        let lifetime = match expires_days {
+            Some(days) => days
+                .checked_mul(86400)
+                .ok_or_else(|| anyhow::anyhow!("invite expiry overflow"))?,
+            None => crate::runtime::limiter::INVITE_DEFAULT_EXPIRY.as_secs(),
+        };
+        let lifetime: i64 = lifetime.try_into()?;
+        let mut tx = self
+            .begin(std::time::Instant::now() + std::time::Duration::from_secs(5))
+            .await?;
+        tx.check_storage().await?;
+        let now = crate::security::observe_clock(&mut tx, crate::security::now()?).await?;
+        let expires = now
+            .checked_add(lifetime)
+            .ok_or_else(|| anyhow::anyhow!("invite expiry overflow"))?;
+        tx.execute(
+            "INSERT INTO nx_invites(code_hash,issuer,expires) VALUES($1,$2,$3)",
+            &[
+                URL_SAFE_NO_PAD.encode(invite_hash(&code)).into(),
+                "operator".into(),
+                expires.into(),
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(code)
+    }
+}
+fn invite_hash(code: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(code.as_bytes()).into()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn register(
+    tx: &mut Transaction,
+    mode: Registration,
+    id: &str,
+    password: &str,
+    invite: Option<&str>,
+    now: i64,
+    permits: crate::runtime::limiter::HashPermits,
+) -> Result<()> {
+    ensure!(
+        mode != Registration::Closed
+            && crate::manifest::identifier(id)
+            && (12..=256).contains(&password.len()),
+        "registration failed"
+    );
+    ensure!(
+        mode != Registration::Invite || invite.is_some_and(|code| code.len() <= 256),
+        "registration failed"
+    );
+    let password = password.to_owned();
+    let hash = tokio::task::spawn_blocking(move || {
+        let hash_permits = permits;
+        hash_permits.enter();
+        Argon2::default()
+            .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
+            .map(|hash| hash.to_string())
+            .map_err(|_| anyhow::anyhow!("registration failed"))
+    })
+    .await??;
+    // The account and redemption are one atomic unit. Insert first to satisfy
+    // redeemed_by's immediate foreign key; failed redemption rolls it back.
+    tx.execute(
+        "INSERT INTO nx_accounts(id,password,tenant,epoch) VALUES($1,$2,'',1)",
+        &[id.into(), hash.into()],
+    )
+    .await?;
+    if mode == Registration::Invite {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let hash = URL_SAFE_NO_PAD.encode(invite_hash(
+            invite.ok_or_else(|| anyhow::anyhow!("registration failed"))?,
+        ));
+        ensure!(tx.execute("UPDATE nx_invites SET redeemed_at=$1,redeemed_by=$2 WHERE code_hash=$3 AND redeemed_at IS NULL AND expires>$1",&[now.into(),id.into(),hash.into()]).await? == 1,"registration failed");
+    }
+    Ok(())
 }

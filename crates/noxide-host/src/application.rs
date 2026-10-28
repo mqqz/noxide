@@ -61,6 +61,7 @@ impl std::error::Error for RequestError {}
 
 pub struct Application {
     pub(crate) presentation: crate::Presentation,
+    pub(crate) registration: auth::Registration,
     pub(crate) manifest: Arc<Manifest>,
     pub(crate) keys: Arc<HostKeys>,
     database: Database,
@@ -88,6 +89,93 @@ pub struct LoginChallenge {
 }
 
 impl Application {
+    pub fn with_registration(mut self, registration: auth::Registration) -> Self {
+        self.registration = registration;
+        self
+    }
+    pub(crate) async fn register(
+        &self,
+        challenge: &str,
+        csrf: &str,
+        username: &str,
+        password: &str,
+        invite: Option<&str>,
+    ) -> std::result::Result<(), RequestError> {
+        if self.registration == auth::Registration::Closed {
+            return Err(RequestError::InvalidRequest);
+        }
+        let request = self
+            .admission_limits
+            .requests()
+            .request()
+            .await
+            .map_err(|_| RequestError::Busy)?;
+        let database = Arc::new(
+            self.admission_limits
+                .database()
+                .acquire()
+                .await
+                .map_err(|_| RequestError::Busy)?,
+        );
+        let deadline = Instant::now() + std::time::Duration::from_secs(3);
+        timeout_at(deadline, async {
+            let mut tx = self
+                .database
+                .begin(deadline.into_std())
+                .await
+                .map_err(|_| RequestError::Busy)?;
+            self.admission(&mut tx, false)
+                .await
+                .map_err(RequestError::database)?;
+            let now = self
+                .observe_clock_write(
+                    &mut tx,
+                    security::now().map_err(|_| RequestError::Rejected)?,
+                )
+                .await
+                .map_err(RequestError::database)?;
+            let token = self
+                .keys
+                .verify(challenge, now)
+                .map_err(|_| RequestError::InvalidRequest)?;
+            if token.kind != TokenKind::Login {
+                return Err(RequestError::InvalidRequest);
+            }
+            self.keys
+                .verify_csrf(&token.nonce, csrf)
+                .map_err(|_| RequestError::InvalidRequest)?;
+            if !self.admission_limits.argon2_attempts.allow() {
+                return Err(RequestError::Busy);
+            }
+            let permit = self
+                .admission_limits
+                .argon2
+                .acquire()
+                .await
+                .map_err(|_| RequestError::Busy)?;
+            let permits = HashPermits {
+                _argon2: permit,
+                _request: request.clone(),
+                _database: database.clone(),
+                #[cfg(test)]
+                gate: self.admission_limits.hash_gate.lock().unwrap().clone(),
+            };
+            auth::register(
+                &mut tx,
+                self.registration,
+                username,
+                password,
+                invite,
+                now,
+                permits,
+            )
+            .await
+            .map_err(|_| RequestError::Rejected)?;
+            tx.commit().await.map_err(|_| RequestError::Rejected)
+        })
+        .await
+        .map_err(|_| RequestError::Busy)?
+    }
     pub fn with_signed_in_reserve(mut self, reserve: u8) -> Result<Self> {
         ensure!(reserve <= 50, "signed_in_reserve must be between 0 and 50");
         self.admission_limits = AdmissionLimits::new(
@@ -302,6 +390,7 @@ impl Application {
         .with_wasm_capacity(concurrency);
         Ok(Self {
             presentation: crate::Presentation::default(),
+            registration: auth::Registration::Closed,
             manifest: Arc::new(m),
             keys: Arc::new(keys),
             database,
