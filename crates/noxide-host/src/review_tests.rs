@@ -143,6 +143,41 @@ async fn clock_conflict<T>(
     operation.await
 }
 
+async fn clock_writer_held<T: std::fmt::Debug>(
+    db: &Database,
+    mut read: impl AsyncFnMut() -> std::result::Result<T, crate::RequestError>,
+    issued: impl Fn(&T) -> i64,
+) {
+    let mut writer = db
+        .begin(Instant::now() + Duration::from_secs(3))
+        .await
+        .unwrap();
+    let watermark =
+        crate::security::observe_clock(&mut writer, crate::security::now().unwrap() + 1)
+            .await
+            .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), read())
+        .await
+        .unwrap()
+        .unwrap();
+    writer.commit().await.unwrap();
+    let next = read().await.unwrap();
+    assert!(issued(&next) >= watermark);
+    // The observer on a new transaction also sees the other connection's commit.
+    let mut tx = db
+        .begin_read(Instant::now() + Duration::from_secs(1))
+        .await
+        .unwrap();
+    let memory = std::sync::atomic::AtomicI64::new(0);
+    assert!(
+        crate::security::observe_clock_read(&mut tx, crate::security::now().unwrap(), &memory)
+            .await
+            .unwrap()
+            >= watermark
+    );
+    tx.commit().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable cluster"]
 async fn postgres_clock_conflicts_are_busy() {
@@ -179,14 +214,36 @@ async fn postgres_clock_conflicts_are_busy() {
     let page = String::from_utf8(app.view(&session, 1, None).await.unwrap().body).unwrap();
     let csrf = fixture::hidden(&page, "_csrf");
 
-    assert!(matches!(
-        clock_conflict(&db, &mut monitor, app.view(&session, 1, None)).await,
-        Err(RequestError::Busy)
-    ));
-    assert!(matches!(
-        clock_conflict(&db, &mut monitor, app.login_challenge()).await,
-        Err(RequestError::Busy)
-    ));
+    clock_writer_held(
+        &db,
+        async || app.view(&session, 1, None).await.map(|page| page.body),
+        |body| {
+            let html = std::str::from_utf8(body).unwrap();
+            app.keys
+                .verify(
+                    &fixture::hidden(html, "_submission"),
+                    crate::security::now().unwrap() + 60,
+                )
+                .unwrap()
+                .issued
+        },
+    )
+    .await;
+    clock_writer_held(
+        &db,
+        async || {
+            app.login_challenge()
+                .await
+                .map(|challenge| challenge.cookie)
+        },
+        |cookie| {
+            app.keys
+                .verify(cookie, crate::security::now().unwrap() + 60)
+                .unwrap()
+                .issued
+        },
+    )
+    .await;
     assert!(matches!(
         clock_conflict(
             &db,
@@ -579,4 +636,510 @@ async fn postgres_clock_rollback_tolerance_and_recovery() {
         .execute(&mut admin)
         .await
         .unwrap();
+}
+
+async fn storage_snapshot(db: &Database) -> Vec<(String, Vec<[String; 1]>)> {
+    let mut tx = db
+        .begin_read(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    let snapshot = tx.snapshot().await.unwrap();
+    tx.commit().await.unwrap();
+    snapshot
+}
+
+async fn read_only_clock_and_schema(db: Database) {
+    use crate::{RequestError, security};
+    use std::sync::atomic::{AtomicI64, Ordering};
+    db.initialize().await.unwrap();
+    let m = fixture::manifest();
+    let app = Arc::new(
+        Application::new(
+            &fixture::component(None),
+            &serde_json::to_vec(&m).unwrap(),
+            manifest::digest(&m).unwrap(),
+            db.clone(),
+            HostKeys::generate().unwrap(),
+            Limits::default(),
+        )
+        .unwrap(),
+    );
+    let before = storage_snapshot(&db).await;
+    assert!(matches!(
+        app.login_challenge().await,
+        Err(RequestError::Rejected)
+    ));
+    assert!(matches!(
+        app.view("unused", 1, None).await,
+        Err(RequestError::Rejected)
+    ));
+    assert!(matches!(
+        app.login("unused", "unused", "alice", "review test password")
+            .await,
+        Err(RequestError::Rejected)
+    ));
+    assert_eq!(storage_snapshot(&db).await, before);
+    let mut tx = db
+        .begin_read(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert!(tx.check_schema(&m).await.is_err());
+    assert!(
+        tx.execute("UPDATE nx_clock SET observed=123", &[])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("read-only")
+    );
+    // Even syntactically invalid SQL must fail at the host guard first.
+    assert!(
+        tx.execute("invalid SQL", &[])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("read-only")
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(storage_snapshot(&db).await, before);
+    let mut tx = db
+        .begin_read(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    let error = tx
+        .fetch::<1>(
+            "UPDATE nx_clock SET observed=1 RETURNING CAST(observed AS TEXT)",
+            &[],
+        )
+        .await
+        .unwrap_err();
+    let Some(sqlx::Error::Database(error)) = error.downcast_ref::<sqlx::Error>() else {
+        panic!("write-through-fetch must be rejected by the database: {error}");
+    };
+    assert_eq!(
+        error.code().as_deref(),
+        Some(match db {
+            Database::Sqlite(_) => "8",
+            Database::Postgres(_) => "25006",
+        })
+    );
+    tx.rollback().await.unwrap();
+    assert_eq!(storage_snapshot(&db).await, before);
+    app.activate().await.unwrap();
+    let mut tx = db
+        .begin_read(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    tx.check_schema(&m).await.unwrap();
+    let mut mismatch = m.clone();
+    mismatch.resources[0].fields[0].max_bytes -= 1;
+    assert!(
+        tx.check_schema(&mismatch)
+            .await
+            .unwrap_err()
+            .to_string()
+            .starts_with("stored schema differs")
+    );
+    tx.rollback().await.unwrap();
+
+    // An already activated process also rejects a definition removed by an
+    // operator; request admission must never recreate it on either path.
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    tx.execute("DELETE FROM nx_schema_definition", &[])
+        .await
+        .unwrap();
+    tx.execute("DELETE FROM nx_resource_catalog", &[])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let before = storage_snapshot(&db).await;
+    assert!(matches!(
+        app.login_challenge().await,
+        Err(RequestError::Rejected)
+    ));
+    assert!(matches!(
+        app.view("unused", 1, None).await,
+        Err(RequestError::Rejected)
+    ));
+    assert!(matches!(
+        app.login("unused", "unused", "alice", "review test password")
+            .await,
+        Err(RequestError::Rejected)
+    ));
+    assert_eq!(storage_snapshot(&db).await, before);
+    app.activate().await.unwrap();
+
+    for stored in [0_i64, 10_000] {
+        let mut tx = db
+            .begin(Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        tx.execute("UPDATE nx_clock SET observed=$1", &[stored.into()])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let before = storage_snapshot(&db).await;
+        let memory = AtomicI64::new(10_000 - stored);
+        let mut tx = db
+            .begin_read(Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            security::observe_clock_read(&mut tx, 9_940, &memory)
+                .await
+                .unwrap(),
+            10_000
+        );
+        assert_eq!(
+            security::observe_clock_read(&mut tx, 9_939, &memory)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "clock moved backwards beyond tolerance; use recover-clock with a fresh host key"
+        );
+        assert!(
+            security::observe_clock_read(&mut tx, -1, &memory)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            security::observe_clock_read(&mut tx, 10_001, &memory)
+                .await
+                .unwrap(),
+            10_001
+        );
+        assert_eq!(memory.load(Ordering::Relaxed), 10_001);
+        tx.commit().await.unwrap();
+        assert_eq!(storage_snapshot(&db).await, before);
+    }
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    tx.execute("UPDATE nx_clock SET observed=-1", &[])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let mut tx = db
+        .begin_read(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert!(
+        security::observe_clock_read(&mut tx, 10_000, &AtomicI64::new(0))
+            .await
+            .is_err()
+    );
+    tx.rollback().await.unwrap();
+}
+
+async fn concurrent_gets_write_nothing(db: Database) {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let app = app(db.clone(), fixture::manifest()).await;
+    let challenge = app.login_challenge().await.unwrap();
+    let session = app
+        .login(
+            &challenge.cookie,
+            &challenge.csrf,
+            "alice",
+            "review test password",
+        )
+        .await
+        .unwrap();
+    let page = app.view(&session, 1, None).await.unwrap();
+    let html = std::str::from_utf8(&page.body).unwrap();
+    // Populate both records and receipts so the dump checks meaningful rows.
+    app.submit(
+        &session,
+        1,
+        &fixture::hidden(html, "_submission"),
+        &fixture::hidden(html, "_csrf"),
+        Fields::from([("body".into(), "read-only fixture".into())]),
+    )
+    .await
+    .unwrap();
+    let before = storage_snapshot(&db).await;
+    let router = crate::http::router(
+        app,
+        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+    );
+    let mut reads = tokio::task::JoinSet::new();
+    for path in ["/login", "/"] {
+        for _ in 0..200 {
+            let router = router.clone();
+            let session = session.clone();
+            reads.spawn(async move {
+                // Existing admission is fail-fast at 16 page views. Retry busy
+                // responses within a bounded test deadline to render every GET.
+                tokio::time::timeout(Duration::from_secs(15), async {
+                    loop {
+                        let request = Request::builder()
+                            .uri(path)
+                            .header("Host", "localhost:8080")
+                            .header("Cookie", format!("session={session}"))
+                            .body(Body::empty())
+                            .unwrap();
+                        let response = router.clone().oneshot(request).await.unwrap();
+                        if response.status() != StatusCode::SERVICE_UNAVAILABLE {
+                            assert_eq!(response.status(), StatusCode::OK);
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            });
+        }
+    }
+    while let Some(read) = reads.join_next().await {
+        read.unwrap();
+    }
+    assert_eq!(storage_snapshot(&db).await, before);
+}
+
+async fn checkpoint_and_external_writes(db: Database) {
+    use crate::security;
+    let app = app(db.clone(), fixture::manifest()).await;
+    let challenge = app.login_challenge().await.unwrap();
+    let session = app
+        .login(
+            &challenge.cookie,
+            &challenge.csrf,
+            "alice",
+            "review test password",
+        )
+        .await
+        .unwrap();
+    let before = security::now().unwrap();
+    while security::now().unwrap() == before {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let mut writer = db
+        .begin(Instant::now() + Duration::from_secs(3))
+        .await
+        .unwrap();
+    let high = security::now().unwrap() + 10;
+    security::observe_clock(&mut writer, high).await.unwrap();
+    // Both read paths must work while the write transaction is still open.
+    tokio::time::timeout(Duration::from_secs(1), app.login_challenge())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), app.view(&session, 1, None))
+        .await
+        .unwrap()
+        .unwrap();
+    // SQLite writer contention or PostgreSQL row lock must stay bounded.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), app.checkpoint_clock())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    writer.commit().await.unwrap();
+    let challenge = app.login_challenge().await.unwrap();
+    assert!(app.keys.verify(&challenge.cookie, high).unwrap().issued >= high);
+    app.checkpoint_clock().await.unwrap();
+    let mut tx = db
+        .begin_read(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    let observed = tx
+        .fetch::<1>(
+            "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(observed[0][0].parse::<i64>().unwrap() >= high);
+    tx.commit().await.unwrap();
+
+    // A larger external watermark must fence the next read after activation.
+    let mut writer = db
+        .begin(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    security::observe_clock(&mut writer, high + 120)
+        .await
+        .unwrap();
+    writer.commit().await.unwrap();
+    assert!(matches!(
+        app.login_challenge().await,
+        Err(crate::RequestError::Rejected)
+    ));
+    app.checkpoint_clock().await.unwrap();
+    let mut tx = db
+        .begin_read(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        tx.fetch::<1>(
+            "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
+            &[]
+        )
+        .await
+        .unwrap()[0][0],
+        (high + 120).to_string()
+    );
+    tx.commit().await.unwrap();
+    // An idle checkpoint after retirement succeeds without touching storage.
+    // Dirty retired checkpoints are covered by the write-watermark regressions.
+    db.recover_clock(&HostKeys::generate().unwrap())
+        .await
+        .unwrap();
+    let before = storage_snapshot(&db).await;
+    app.checkpoint_clock().await.unwrap();
+    assert_eq!(storage_snapshot(&db).await, before);
+}
+
+#[tokio::test]
+async fn sqlite_read_only_clock_and_schema() {
+    let temp = tempfile::tempdir().unwrap();
+    read_only_clock_and_schema(Database::sqlite(temp.path().join("reads.db"))).await;
+}
+
+#[tokio::test]
+async fn sqlite_concurrent_gets_write_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    concurrent_gets_write_nothing(Database::sqlite(temp.path().join("gets.db"))).await;
+}
+
+#[tokio::test]
+async fn sqlite_checkpoint_and_external_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    checkpoint_and_external_writes(Database::sqlite(temp.path().join("checkpoint.db"))).await;
+}
+
+#[tokio::test]
+#[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable cluster"]
+async fn postgres_read_paths_and_checkpoints() {
+    use sqlx::Connection;
+    let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+    for case in ["schema", "gets", "checkpoint", "timer"] {
+        let name = format!(
+            "nx_read_{case}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sqlx::query(&format!("CREATE DATABASE {name}"))
+            .execute(&mut admin)
+            .await
+            .unwrap();
+        let mut url = url::Url::parse(&url).unwrap();
+        url.set_path(&format!("/{name}"));
+        let db = Database::postgres(url.as_str()).unwrap();
+        match case {
+            "schema" => read_only_clock_and_schema(db).await,
+            "gets" => concurrent_gets_write_nothing(db).await,
+            "checkpoint" => checkpoint_and_external_writes(db).await,
+            _ => server_checkpoints_read_advances(db).await,
+        }
+        sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+            .execute(&mut admin)
+            .await
+            .unwrap();
+    }
+}
+
+async fn server_checkpoints_read_advances(db: Database) {
+    use crate::{
+        http::{Listener, Origin},
+        security,
+    };
+    let app = app(db.clone(), fixture::manifest()).await;
+    let before = security::now().unwrap();
+    // Advance only through a read, without changing the durable row.
+    while security::now().unwrap() == before {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let snapshot = storage_snapshot(&db).await;
+    let challenge = app.login_challenge().await.unwrap();
+    let effective = app
+        .keys
+        .verify(&challenge.cookie, security::now().unwrap())
+        .unwrap()
+        .issued;
+    assert!(effective > before);
+    assert_eq!(storage_snapshot(&db).await, snapshot);
+    let listener = Listener::loopback("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let (stop, shutdown) = tokio::sync::oneshot::channel();
+    let server_app = app.clone();
+    let server = tokio::spawn(async move {
+        crate::http::serve(
+            listener,
+            server_app,
+            Origin::parse("http://localhost:8080").unwrap(),
+            async {
+                let _ = shutdown.await;
+            },
+        )
+        .await
+        .unwrap();
+    });
+    // Exercise the production 60-second timer without changing dependencies or
+    // introducing a configurable checkpoint interval solely for tests.
+    tokio::time::timeout(
+        security::CLOCK_CHECKPOINT_INTERVAL + Duration::from_secs(5),
+        async {
+            loop {
+                let mut tx = db
+                    .begin_read(Instant::now() + Duration::from_secs(2))
+                    .await
+                    .unwrap();
+                let rows = tx
+                    .fetch::<1>(
+                        "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+                if rows[0][0].parse::<i64>().unwrap() >= effective {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        },
+    )
+    .await
+    .unwrap();
+    stop.send(()).unwrap();
+    server.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while Arc::strong_count(&app) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_server_checkpoints_read_advances() {
+    let temp = tempfile::tempdir().unwrap();
+    server_checkpoints_read_advances(Database::sqlite(temp.path().join("server-clock.db"))).await;
+}
+
+#[test]
+fn private_notes_approval_digest_is_unchanged() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let m = manifest::parse(include_bytes!(
+        "../../../examples/private-notes/manifest.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        URL_SAFE_NO_PAD.encode(manifest::digest(&m).unwrap()),
+        "jKUms09nfOJN4kK0zmHL4tweVWcKwmUJtk7UfhuojlA"
+    );
 }

@@ -27,6 +27,7 @@ pub(crate) enum Backend {
 pub(crate) struct Transaction {
     backend: Backend,
     active: bool,
+    read_only: bool,
     cancelled: Arc<AtomicBool>,
     deadline: tokio::time::Instant,
 }
@@ -94,13 +95,21 @@ impl Database {
         Ok(Self::Postgres(options))
     }
     pub(crate) async fn begin(&self, deadline: Instant) -> Result<Transaction> {
-        tokio::time::timeout_at(deadline.into(), self.connect(deadline, false)).await?
+        tokio::time::timeout_at(deadline.into(), self.connect(deadline, false, false)).await?
+    }
+    pub(crate) async fn begin_read(&self, deadline: Instant) -> Result<Transaction> {
+        tokio::time::timeout_at(deadline.into(), self.connect(deadline, false, true)).await?
     }
     async fn begin_schema(&self) -> Result<Transaction> {
         let deadline = Instant::now() + Duration::from_secs(60);
-        tokio::time::timeout_at(deadline.into(), self.connect(deadline, true)).await?
+        tokio::time::timeout_at(deadline.into(), self.connect(deadline, true, false)).await?
     }
-    async fn connect(&self, deadline: Instant, exclusive: bool) -> Result<Transaction> {
+    async fn connect(
+        &self,
+        deadline: Instant,
+        exclusive: bool,
+        read_only: bool,
+    ) -> Result<Transaction> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let backend = match self {
             Self::Sqlite(options) => {
@@ -138,7 +147,18 @@ impl Database {
                     synchronous == 2 && mode == "wal",
                     "unsafe SQLite durability"
                 );
-                sqlx::query("BEGIN IMMEDIATE").execute(&mut cx).await?;
+                if read_only {
+                    sqlx::query("PRAGMA query_only = ON")
+                        .execute(&mut cx)
+                        .await?;
+                }
+                sqlx::query(if read_only {
+                    "BEGIN DEFERRED"
+                } else {
+                    "BEGIN IMMEDIATE"
+                })
+                .execute(&mut cx)
+                .await?;
                 Backend::Sqlite(cx)
             }
             Self::Postgres(options) => {
@@ -176,15 +196,20 @@ impl Database {
                 };
                 let acquired: bool = sqlx::query_scalar(lock).fetch_one(&mut cx).await?;
                 ensure!(acquired, "application database is busy with maintenance");
-                sqlx::query("BEGIN ISOLATION LEVEL SERIALIZABLE")
-                    .execute(&mut cx)
-                    .await?;
+                sqlx::query(if read_only {
+                    "BEGIN ISOLATION LEVEL SERIALIZABLE, READ ONLY"
+                } else {
+                    "BEGIN ISOLATION LEVEL SERIALIZABLE"
+                })
+                .execute(&mut cx)
+                .await?;
                 Backend::Postgres(cx)
             }
         };
         Ok(Transaction {
             backend,
             active: true,
+            read_only,
             cancelled,
             deadline: deadline.into(),
         })
@@ -262,6 +287,28 @@ impl Database {
 }
 
 impl Transaction {
+    #[cfg(test)]
+    pub(crate) async fn snapshot(&mut self) -> Result<Vec<(String, Vec<[String; 1]>)>> {
+        let mut tables = Vec::new();
+        for &(table, columns) in TABLE_COLUMNS {
+            let columns = columns
+                .iter()
+                .map(|(name, _)| format!("CAST({name} AS TEXT)"))
+                .collect::<Vec<_>>()
+                .join(",");
+            let json = match self.backend {
+                Backend::Sqlite(_) => format!("json_array({columns})"),
+                Backend::Postgres(_) => format!("CAST(json_build_array({columns}) AS TEXT)"),
+            };
+            let mut rows = self
+                .fetch::<1>(&format!("SELECT {json} FROM {table}"), &[])
+                .await?;
+            rows.sort();
+            tables.push((table.into(), rows));
+        }
+        Ok(tables)
+    }
+
     pub(crate) async fn check_storage(&mut self) -> Result<()> {
         let rows = self.fetch::<2>(
             "SELECT CAST(singleton AS TEXT),CAST(version AS TEXT) FROM nx_storage ORDER BY singleton LIMIT 2",
@@ -386,6 +433,10 @@ impl Transaction {
         format!("CASE WHEN {size}<={maximum} THEN {column} ELSE NULL END")
     }
     pub(crate) async fn execute(&mut self, sql: &str, params: &[Param]) -> Result<u64> {
+        ensure!(!self.read_only, "read-only transaction");
+        self.execute_internal(sql, params).await
+    }
+    async fn execute_internal(&mut self, sql: &str, params: &[Param]) -> Result<u64> {
         let deadline = if sql == "ROLLBACK" {
             tokio::time::Instant::now() + Duration::from_millis(500)
         } else {
@@ -452,7 +503,7 @@ impl Transaction {
         Ok(())
     }
     pub(crate) async fn commit(&mut self) -> Result<()> {
-        self.execute("COMMIT", &[]).await?;
+        self.execute_internal("COMMIT", &[]).await?;
         self.active = false;
         self.release_gate().await?;
         #[cfg(test)]
@@ -465,7 +516,7 @@ impl Transaction {
                 if let Backend::Sqlite(cx) = &mut self.backend {
                     cx.lock_handle().await?.remove_progress_handler();
                 }
-                self.execute("ROLLBACK", &[]).await?;
+                self.execute_internal("ROLLBACK", &[]).await?;
                 self.active = false;
             }
             self.release_gate().await?;
@@ -589,17 +640,27 @@ impl Transaction {
             .map_err(Into::into)
     }
 
+    pub(crate) async fn check_schema(
+        &mut self,
+        manifest: &noxide_protocol::Manifest,
+    ) -> Result<()> {
+        let (resources, _) = self
+            .schema_definition()
+            .await?
+            .context("application schema is not bound")?;
+        ensure!(
+            crate::schema::digest(&resources)? == crate::schema::digest(&manifest.resources)?,
+            "stored schema differs from approved resource contract; an explicit migration is required"
+        );
+        for resource in &manifest.resources {
+            self.storage_resource(manifest, resource.id).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn bind_schema(&mut self, manifest: &noxide_protocol::Manifest) -> Result<()> {
-        let hash = crate::schema::digest(&manifest.resources)?;
-        if let Some((resources, _)) = self.schema_definition().await? {
-            ensure!(
-                crate::schema::digest(&resources)? == hash,
-                "stored schema differs from approved resource contract; an explicit migration is required"
-            );
-            for resource in &manifest.resources {
-                self.storage_resource(manifest, resource.id).await?;
-            }
-            return Ok(());
+        if self.schema_definition().await?.is_some() {
+            return self.check_schema(manifest).await;
         }
         ensure!(
             self.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_records", &[])

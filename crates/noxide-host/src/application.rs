@@ -13,7 +13,10 @@ use noxide_protocol::*;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicI64, Ordering},
+    },
 };
 use tokio::{
     sync::Semaphore,
@@ -64,6 +67,8 @@ pub struct Application {
     contract: String,
     deployment: String,
     generation: OnceLock<String>,
+    clock: AtomicI64,
+    checkpointed: AtomicI64,
     permits: Semaphore,
     login_permits: Arc<Semaphore>,
 }
@@ -91,7 +96,19 @@ impl Application {
             self.generation.get().is_none_or(|g| g == &generation),
             "application generation retired"
         );
+        let rows = tx
+            .fetch::<1>(
+                "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
+                &[],
+            )
+            .await?;
+        let observed = rows
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("clock missing"))?[0]
+            .parse()?;
         tx.commit().await?;
+        self.clock.fetch_max(observed, Ordering::Relaxed);
+        self.checkpointed.fetch_max(observed, Ordering::Relaxed);
         ensure!(
             self.generation.get_or_init(|| generation.clone()) == &generation,
             "concurrent activation differs"
@@ -101,7 +118,7 @@ impl Application {
 
     async fn admission(&self, tx: &mut Transaction, activate: bool) -> Result<()> {
         tx.check_storage().await?;
-        tx.bind_schema(&self.manifest).await?;
+        tx.check_schema(&self.manifest).await?;
         let generation = tx
             .deployment(&self.deployment, self.keys.incarnation(), activate)
             .await?;
@@ -110,6 +127,48 @@ impl Application {
             "application is unactivated or retired"
         );
         Ok(())
+    }
+
+    async fn observe_clock_write(&self, tx: &mut Transaction, now: i64) -> Result<i64> {
+        // Check raw wall time against both watermarks before substituting the
+        // effective time. Persist read-only advances with the write itself.
+        let effective = security::observe_clock_read(tx, now, &self.clock).await?;
+        let effective = security::observe_clock(tx, effective).await?;
+        self.clock.fetch_max(effective, Ordering::Relaxed);
+        Ok(effective)
+    }
+
+    pub(crate) async fn checkpoint_clock(&self) -> Result<()> {
+        let m = self.clock.load(Ordering::Relaxed);
+        if m <= self.checkpointed.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let deadline = Instant::now() + security::CLOCK_CHECKPOINT_BEGIN_DEADLINE;
+        timeout_at(deadline, async {
+            let mut tx = self.database.begin(deadline.into_std()).await?;
+            self.admission(&mut tx, false).await?;
+            tx.execute(
+                "UPDATE nx_clock SET observed=$1 WHERE singleton=1 AND observed<$1",
+                &[m.into()],
+            )
+            .await?;
+            tx.commit().await?;
+            self.checkpointed.fetch_max(m, Ordering::Relaxed);
+            Ok(())
+        })
+        .await?
+    }
+
+    pub(crate) async fn checkpoint_clocks(&self) {
+        let mut ticks = tokio::time::interval_at(
+            Instant::now() + security::CLOCK_CHECKPOINT_INTERVAL,
+            security::CLOCK_CHECKPOINT_INTERVAL,
+        );
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticks.tick().await;
+            let _ = self.checkpoint_clock().await;
+        }
     }
 
     fn submission_contract(&self) -> String {
@@ -150,6 +209,8 @@ impl Application {
             contract: URL_SAFE_NO_PAD.encode(digest),
             deployment,
             generation: OnceLock::new(),
+            clock: AtomicI64::new(0),
+            checkpointed: AtomicI64::new(0),
             permits: Semaphore::new(concurrency),
             login_permits: Arc::new(Semaphore::new(2)),
         })
@@ -165,16 +226,17 @@ impl Application {
     pub async fn login_challenge(&self) -> std::result::Result<LoginChallenge, RequestError> {
         let mut tx = self
             .database
-            .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
+            .begin_read(std::time::Instant::now() + std::time::Duration::from_secs(2))
             .await
             .map_err(|_| RequestError::Busy)?;
         self.admission(&mut tx, false)
             .await
             .map_err(|_| RequestError::Rejected)?;
         let now = security::now().map_err(|_| RequestError::Rejected)?;
-        let now = security::observe_clock(&mut tx, now)
+        let now = security::observe_clock_read(&mut tx, now, &self.clock)
             .await
             .map_err(RequestError::database)?;
+        self.clock.fetch_max(now, Ordering::Relaxed);
 
         let (token, cookie) = self
             .keys
@@ -210,7 +272,8 @@ impl Application {
                 .await
                 .map_err(|_| RequestError::Rejected)?;
             let now = security::now().map_err(|_| RequestError::Rejected)?;
-            let now = security::observe_clock(&mut tx, now)
+            let now = self
+                .observe_clock_write(&mut tx, now)
                 .await
                 .map_err(RequestError::database)?;
             let token = self
@@ -244,7 +307,8 @@ impl Application {
             .await
             .map_err(|_| RequestError::Rejected)?;
         let now = security::now().map_err(|_| RequestError::Rejected)?;
-        let now = security::observe_clock(&mut tx, now)
+        let now = self
+            .observe_clock_write(&mut tx, now)
             .await
             .map_err(RequestError::database)?;
         let (session, _) = auth::authenticate(&mut tx, &self.keys, cookie, now)
@@ -542,16 +606,17 @@ impl Application {
         timeout_at(deadline, async {
             let mut tx = self
                 .database
-                .begin(deadline.into_std())
+                .begin_read(deadline.into_std())
                 .await
                 .map_err(|_| RequestError::Busy)?;
             self.admission(&mut tx, false)
                 .await
                 .map_err(|_| RequestError::Rejected)?;
             let now = security::now().map_err(|_| RequestError::Rejected)?;
-            let now = security::observe_clock(&mut tx, now)
+            let now = security::observe_clock_read(&mut tx, now, &self.clock)
                 .await
                 .map_err(RequestError::database)?;
+            self.clock.fetch_max(now, Ordering::Relaxed);
 
             let (session, principal) = auth::authenticate(&mut tx, &self.keys, cookie, now)
                 .await
@@ -714,7 +779,7 @@ impl Application {
             let mut tx = self.database.begin(deadline.into_std()).await?;
             self.admission(&mut tx, false).await?;
             let now = security::now()?;
-            let now = security::observe_clock(&mut tx, now).await?;
+            let now = self.observe_clock_write(&mut tx, now).await?;
             let token = self.keys.verify(submission, now)?;
             let target = self.submission_target(&token, a)?;
 
@@ -772,7 +837,7 @@ impl Application {
         let mut tx = self.database.begin(deadline.into_std()).await?;
         self.admission(&mut tx, false).await?;
         let now = security::now()?;
-        let now = security::observe_clock(&mut tx, now).await?;
+        let now = self.observe_clock_write(&mut tx, now).await?;
         let token = self
             .keys
             .verify(submission, now)
@@ -916,5 +981,287 @@ impl Application {
             .await?;
         ensure!(Instant::now() < deadline, "request deadline");
         Ok((Some(effects.tx), response))
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    use crate::test_support as fixture;
+    use std::time::Duration;
+
+    async fn read_advance(app: &Application, now: i64) {
+        let mut tx = app
+            .database
+            .begin_read(std::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        security::observe_clock_read(&mut tx, now, &app.clock)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    async fn stored_clock(db: &Database) -> i64 {
+        let mut tx = db
+            .begin_read(std::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        let rows = tx
+            .fetch::<1>(
+                "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
+                &[],
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        rows[0][0].parse().unwrap()
+    }
+
+    async fn write_clock_uses_read_watermark(db: Database) {
+        db.initialize().await.unwrap();
+        db.create_account("alice", "clock regression password", "")
+            .await
+            .unwrap();
+        let m = fixture::manifest();
+        let app = Application::new(
+            &fixture::component(None),
+            &serde_json::to_vec(&m).unwrap(),
+            manifest::digest(&m).unwrap(),
+            db.clone(),
+            HostKeys::generate().unwrap(),
+            Limits::default(),
+        )
+        .unwrap();
+        app.activate().await.unwrap();
+        let wall = security::now().unwrap();
+        let high = wall + 30;
+        read_advance(&app, high).await;
+        assert!(stored_clock(&db).await < high);
+        let challenge = app.login_challenge().await.unwrap();
+        assert_eq!(
+            app.keys.verify(&challenge.cookie, high).unwrap().issued,
+            high
+        );
+        let (expired_challenge, signed) =
+            app.keys.issue(TokenKind::Login, "", wall - 60, 75).unwrap();
+        assert!(app.keys.verify(&signed, wall).is_ok());
+        assert!(matches!(
+            app.login(
+                &signed,
+                &app.keys.csrf(&expired_challenge.nonce),
+                "alice",
+                "clock regression password"
+            )
+            .await,
+            Err(RequestError::InvalidRequest)
+        ));
+        assert!(stored_clock(&db).await < high);
+
+        let session = app
+            .login(
+                &challenge.cookie,
+                &challenge.csrf,
+                "alice",
+                "clock regression password",
+            )
+            .await
+            .unwrap();
+        assert_eq!(app.keys.verify(&session, high).unwrap().issued, high);
+        assert_eq!(stored_clock(&db).await, high);
+
+        read_advance(&app, high + 1).await;
+        let page = app.view(&session, 1, None).await.unwrap();
+        let html = std::str::from_utf8(&page.body).unwrap();
+        let submission = fixture::hidden(html, "_submission");
+        let csrf = fixture::hidden(html, "_csrf");
+        let token = app.keys.verify(&submission, high + 1).unwrap();
+        let (_, expired) = app
+            .keys
+            .issue(token.kind.clone(), &token.subject, wall - 60, 75)
+            .unwrap();
+        assert!(app.keys.verify(&expired, wall).is_ok());
+        let input = Fields::from([("body".into(), "read watermark".into())]);
+        assert!(
+            app.submit(&session, 1, &expired, &csrf, input.clone())
+                .await
+                .is_err()
+        );
+        assert!(
+            app.recover_form(&session, 1, &expired, &csrf, &input, true)
+                .await
+                .is_err()
+        );
+        app.submit(&session, 1, &submission, &csrf, input.clone())
+            .await
+            .unwrap();
+        assert_eq!(stored_clock(&db).await, high + 1);
+        read_advance(&app, high + 2).await;
+        app.recover_form(&session, 1, &submission, &csrf, &input, true)
+            .await
+            .unwrap();
+        assert_eq!(stored_clock(&db).await, high + 2);
+        read_advance(&app, high + 3).await;
+        app.logout(&session, &csrf).await.unwrap();
+        assert_eq!(stored_clock(&db).await, high + 3);
+
+        // The exact boundary is evaluated against raw wall time, not an
+        // already-substituted effective time, even if durable time lags.
+        let mut tx = db
+            .begin(std::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            app.observe_clock_write(&mut tx, high + 3 - 60)
+                .await
+                .unwrap(),
+            high + 3
+        );
+        assert_eq!(
+            app.observe_clock_write(&mut tx, high + 3 - 61)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "clock moved backwards beyond tolerance; use recover-clock with a fresh host key"
+        );
+        tx.rollback().await.unwrap();
+        let durable = stored_clock(&db).await;
+        read_advance(&app, wall + 120).await;
+        let snapshot = {
+            let mut tx = db
+                .begin_read(std::time::Instant::now() + Duration::from_secs(2))
+                .await
+                .unwrap();
+            let rows = tx.snapshot().await.unwrap();
+            tx.commit().await.unwrap();
+            rows
+        };
+        assert!(matches!(
+            app.login(
+                &challenge.cookie,
+                &challenge.csrf,
+                "alice",
+                "clock regression password"
+            )
+            .await,
+            Err(RequestError::Rejected)
+        ));
+        assert!(matches!(
+            app.logout(&session, &csrf).await,
+            Err(RequestError::Rejected)
+        ));
+        assert!(matches!(
+            app.submit(&session, 1, &submission, &csrf, input.clone())
+                .await,
+            Err(RequestError::Rejected)
+        ));
+        assert!(
+            app.recover_form(&session, 1, &submission, &csrf, &input, true)
+                .await
+                .is_err()
+        );
+        assert_eq!(stored_clock(&db).await, durable);
+        let mut tx = db
+            .begin_read(std::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(tx.snapshot().await.unwrap(), snapshot);
+        tx.commit().await.unwrap();
+        db.recover_clock(&HostKeys::generate().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            app.checkpoint_clock().await.is_err(),
+            "a dirty retired process must not checkpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_idle_checkpoint_takes_no_writer_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::sqlite(temp.path().join("idle-checkpoint.db"));
+        db.initialize().await.unwrap();
+        let mut tx = db
+            .begin(std::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        security::observe_clock(&mut tx, 10_000).await.unwrap();
+        tx.commit().await.unwrap();
+        let m = fixture::manifest();
+        let app = Application::new(
+            &fixture::component(None),
+            &serde_json::to_vec(&m).unwrap(),
+            manifest::digest(&m).unwrap(),
+            db.clone(),
+            HostKeys::generate().unwrap(),
+            Limits::default(),
+        )
+        .unwrap();
+        app.activate().await.unwrap();
+        assert_eq!(app.checkpointed.load(Ordering::Relaxed), 10_000);
+        let mut writer = db
+            .begin(std::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_millis(100), app.checkpoint_clock())
+            .await
+            .unwrap()
+            .unwrap();
+        writer.rollback().await.unwrap();
+
+        let high = security::now().unwrap();
+        read_advance(&app, high).await;
+        app.checkpoint_clock().await.unwrap();
+        assert_eq!(app.checkpointed.load(Ordering::Relaxed), high);
+        assert_eq!(stored_clock(&db).await, high);
+        let mut writer = db
+            .begin(std::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        // No read has advanced memory since the successful checkpoint. This
+        // would hit the 200 ms deadline if a second checkpoint opened a writer.
+        tokio::time::timeout(Duration::from_millis(100), app.checkpoint_clock())
+            .await
+            .unwrap()
+            .unwrap();
+        read_advance(&app, high + 1).await;
+        assert!(app.checkpoint_clock().await.is_err());
+        assert_eq!(app.checkpointed.load(Ordering::Relaxed), high);
+        writer.rollback().await.unwrap();
+        app.checkpoint_clock().await.unwrap();
+        assert_eq!(app.checkpointed.load(Ordering::Relaxed), high + 1);
+        assert_eq!(stored_clock(&db).await, high + 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_writes_honor_read_clock_before_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        write_clock_uses_read_watermark(Database::sqlite(temp.path().join("read-clock.db"))).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable cluster"]
+    async fn postgres_writes_honor_read_clock_before_checkpoint() {
+        use sqlx::Connection;
+        let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+        let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+        let name = format!(
+            "nx_read_write_clock_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sqlx::query(&format!("CREATE DATABASE {name}"))
+            .execute(&mut admin)
+            .await
+            .unwrap();
+        let mut case = url::Url::parse(&url).unwrap();
+        case.set_path(&format!("/{name}"));
+        write_clock_uses_read_watermark(Database::postgres(case.as_str()).unwrap()).await;
+        sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+            .execute(&mut admin)
+            .await
+            .unwrap();
     }
 }
