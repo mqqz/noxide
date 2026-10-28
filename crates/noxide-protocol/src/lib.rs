@@ -131,9 +131,7 @@ pub struct Policy {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TextField {
-    #[serde(default)]
     pub kind: FieldKind,
-    #[serde(default)]
     pub optional: bool,
     pub name: String,
     pub label: String,
@@ -224,7 +222,6 @@ pub struct Route {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Action {
-    #[serde(default)]
     pub layout: Vec<FormInstruction>,
     pub id: u32,
     pub version: u32,
@@ -233,7 +230,6 @@ pub struct Action {
     pub redirect: u32,
     /// Every listed field is required; all other application fields are rejected.
     pub fields: Vec<String>,
-    #[serde(default)]
     pub inspect: Option<Inspection>,
 }
 
@@ -280,7 +276,6 @@ pub struct RequestView {
     pub input: Fields,
     /// Original target values permitted by the action's explicit read projection.
     pub inspection: Option<Fields>,
-    #[serde(default)]
     pub available_forms: Vec<u32>,
 }
 
@@ -325,5 +320,45 @@ impl TextField {
             return Err(format!("Use at most {} UTF-8 bytes.", self.max_bytes));
         }
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_protocol_requires_explicit_declarations_and_form_availability() {
+        fn required<T: serde::de::DeserializeOwned>(value: serde_json::Value, fields: &[&str]) {
+            assert!(serde_json::from_value::<T>(value.clone()).is_ok());
+            for field in fields {
+                let mut missing = value.clone();
+                missing.as_object_mut().unwrap().remove(*field);
+                assert!(
+                    serde_json::from_value::<T>(missing).is_err(),
+                    "missing {field}"
+                );
+            }
+        }
+        required::<TextField>(
+            serde_json::json!({
+                "kind": "text", "optional": false, "name": "body", "label": "Body", "max_bytes": 4096
+            }),
+            &["kind", "optional"],
+        );
+        required::<Action>(
+            serde_json::json!({
+                "layout": [], "id": 1, "version": 1, "name": "Create", "operation": 1,
+                "redirect": 1, "fields": ["body"], "inspect": null
+            }),
+            &["layout"],
+        );
+        required::<RequestView>(
+            serde_json::json!({
+                "version": VERSION, "kind": {"route": 1}, "target": null, "input": {},
+                "inspection": null, "available_forms": []
+            }),
+            &["available_forms"],
+        );
     }
 }

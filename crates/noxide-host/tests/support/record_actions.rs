@@ -4,8 +4,8 @@ pub fn declarations() -> Manifest {
     serde_json::from_value(serde_json::json!({
         "version": VERSION,
         "resources": [{"id":1,"name":"notes","fields":[
-            {"name":"body","label":"Note","max_bytes":4096},
-            {"name":"tag","label":"Tag","max_bytes":128}]}],
+            {"kind":"text","optional":false,"name":"body","label":"Note","max_bytes":4096},
+            {"kind":"text","optional":false,"name":"tag","label":"Tag","max_bytes":128}]}],
         "operations": [
             {"id":2,"resource":1,"kind":"read","policy":{"any":[["owner"]]}},
             {"id":4,"resource":1,"kind":"update","policy":{"any":[["owner",{"role":{"name":"writer","tenant_scoped":false}}]]}},
@@ -13,12 +13,12 @@ pub fn declarations() -> Manifest {
         ],
         "routes":[
             {"id":1,"path":"/","resource":null,"operations":[],"forms":[]},
-            {"id":2,"path":"/notes","resource":1,"operations":[2],"forms":[2,3]}
+            {"id":2,"path":"/notes/{note}","resource":1,"operations":[2],"forms":[2,3]}
         ],
         "actions":[
             {"id":2,"version":1,"name":"Save changes","operation":4,"redirect":2,
-             "fields":["body"],"inspect":{"operation":2,"fields":["body"]}},
-            {"id":3,"version":1,"name":"Delete note","operation":5,"redirect":1,"fields":[]}
+             "fields":["body"],"layout":[],"inspect":{"operation":2,"fields":["body"]}},
+            {"id":3,"version":1,"name":"Delete note","operation":5,"redirect":1,"fields":[],"layout":[]}
         ]
     })).unwrap()
 }

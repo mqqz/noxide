@@ -44,7 +44,7 @@ would require a separately specified ordering protocol.
 
 Application declarations request authority. Approval comes from deployment
 policy, which must constrain resources, operations, policy rules, and action
-contracts. Installation and upgrades must preserve those constraints unless the
+contracts. Deployment must preserve those constraints unless the
 operator explicitly approves wider permissions.
 
 Grants apply to reads as well as writes. A request to delete note 42 cannot delete
@@ -281,22 +281,16 @@ Both providers must implement the same semantic protocol and pass the same
 hostile acceptance suite on real databases, including independent connections
 and host processes. Provider SQL, locking, and error classification can differ.
 
-Runtime storage version 2 adds record incarnation and revision fields.
-`noxide migrate CONFIG.json` upgrades legacy storage in one transaction while
-serving is stopped. It preserves content and authorization fields, assigns each
-record a random incarnation and revision 1, then stamps the storage version.
-Migration also changes the deployment generation to retire old forms. Interrupting
-the operation leaves the old layout or the complete new layout. Required columns
-without defaults reject legacy inserts. Current hosts check the version at
-activation and admission; they do not migrate implicitly.
+Initialization creates the current framework storage layout. Activation and
+request admission reject unsupported storage versions. Initialization also checks
+the table and column definitions of an existing database.
 
-Runtime storage version 3 additionally stores a stable resource-key catalog and
-normalized application schemas. Application schema changes use bounded,
-operator-approved declarative migrations under exclusive database access. Schema
-fingerprints ignore bundle IDs, ordering, and presentation labels. Explicit
-legacy import verifies the original stored resource digest before mapping old
-numeric storage identities. Guest-provided migration code remains unsupported.
-See [the application API](../application-api.md) for migration authoring and the
+Storage includes record incarnation/revision fields, a stable resource-key
+catalog, and normalized application schemas. Application schema changes use
+bounded, operator-approved declarative migrations under exclusive database
+access. Schema fingerprints ignore bundle IDs, ordering, and presentation labels.
+Guest-provided migration code remains unsupported. See
+[the application API](../application-api.md) for migration authoring and the
 isolated SDK workflow.
 
 The adapters use SQLite WAL with `BEGIN IMMEDIATE` and PostgreSQL `SERIALIZABLE`.

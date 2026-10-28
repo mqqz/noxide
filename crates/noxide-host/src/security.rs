@@ -301,16 +301,6 @@ mod tests {
         let (_, encoded) = keys.issue(TokenKind::Login, "", 100, 900).unwrap();
         assert!(keys.verify(&format!("{encoded}.extra"), 100).is_err());
         assert!(keys.verify(&"A".repeat(2049), 100).is_err());
-        // Reject the old readable HMAC envelope even with a valid old signature.
-        let (token, _) = keys.issue(TokenKind::Login, "", 100, 900).unwrap();
-        let body = serde_json::to_vec(&token).unwrap();
-        let mac = keys.mac(b"noxide/token/v1", &body).finalize().into_bytes();
-        let old = format!(
-            "{}.{}",
-            URL_SAFE_NO_PAD.encode(body),
-            URL_SAFE_NO_PAD.encode(mac)
-        );
-        assert!(keys.verify(&old, 100).is_err());
     }
 
     #[test]

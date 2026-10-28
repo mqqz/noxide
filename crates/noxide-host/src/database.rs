@@ -197,27 +197,9 @@ impl Database {
                 tx.execute(sql, &[]).await?;
             }
         } else {
-            tx.check_storage()
-                .await
-                .context("storage requires explicit offline migration")?;
-            tx.check_layout(STORAGE_VERSION).await?;
+            tx.check_storage().await?;
+            tx.check_layout().await?;
         }
-        tx.commit().await
-    }
-
-    /// Upgrade the framework's storage while all application servers are stopped.
-    /// Migration is atomic and limited to five minutes; it never executes guest SQL.
-    pub async fn migrate(&self) -> Result<()> {
-        let mut tx = self
-            .begin(Instant::now() + Duration::from_secs(300))
-            .await?;
-        if matches!(tx.backend, Backend::Postgres(_)) {
-            tx.execute("SET LOCAL statement_timeout = '300s'", &[])
-                .await?;
-            tx.execute("SET LOCAL idle_in_transaction_session_timeout = '10s'", &[])
-                .await?;
-        }
-        tx.migrate_storage().await?;
         tx.commit().await
     }
 
@@ -287,7 +269,7 @@ impl Transaction {
         ).await?;
         ensure!(
             rows.as_slice() == [["1".to_owned(), STORAGE_VERSION.to_string()]],
-            "unsupported framework storage version; an explicit offline migration is required"
+            "unsupported framework storage version"
         );
         Ok(())
     }
@@ -309,14 +291,9 @@ impl Transaction {
             .collect())
     }
 
-    async fn check_layout(&mut self, version: i64) -> Result<()> {
+    async fn check_layout(&mut self) -> Result<()> {
         let mut expected: Vec<_> = TABLE_COLUMNS
             .iter()
-            .filter(|(name, _)| {
-                (version >= 2 || *name != "nx_storage")
-                    && (version >= 3
-                        || !matches!(*name, "nx_resource_catalog" | "nx_schema_definition"))
-            })
             .map(|(name, _)| (*name).to_owned())
             .collect();
         expected.sort();
@@ -325,11 +302,6 @@ impl Transaction {
             "unsupported or incomplete framework storage schema"
         );
         for &(table, columns) in TABLE_COLUMNS {
-            if (table == "nx_storage" && version < 2)
-                || (version < 3 && matches!(table, "nx_resource_catalog" | "nx_schema_definition"))
-            {
-                continue;
-            }
             let sql = match self.backend {
                 Backend::Sqlite(_) => {
                     "SELECT name,upper(type),COALESCE(dflt_value,''),CAST(\"notnull\" AS TEXT) FROM pragma_table_info($1) ORDER BY cid LIMIT 65"
@@ -339,11 +311,6 @@ impl Transaction {
                 }
             };
             let actual = self.fetch::<4>(sql, &[table.into()]).await?;
-            let columns = if table == "nx_records" && version < 2 {
-                &columns[..5]
-            } else {
-                columns
-            };
             ensure!(
                 actual.len() == columns.len(),
                 "unsupported columns in {table}"
@@ -351,8 +318,8 @@ impl Transaction {
             for ([name, kind, default, not_null], &(expected_name, expected_kind)) in
                 actual.into_iter().zip(columns)
             {
-                // SQLite's released single-column primary keys were not
-                // explicitly NOT NULL. PostgreSQL marks primary keys non-null.
+                // SQLite reports implicit single-column primary keys as nullable.
+                // PostgreSQL marks primary keys non-null.
                 let implicit_key = expected_name == "singleton"
                     || expected_name == "storage_id"
                     || (matches!(table, "nx_accounts" | "nx_sessions") && expected_name == "id")
@@ -373,94 +340,6 @@ impl Transaction {
             }
         }
         Ok(())
-    }
-
-    async fn migrate_storage(&mut self) -> Result<()> {
-        // Take this lock before any SELECT establishes PostgreSQL's transaction
-        // snapshot. A writer finishing while we wait must appear in the copy.
-        // Operators must still stop all application servers before migration.
-        if matches!(self.backend, Backend::Postgres(_)) {
-            self.execute(
-                "LOCK TABLE nx_records, nx_deployment IN ACCESS EXCLUSIVE MODE",
-                &[],
-            )
-            .await?;
-        }
-        let tables = self.storage_tables().await?;
-        if tables.iter().any(|name| name == "nx_storage") {
-            let rows = self.fetch::<2>("SELECT CAST(singleton AS TEXT),CAST(version AS TEXT) FROM nx_storage ORDER BY singleton LIMIT 2", &[]).await?;
-            ensure!(
-                rows.len() == 1 && rows[0][0] == "1",
-                "invalid storage version row"
-            );
-            let version = rows[0][1].parse::<i64>()?;
-            ensure!(
-                matches!(version, 2 | 3),
-                "unsupported framework storage version"
-            );
-            self.check_layout(version).await?;
-            if version == 2 {
-                self.migrate_catalog().await?;
-            }
-            return self.check_storage().await;
-        }
-        self.check_layout(1).await?;
-        self.execute("CREATE TABLE nx_records_migrating (resource BIGINT NOT NULL, id BIGINT NOT NULL, owner TEXT NOT NULL REFERENCES nx_accounts(id), tenant TEXT NOT NULL, fields TEXT NOT NULL, incarnation TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>=1), PRIMARY KEY(resource,id))", &[]).await?;
-        let total = self
-            .fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_records", &[])
-            .await?[0][0]
-            .parse::<u64>()?;
-        let mut copied_total = 0u64;
-        let mut cursor = None;
-        loop {
-            let rows = if let Some((resource, id)) = cursor {
-                self.fetch::<2>("SELECT CAST(resource AS TEXT),CAST(id AS TEXT) FROM nx_records WHERE resource>$1 OR (resource=$1 AND id>$2) ORDER BY nx_records.resource,nx_records.id LIMIT 32", &[Param::Number(resource), Param::Number(id)]).await?
-            } else {
-                self.fetch::<2>("SELECT CAST(resource AS TEXT),CAST(id AS TEXT) FROM nx_records ORDER BY nx_records.resource,nx_records.id LIMIT 32", &[]).await?
-            };
-            if rows.is_empty() {
-                break;
-            }
-            for [resource, id] in rows {
-                let resource = resource.parse::<i64>()?;
-                let id = id.parse::<i64>()?;
-                let incarnation = crate::security::random_id()?;
-                let copied = self.execute("INSERT INTO nx_records_migrating(resource,id,owner,tenant,fields,incarnation,revision) SELECT resource,id,owner,tenant,fields,$3,1 FROM nx_records WHERE resource=$1 AND id=$2", &[resource.into(), id.into(), incarnation.into()]).await?;
-                ensure!(copied == 1, "record changed during migration");
-                copied_total = copied_total
-                    .checked_add(copied)
-                    .context("record count overflow")?;
-                cursor = Some((resource, id));
-            }
-        }
-        ensure!(copied_total == total, "migration did not copy every record");
-        self.execute("DROP TABLE nx_records", &[]).await?;
-        self.execute("ALTER TABLE nx_records_migrating RENAME TO nx_records", &[])
-            .await?;
-        self.execute(
-            "CREATE INDEX nx_records_owner ON nx_records(resource,owner,id)",
-            &[],
-        )
-        .await?;
-        self.execute(
-            "CREATE INDEX nx_records_tenant ON nx_records(resource,tenant,id)",
-            &[],
-        )
-        .await?;
-        self.execute(
-            "UPDATE nx_deployment SET generation=$1",
-            &[crate::security::random_id()?.into()],
-        )
-        .await?;
-        self.execute("CREATE TABLE nx_storage (singleton BIGINT PRIMARY KEY CHECK(singleton=1), version BIGINT NOT NULL)", &[]).await?;
-        self.execute(
-            "INSERT INTO nx_storage(singleton,version) VALUES(1,$1)",
-            &[2i64.into()],
-        )
-        .await?;
-        self.migrate_catalog().await?;
-        self.check_layout(STORAGE_VERSION).await?;
-        self.check_storage().await
     }
 
     pub(crate) async fn deployment(
@@ -597,22 +476,6 @@ impl Transaction {
 }
 
 impl Database {
-    /// Establish the approved legacy resource keys without reidentifying records.
-    /// The supplied legacy contract must match the digest already stored by v2.
-    pub async fn import_schema(&self, manifest: &noxide_protocol::Manifest) -> Result<()> {
-        crate::manifest::validate(manifest)?;
-        let mut tx = self.begin_schema().await?;
-        tx.check_storage().await?;
-        let result = tx.import_schema(manifest).await;
-        match result {
-            Ok(()) => tx.commit().await,
-            Err(error) => {
-                tx.rollback().await?;
-                Err(error)
-            }
-        }
-    }
-
     /// Rehearse the full transition with real data, then roll back every write.
     pub async fn schema_check(
         &self,
@@ -648,19 +511,6 @@ impl Database {
 }
 
 impl Transaction {
-    async fn migrate_catalog(&mut self) -> Result<()> {
-        self.execute("CREATE TABLE nx_resource_catalog (storage_id BIGINT PRIMARY KEY, resource_key TEXT NOT NULL UNIQUE)", &[]).await?;
-        self.execute("CREATE TABLE nx_schema_definition (singleton BIGINT PRIMARY KEY CHECK(singleton=1), definition TEXT NOT NULL, history TEXT NOT NULL)", &[]).await?;
-        self.execute("UPDATE nx_storage SET version=3 WHERE singleton=1", &[])
-            .await?;
-        self.execute(
-            "UPDATE nx_deployment SET generation=$1",
-            &[crate::security::random_id()?.into()],
-        )
-        .await?;
-        Ok(())
-    }
-
     async fn schema_definition(
         &mut self,
     ) -> Result<
@@ -701,8 +551,6 @@ impl Transaction {
             definition.len() <= noxide_protocol::MAX_MANIFEST_BYTES && history.len() <= 32_768,
             "stored schema history limit"
         );
-        let hash = crate::schema::digest(&resources)?;
-        self.execute("INSERT INTO nx_schema(singleton,digest) VALUES(1,$1) ON CONFLICT(singleton) DO UPDATE SET digest=excluded.digest", &[hash.into()]).await?;
         self.execute("INSERT INTO nx_schema_definition(singleton,definition,history) VALUES(1,$1,$2) ON CONFLICT(singleton) DO UPDATE SET definition=excluded.definition,history=excluded.history", &[definition.into(),history.into()]).await?;
         Ok(())
     }
@@ -754,16 +602,17 @@ impl Transaction {
             return Ok(());
         }
         ensure!(
-            self.fetch::<1>("SELECT digest FROM nx_schema WHERE singleton=1", &[])
-                .await?
-                .is_empty(),
-            "legacy resource schema requires explicit approved schema import"
-        );
-        ensure!(
             self.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_records", &[])
                 .await?[0][0]
-                == "0",
-            "unbound records require explicit schema import"
+                == "0"
+                && self
+                    .fetch::<1>(
+                        "SELECT CAST(COUNT(*) AS TEXT) FROM nx_resource_catalog",
+                        &[]
+                    )
+                    .await?[0][0]
+                    == "0",
+            "cannot bind nonempty storage without an application schema"
         );
         for resource in crate::schema::normalized(&manifest.resources) {
             let id = self.next_storage_id().await?;
@@ -774,122 +623,6 @@ impl Transaction {
             .await?;
         }
         self.store_schema(&manifest.resources, &[]).await
-    }
-
-    async fn import_schema(&mut self, manifest: &noxide_protocol::Manifest) -> Result<()> {
-        ensure!(
-            self.schema_definition().await?.is_none(),
-            "schema was already imported"
-        );
-        let hashes = [
-            crate::schema::hash(&serde_json::to_vec(&manifest.resources)?),
-            {
-                // v2 TextField predated kind/optional. Only exact legacy text fields
-                // may use its serialization, never a newly typed schema.
-                ensure!(
-                    manifest
-                        .resources
-                        .iter()
-                        .flat_map(|r| &r.fields)
-                        .all(|f| f.kind == noxide_protocol::FieldKind::Text && !f.optional),
-                    "legacy import requires the original text schema"
-                );
-                #[derive(serde::Serialize)]
-                struct LegacyField<'a> {
-                    name: &'a str,
-                    label: &'a str,
-                    max_bytes: u32,
-                }
-                #[derive(serde::Serialize)]
-                struct LegacyResource<'a> {
-                    id: u32,
-                    name: &'a str,
-                    fields: Vec<LegacyField<'a>>,
-                }
-                let legacy: Vec<_> = manifest
-                    .resources
-                    .iter()
-                    .map(|r| LegacyResource {
-                        id: r.id,
-                        name: &r.name,
-                        fields: r
-                            .fields
-                            .iter()
-                            .map(|f| LegacyField {
-                                name: &f.name,
-                                label: &f.label,
-                                max_bytes: f.max_bytes,
-                            })
-                            .collect(),
-                    })
-                    .collect();
-                crate::schema::hash(&serde_json::to_vec(&legacy)?)
-            },
-        ];
-        let stored = self
-            .fetch::<1>("SELECT digest FROM nx_schema WHERE singleton=1", &[])
-            .await?;
-        ensure!(
-            stored.len() == 1 && hashes.contains(&stored[0][0]),
-            "legacy contract does not match stored schema digest"
-        );
-        ensure!(
-            self.fetch::<1>(
-                "SELECT CAST(COUNT(*) AS TEXT) FROM nx_resource_catalog",
-                &[]
-            )
-            .await?[0][0]
-                == "0",
-            "legacy catalog is not empty"
-        );
-        for resource in &manifest.resources {
-            self.execute(
-                "INSERT INTO nx_resource_catalog(storage_id,resource_key) VALUES($1,$2)",
-                &[i64::from(resource.id).into(), resource.name.as_str().into()],
-            )
-            .await?;
-        }
-        let unknown = self.fetch::<1>("SELECT CAST(resource AS TEXT) FROM nx_records WHERE resource NOT IN (SELECT storage_id FROM nx_resource_catalog) LIMIT 1", &[]).await?;
-        ensure!(
-            unknown.is_empty(),
-            "legacy records contain undeclared resource identities"
-        );
-        // v2 accepted CR and CRLF verbatim through the host API. Validate
-        // against that contract before adopting the current text encoding.
-        for resource in &manifest.resources {
-            let storage = self.storage_key(&resource.name).await?;
-            self.transform_records(storage, |fields| {
-                ensure!(
-                    fields.len() == resource.fields.len(),
-                    "unexpected legacy fields"
-                );
-                for field in &resource.fields {
-                    let value = fields
-                        .get_mut(&field.name)
-                        .context("missing legacy field")?;
-                    ensure!(
-                        !value.trim().is_empty() && value.len() <= field.max_bytes as usize,
-                        "invalid legacy field length"
-                    );
-                    ensure!(
-                        !value
-                            .chars()
-                            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')),
-                        "invalid legacy field text"
-                    );
-                    *value = field.canonical(value).map_err(anyhow::Error::msg)?;
-                }
-                crate::manifest::validate_fields(resource, fields)
-            })
-            .await?;
-        }
-        self.store_schema(&manifest.resources, &[]).await?;
-        self.execute(
-            "UPDATE nx_deployment SET generation=$1",
-            &[crate::security::random_id()?.into()],
-        )
-        .await?;
-        Ok(())
     }
 
     async fn row_fields(&mut self, storage: i64, id: i64) -> Result<noxide_protocol::Fields> {
@@ -962,7 +695,7 @@ impl Transaction {
         let (source, mut history) = self
             .schema_definition()
             .await?
-            .context("schema must be bound or imported before migration")?;
+            .context("application schema must be bound before migration")?;
         let current = schema::digest(&source)?;
         ensure!(
             schema::digest(&target.resources)? == migration.to,
@@ -1193,7 +926,6 @@ const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
         "nx_clock",
         &[("singleton", "BIGINT"), ("observed", "BIGINT")],
     ),
-    ("nx_schema", &[("singleton", "BIGINT"), ("digest", "TEXT")]),
     (
         "nx_deployment",
         &[
@@ -1222,7 +954,6 @@ const SCHEMA: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS nx_records_tenant ON nx_records(resource,tenant,id)",
     "CREATE TABLE IF NOT EXISTS nx_receipts (nonce TEXT PRIMARY KEY, subject TEXT NOT NULL, contract TEXT NOT NULL, action BIGINT NOT NULL, input TEXT NOT NULL, outcome TEXT NOT NULL, expires BIGINT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS nx_clock (singleton BIGINT PRIMARY KEY, observed BIGINT NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS nx_schema (singleton BIGINT PRIMARY KEY, digest TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS nx_deployment (singleton BIGINT PRIMARY KEY, contract TEXT NOT NULL, incarnation TEXT NOT NULL, generation TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS nx_receipts_expiry ON nx_receipts(expires)",
     "CREATE INDEX IF NOT EXISTS nx_sessions_expiry ON nx_sessions(expires)",
@@ -1232,192 +963,18 @@ const SCHEMA: &[&str] = &[
 #[cfg(test)]
 mod storage_tests {
     use super::*;
-    use base64::Engine;
 
-    const LEGACY_RECORDS: &str = "CREATE TABLE nx_records (resource BIGINT NOT NULL, id BIGINT NOT NULL, owner TEXT NOT NULL REFERENCES nx_accounts(id), tenant TEXT NOT NULL, fields TEXT NOT NULL, PRIMARY KEY(resource,id))";
-
-    async fn legacy(db: &Database) {
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        // This fixture deliberately creates the released, unversioned schema.
-        for sql in SCHEMA {
-            if sql.contains("nx_storage")
-                || sql.contains("nx_resource_catalog")
-                || sql.contains("nx_schema_definition")
-            {
-                continue;
-            }
-            tx.execute(
-                if sql.starts_with("CREATE TABLE") && sql.contains("nx_records (") {
-                    LEGACY_RECORDS
-                } else {
-                    sql
-                },
-                &[],
-            )
-            .await
-            .unwrap();
-        }
-        tx.execute("INSERT INTO nx_accounts(id,password,tenant,epoch) VALUES('alice','password-hash','team',7)", &[]).await.unwrap();
-        tx.execute(
-            "INSERT INTO nx_roles(principal,name,tenant) VALUES('alice','writer','team')",
-            &[],
-        )
-        .await
-        .unwrap();
-        tx.execute("INSERT INTO nx_sessions(id,principal,epoch,expires) VALUES('session','alice',7,123456)", &[]).await.unwrap();
-        tx.execute("INSERT INTO nx_deployment(singleton,contract,incarnation,generation) VALUES(1,'contract','host-key','old-generation')", &[]).await.unwrap();
-        tx.execute(
-            "INSERT INTO nx_schema(singleton,digest) VALUES(1,'resource-contract')",
-            &[],
-        )
-        .await
-        .unwrap();
-        tx.execute("INSERT INTO nx_receipts(nonce,subject,contract,action,input,outcome,expires) VALUES('receipt','session','contract',3,'input-digest','outcome',123456)", &[]).await.unwrap();
-        // Exceed one fetch's row and byte limits so migration must page safely.
-        let fields = format!(r#"{{"body":"{}"}}"#, "x".repeat(8192));
-        for id in 1..=80i64 {
-            tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields) VALUES(1,$1,'alice','team',$2)", &[id.into(), fields.clone().into()]).await.unwrap();
-        }
-        tx.commit().await.unwrap();
-    }
-
-    async fn migration_contract(db: Database) {
-        legacy(&db).await;
-        let err = db.initialize().await.unwrap_err().to_string();
-        assert!(err.contains("migration"), "{err}");
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        assert!(tx.check_storage().await.is_err());
-        tx.rollback().await.unwrap();
-
-        // Simulate termination after every migration write but before commit.
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        tx.migrate_storage().await.unwrap();
-        tx.rollback().await.unwrap();
-        assert!(db.initialize().await.is_err());
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        assert_eq!(
-            tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_records", &[])
-                .await
-                .unwrap()[0][0],
-            "80"
-        );
-        assert_eq!(
-            tx.fetch::<1>(
-                "SELECT generation FROM nx_deployment WHERE singleton=1",
-                &[]
-            )
-            .await
-            .unwrap()[0][0],
-            "old-generation"
-        );
-        tx.rollback().await.unwrap();
-
-        db.migrate().await.unwrap();
+    async fn current_storage_contract(db: Database) {
+        db.initialize().await.unwrap();
         db.initialize().await.unwrap();
         let mut tx = db
             .begin(Instant::now() + Duration::from_secs(10))
             .await
             .unwrap();
         tx.check_storage().await.unwrap();
-        let records = tx
-            .fetch::<2>(
-                "SELECT incarnation,CAST(revision AS TEXT) FROM nx_records ORDER BY id LIMIT 64",
-                &[],
-            )
-            .await
-            .unwrap();
-        let mut incarnations = std::collections::HashSet::new();
-        for [incarnation, revision] in records {
-            assert_eq!(revision, "1");
-            assert_eq!(
-                base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .decode(&incarnation)
-                    .unwrap()
-                    .len(),
-                32
-            );
-            assert!(incarnations.insert(incarnation));
-        }
-        let original = format!(r#"{{"body":"{}"}}"#, "x".repeat(8192));
-        let expected = ["alice".into(), "team".into(), original];
-        assert_eq!(
-            tx.fetch::<3>(
-                "SELECT owner,tenant,fields FROM nx_records WHERE resource=1 AND id=80",
-                &[]
-            )
-            .await
-            .unwrap()[0],
-            expected
-        );
-        for (sql, expected) in [
-            ("SELECT CAST(COUNT(*) AS TEXT) FROM nx_records", "80"),
-            (
-                "SELECT password FROM nx_accounts WHERE id='alice'",
-                "password-hash",
-            ),
-            (
-                "SELECT name FROM nx_roles WHERE principal='alice'",
-                "writer",
-            ),
-            (
-                "SELECT principal FROM nx_sessions WHERE id='session'",
-                "alice",
-            ),
-            (
-                "SELECT outcome FROM nx_receipts WHERE nonce='receipt'",
-                "outcome",
-            ),
-            (
-                "SELECT digest FROM nx_schema WHERE singleton=1",
-                "resource-contract",
-            ),
-        ] {
-            assert_eq!(tx.fetch::<1>(sql, &[]).await.unwrap()[0][0], expected);
-        }
-        let generation = tx
-            .fetch::<1>(
-                "SELECT generation FROM nx_deployment WHERE singleton=1",
-                &[],
-            )
-            .await
-            .unwrap()[0][0]
-            .clone();
-        assert_ne!(generation, "old-generation");
+        tx.check_layout().await.unwrap();
         tx.rollback().await.unwrap();
-        db.migrate().await.unwrap();
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        assert_eq!(
-            tx.fetch::<1>(
-                "SELECT generation FROM nx_deployment WHERE singleton=1",
-                &[]
-            )
-            .await
-            .unwrap()[0][0],
-            generation
-        );
-        assert!(tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields) VALUES(1,81,'alice','team','{}')", &[]).await.is_err());
-        tx.rollback().await.unwrap();
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        assert!(tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES(1,81,'alice','team','{}','new-record',0)", &[]).await.is_err());
-        tx.rollback().await.unwrap();
+        // Unknown formats fail closed rather than attempting a conversion.
         let mut tx = db
             .begin(Instant::now() + Duration::from_secs(10))
             .await
@@ -1427,231 +984,65 @@ mod storage_tests {
             .unwrap();
         tx.commit().await.unwrap();
         assert!(db.initialize().await.is_err());
-        assert!(db.migrate().await.is_err());
         let mut tx = db
             .begin(Instant::now() + Duration::from_secs(10))
             .await
             .unwrap();
         assert!(tx.check_storage().await.is_err());
         assert_eq!(
-            tx.fetch::<1>(
-                "SELECT CAST(version AS TEXT) FROM nx_storage WHERE singleton=1",
-                &[]
-            )
-            .await
-            .unwrap()[0][0],
+            tx.fetch::<1>("SELECT CAST(version AS TEXT) FROM nx_storage", &[])
+                .await
+                .unwrap()[0][0],
             "999"
         );
-        tx.rollback().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn sqlite_storage_migration() {
-        let dir = tempfile::tempdir().unwrap();
-        migration_contract(Database::sqlite(dir.path().join("migration.db"))).await;
-    }
-
-    #[tokio::test]
-    async fn sqlite_storage_version_and_shape_fail_closed() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Database::sqlite(dir.path().join("version.db"));
-        db.initialize().await.unwrap();
-        db.initialize().await.unwrap();
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        tx.execute("UPDATE nx_storage SET version=999", &[])
-            .await
-            .unwrap();
+        tx.execute(
+            "UPDATE nx_storage SET version=$1",
+            &[STORAGE_VERSION.into()],
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
-        assert!(db.initialize().await.is_err());
-        assert!(db.migrate().await.is_err());
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        assert!(tx.check_storage().await.is_err());
-        tx.rollback().await.unwrap();
-
-        let db = Database::sqlite(dir.path().join("partial.db"));
-        legacy(&db).await;
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        tx.execute("DROP TABLE nx_receipts", &[]).await.unwrap();
-        tx.commit().await.unwrap();
-        assert!(db.migrate().await.is_err());
-        assert!(db.initialize().await.is_err());
-
-        let db = Database::sqlite(dir.path().join("nullable.db"));
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        for sql in SCHEMA {
-            tx.execute(
-                &sql.replace(
-                    "incarnation TEXT NOT NULL, revision",
-                    "incarnation TEXT, revision",
-                ),
-                &[],
-            )
-            .await
-            .unwrap();
-        }
-        tx.commit().await.unwrap();
-        assert!(db.initialize().await.is_err());
-        assert!(db.migrate().await.is_err());
-    }
-
-    #[tokio::test]
-    #[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable test cluster"]
-    async fn postgres_storage_migration() {
-        let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
-        let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-        let name = format!(
-            "nx_migrate_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .unwrap();
-        let mut case = url::Url::parse(&url).unwrap();
-        case.set_path(&format!("/{name}"));
-        migration_contract(Database::postgres(case.as_str()).unwrap()).await;
-        sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
-            .execute(&mut admin)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    #[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable test cluster"]
-    async fn postgres_migration_waits_for_writer_before_snapshot() {
-        let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
-        let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-        let name = format!(
-            "nx_migrate_writer_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .unwrap();
-        let mut case = url::Url::parse(&url).unwrap();
-        case.set_path(&format!("/{name}"));
-        let db = Database::postgres(case.as_str()).unwrap();
-        legacy(&db).await;
-        let mut writer = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        writer.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields) VALUES(1,81,'alice','team','committed before migration lock')", &[]).await.unwrap();
-        let migrating = db.clone();
-        let migration = tokio::spawn(async move { migrating.migrate().await });
-        // Observe the actual waiter, rather than relying on a scheduling delay.
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let waiting: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE a.datname=$1 AND l.mode='AccessExclusiveLock' AND NOT l.granted")
-                    .bind(&name).fetch_one(&mut admin).await.unwrap();
-                if waiting != 0 { break; }
-                assert!(!migration.is_finished(), "migration stopped before acquiring its lock");
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        }).await.unwrap();
-        writer.commit().await.unwrap();
-        migration.await.unwrap().unwrap();
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        let rows = tx
-            .fetch::<1>(
-                "SELECT fields FROM nx_records WHERE resource=1 AND id=81",
-                &[],
-            )
-            .await
-            .unwrap();
-        assert_eq!(rows, [["committed before migration lock".to_owned()]]);
-        assert_eq!(
-            tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_records", &[])
-                .await
-                .unwrap()[0][0],
-            "81"
-        );
-        tx.check_storage().await.unwrap();
-        tx.rollback().await.unwrap();
-        sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
-            .execute(&mut admin)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    #[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable test cluster"]
-    async fn postgres_migration_blocks_legacy_writer_after_copy() {
-        let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
-        let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-        let name = format!(
-            "nx_migrate_late_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .unwrap();
-        let mut case = url::Url::parse(&url).unwrap();
-        case.set_path(&format!("/{name}"));
-        let db = Database::postgres(case.as_str()).unwrap();
-        legacy(&db).await;
-        let mut migration = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        migration.migrate_storage().await.unwrap();
-        let writing = db.clone();
-        let writer = tokio::spawn(async move {
-            let mut tx = writing
+        for sql in [
+            "DROP TABLE nx_receipts",
+            "ALTER TABLE nx_records ADD COLUMN unexpected TEXT",
+            "ALTER TABLE nx_records RENAME COLUMN fields TO unexpected",
+        ] {
+            let mut tx = db
                 .begin(Instant::now() + Duration::from_secs(10))
-                .await?;
-            tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields) VALUES(1,81,'alice','team','legacy write after migration')", &[]).await?;
-            tx.commit().await
-        });
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let waiting: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE a.datname=$1 AND l.mode='RowExclusiveLock' AND NOT l.granted")
-                    .bind(&name).fetch_one(&mut admin).await.unwrap();
-                if waiting != 0 { break; }
-                assert!(!writer.is_finished(), "writer stopped before reaching migration lock");
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        }).await.unwrap();
-        migration.commit().await.unwrap();
-        assert!(writer.await.unwrap().is_err());
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
+                .await
+                .unwrap();
+            tx.execute(sql, &[]).await.unwrap();
+            assert!(tx.check_layout().await.is_err(), "{sql}");
+            tx.rollback().await.unwrap();
+        }
+        db.initialize().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_current_storage_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        current_storage_contract(Database::sqlite(dir.path().join("storage.db"))).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable test cluster"]
+    async fn postgres_current_storage_validation() {
+        let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+        let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+        let name = format!(
+            "nx_storage_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sqlx::query(&format!("CREATE DATABASE {name}"))
+            .execute(&mut admin)
             .await
             .unwrap();
-        assert_eq!(
-            tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_records", &[])
-                .await
-                .unwrap()[0][0],
-            "80"
-        );
-        tx.check_storage().await.unwrap();
-        tx.rollback().await.unwrap();
+        let mut case = url::Url::parse(&url).unwrap();
+        case.set_path(&format!("/{name}"));
+        current_storage_contract(Database::postgres(case.as_str()).unwrap()).await;
         sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
             .execute(&mut admin)
             .await
@@ -1823,219 +1214,6 @@ mod application_schema_tests {
             schema::normalized(&source().resources)
         );
         tx.rollback().await.unwrap();
-    }
-    #[tokio::test]
-    async fn sqlite_version_two_requires_approved_schema_import() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Database::sqlite(dir.path().join("legacy-schema.db"));
-        db.initialize().await.unwrap();
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        tx.execute("DROP TABLE nx_resource_catalog", &[])
-            .await
-            .unwrap();
-        tx.execute("DROP TABLE nx_schema_definition", &[])
-            .await
-            .unwrap();
-        tx.execute("UPDATE nx_storage SET version=2", &[])
-            .await
-            .unwrap();
-        let bytes=br#"[{"id":1,"name":"notes","fields":[{"name":"body","label":"Note","max_bytes":4096}]}]"#;
-        tx.execute(
-            "INSERT INTO nx_schema(singleton,digest) VALUES(1,$1)",
-            &[schema::hash(bytes).into()],
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-        assert!(db.initialize().await.is_err());
-        db.migrate().await.unwrap();
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        assert!(tx.bind_schema(&source()).await.is_err());
-        tx.rollback().await.unwrap();
-        let mut wrong = source();
-        wrong.resources[0].id = 2;
-        assert!(db.import_schema(&wrong).await.is_err());
-        db.import_schema(&source()).await.unwrap();
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        tx.bind_schema(&source()).await.unwrap();
-        assert_eq!(tx.storage_resource(&source(), 1).await.unwrap(), 1);
-        tx.rollback().await.unwrap();
-    }
-
-    async fn legacy_text_import_contract(db: Database) {
-        use noxide_protocol::Fields;
-        db.initialize().await.unwrap();
-        let legacy = br#"[{"id":1,"name":"notes","fields":[{"name":"body","label":"Note","max_bytes":4096}]}]"#;
-        let digest = schema::hash(legacy);
-        let original = "first\r\nsecond\rthird\tend";
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        tx.execute(
-            "INSERT INTO nx_schema(singleton,digest) VALUES(1,$1)",
-            &[digest.as_str().into()],
-        )
-        .await
-        .unwrap();
-        tx.execute(
-            "INSERT INTO nx_accounts(id,password,tenant,epoch) VALUES('alice','hash','team',1)",
-            &[],
-        )
-        .await
-        .unwrap();
-        tx.execute("INSERT INTO nx_deployment(singleton,contract,incarnation,generation) VALUES(1,'contract','key','original')", &[]).await.unwrap();
-        for id in [1i64, 2] {
-            let fields =
-                serde_json::to_string(&Fields::from([("body".into(), original.into())])).unwrap();
-            tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES(1,$1,'alice','team',$2,$3,7)", &[id.into(), fields.into(), format!("record-{id}").into()]).await.unwrap();
-        }
-        tx.commit().await.unwrap();
-        // Each failure occurs after the first row has already been normalized.
-        for invalid in [
-            Fields::from([("body".into(), " \r\n\t".into())]),
-            Fields::from([("body".into(), "x".repeat(4097))]),
-            Fields::from([("body".into(), "bad\u{0001}".into())]),
-            Fields::from([("wrong".into(), "text".into())]),
-            Fields::from([
-                ("body".into(), "text".into()),
-                ("extra".into(), "text".into()),
-            ]),
-        ] {
-            let mut tx = db
-                .begin(Instant::now() + Duration::from_secs(10))
-                .await
-                .unwrap();
-            tx.execute(
-                "UPDATE nx_records SET fields=$1 WHERE resource=1 AND id=2",
-                &[serde_json::to_string(&invalid).unwrap().into()],
-            )
-            .await
-            .unwrap();
-            tx.commit().await.unwrap();
-            assert!(db.import_schema(&source()).await.is_err());
-            let mut tx = db
-                .begin(Instant::now() + Duration::from_secs(10))
-                .await
-                .unwrap();
-            assert_eq!(tx.row_fields(1, 1).await.unwrap()["body"], original);
-            assert_eq!(tx.row_fields(1, 2).await.unwrap(), invalid);
-            assert!(tx.schema_definition().await.unwrap().is_none());
-            assert_eq!(
-                tx.fetch::<1>(
-                    "SELECT CAST(COUNT(*) AS TEXT) FROM nx_resource_catalog",
-                    &[]
-                )
-                .await
-                .unwrap()[0][0],
-                "0"
-            );
-            assert_eq!(
-                tx.fetch::<1>("SELECT digest FROM nx_schema WHERE singleton=1", &[])
-                    .await
-                    .unwrap()[0][0],
-                digest
-            );
-            assert_eq!(
-                tx.fetch::<1>(
-                    "SELECT generation FROM nx_deployment WHERE singleton=1",
-                    &[]
-                )
-                .await
-                .unwrap()[0][0],
-                "original"
-            );
-            for id in [1i64, 2] {
-                assert_eq!(tx.fetch::<4>("SELECT owner,tenant,incarnation,CAST(revision AS TEXT) FROM nx_records WHERE resource=1 AND id=$1", &[id.into()]).await.unwrap()[0], ["alice".into(), "team".into(), format!("record-{id}"), "7".into()]);
-            }
-            tx.rollback().await.unwrap();
-        }
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        tx.execute(
-            "UPDATE nx_records SET fields=$1 WHERE resource=1 AND id=2",
-            &[serde_json::to_string(&Fields::from([(
-                "body".into(),
-                "other\r\nline\r\tend".into(),
-            )]))
-            .unwrap()
-            .into()],
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-        db.import_schema(&source()).await.unwrap();
-        let mut tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        assert_eq!(
-            tx.row_fields(1, 1).await.unwrap()["body"],
-            "first\nsecond\nthird\tend"
-        );
-        assert_eq!(
-            tx.row_fields(1, 2).await.unwrap()["body"],
-            "other\nline\n\tend"
-        );
-        assert_eq!(tx.storage_resource(&source(), 1).await.unwrap(), 1);
-        let (resources, history) = tx.schema_definition().await.unwrap().unwrap();
-        assert_eq!(resources, schema::normalized(&source().resources));
-        assert!(history.is_empty());
-        assert_ne!(
-            tx.fetch::<1>(
-                "SELECT generation FROM nx_deployment WHERE singleton=1",
-                &[]
-            )
-            .await
-            .unwrap()[0][0],
-            "original"
-        );
-        for id in [1i64, 2] {
-            assert_eq!(tx.fetch::<4>("SELECT owner,tenant,incarnation,CAST(revision AS TEXT) FROM nx_records WHERE resource=1 AND id=$1", &[id.into()]).await.unwrap()[0], ["alice".into(), "team".into(), format!("record-{id}"), "7".into()]);
-        }
-        tx.rollback().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn sqlite_legacy_text_import_is_canonical_and_atomic() {
-        let dir = tempfile::tempdir().unwrap();
-        legacy_text_import_contract(Database::sqlite(dir.path().join("legacy-text.db"))).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable test cluster"]
-    async fn postgres_legacy_text_import_is_canonical_and_atomic() {
-        let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
-        let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-        let name = format!(
-            "nx_legacy_text_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .unwrap();
-        let mut case = url::Url::parse(&url).unwrap();
-        case.set_path(&format!("/{name}"));
-        legacy_text_import_contract(Database::postgres(case.as_str()).unwrap()).await;
-        sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
-            .execute(&mut admin)
-            .await
-            .unwrap();
     }
     #[tokio::test]
     #[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable test cluster"]

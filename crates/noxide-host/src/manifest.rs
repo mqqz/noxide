@@ -699,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_checks_typed_paths_and_overlapping_legacy_routes() {
+    fn admission_checks_explicit_paths_and_overlaps() {
         let mut manifest = crate::test_support::manifest();
         manifest.routes[1].path = "/notes/{note}".into();
         validate(&manifest).unwrap();

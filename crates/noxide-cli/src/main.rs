@@ -117,7 +117,7 @@ async fn main() -> Result<()> {
         "schema" => workflow::schema(&args[1..]).await?,
         "help" | "--help" | "-h" => {
             println!(
-                "Noxide {}\n\nCommands:\n  check|build --app APP --name CRATE --kernel KERNEL --toolchain TOOLCHAIN --output NEW_DIR [--framework CHECKOUT]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  schema import CONFIG LEGACY_MANIFEST\n  init CONFIG.json\n  account CONFIG.json USER PASSWORD_FILE [TENANT]\n  contract-hash MANIFEST.json\n  component CORE.wasm COMPONENT.wasm\n  serve CONFIG.json\n  maintain CONFIG.json\n  recover-clock CONFIG.json (stop serving first; configure a fresh host key)\n  migrate CONFIG.json (stop serving first)\n  keygen NEW_KEYS.json\n\nApplication builds must use the isolated VM recipe. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
+                "Noxide {}\n\nCommands:\n  check|build --app APP --name CRATE --kernel KERNEL --toolchain TOOLCHAIN --output NEW_DIR [--framework CHECKOUT]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  init CONFIG.json\n  account CONFIG.json USER PASSWORD_FILE [TENANT]\n  contract-hash MANIFEST.json\n  component CORE.wasm COMPONENT.wasm\n  serve CONFIG.json\n  maintain CONFIG.json\n  recover-clock CONFIG.json (stop serving first; configure a fresh host key)\n  keygen NEW_KEYS.json\n\nApplication builds must use the isolated VM recipe. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
                 env!("CARGO_PKG_VERSION")
             );
         }
@@ -136,15 +136,6 @@ async fn main() -> Result<()> {
                 &serde_json::to_vec(&HostKeys::generate()?)?,
                 true,
             )?;
-        }
-        "migrate" => {
-            ensure!(
-                args.len() == 2,
-                "usage: noxide migrate CONFIG.json (stop serving first)"
-            );
-            let (config, base) = config(Path::new(&args[1]))?;
-            database(&config.database, &base)?.migrate().await?;
-            println!("Runtime storage is current. Restart with the approved application bundle.");
         }
         "recover-clock" => {
             ensure!(

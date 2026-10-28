@@ -47,7 +47,7 @@ pub fn manifest() -> Manifest {
             },
             Route {
                 id: 2,
-                path: "/notes".into(),
+                path: "/notes/{note}".into(),
                 resource: Some(1),
                 operations: vec![2],
                 forms: vec![],

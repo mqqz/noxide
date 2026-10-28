@@ -190,21 +190,7 @@ diagnostics and generated manifest when working with untrusted applications.
 
 ## Schema evolution
 
-Framework storage and application schemas have separate migrations. Upgrade
-framework tables with `noxide migrate CONFIG` while serving is stopped. For an
-existing v2 application, retain its original approved manifest and import it:
-
-```sh
-noxide schema import CONFIG original-manifest.json
-```
-
-Import verifies its resource IDs and field declarations against the stored legacy
-schema digest, validates the original text constraints, and normalizes CR/CRLF
-line endings to LF in the same transaction. It preserves owners, tenants, record
-IDs, incarnations, and revisions. Invalid legacy data rolls back the entire import.
-Then activate the matching typed application bundle.
-
-For subsequent application changes, build the new bundle and generate a draft:
+Build the new application bundle and generate a schema-change draft:
 
 ```sh
 noxide schema diff old-manifest.json new-manifest.json migrations/002.json

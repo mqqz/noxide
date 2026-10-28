@@ -91,7 +91,7 @@ pub async fn schema(args: &[OsString]) -> Result<()> {
     let action = args
         .first()
         .and_then(|value| value.to_str())
-        .context("usage: noxide schema diff|check|apply|import ...")?;
+        .context("usage: noxide schema diff|check|apply ...")?;
     match action {
         "diff" => {
             ensure!(
@@ -109,25 +109,6 @@ pub async fn schema(args: &[OsString]) -> Result<()> {
             println!(
                 "Migration draft created. Resolve every null value and confirm every destructive operation before approval."
             );
-        }
-        "import" => {
-            ensure!(
-                args.len() == 3,
-                "usage: noxide schema import CONFIG LEGACY_MANIFEST"
-            );
-            let (config, base) = super::config(Path::new(&args[1]))?;
-            let mut legacy: Manifest =
-                serde_json::from_slice(&super::read(Path::new(&args[2]), 32768)?)?;
-            ensure!(
-                legacy.version == 2 || legacy.version == noxide::__private::VERSION,
-                "unsupported legacy contract"
-            );
-            legacy.version = noxide::__private::VERSION;
-            manifest::validate(&legacy)?;
-            super::database(&config.database, &base)?
-                .import_schema(&legacy)
-                .await?;
-            println!("Imported the approved legacy schema; record identities were preserved.");
         }
         "check" | "apply" => {
             ensure!(
