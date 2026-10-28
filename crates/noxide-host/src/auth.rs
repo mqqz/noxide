@@ -69,7 +69,7 @@ pub(crate) async fn login(
     id: &str,
     password: &str,
     now: i64,
-    permit: tokio::sync::OwnedSemaphorePermit,
+    permits: crate::runtime::limiter::HashPermits,
 ) -> Result<String> {
     ensure!(
         crate::manifest::identifier(id) && password.len() <= 256,
@@ -87,7 +87,8 @@ pub(crate) async fn login(
     let password = password.to_owned();
     tokio::task::spawn_blocking(move || {
         // Cancellation cannot release capacity while this worker is running.
-        let _permit = permit;
+        let hash_permits = permits;
+        hash_permits.enter();
         let parsed =
             PasswordHash::new(&hash).map_err(|_| anyhow::anyhow!("invalid credentials"))?;
         ensure!(

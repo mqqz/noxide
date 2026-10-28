@@ -229,6 +229,56 @@ trusted TLS terminator and makes cookies Secure; HTTP onion/local origins use
 host-only HttpOnly, SameSite=Strict cookies without Secure. Application code
 cannot alter cookie or security-header policy.
 
+## Tor deployment
+
+Use `tor_unix` to accept Tor's PROXY v1 circuit information on a private Unix
+socket. Set `origin` to the exact public onion origin and configure the numeric
+GID of the Tor service account:
+
+```json
+{"listen": {"tor_unix": {"path": "/srv/noxide/run/app.sock", "tor_gid": 115}}}
+```
+
+Prepare the directory as the operator, with the host account as owner and the
+Tor account's group (commonly `debian-tor`):
+
+```sh
+install -d -o noxide -g debian-tor -m 2750 /srv/noxide/run
+```
+
+The host requires directory mode 2750 and the configured group. The setgid bit
+makes the socket inherit that group; the host sets socket mode 0660 and checks
+its identity and ownership before serving. A group-writable directory, a missing
+setgid bit, or an existing socket path prevents startup. Shutdown removes only
+the socket created by this listener.
+
+Configure Tor with:
+
+```text
+HiddenServiceDir /var/lib/tor/app
+HiddenServicePort 80 unix:/srv/noxide/run/app.sock
+HiddenServiceExportCircuitID haproxy
+HiddenServicePoWDefensesEnabled 1
+HiddenServiceMaxStreams 16
+HiddenServiceMaxStreamsCloseCircuit 1
+```
+
+Only this listener accepts PROXY v1 lines. Ordinary `tcp` and `unix` listeners
+keep local-peer semantics and reject a PROXY line as malformed HTTP. Tor circuit
+information stays inside the host; it is not sent to the guest or browser and
+is not stored in the database or logged.
+
+The server permits at most 256 connections, with four per Tor circuit. The PROXY
+line has a two-second deadline and a 107-byte limit including CRLF. HTTP headers
+have a 15-second deadline; each connection retains its 60-second lifetime cap.
+Requests have 64 active slots and at most 64 waiters for two seconds. Database
+transactions and Wasm execution each have eight slots and at most 16 waiters for
+one second. Argon2 has two slots, at most eight waiters for one second, and a
+global token bucket of 60 attempts per minute. Admission failures return the same
+host-owned HTML busy page with status 503, the usual security headers, and no
+`Retry-After` header. Disconnected hash workers retain their capacity until the
+work finishes.
+
 ## Failures and recovery
 
 Every mutation carries a host-authenticated token with a 15-minute expiry. Repeat
