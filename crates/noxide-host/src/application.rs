@@ -920,9 +920,11 @@ impl Application {
     ) -> Result<Rendered> {
         target.revision = stored.revision;
         let credentials = self.credentials(action, session, now, Some(target), Fields::new())?;
-        let current = if manifest::operation(&self.manifest, action.operation)?.kind
-            == OperationKind::Delete
-        {
+        let operation = manifest::operation(&self.manifest, action.operation)?;
+        // An edit capability grants mutation authority, never a read projection.
+        let current = if manifest::is_capability(operation) {
+            Fields::new()
+        } else if operation.kind == OperationKind::Delete {
             stored.record.fields.clone()
         } else {
             action
