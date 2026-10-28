@@ -1061,6 +1061,7 @@ mod tests {
 
     fn record_route(path: &str) -> Route {
         Route {
+            access: noxide_protocol::Access::Authenticated,
             id: 1,
             path: path.into(),
             resource: Some(1),

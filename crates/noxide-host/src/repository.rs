@@ -76,16 +76,23 @@ pub(crate) async fn load(
 pub(crate) fn allowed(policy: &Policy, principal: &Principal, owner: &str, tenant: &str) -> bool {
     policy.any.iter().any(|rule| {
         !rule.is_empty()
-            && rule.iter().all(|p| match p {
-                Predicate::Owner => principal.id == owner,
-                Predicate::SameTenant => !principal.tenant.is_empty() && principal.tenant == tenant,
-                Predicate::Role {
-                    name,
-                    tenant_scoped,
-                } => principal.roles.iter().any(|(r, t)| {
+            && rule.iter().all(|p| match (principal, p) {
+                (_, Predicate::Public) => true,
+                (Principal::Anonymous, _) => false,
+                (Principal::User(user), Predicate::Owner) => user.id == owner,
+                (Principal::User(user), Predicate::SameTenant) => {
+                    !user.tenant.is_empty() && user.tenant == tenant
+                }
+                (
+                    Principal::User(user),
+                    Predicate::Role {
+                        name,
+                        tenant_scoped,
+                    },
+                ) => user.roles.iter().any(|(r, t)| {
                     r == name
                         && if *tenant_scoped {
-                            !tenant.is_empty() && t == tenant && principal.tenant == tenant
+                            !tenant.is_empty() && t == tenant && user.tenant == tenant
                         } else {
                             t.is_empty()
                         }
@@ -95,6 +102,42 @@ pub(crate) fn allowed(policy: &Policy, principal: &Principal, owner: &str, tenan
 }
 
 impl Effects {
+    fn visibility_clause(&self, op: &Operation, params: &mut Vec<Param>) -> Result<String> {
+        if !manifest::is_public(op) {
+            return Ok(String::new());
+        }
+        let visibility = op
+            .visibility
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing public visibility"))?;
+        let (expression, path) = self.tx.field_text(&visibility.field, params.len() + 1);
+        params.push(path);
+        params.push(visibility.equals.as_str().into());
+        Ok(format!(" AND ({expression} = ${})", params.len()))
+    }
+
+    fn visible_fields(&self, op: &Operation, mut fields: Fields) -> Result<Fields> {
+        if manifest::is_public(op) {
+            let visibility = op
+                .visibility
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("missing public visibility"))?;
+            ensure!(
+                fields.get(&visibility.field) == Some(&visibility.equals),
+                "public visibility invariant"
+            );
+        }
+        manifest::validate_fields(manifest::resource(&self.manifest, op.resource)?, &fields)?;
+        if manifest::is_public(op) {
+            let names = op
+                .fields
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("missing public fields"))?;
+            fields.retain(|name, _| names.contains(name));
+        }
+        Ok(fields)
+    }
+
     pub(crate) async fn invoke(&mut self, operation: u32, target: u64) -> Result<Vec<u8>> {
         ensure!(self.calls > 0, "database call budget");
         self.calls -= 1;
@@ -132,18 +175,14 @@ impl Effects {
             .await?;
         let value = match op.kind {
             OperationKind::Create => {
+                let user = self.principal.user()?;
                 ensure!(
-                    allowed(
-                        &op.policy,
-                        &self.principal,
-                        &self.principal.id,
-                        &self.principal.tenant
-                    ),
+                    allowed(&op.policy, &self.principal, &user.id, &user.tenant),
                     "policy denied"
                 );
                 let resource = manifest::resource(&self.manifest, op.resource)?;
                 manifest::validate_fields(resource, &self.request.input)?;
-                let used=self.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM (SELECT id FROM nx_records WHERE resource=$1 AND owner=$2 LIMIT 10000) AS quota",&[Param::Number(storage_resource),self.principal.id.as_str().into()]).await?;
+                let used=self.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM (SELECT id FROM nx_records WHERE resource=$1 AND owner=$2 LIMIT 10000) AS quota",&[Param::Number(storage_resource),user.id.as_str().into()]).await?;
                 ensure!(used[0][0].parse::<usize>()? < 10_000, "record quota");
                 let id = crate::security::record_id()?;
                 let record = Record {
@@ -153,7 +192,7 @@ impl Effects {
                 };
                 ensure!(self.grant.is_none(), "creation has no existing target");
                 self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES($1,$2,$3,$4,$5,$6,1)",&[
-                    Param::Number(storage_resource),Param::Number(id as i64),self.principal.id.clone().into(),self.principal.tenant.clone().into(),serde_json::to_string(&record.fields)?.into(), crate::security::random_id()?.into()
+                    Param::Number(storage_resource),Param::Number(id as i64),user.id.clone().into(),user.tenant.clone().into(),serde_json::to_string(&record.fields)?.into(), crate::security::random_id()?.into()
                 ]).await?;
                 #[cfg(test)]
                 crate::failure_tests::after_effect(&mut self.tx).await?;
@@ -171,6 +210,7 @@ impl Effects {
                 serde_json::to_vec(&record)?
             }
             OperationKind::Update | OperationKind::Delete => {
+                self.principal.user()?;
                 let RequestKind::Action(action) = self.request.kind else {
                     anyhow::bail!("missing action")
                 };
@@ -246,29 +286,21 @@ impl Effects {
                     target > 0 && target <= i64::MAX as u64,
                     "invalid resource target"
                 );
+                let mut params = vec![
+                    Param::Number(storage_resource),
+                    Param::Number(target as i64),
+                ];
+                let visibility = self.visibility_clause(&op, &mut params)?;
                 let sql = format!(
-                    "SELECT owner,tenant,{} FROM nx_records WHERE resource=$1 AND id=$2",
+                    "SELECT owner,tenant,{} FROM nx_records WHERE resource=$1 AND id=$2{visibility}",
                     self.tx.bounded_text("fields", 20_000)
                 );
-                let rows = self
-                    .tx
-                    .fetch::<3>(
-                        &sql,
-                        &[
-                            Param::Number(storage_resource),
-                            Param::Number(target as i64),
-                        ],
-                    )
-                    .await?;
+                let rows = self.tx.fetch::<3>(&sql, &params).await?;
                 let record = match rows.first() {
                     Some([owner, tenant, fields])
                         if allowed(&op.policy, &self.principal, owner, tenant) =>
                     {
-                        let fields = serde_json::from_str(fields)?;
-                        manifest::validate_fields(
-                            manifest::resource(&self.manifest, op.resource)?,
-                            &fields,
-                        )?;
+                        let fields = self.visible_fields(&op, serde_json::from_str(fields)?)?;
                         Some(Record {
                             resource: op.resource,
                             id: target,
@@ -285,33 +317,38 @@ impl Effects {
                 for rule in &op.policy.any {
                     let mut terms = Vec::new();
                     for predicate in rule {
-                        let term = match predicate {
-                            Predicate::Owner => {
-                                params.push(self.principal.id.clone().into());
+                        let term = match (&self.principal, predicate) {
+                            (_, Predicate::Public) => "1=1".into(),
+                            (Principal::Anonymous, _) => "1=0".into(),
+                            (Principal::User(user), Predicate::Owner) => {
+                                params.push(user.id.clone().into());
                                 format!("owner=${}", params.len())
                             }
-                            Predicate::SameTenant => {
-                                if self.principal.tenant.is_empty() {
+                            (Principal::User(user), Predicate::SameTenant) => {
+                                if user.tenant.is_empty() {
                                     "1=0".into()
                                 } else {
-                                    params.push(self.principal.tenant.clone().into());
+                                    params.push(user.tenant.clone().into());
                                     format!("tenant=${}", params.len())
                                 }
                             }
-                            Predicate::Role {
-                                name,
-                                tenant_scoped,
-                            } => {
-                                if self.principal.roles.iter().any(|(r, t)| {
+                            (
+                                Principal::User(user),
+                                Predicate::Role {
+                                    name,
+                                    tenant_scoped,
+                                },
+                            ) => {
+                                if user.roles.iter().any(|(r, t)| {
                                     r == name
                                         && if *tenant_scoped {
-                                            !t.is_empty() && *t == self.principal.tenant
+                                            !t.is_empty() && *t == user.tenant
                                         } else {
                                             t.is_empty()
                                         }
                                 }) {
                                     if *tenant_scoped {
-                                        params.push(self.principal.tenant.clone().into());
+                                        params.push(user.tenant.clone().into());
                                         format!("tenant=${}", params.len())
                                     } else {
                                         "1=1".into()
@@ -324,6 +361,13 @@ impl Effects {
                         terms.push(term);
                     }
                     clauses.push(format!("({})", terms.join(" AND ")));
+                }
+                if manifest::is_public(&op) {
+                    clauses = vec![
+                        self.visibility_clause(&op, &mut params)?
+                            .trim_start_matches(" AND ")
+                            .to_owned(),
+                    ];
                 }
                 params.push(Param::Number(self.cursor.unwrap_or(i64::MAX as u64) as i64));
                 let sql = format!(
@@ -339,11 +383,7 @@ impl Effects {
                         allowed(&op.policy, &self.principal, &owner, &tenant),
                         "policy invariant"
                     );
-                    let fields = serde_json::from_str(&fields)?;
-                    manifest::validate_fields(
-                        manifest::resource(&self.manifest, op.resource)?,
-                        &fields,
-                    )?;
+                    let fields = self.visible_fields(&op, serde_json::from_str(&fields)?)?;
                     records.push(Record {
                         resource: op.resource,
                         id: id.parse()?,
@@ -366,11 +406,11 @@ mod tests {
     use super::*;
     #[test]
     fn policy_is_scoped_and_empty_rules_deny() {
-        let alice = Principal {
+        let alice = Principal::User(crate::auth::User {
             id: "alice".into(),
             tenant: "one".into(),
             roles: vec![("admin".into(), "one".into())],
-        };
+        });
         assert!(!allowed(&Policy { any: vec![] }, &alice, "alice", "one"));
         assert!(!allowed(
             &Policy { any: vec![vec![]] },
