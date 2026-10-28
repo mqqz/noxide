@@ -92,6 +92,79 @@ interpolation becomes text. The host escapes and validates the resulting IR.
 The typed fragment builder is also available when a macro is inconvenient.
 There are no raw HTML, arbitrary attribute, style, or URL escape hatches.
 
+## Public pages
+
+Public queries require a host-enforced visibility predicate and field projection:
+
+```rust
+#[derive(Resource)]
+#[resource(key = "articles")]
+pub struct Article {
+    #[id]
+    pub id: Id<Self>,
+    #[field(key = "title", max_bytes = 256)]
+    pub title: String,
+    #[field(key = "body", max_bytes = 4096)]
+    pub body: String,
+    #[field(key = "published")]
+    pub published: bool,
+}
+
+#[query(list(Article), allow = public, visible(published = true), fields(title, body))]
+pub struct PublishedArticles;
+
+#[page(path = "/", access = public)]
+fn index(mut articles: Query<PublishedArticles>) -> Page {
+    Page::new("Articles", html! {
+        main {
+            h1 { "Articles" }
+            @for article in articles.fetch() {
+                article {
+                    h2 { (&article.title) }
+                    p { (&article.body) }
+                }
+            }
+        }
+    })
+}
+
+noxide::application! {
+    pages: [index],
+    actions: [],
+    forms: [],
+}
+```
+
+The host filters rows in SQL, validates their complete stored fields, and returns
+only `title` and `body`. The SDK generates `PublishedArticlesRecord`, which has
+those typed fields and an `id()` method returning `Id<Article>`. Private queries
+continue returning the complete resource type. A public `read(Article)` query
+uses the same declaration options and returns `None` for missing or unpublished
+records.
+
+Manifest admission enforces these rules:
+
+- `public` must be the entire operation policy, serialized as `any: [["public"]]`.
+  It cannot occur inside `any(...)` or `all(...)` in macro declarations.
+- Only `List` and `Read` operations may be public. Both `visible(...)` and a
+  nonempty `fields(...)` projection are required. Projected names must be unique
+  fields of the resource.
+- Visibility names a boolean or choice field and an already canonical value.
+  Boolean declarations emit `true` or `false`; a choice expression such as
+  `visible(status = Status::Published)` emits that variant's declared key.
+- Non-public operations cannot specify visibility or a read projection. An
+  action's `inspect` cannot reference a public operation.
+- A route with `access = public` contains only public operations and no forms.
+  Public operations may also appear on authenticated or optional public routes.
+- `access = public_optional` permits public or private operations and forms.
+  Anonymous visitors receive no forms; signed-in visitors retain the usual
+  host-authorized forms. Omitting `access` keeps a route authenticated.
+
+A public route ignores session cookies. An optional public route treats missing,
+invalid, expired, or revoked sessions as anonymous, but returns 503 when session
+verification is unavailable. Anonymous page rendering cannot invoke owner,
+tenant, or role authority. All responses retain `Cache-Control: no-store`.
+
 ## Actions and forms
 
 Register declarations once:
