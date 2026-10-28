@@ -147,6 +147,11 @@ impl Database {
                     synchronous == 2 && mode == "wal",
                     "unsafe SQLite durability"
                 );
+                if read_only {
+                    sqlx::query("PRAGMA query_only = ON")
+                        .execute(&mut cx)
+                        .await?;
+                }
                 sqlx::query(if read_only {
                     "BEGIN DEFERRED"
                 } else {

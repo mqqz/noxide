@@ -701,6 +701,29 @@ async fn read_only_clock_and_schema(db: Database) {
     );
     tx.commit().await.unwrap();
     assert_eq!(storage_snapshot(&db).await, before);
+    let mut tx = db
+        .begin_read(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    let error = tx
+        .fetch::<1>(
+            "UPDATE nx_clock SET observed=1 RETURNING CAST(observed AS TEXT)",
+            &[],
+        )
+        .await
+        .unwrap_err();
+    let Some(sqlx::Error::Database(error)) = error.downcast_ref::<sqlx::Error>() else {
+        panic!("write-through-fetch must be rejected by the database: {error}");
+    };
+    assert_eq!(
+        error.code().as_deref(),
+        Some(match db {
+            Database::Sqlite(_) => "8",
+            Database::Postgres(_) => "25006",
+        })
+    );
+    tx.rollback().await.unwrap();
+    assert_eq!(storage_snapshot(&db).await, before);
     app.activate().await.unwrap();
     let mut tx = db
         .begin_read(Instant::now() + Duration::from_secs(2))
@@ -965,12 +988,13 @@ async fn checkpoint_and_external_writes(db: Database) {
         (high + 120).to_string()
     );
     tx.commit().await.unwrap();
-    // Retired processes must not checkpoint after recover-clock.
+    // An idle checkpoint after retirement succeeds without touching storage.
+    // Dirty retired checkpoints are covered by the write-watermark regressions.
     db.recover_clock(&HostKeys::generate().unwrap())
         .await
         .unwrap();
     let before = storage_snapshot(&db).await;
-    assert!(app.checkpoint_clock().await.is_err());
+    app.checkpoint_clock().await.unwrap();
     assert_eq!(storage_snapshot(&db).await, before);
 }
 
