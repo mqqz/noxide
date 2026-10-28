@@ -121,6 +121,49 @@ pub fn validate(m: &Manifest) -> Result<()> {
             }
         }
     }
+    for op in &m.operations {
+        if is_public(op) {
+            ensure!(
+                op.policy.any == [vec![Predicate::Public]],
+                "public policy must stand alone"
+            );
+            ensure!(
+                matches!(op.kind, OperationKind::List | OperationKind::Read),
+                "public operations must read"
+            );
+            let visibility = op
+                .visibility
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("public visibility required"))?;
+            let resource = resource(m, op.resource)?;
+            let field = resource
+                .fields
+                .iter()
+                .find(|field| field.name == visibility.field)
+                .ok_or_else(|| anyhow::anyhow!("unknown visibility field"))?;
+            ensure!(
+                matches!(field.kind, FieldKind::Boolean | FieldKind::Choice { .. }),
+                "visibility must be boolean or choice"
+            );
+            ensure!(
+                field
+                    .canonical(&visibility.equals)
+                    .is_ok_and(|v| v == visibility.equals),
+                "visibility must be canonical"
+            );
+            let fields = op
+                .fields
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("public fields required"))?;
+            ensure!(!fields.is_empty(), "empty public fields");
+            projected_fields(resource, fields)?;
+        } else {
+            ensure!(
+                op.visibility.is_none() && op.fields.is_none(),
+                "private operations cannot declare public visibility or fields"
+            );
+        }
+    }
     let mut paths = BTreeSet::new();
     for r in &m.routes {
         crate::render::validate_path(r)?;
@@ -135,6 +178,15 @@ pub fn validate(m: &Manifest) -> Result<()> {
         }
         unique(r.operations.iter().copied())?;
         unique(r.forms.iter().copied())?;
+        if r.access == Access::Public {
+            ensure!(r.forms.is_empty(), "public routes cannot have forms");
+            for id in &r.operations {
+                ensure!(
+                    is_public(operation(m, *id)?),
+                    "public routes require public operations"
+                );
+            }
+        }
         ensure!(
             r.resource.is_some() || r.operations.len() <= 1,
             "a list route has one cursor scope"
@@ -198,6 +250,7 @@ pub fn validate(m: &Manifest) -> Result<()> {
         }
         if let Some(inspect) = &a.inspect {
             let read = operation(m, inspect.operation)?;
+            ensure!(!is_public(read), "inspection cannot use a public operation");
             ensure!(
                 op.kind != OperationKind::Create
                     && read.kind == OperationKind::Read
@@ -219,6 +272,14 @@ pub fn validate(m: &Manifest) -> Result<()> {
         );
     }
     Ok(())
+}
+
+pub(crate) fn is_public(op: &Operation) -> bool {
+    op.policy
+        .any
+        .iter()
+        .flatten()
+        .any(|p| *p == Predicate::Public)
 }
 
 pub fn operation(m: &Manifest, id: u32) -> Result<&Operation> {

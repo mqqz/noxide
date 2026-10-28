@@ -10,7 +10,21 @@ use argon2::{
 };
 
 #[derive(Clone, Debug)]
-pub(crate) struct Principal {
+pub(crate) enum Principal {
+    Anonymous,
+    User(User),
+}
+impl Principal {
+    pub(crate) fn user(&self) -> Result<&User> {
+        match self {
+            Self::User(user) => Ok(user),
+            Self::Anonymous => anyhow::bail!("policy denied"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct User {
     pub id: String,
     pub tenant: String,
     pub roles: Vec<(String, String)>,
@@ -104,31 +118,49 @@ pub(crate) async fn login(
     Ok(signed)
 }
 
+#[derive(Debug)]
+pub(crate) enum AuthError {
+    Invalid,
+    Unavailable,
+}
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Invalid => "authentication required",
+            Self::Unavailable => "authentication unavailable",
+        })
+    }
+}
+impl std::error::Error for AuthError {}
+
 pub(crate) async fn authenticate(
     tx: &mut Transaction,
     keys: &HostKeys,
     cookie: &str,
     now: i64,
-) -> Result<(Token, Principal)> {
-    let token = keys.verify(cookie, now)?;
-    ensure!(token.kind == TokenKind::Session, "wrong token kind");
-    let rows=tx.fetch::<2>("SELECT a.id,a.tenant FROM nx_sessions s JOIN nx_accounts a ON a.id=s.principal WHERE s.id=$1 AND s.principal=$2 AND s.epoch=a.epoch AND s.expires>$3",&[token.nonce.as_str().into(),token.subject.as_str().into(),Param::Number(now)]).await?;
-    let row = rows
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("authentication required"))?;
+) -> std::result::Result<(Token, Principal), AuthError> {
+    let token = keys.verify(cookie, now).map_err(|_| AuthError::Invalid)?;
+    if token.kind != TokenKind::Session {
+        return Err(AuthError::Invalid);
+    }
+    let rows=tx.fetch::<2>("SELECT a.id,a.tenant FROM nx_sessions s JOIN nx_accounts a ON a.id=s.principal WHERE s.id=$1 AND s.principal=$2 AND s.epoch=a.epoch AND s.expires>$3",&[token.nonce.as_str().into(),token.subject.as_str().into(),Param::Number(now)]).await.map_err(|_| AuthError::Unavailable)?;
+    let row = rows.first().ok_or(AuthError::Invalid)?;
     let roles = tx
         .fetch::<2>(
             "SELECT name,tenant FROM nx_roles WHERE principal=$1 LIMIT 33",
             &[row[0].as_str().into()],
         )
-        .await?;
-    ensure!(roles.len() <= 32, "role limit");
+        .await
+        .map_err(|_| AuthError::Unavailable)?;
+    if roles.len() > 32 {
+        return Err(AuthError::Invalid);
+    }
     Ok((
         token,
-        Principal {
+        Principal::User(User {
             id: row[0].clone(),
             tenant: row[1].clone(),
             roles: roles.into_iter().map(|[r, t]| (r, t)).collect(),
-        },
+        }),
     ))
 }

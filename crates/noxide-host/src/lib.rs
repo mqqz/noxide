@@ -23,3 +23,6 @@ mod test_support;
 
 mod presentation;
 pub use presentation::Presentation;
+
+#[cfg(test)]
+mod public_tests;

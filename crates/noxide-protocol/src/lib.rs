@@ -115,6 +115,7 @@ pub fn decode_response(bytes: &[u8]) -> Result<ResponseIntent, String> {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Predicate {
+    Public,
     Owner,
     SameTenant,
     Role { name: String, tenant_scoped: bool },
@@ -206,6 +207,31 @@ pub struct Operation {
     pub resource: u32,
     pub kind: OperationKind,
     pub policy: Policy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<Visibility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Visibility {
+    pub field: String,
+    pub equals: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Access {
+    #[default]
+    Authenticated,
+    Public,
+    PublicOptional,
+}
+impl Access {
+    fn is_authenticated(&self) -> bool {
+        *self == Self::Authenticated
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -217,6 +243,8 @@ pub struct Route {
     pub resource: Option<u32>,
     pub operations: Vec<u32>,
     pub forms: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Access::is_authenticated")]
+    pub access: Access,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
