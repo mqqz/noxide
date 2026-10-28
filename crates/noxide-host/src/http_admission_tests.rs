@@ -862,7 +862,7 @@ async fn postgres_identity_lanes_and_invalid_candidate_costs() {
 
 #[tokio::test]
 async fn verified_http_pages_work_with_small_reserves_and_one_runtime_slot() {
-    for reserve in [1, 6, 25] {
+    for reserve in [1, 6, 25, 50] {
         let temp = tempfile::tempdir().unwrap();
         let db = Database::sqlite(temp.path().join("small-shares.db"));
         db.initialize().await.unwrap();
@@ -903,6 +903,7 @@ async fn verified_http_pages_work_with_small_reserves_and_one_runtime_slot() {
                 .status(),
             StatusCode::OK
         );
+        assert!(app.view(&session, 1, None).await.is_ok());
         let held = app.admission_limits.wasm.acquire().await.unwrap();
         assert_eq!(
             identity_get(app.clone(), "/", &session, Peer::Local)
