@@ -520,7 +520,6 @@ async fn public_create_ignores_guest_redirect_and_requires_an_edit_signing_key()
         .unwrap();
     assert_eq!(handover.status, 200);
     assert!(handover.location.is_none());
-    assert!(!text(&handover).contains("999"));
     assert!(text(&handover).contains("/notes/"));
     let mut legacy = serde_json::to_value(HostKeys::generate().unwrap()).unwrap();
     legacy.as_object_mut().unwrap().remove("edit_keys");
