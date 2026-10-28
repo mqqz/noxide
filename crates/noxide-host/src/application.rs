@@ -4,7 +4,10 @@ use crate::{
     manifest,
     render::{self, FormCredentials, RenderContext, Rendered},
     repository::{self, Effects, StoredRecord},
-    runtime::{Limits, Runtime},
+    runtime::{
+        Limits, Runtime,
+        limiter::{AdmissionLimits, HashPermits},
+    },
     security::{self, RecordTarget, Token, TokenKind},
 };
 use anyhow::{Result, ensure};
@@ -18,10 +21,7 @@ use std::{
         atomic::{AtomicI64, Ordering},
     },
 };
-use tokio::{
-    sync::Semaphore,
-    time::{Instant, timeout_at},
-};
+use tokio::time::{Instant, timeout_at};
 
 #[derive(Debug)]
 pub enum RequestError {
@@ -69,8 +69,7 @@ pub struct Application {
     generation: OnceLock<String>,
     clock: AtomicI64,
     checkpointed: AtomicI64,
-    permits: Semaphore,
-    login_permits: Arc<Semaphore>,
+    pub(crate) admission_limits: AdmissionLimits,
 }
 
 pub struct LoginChallenge {
@@ -82,6 +81,18 @@ impl Application {
     /// Validate persisted schema compatibility before accepting any traffic.
     /// Data requests repeat this fence inside their transaction.
     pub async fn activate(&self) -> Result<()> {
+        let _request = self
+            .admission_limits
+            .requests
+            .request()
+            .await
+            .map_err(|_| RequestError::Busy)?;
+        let _database = self
+            .admission_limits
+            .database
+            .acquire()
+            .await
+            .map_err(|_| RequestError::Busy)?;
         self.presentation.validate(&self.manifest)?;
         let mut tx = self
             .database
@@ -145,6 +156,8 @@ impl Application {
         }
         let deadline = Instant::now() + security::CLOCK_CHECKPOINT_BEGIN_DEADLINE;
         timeout_at(deadline, async {
+            let _request = self.admission_limits.requests.request().await?;
+            let _database = self.admission_limits.database.acquire().await?;
             let mut tx = self.database.begin(deadline.into_std()).await?;
             self.admission(&mut tx, false).await?;
             tx.execute(
@@ -194,11 +207,11 @@ impl Application {
             digest == approved,
             "deployment did not approve this contract"
         );
-        let concurrency = limits.concurrency;
         let mut identity = Sha256::new();
         identity.update(digest);
         identity.update(Sha256::digest(component));
         let deployment = URL_SAFE_NO_PAD.encode(identity.finalize());
+        let admission_limits = AdmissionLimits::default().with_wasm_capacity(limits.concurrency);
         let runtime = Runtime::compile(component, limits)?;
         Ok(Self {
             presentation: crate::Presentation::default(),
@@ -211,8 +224,7 @@ impl Application {
             generation: OnceLock::new(),
             clock: AtomicI64::new(0),
             checkpointed: AtomicI64::new(0),
-            permits: Semaphore::new(concurrency),
-            login_permits: Arc::new(Semaphore::new(2)),
+            admission_limits,
         })
     }
 
@@ -224,6 +236,18 @@ impl Application {
     }
 
     pub async fn login_challenge(&self) -> std::result::Result<LoginChallenge, RequestError> {
+        let _request = self
+            .admission_limits
+            .requests
+            .request()
+            .await
+            .map_err(|_| RequestError::Busy)?;
+        let _database = self
+            .admission_limits
+            .database
+            .acquire()
+            .await
+            .map_err(|_| RequestError::Busy)?;
         let mut tx = self
             .database
             .begin_read(std::time::Instant::now() + std::time::Duration::from_secs(2))
@@ -256,11 +280,19 @@ impl Application {
         username: &str,
         password: &str,
     ) -> std::result::Result<String, RequestError> {
-        let permit = self
-            .login_permits
-            .clone()
-            .try_acquire_owned()
+        let request = self
+            .admission_limits
+            .requests
+            .request()
+            .await
             .map_err(|_| RequestError::Busy)?;
+        let database = Arc::new(
+            self.admission_limits
+                .database
+                .acquire()
+                .await
+                .map_err(|_| RequestError::Busy)?,
+        );
         let deadline = Instant::now() + std::time::Duration::from_secs(3);
         timeout_at(deadline, async {
             let mut tx = self
@@ -287,7 +319,23 @@ impl Application {
                 .verify_csrf(&token.nonce, csrf)
                 .map_err(|_| RequestError::InvalidRequest)?;
 
-            let signed = auth::login(&mut tx, &self.keys, username, password, now, permit)
+            if !self.admission_limits.argon2_attempts.allow() {
+                return Err(RequestError::Busy);
+            }
+            let permit = self
+                .admission_limits
+                .argon2
+                .acquire()
+                .await
+                .map_err(|_| RequestError::Busy)?;
+            let permits = HashPermits {
+                _argon2: permit,
+                _request: request.clone(),
+                _database: database.clone(),
+                #[cfg(test)]
+                gate: self.admission_limits.hash_gate.lock().unwrap().clone(),
+            };
+            let signed = auth::login(&mut tx, &self.keys, username, password, now, permits)
                 .await
                 .map_err(|_| RequestError::Authentication)?;
             tx.commit().await.map_err(|_| RequestError::Busy)?;
@@ -298,6 +346,18 @@ impl Application {
     }
 
     pub async fn logout(&self, cookie: &str, csrf: &str) -> std::result::Result<(), RequestError> {
+        let _request = self
+            .admission_limits
+            .requests
+            .request()
+            .await
+            .map_err(|_| RequestError::Busy)?;
+        let _database = self
+            .admission_limits
+            .database
+            .acquire()
+            .await
+            .map_err(|_| RequestError::Busy)?;
         let mut tx = self
             .database
             .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
@@ -604,7 +664,18 @@ impl Application {
         target: Option<u64>,
         cursor: Option<u64>,
     ) -> std::result::Result<Rendered, RequestError> {
-        let _permit = self.permits.try_acquire().map_err(|_| RequestError::Busy)?;
+        let _request = self
+            .admission_limits
+            .requests
+            .request()
+            .await
+            .map_err(|_| RequestError::Busy)?;
+        let _database = self
+            .admission_limits
+            .database
+            .acquire()
+            .await
+            .map_err(|_| RequestError::Busy)?;
         if cursor.is_some_and(|c| c == 0 || c > i64::MAX as u64 || target.is_some()) {
             return Err(RequestError::InvalidRequest);
         }
@@ -686,6 +757,12 @@ impl Application {
                 cursor,
                 more: None,
             };
+            let _wasm = self
+                .admission_limits
+                .wasm
+                .acquire()
+                .await
+                .map_err(|_| RequestError::Busy)?;
             let attempt = self
                 .runtime
                 .run(
@@ -740,7 +817,18 @@ impl Application {
         csrf: &str,
         input: Fields,
     ) -> std::result::Result<Rendered, RequestError> {
-        let _permit = self.permits.try_acquire().map_err(|_| RequestError::Busy)?;
+        let _request = self
+            .admission_limits
+            .requests
+            .request()
+            .await
+            .map_err(|_| RequestError::Busy)?;
+        let _database = self
+            .admission_limits
+            .database
+            .acquire()
+            .await
+            .map_err(|_| RequestError::Busy)?;
         let a =
             manifest::action(&self.manifest, action).map_err(|_| RequestError::InvalidRequest)?;
         let input = manifest::canonical_input(&self.manifest, a, &input)
@@ -812,7 +900,18 @@ impl Application {
         input: &Fields,
         unknown: bool,
     ) -> Result<Rendered> {
-        let _permit = self.permits.try_acquire()?;
+        let _request = self
+            .admission_limits
+            .requests
+            .request()
+            .await
+            .map_err(|_| RequestError::Busy)?;
+        let _database = self
+            .admission_limits
+            .database
+            .acquire()
+            .await
+            .map_err(|_| RequestError::Busy)?;
         let deadline = Instant::now() + self.runtime.limits().wall_time;
         timeout_at(deadline, async {
             let a = manifest::action(&self.manifest, action)?;
@@ -965,6 +1064,12 @@ impl Application {
             cursor: None,
             more: None,
         };
+        let _wasm = self
+            .admission_limits
+            .wasm
+            .acquire()
+            .await
+            .map_err(|_| RequestError::Busy)?;
         let attempt = self
             .runtime
             .run(request, Some(effects), *fuel, *calls, deadline)
