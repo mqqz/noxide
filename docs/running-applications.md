@@ -461,6 +461,7 @@ its SHA-256 hash with the operator as issuer. Give that code to the intended
 visitor outside application URLs. Invite redemption and account creation commit
 in one transaction. Expired, reused and invalid codes produce the same generic
 failure page as other registration failures. There is no inviter role.
+Clock recovery invalidates all outstanding invites; redeemed invite records are retained.
 
 New accounts use the existing identifier rules and a password of 12–256 bytes.
 They start with an empty tenant, epoch 1 and no roles. All responses retain
