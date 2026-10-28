@@ -26,6 +26,8 @@ pub(crate) enum Peer {
     Circuit(u32),
 }
 
+pub(crate) const REGISTRATION_PATH: &str = "/register";
+
 const BUSY_HTML: &str = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Service busy</title></head><body><main><h1>Service busy</h1><p>The service is busy. Retry this request.</p></main></body></html>";
 fn busy() -> Response {
     (
@@ -268,7 +270,7 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
     let path = request.uri().path();
     let class = if request.method() == axum::http::Method::GET {
         RequestClass::Get
-    } else if path == app.presentation.login_path || path == "/register" {
+    } else if path == app.presentation.login_path || path == REGISTRATION_PATH {
         RequestClass::PasswordHash
     } else if capability_path(path).is_some()
         || path
@@ -293,7 +295,7 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
     {
         return finish(busy());
     }
-    let public = (path == "/register" && app.registration == crate::Registration::Closed)
+    let public = (path == REGISTRATION_PATH && app.registration == crate::Registration::Closed)
         || app
             .manifest
             .routes
@@ -357,11 +359,11 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
         },
     };
     let path = request.uri().path().to_owned();
-    if path == "/register" && gateway.app.registration == crate::Registration::Closed {
+    if path == REGISTRATION_PATH && gateway.app.registration == crate::Registration::Closed {
         return StatusCode::NOT_FOUND.into_response();
     }
     if request.method() == axum::http::Method::GET {
-        if path == "/register" {
+        if path == REGISTRATION_PATH {
             return match gateway.app.login_challenge().await {
                 Err(e) => error(e, &presentation.login_path),
                 Ok(challenge) => {
@@ -531,17 +533,17 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     };
     let mut form = match decode_form(&bytes) {
         Ok(form) => form,
-        Err(_) if path == "/register" => return registration_failed(),
+        Err(_) if path == REGISTRATION_PATH => return registration_failed(),
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
     let Some(csrf) = form.remove("_csrf") else {
-        return if path == "/register" {
+        return if path == REGISTRATION_PATH {
             registration_failed()
         } else {
             StatusCode::FORBIDDEN.into_response()
         };
     };
-    if path == "/register" {
+    if path == REGISTRATION_PATH {
         let (Some(username), Some(password)) = (form.remove("username"), form.remove("password"))
         else {
             return registration_failed();
