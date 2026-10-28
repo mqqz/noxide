@@ -870,13 +870,17 @@ async fn concurrent_gets_write_nothing(db: Database) {
     );
     let mut reads = tokio::task::JoinSet::new();
     for path in ["/login", "/"] {
-        for _ in 0..200 {
+        for index in 0..200 {
             let router = router.clone();
             let session = session.clone();
             reads.spawn(async move {
                 // Existing admission is fail-fast at 16 page views. Retry busy
                 // responses within a bounded test deadline to render every GET.
-                tokio::time::timeout(Duration::from_secs(15), async {
+                // Stagger retries after the initial concurrent burst so a small
+                // CI runner can finish cold PostgreSQL connections instead of
+                // repeatedly restarting the same synchronized overload.
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    let mut retry_delay = Duration::from_millis(10 + (index * 37 % 200));
                     loop {
                         let request = Request::builder()
                             .uri(path)
@@ -889,7 +893,8 @@ async fn concurrent_gets_write_nothing(db: Database) {
                             assert_eq!(response.status(), StatusCode::OK);
                             break;
                         }
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(Duration::from_secs(1));
                     }
                 })
                 .await
