@@ -78,18 +78,80 @@ pub struct LoginChallenge {
 }
 
 impl Application {
+    pub fn with_signed_in_reserve(mut self, reserve: u8) -> Result<Self> {
+        ensure!(reserve <= 50, "signed_in_reserve must be between 0 and 50");
+        self.admission_limits = AdmissionLimits::new(
+            reserve,
+            self.manifest
+                .routes
+                .iter()
+                .any(|r| r.access != noxide_protocol::Access::Public),
+        )
+        .with_wasm_capacity(self.runtime.limits().concurrency);
+        Ok(self)
+    }
+    pub(crate) async fn session_candidate(
+        &self,
+        cookie: &str,
+    ) -> std::result::Result<Option<String>, RequestError> {
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
+        timeout_at(deadline, async {
+            let _request = self
+                .admission_limits
+                .session_requests()
+                .acquire()
+                .await
+                .map_err(|_| RequestError::Busy)?;
+            let _database = self
+                .admission_limits
+                .session_database()
+                .acquire()
+                .await
+                .map_err(|_| RequestError::Busy)?;
+            let mut tx = self
+                .database
+                .begin_read(deadline.into_std())
+                .await
+                .map_err(|_| RequestError::Busy)?;
+            // Scheduling preflight only; the request repeats admission and
+            // authorization inside its own transaction.
+            let now = security::now()
+                .map_err(|_| RequestError::Rejected)?
+                .max(self.clock.load(Ordering::Relaxed));
+            let principal = match auth::authenticate(&mut tx, &self.keys, cookie, now).await {
+                Ok((_, auth::Principal::User(user))) => Some(user.id),
+                Err(auth::AuthError::Invalid) => None,
+                _ => return Err(RequestError::Busy),
+            };
+            tx.commit().await.map_err(|_| RequestError::Busy)?;
+            Ok(principal)
+        })
+        .await
+        .map_err(|_| RequestError::Busy)?
+    }
+    pub(crate) fn session_envelope(&self, cookie: &str) -> bool {
+        security::now()
+            .ok()
+            .and_then(|now| {
+                self.keys
+                    .verify(cookie, now.max(self.clock.load(Ordering::Relaxed)))
+                    .ok()
+            })
+            .is_some_and(|t| t.kind == TokenKind::Session)
+    }
+
     /// Validate persisted schema compatibility before accepting any traffic.
     /// Data requests repeat this fence inside their transaction.
     pub async fn activate(&self) -> Result<()> {
         let _request = self
             .admission_limits
-            .requests
+            .requests()
             .request()
             .await
             .map_err(|_| RequestError::Busy)?;
         let _database = self
             .admission_limits
-            .database
+            .database()
             .acquire()
             .await
             .map_err(|_| RequestError::Busy)?;
@@ -156,8 +218,8 @@ impl Application {
         }
         let deadline = Instant::now() + security::CLOCK_CHECKPOINT_BEGIN_DEADLINE;
         timeout_at(deadline, async {
-            let _request = self.admission_limits.requests.request().await?;
-            let _database = self.admission_limits.database.acquire().await?;
+            let _request = self.admission_limits.requests().request().await?;
+            let _database = self.admission_limits.database().acquire().await?;
             let mut tx = self.database.begin(deadline.into_std()).await?;
             self.admission(&mut tx, false).await?;
             tx.execute(
@@ -211,8 +273,15 @@ impl Application {
         identity.update(digest);
         identity.update(Sha256::digest(component));
         let deployment = URL_SAFE_NO_PAD.encode(identity.finalize());
-        let admission_limits = AdmissionLimits::default().with_wasm_capacity(limits.concurrency);
+        let concurrency = limits.concurrency;
         let runtime = Runtime::compile(component, limits)?;
+        let admission_limits = AdmissionLimits::new(
+            25,
+            m.routes
+                .iter()
+                .any(|r| r.access != noxide_protocol::Access::Public),
+        )
+        .with_wasm_capacity(concurrency);
         Ok(Self {
             presentation: crate::Presentation::default(),
             manifest: Arc::new(m),
@@ -238,13 +307,13 @@ impl Application {
     pub async fn login_challenge(&self) -> std::result::Result<LoginChallenge, RequestError> {
         let _request = self
             .admission_limits
-            .requests
+            .requests()
             .request()
             .await
             .map_err(|_| RequestError::Busy)?;
         let _database = self
             .admission_limits
-            .database
+            .database()
             .acquire()
             .await
             .map_err(|_| RequestError::Busy)?;
@@ -282,13 +351,13 @@ impl Application {
     ) -> std::result::Result<String, RequestError> {
         let request = self
             .admission_limits
-            .requests
+            .requests()
             .request()
             .await
             .map_err(|_| RequestError::Busy)?;
         let database = Arc::new(
             self.admission_limits
-                .database
+                .database()
                 .acquire()
                 .await
                 .map_err(|_| RequestError::Busy)?,
@@ -348,13 +417,13 @@ impl Application {
     pub async fn logout(&self, cookie: &str, csrf: &str) -> std::result::Result<(), RequestError> {
         let _request = self
             .admission_limits
-            .requests
+            .requests()
             .request()
             .await
             .map_err(|_| RequestError::Busy)?;
         let _database = self
             .admission_limits
-            .database
+            .database()
             .acquire()
             .await
             .map_err(|_| RequestError::Busy)?;
@@ -666,13 +735,13 @@ impl Application {
     ) -> std::result::Result<Rendered, RequestError> {
         let _request = self
             .admission_limits
-            .requests
+            .requests()
             .request()
             .await
             .map_err(|_| RequestError::Busy)?;
         let _database = self
             .admission_limits
-            .database
+            .database()
             .acquire()
             .await
             .map_err(|_| RequestError::Busy)?;
@@ -759,7 +828,7 @@ impl Application {
             };
             let _wasm = self
                 .admission_limits
-                .wasm
+                .wasm()
                 .acquire()
                 .await
                 .map_err(|_| RequestError::Busy)?;
@@ -819,13 +888,13 @@ impl Application {
     ) -> std::result::Result<Rendered, RequestError> {
         let _request = self
             .admission_limits
-            .requests
+            .requests()
             .request()
             .await
             .map_err(|_| RequestError::Busy)?;
         let _database = self
             .admission_limits
-            .database
+            .database()
             .acquire()
             .await
             .map_err(|_| RequestError::Busy)?;
@@ -902,13 +971,13 @@ impl Application {
     ) -> Result<Rendered> {
         let _request = self
             .admission_limits
-            .requests
+            .requests()
             .request()
             .await
             .map_err(|_| RequestError::Busy)?;
         let _database = self
             .admission_limits
-            .database
+            .database()
             .acquire()
             .await
             .map_err(|_| RequestError::Busy)?;
@@ -1066,7 +1135,7 @@ impl Application {
         };
         let _wasm = self
             .admission_limits
-            .wasm
+            .wasm()
             .acquire()
             .await
             .map_err(|_| RequestError::Busy)?;
@@ -1413,6 +1482,35 @@ mod clock_tests {
             .execute(&mut admin)
             .await
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod identity_time_tests {
+    use super::*;
+    #[test]
+    fn candidate_classification_uses_memory_effective_time_without_database_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let m = crate::test_support::manifest();
+        let app = Application::new(
+            &crate::test_support::component(None),
+            &serde_json::to_vec(&m).unwrap(),
+            manifest::digest(&m).unwrap(),
+            Database::sqlite(temp.path().join("absent.db")),
+            HostKeys::generate().unwrap(),
+            Limits::default(),
+        )
+        .unwrap();
+        let now = security::now().unwrap();
+        let (_, cookie) = app
+            .keys
+            .issue(TokenKind::Session, "alice", now, 10)
+            .unwrap();
+        assert!(app.keys.verify(&cookie, now).is_ok());
+        assert!(app.session_envelope(&cookie));
+        app.clock.fetch_max(now + 20, Ordering::Relaxed);
+        assert!(!app.session_envelope(&cookie));
+        assert!(!temp.path().join("absent.db").exists());
     }
 }
 
