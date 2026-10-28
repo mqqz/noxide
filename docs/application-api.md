@@ -347,4 +347,6 @@ application's create redirect when displaying this handover.
 Submitting the current secret replaces it. Retrying that rotation recovers the
 same replacement; retrying an earlier create or rotation after its version has
 been replaced displays a revoked message. Deleting the record also revokes its
-secret. A secret belongs in the password input, never a link or URL.
+secret. A secret belongs in the password input, never a link or URL. Edit secrets bind
+to persistent resource identity, so an approved resource rename or bundle-ID
+change preserves access.
