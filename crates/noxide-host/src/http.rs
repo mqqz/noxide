@@ -156,7 +156,7 @@ fn rendered(value: Rendered, secure: bool) -> Response {
         response.headers_mut().append(
             header::SET_COOKIE,
             set_cookie(
-                "noxide_anon",
+                crate::security::ANONYMOUS_COOKIE,
                 &cookie,
                 secure,
                 crate::security::ANONYMOUS_TTL as u32,
@@ -397,7 +397,13 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
         if let Some((resource, id)) = capability_path(&path) {
             return match gateway
                 .app
-                .capability_page(resource, id, cookie(headers, "noxide_anon").ok().as_deref())
+                .capability_page(
+                    resource,
+                    id,
+                    cookie(headers, crate::security::ANONYMOUS_COOKIE)
+                        .ok()
+                        .as_deref(),
+                )
                 .await
             {
                 Ok(page) => rendered(page, gateway.origin.secure),
@@ -425,7 +431,9 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                     .app
                     .view_page_anonymous(
                         session.as_deref(),
-                        cookie(headers, "noxide_anon").ok().as_deref(),
+                        cookie(headers, crate::security::ANONYMOUS_COOKIE)
+                            .ok()
+                            .as_deref(),
                         route.id,
                         target,
                         cursor,
@@ -475,7 +483,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     }
     let session = cookie(headers, &presentation.session_cookie);
     let login = cookie(headers, &presentation.login_cookie);
-    let anonymous = cookie(headers, "noxide_anon");
+    let anonymous = cookie(headers, crate::security::ANONYMOUS_COOKIE);
     let bytes = match tokio::time::timeout(
         Duration::from_secs(30),
         to_bytes(request.into_body(), MAX_ENCODED_FORM_BYTES),

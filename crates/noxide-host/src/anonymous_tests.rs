@@ -917,3 +917,208 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
         effects.tx.rollback().await.unwrap();
     }
 }
+
+async fn persistent_resource_secret_contract(db: Database) {
+    let original = app(db.clone()).await;
+    let page = original.view_page(None, 1, None, None).await.unwrap();
+    let cookie = page.anonymous_cookie.clone().unwrap();
+    let csrf = fixture::hidden(text(&page), "_csrf");
+    let created = original
+        .submit(
+            &cookie,
+            1,
+            &token(&page, 1),
+            &csrf,
+            Fields::from([
+                ("body".into(), "original".into()),
+                ("published".into(), "true".into()),
+            ]),
+        )
+        .await
+        .unwrap();
+    let old = secret(&created);
+    let mut tx = db
+        .begin_read(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    let id = tx
+        .fetch::<1>("SELECT CAST(id AS TEXT) FROM nx_records", &[])
+        .await
+        .unwrap()[0][0]
+        .parse()
+        .unwrap();
+    tx.commit().await.unwrap();
+    let mut rebound = declarations();
+    rebound.resources[0].id = 901;
+    for op in &mut rebound.operations {
+        op.resource = 901;
+    }
+    rebound.routes[1].resource = Some(901);
+    let keys: HostKeys =
+        serde_json::from_value(serde_json::to_value(&*original.keys).unwrap()).unwrap();
+    let changed = Application::new(
+        &component(),
+        &serde_json::to_vec(&rebound).unwrap(),
+        manifest::digest(&rebound).unwrap(),
+        db.clone(),
+        keys,
+        Limits::default(),
+    )
+    .unwrap();
+    changed.activate().await.unwrap();
+    let page = changed
+        .view_page_anonymous(None, Some(&cookie), 2, Some(id), None)
+        .await
+        .unwrap();
+    let csrf = fixture::hidden(text(&page), "_csrf");
+    assert_eq!(
+        changed
+            .submit_with_capability(
+                &cookie,
+                2,
+                &token(&page, 2),
+                &csrf,
+                Fields::from([("body".into(), "rebound".into())]),
+                Some(&old)
+            )
+            .await
+            .unwrap()
+            .status,
+        303
+    );
+    let rotation = changed
+        .capability_page(901, id, Some(&cookie))
+        .await
+        .unwrap();
+    let rotated = changed
+        .rotate_capability(
+            901,
+            id,
+            &cookie,
+            &fixture::hidden(text(&rotation), "_csrf"),
+            &fixture::hidden(text(&rotation), "_submission"),
+            &old,
+        )
+        .await
+        .unwrap();
+    let current = secret(&rotated);
+    let mut renamed = rebound.clone();
+    renamed.resources[0].name = "renamed_notes".into();
+    renamed.resources[0].id = 1901;
+    for op in &mut renamed.operations {
+        op.resource = 1901;
+    }
+    renamed.routes[1].resource = Some(1901);
+    db.schema_apply(
+        &renamed,
+        &crate::schema::Migration {
+            version: 1,
+            from: crate::schema::digest(&rebound.resources).unwrap(),
+            to: crate::schema::digest(&renamed.resources).unwrap(),
+            operations: vec![crate::schema::MigrationOp::RenameResource {
+                from: "notes".into(),
+                to: "renamed_notes".into(),
+            }],
+        },
+    )
+    .await
+    .unwrap();
+    let keys: HostKeys =
+        serde_json::from_value(serde_json::to_value(&*original.keys).unwrap()).unwrap();
+    let changed = Application::new(
+        &component(),
+        &serde_json::to_vec(&renamed).unwrap(),
+        manifest::digest(&renamed).unwrap(),
+        db,
+        keys,
+        Limits::default(),
+    )
+    .unwrap();
+    changed.activate().await.unwrap();
+    let page = changed
+        .view_page_anonymous(None, Some(&cookie), 2, Some(id), None)
+        .await
+        .unwrap();
+    let csrf = fixture::hidden(text(&page), "_csrf");
+    assert_eq!(
+        changed
+            .submit_with_capability(
+                &cookie,
+                2,
+                &token(&page, 2),
+                &csrf,
+                Fields::from([("body".into(), "renamed".into())]),
+                Some(&current)
+            )
+            .await
+            .unwrap()
+            .status,
+        303
+    );
+    let rotation = changed
+        .capability_page(1901, id, Some(&cookie))
+        .await
+        .unwrap();
+    let rotated = changed
+        .rotate_capability(
+            1901,
+            id,
+            &cookie,
+            &fixture::hidden(text(&rotation), "_csrf"),
+            &fixture::hidden(text(&rotation), "_submission"),
+            &current,
+        )
+        .await
+        .unwrap();
+    let latest = secret(&rotated);
+    let page = changed
+        .view_page_anonymous(None, Some(&cookie), 2, Some(id), None)
+        .await
+        .unwrap();
+    let csrf = fixture::hidden(text(&page), "_csrf");
+    assert_eq!(
+        changed
+            .submit_with_capability(
+                &cookie,
+                3,
+                &token(&page, 3),
+                &csrf,
+                Fields::new(),
+                Some(&latest)
+            )
+            .await
+            .unwrap()
+            .status,
+        303
+    );
+}
+#[tokio::test]
+async fn sqlite_edit_secrets_survive_bundle_rebinding_and_resource_rename() {
+    let temp = tempfile::tempdir().unwrap();
+    persistent_resource_secret_contract(Database::sqlite(temp.path().join("identity.db"))).await;
+}
+#[tokio::test]
+#[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable cluster"]
+async fn postgres_edit_secrets_survive_bundle_rebinding_and_resource_rename() {
+    use sqlx::Connection;
+    let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+    let name = format!(
+        "nx_edit_identity_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let mut case = url::Url::parse(&url).unwrap();
+    case.set_path(&format!("/{name}"));
+    persistent_resource_secret_contract(Database::postgres(case.as_str()).unwrap()).await;
+    sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+}

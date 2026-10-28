@@ -553,10 +553,11 @@ impl Application {
         else {
             return Ok(None);
         };
+        let storage = u32::try_from(tx.storage_resource(&self.manifest, target.resource).await?)?;
         self.keys
             .verify_edit(
                 capability.ok_or(RequestError::InvalidRequest)?,
-                target.resource,
+                storage,
                 target.id,
                 stored.cap_version.ok_or(RequestError::InvalidRequest)?,
             )
@@ -590,12 +591,14 @@ impl Application {
         {
             return render::capability_handover(None, None);
         }
-        let Ok(secret) = self.keys.edit_secret(
-            receipt.key_id,
-            receipt.resource,
-            receipt.id,
-            receipt.cap_version,
-        ) else {
+        let storage = u32::try_from(
+            tx.storage_resource(&self.manifest, receipt.resource)
+                .await?,
+        )?;
+        let Ok(secret) =
+            self.keys
+                .edit_secret(receipt.key_id, storage, receipt.id, receipt.cap_version)
+        else {
             return render::capability_handover(None, None);
         };
         let link = render::resolve(
