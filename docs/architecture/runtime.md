@@ -471,6 +471,15 @@ expiry grace period.
 The encoded HTTP form budget accounts for CRLF and percent-encoding expansion.
 Canonical input has a separate 32 KiB limit. To avoid treating writer-lock waits
 as clock rollback, sample request time after transaction acquisition and admission.
+Use the maximum of wall time and the persisted clock mark as the effective time
+for every token operation and collection. Backward corrections up to 60 seconds
+are tolerated without lowering the mark; larger corrections fence admission.
+Operator recovery requires a new host-key incarnation and atomically resets the
+mark, rotates the deployment generation, and removes sessions. Records and
+receipts remain intact. Expired authority cannot revive after receipt collection
+because recovery invalidates its keys, session, and generation. A single small
+correction may extend wall-time token lifetime by up to 60 seconds; request
+execution deadlines remain monotonic.
 Authorized read pages omit declared forms denied by policy; undeclared forms
 remain invalid.
 

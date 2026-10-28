@@ -214,7 +214,7 @@ async fn postgres_clock_conflicts_are_busy() {
         .begin(Instant::now() + Duration::from_secs(2))
         .await
         .unwrap();
-    crate::security::observe_clock(&mut tx, crate::security::now().unwrap() + 60)
+    crate::security::observe_clock(&mut tx, crate::security::now().unwrap() + 120)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -319,4 +319,264 @@ async fn browser_encoded_maximum_fields_save_and_recover() {
     assert!(html.contains(&format!(">{}xx</textarea>", "\n".repeat(4096))));
     let oversized = router.oneshot(request("x".repeat(65_537))).await.unwrap();
     assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+async fn clock_state(db: &Database) -> [String; 5] {
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    let rows = tx.fetch::<5>("SELECT incarnation,generation,CAST((SELECT count(*) FROM nx_sessions) AS TEXT),CAST((SELECT count(*) FROM nx_records) AS TEXT),CAST((SELECT count(*) FROM nx_receipts) AS TEXT) FROM nx_deployment WHERE singleton=1", &[]).await.unwrap();
+    tx.commit().await.unwrap();
+    rows.into_iter().next().unwrap()
+}
+
+async fn restart_clock_app(db: &Database, keys: &crate::HostKeys) -> Arc<Application> {
+    let m = fixture::manifest();
+    let app = Arc::new(
+        Application::new(
+            &fixture::component(None),
+            &serde_json::to_vec(&m).unwrap(),
+            manifest::digest(&m).unwrap(),
+            db.clone(),
+            serde_json::from_slice(&serde_json::to_vec(keys).unwrap()).unwrap(),
+            Limits::default(),
+        )
+        .unwrap(),
+    );
+    app.activate().await.unwrap();
+    app
+}
+
+async fn clock_rollback_and_recovery(db: Database) {
+    use crate::security::{self, TokenKind};
+    let old = app(db.clone(), fixture::manifest()).await;
+    // The exact tolerance boundary is deterministic and independent of the
+    // machine's clock. The persisted time can only increase during requests.
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        security::observe_clock(&mut tx, 10_000).await.unwrap(),
+        10_000
+    );
+    assert_eq!(
+        security::observe_clock(&mut tx, 9_940).await.unwrap(),
+        10_000
+    );
+    assert!(security::observe_clock(&mut tx, 9_939).await.is_err());
+    assert!(security::observe_clock(&mut tx, -1).await.is_err());
+    let (_, expired_at_high_water) = old.keys.issue(TokenKind::Login, "", 9_900, 80).unwrap();
+    assert!(old.keys.verify(&expired_at_high_water, 9_940).is_ok());
+    assert!(old.keys.verify(&expired_at_high_water, 10_000).is_err());
+    tx.commit().await.unwrap();
+    let wall = security::now().unwrap();
+    let future = wall + 30;
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        security::observe_clock(&mut tx, future).await.unwrap(),
+        future
+    );
+    tx.commit().await.unwrap();
+
+    // Every request path must use the effective clock, including newly issued
+    // future-dated tokens; checking those against raw wall time would reject them.
+    let challenge = old.login_challenge().await.unwrap();
+    assert_eq!(
+        old.keys.verify(&challenge.cookie, future).unwrap().issued,
+        future
+    );
+    let session = old
+        .login(
+            &challenge.cookie,
+            &challenge.csrf,
+            "alice",
+            "review test password",
+        )
+        .await
+        .unwrap();
+    let html = String::from_utf8(old.view(&session, 1, None).await.unwrap().body).unwrap();
+    let submission = fixture::hidden(&html, "_submission");
+    let csrf = fixture::hidden(&html, "_csrf");
+    let input = Fields::from([("body".into(), "preserved through clock recovery".into())]);
+    let saved = old
+        .submit(&session, 1, &submission, &csrf, input.clone())
+        .await
+        .unwrap();
+    let replay = old
+        .recover_form(&session, 1, &submission, &csrf, &input, true)
+        .await
+        .unwrap();
+    assert_eq!(saved.location, replay.location);
+    let token = old.keys.verify(&submission, future).unwrap();
+    let (_, expired) = old
+        .keys
+        .issue(token.kind, &token.subject, wall - 60, 75)
+        .unwrap();
+    assert!(old.keys.verify(&expired, wall).is_ok());
+    assert!(
+        old.submit(&session, 1, &expired, &csrf, input.clone())
+            .await
+            .is_err(),
+        "effective time must not revive expired authority"
+    );
+
+    let restarted = restart_clock_app(&db, &old.keys).await;
+    restarted.view(&session, 1, None).await.unwrap();
+    // Maintenance must use the same effective time and grace window.
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    tx.execute("INSERT INTO nx_receipts(nonce,subject,contract,action,input,outcome,expires) VALUES('clock-expired','old','old',1,'old','old',$1)", &[(wall - 40).into()]).await.unwrap();
+    tx.commit().await.unwrap();
+    db.maintain().await.unwrap();
+    assert_eq!(clock_state(&db).await[4], "1");
+    old.logout(&session, &csrf).await.unwrap();
+    assert!(restarted.view(&session, 1, None).await.is_err());
+    let challenge = restarted.login_challenge().await.unwrap();
+    let session = restarted
+        .login(
+            &challenge.cookie,
+            &challenge.csrf,
+            "alice",
+            "review test password",
+        )
+        .await
+        .unwrap();
+
+    // Simulate a large correction after expiry collection. Retaining only the
+    // old token must never allow its already-committed action to execute again.
+    let high = security::now().unwrap() + 7200;
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    security::observe_clock(&mut tx, high).await.unwrap();
+    tx.execute("DELETE FROM nx_receipts WHERE expires<$1", &[high.into()])
+        .await
+        .unwrap();
+    tx.execute("INSERT INTO nx_receipts(nonce,subject,contract,action,input,outcome,expires) VALUES('clock-retained','old','old',1,'old','old',$1)", &[(high + 900).into()]).await.unwrap();
+    tx.commit().await.unwrap();
+    assert!(restarted.login_challenge().await.is_err());
+    assert!(db.maintain().await.is_err());
+    let before = clock_state(&db).await;
+    assert_eq!(&before[2..], ["1", "1", "1"]);
+    assert!(
+        db.recover_clock(&old.keys).await.is_err(),
+        "same key cannot reset clock"
+    );
+    assert_eq!(clock_state(&db).await, before);
+
+    // A failure after deployment/session writes must roll back the whole reset.
+    let fresh = HostKeys::generate().unwrap();
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    tx.execute("DELETE FROM nx_clock", &[]).await.unwrap();
+    tx.commit().await.unwrap();
+    assert!(db.recover_clock(&fresh).await.is_err());
+    assert_eq!(clock_state(&db).await, before);
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    tx.execute(
+        "INSERT INTO nx_clock(singleton,observed) VALUES(1,$1)",
+        &[high.into()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    db.recover_clock(&fresh).await.unwrap();
+    let after = clock_state(&db).await;
+    assert_ne!(after[0], before[0]);
+    assert_ne!(after[1], before[1]);
+    assert_eq!(&after[2..], ["0", "1", "1"]);
+    assert!(old.login_challenge().await.is_err());
+    assert!(
+        old.activate().await.is_err(),
+        "retired process must not reactivate itself"
+    );
+    assert_eq!(clock_state(&db).await, after);
+    let recovered = restart_clock_app(&db, &fresh).await;
+    assert!(recovered.view(&session, 1, None).await.is_err());
+    assert!(
+        fresh
+            .verify(&challenge.cookie, security::now().unwrap())
+            .is_err()
+    );
+    let challenge = recovered.login_challenge().await.unwrap();
+    let session = recovered
+        .login(
+            &challenge.cookie,
+            &challenge.csrf,
+            "alice",
+            "review test password",
+        )
+        .await
+        .unwrap();
+    let html = String::from_utf8(recovered.view(&session, 1, None).await.unwrap().body).unwrap();
+    let new_csrf = fixture::hidden(&html, "_csrf");
+    assert!(
+        recovered
+            .submit(&session, 1, &submission, &new_csrf, input.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(clock_state(&db).await[3], "1");
+    let new_submission = fixture::hidden(&html, "_submission");
+    recovered
+        .submit(&session, 1, &new_submission, &new_csrf, input)
+        .await
+        .unwrap();
+    assert_eq!(clock_state(&db).await[3], "2");
+    db.maintain().await.unwrap();
+    assert!(db.recover_clock(&fresh).await.is_err());
+    // Tokens issued by the recovered deployment retain normal expiry semantics.
+    assert_eq!(
+        fresh
+            .verify(&session, security::now().unwrap())
+            .unwrap()
+            .kind,
+        TokenKind::Session
+    );
+}
+
+#[tokio::test]
+async fn sqlite_clock_rollback_tolerance_and_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    clock_rollback_and_recovery(Database::sqlite(temp.path().join("recovery.db"))).await;
+}
+
+#[tokio::test]
+#[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable cluster"]
+async fn postgres_clock_rollback_tolerance_and_recovery() {
+    use sqlx::Connection;
+    let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+    let name = format!(
+        "nx_clock_recovery_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let mut case = url::Url::parse(&url).unwrap();
+    case.set_path(&format!("/{name}"));
+    clock_rollback_and_recovery(Database::postgres(case.as_str()).unwrap()).await;
+    sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
 }

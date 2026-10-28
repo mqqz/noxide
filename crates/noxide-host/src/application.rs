@@ -172,9 +172,10 @@ impl Application {
             .await
             .map_err(|_| RequestError::Rejected)?;
         let now = security::now().map_err(|_| RequestError::Rejected)?;
-        security::observe_clock(&mut tx, now)
+        let now = security::observe_clock(&mut tx, now)
             .await
             .map_err(RequestError::database)?;
+
         let (token, cookie) = self
             .keys
             .issue(TokenKind::Login, "", now, 900)
@@ -209,6 +210,9 @@ impl Application {
                 .await
                 .map_err(|_| RequestError::Rejected)?;
             let now = security::now().map_err(|_| RequestError::Rejected)?;
+            let now = security::observe_clock(&mut tx, now)
+                .await
+                .map_err(RequestError::database)?;
             let token = self
                 .keys
                 .verify(challenge, now)
@@ -219,9 +223,7 @@ impl Application {
             self.keys
                 .verify_csrf(&token.nonce, csrf)
                 .map_err(|_| RequestError::InvalidRequest)?;
-            security::observe_clock(&mut tx, now)
-                .await
-                .map_err(RequestError::database)?;
+
             let signed = auth::login(&mut tx, &self.keys, username, password, now, permit)
                 .await
                 .map_err(|_| RequestError::Authentication)?;
@@ -242,12 +244,13 @@ impl Application {
             .await
             .map_err(|_| RequestError::Rejected)?;
         let now = security::now().map_err(|_| RequestError::Rejected)?;
+        let now = security::observe_clock(&mut tx, now)
+            .await
+            .map_err(RequestError::database)?;
         let (session, _) = auth::authenticate(&mut tx, &self.keys, cookie, now)
             .await
             .map_err(|_| RequestError::Authentication)?;
-        security::observe_clock(&mut tx, now)
-            .await
-            .map_err(RequestError::database)?;
+
         self.keys
             .verify_csrf(&session.nonce, csrf)
             .map_err(|_| RequestError::InvalidRequest)?;
@@ -546,9 +549,10 @@ impl Application {
                 .await
                 .map_err(|_| RequestError::Rejected)?;
             let now = security::now().map_err(|_| RequestError::Rejected)?;
-            security::observe_clock(&mut tx, now)
+            let now = security::observe_clock(&mut tx, now)
                 .await
                 .map_err(RequestError::database)?;
+
             let (session, principal) = auth::authenticate(&mut tx, &self.keys, cookie, now)
                 .await
                 .map_err(|_| RequestError::Authentication)?;
@@ -710,9 +714,10 @@ impl Application {
             let mut tx = self.database.begin(deadline.into_std()).await?;
             self.admission(&mut tx, false).await?;
             let now = security::now()?;
+            let now = security::observe_clock(&mut tx, now).await?;
             let token = self.keys.verify(submission, now)?;
             let target = self.submission_target(&token, a)?;
-            security::observe_clock(&mut tx, now).await?;
+
             let (session, principal) = auth::authenticate(&mut tx, &self.keys, cookie, now).await?;
             ensure!(session.nonce == token.subject, "submission subject");
             self.keys.verify_csrf(&session.nonce, csrf)?;
@@ -767,12 +772,13 @@ impl Application {
         let mut tx = self.database.begin(deadline.into_std()).await?;
         self.admission(&mut tx, false).await?;
         let now = security::now()?;
+        let now = security::observe_clock(&mut tx, now).await?;
         let token = self
             .keys
             .verify(submission, now)
             .map_err(|_| RequestError::InvalidRequest)?;
         let target = self.submission_target(&token, a)?;
-        security::observe_clock(&mut tx, now).await?;
+
         let (session, principal) = auth::authenticate(&mut tx, &self.keys, cookie, now)
             .await
             .map_err(|_| RequestError::Authentication)?;

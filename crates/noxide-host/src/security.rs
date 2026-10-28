@@ -194,7 +194,11 @@ pub(crate) fn now() -> Result<i64> {
         .try_into()?)
 }
 
-pub(crate) async fn observe_clock(tx: &mut Transaction, now: i64) -> Result<()> {
+/// A small wall-clock correction may delay expiry, but must never revive it.
+/// Every caller uses the returned high-water time, including token verification.
+pub(crate) const CLOCK_ROLLBACK_TOLERANCE: i64 = 60;
+
+pub(crate) async fn observe_clock(tx: &mut Transaction, now: i64) -> Result<i64> {
     let rows = tx
         .fetch::<1>(
             "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
@@ -205,7 +209,11 @@ pub(crate) async fn observe_clock(tx: &mut Transaction, now: i64) -> Result<()> 
         .first()
         .ok_or_else(|| anyhow::anyhow!("clock missing"))?[0]
         .parse()?;
-    ensure!(now >= previous, "clock moved backwards; admission fenced");
+    ensure!(now >= 0 && previous >= 0, "invalid clock");
+    ensure!(
+        previous.saturating_sub(now) <= CLOCK_ROLLBACK_TOLERANCE,
+        "clock moved backwards beyond tolerance; use recover-clock with a fresh host key"
+    );
     if now > previous {
         tx.execute(
             "UPDATE nx_clock SET observed=$1 WHERE singleton=1 AND observed<$1",
@@ -213,7 +221,7 @@ pub(crate) async fn observe_clock(tx: &mut Transaction, now: i64) -> Result<()> 
         )
         .await?;
     }
-    Ok(())
+    Ok(now.max(previous))
 }
 
 #[cfg(test)]

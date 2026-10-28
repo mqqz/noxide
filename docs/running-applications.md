@@ -298,8 +298,32 @@ automatically distinguish an unannounced restored database from its original.
 Run `noxide maintain CONFIG.json` periodically. Each invocation removes at most
 256 expired receipts and 256 expired sessions, after a 60-second grace period.
 Expiry is authenticated, so deleting a receipt cannot authorize an old token.
-A persisted clock high-water mark fences admission if time moves backwards;
-restore trusted time before resuming. Do not reset the fence to revive tokens.
+The persisted clock high-water mark tolerates backward corrections of up to
+60 seconds. Requests and maintenance use the greater of wall time and the
+persisted mark for all token issuance, verification, and expiry collection.
+Time never moves backwards within that authority. A single correction can extend
+a token's wall-time lifetime by up to 60 seconds. Request execution deadlines
+continue to use monotonic elapsed time.
+
+Larger corrections fence admission. To recover without waiting for the old time
+to catch up, stop all runtime instances and correct the system clock. Generate a
+fresh host key, update the configuration, then run recovery before restarting:
+
+```sh
+target/debug/noxide keygen /tmp/noxide-notes-run/clock-host-keys.json
+# Set "keys": "clock-host-keys.json" in runtime.json.
+target/debug/noxide recover-clock /tmp/noxide-notes-run/runtime.json
+target/debug/noxide serve /tmp/noxide-notes-run/runtime.json
+```
+
+Recovery atomically resets the clock mark, switches the accepted key incarnation
+and deployment generation, and deletes authentication sessions. Application
+records and receipts are preserved. Users must sign in again and reopen forms;
+old tokens cannot authorize another execution even if their receipts were
+already collected. The command refuses the current host key and rolls back on
+failure. Always generate a new key; never reuse a retired one or lower the clock
+mark through SQL. `noxide maintain CONFIG.json` reports a clock-fence error with
+the recovery command when the correction exceeds tolerance.
 
 SQLite requires WAL and `synchronous=FULL`. PostgreSQL requires `fsync` and
 `full_page_writes` enabled and uses synchronous commits. These settings assume
