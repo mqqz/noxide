@@ -36,6 +36,7 @@ pub struct Rendered {
     pub status: u16,
     pub body: Vec<u8>,
     pub location: Option<String>,
+    pub anonymous_cookie: Option<String>,
 }
 
 fn stylesheet(out: &mut Buffer, presentation: &crate::Presentation) -> Result<()> {
@@ -267,6 +268,7 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
                 status: 303,
                 body: Vec::new(),
                 location: Some(resolve(m, dest)?),
+                anonymous_cookie: None,
             });
         }
         ResponseIntent::Rejected { .. } => anyhow::bail!("rejection requires action context"),
@@ -428,6 +430,7 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
         status,
         body: out.0.into_bytes(),
         location: None,
+        anonymous_cookie: None,
     })
 }
 
@@ -461,6 +464,9 @@ fn form(
         ("_submission", &credentials.submission),
     ] {
         hidden(out, name, value)?;
+    }
+    if crate::manifest::is_capability(crate::manifest::operation(m, action.operation)?) {
+        out.push("<label>Edit secret<input type=\"password\" name=\"_capability\" autocomplete=\"off\" maxlength=\"128\" required></label>")?;
     }
     let default_button =
         if crate::manifest::operation(m, action.operation)?.kind == OperationKind::Delete {
@@ -872,6 +878,7 @@ pub(crate) fn recovery(
         status,
         body: out.0.into_bytes(),
         location: None,
+        anonymous_cookie: None,
     })
 }
 
@@ -1234,4 +1241,47 @@ mod link_tests {
             );
         }
     }
+}
+
+pub(crate) fn capability_handover(secret: Option<&str>, link: Option<&str>) -> Result<Rendered> {
+    let mut out = Buffer("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Edit secret</title></head><body><main>".into());
+    if let Some(secret) = secret {
+        out.push("<h1>Save your edit secret</h1><p>Keep this secret to edit, delete, or rotate access to your record.</p><pre>")?;
+        out.text(secret)?;
+        out.push("</pre>")?;
+        if let Some(link) = link {
+            out.push("<a href=\"")?;
+            out.text(link)?;
+            out.push("\">View record</a>")?;
+        }
+    } else {
+        out.push("<h1>This secret has been replaced or revoked</h1>")?;
+    }
+    out.push("</main></body></html>")?;
+    Ok(Rendered {
+        status: 200,
+        body: out.0.into_bytes(),
+        location: None,
+        anonymous_cookie: None,
+    })
+}
+
+pub(crate) fn capability_rotation(
+    credentials: &FormCredentials,
+    resource: u32,
+    id: u64,
+) -> Result<Rendered> {
+    let mut out = Buffer("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Rotate edit secret</title></head><body><main><h1>Rotate edit secret</h1>".into());
+    out.push(&format!(
+        "<form method=\"post\" action=\"/_noxide/capability/{resource}/{id}\">"
+    ))?;
+    hidden(&mut out, "_csrf", &credentials.csrf)?;
+    hidden(&mut out, "_submission", &credentials.submission)?;
+    out.push("<label>Current edit secret<input type=\"password\" name=\"_capability\" autocomplete=\"off\" maxlength=\"128\" required></label><button>Rotate secret</button></form></main></body></html>")?;
+    Ok(Rendered {
+        status: 200,
+        body: out.0.into_bytes(),
+        location: None,
+        anonymous_cookie: None,
+    })
 }
