@@ -307,3 +307,46 @@ Applying a migration fences old forms and old schemas. Activate the matching
 approved bundle afterward. If activation fails, keep the application unavailable
 until a compatible bundle is ready. Recovery after a committed destructive
 migration requires an explicit forward migration or a verified backup restore.
+
+## Anonymous submissions and edit secrets
+
+A public create action accepts anonymous submissions. Capability actions require
+an edit secret for the exact record:
+
+```rust
+#[action(create(Article), allow = public, fields(title, body, published), redirect = article)]
+struct PublishArticle;
+
+#[action(update(Article), allow = capability, fields(title, body), redirect = article)]
+struct EditArticle;
+
+#[action(delete(Article), allow = capability, redirect = index)]
+struct DeleteArticle;
+```
+
+Use `access = public_optional` on pages that offer these forms. Public read
+operations still require visibility and field projection; public create
+operations forbid both. `capability` must stand alone and is valid only for
+update and delete. The host adds a password input for the edit secret. Capability
+forms start with blank values, so their fields cannot disclose values outside a
+public read projection. A capability never grants an owner, role, tenant, or
+inspection policy to application code.
+
+The host issues or reuses a 900-second `noxide_anon` cookie and binds form tokens
+and CSRF to that browser. Cookies and edit secrets never enter `RequestView`.
+Every anonymous mutation uses the receipt protocol and bounded anonymous-write
+admission. Responses retain `Cache-Control: no-store`.
+
+After a public create commits, a fixed host page shows the edit secret and a
+record link. Save the secret before leaving that page. Retrying the same form
+recovers the same secret while it remains current. The host stores only record,
+capability-version and key identifiers in the receipt outcome. It ignores the
+application's create redirect when displaying this handover.
+
+`GET /_noxide/capability/{resource}/{id}` offers a host-owned rotation form.
+Submitting the current secret replaces it. Retrying that rotation recovers the
+same replacement; retrying an earlier create or rotation after its version has
+been replaced displays a revoked message. Deleting the record also revokes its
+secret. A secret belongs in the password input, never a link or URL. Edit secrets bind
+to persistent resource identity, so an approved resource rename or bundle-ID
+change preserves access.

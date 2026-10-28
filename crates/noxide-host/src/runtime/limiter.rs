@@ -32,6 +32,10 @@ const ARGON2: usize = 2;
 const ARGON2_WAITING: usize = 8;
 const ARGON2_WAIT: Duration = Duration::from_secs(1);
 const ARGON2_PER_MINUTE: u32 = 60;
+const ANONYMOUS_WRITES: usize = 1;
+const ANONYMOUS_WRITE_WAITING: usize = 4;
+const ANONYMOUS_WRITE_WAIT: Duration = Duration::from_secs(1);
+const ANONYMOUS_WRITES_PER_MINUTE: u32 = 30;
 
 #[derive(Debug)]
 pub(crate) struct Busy;
@@ -301,6 +305,8 @@ pub(crate) struct AdmissionLimits {
     pub session_check: Lane,
     circuits: Buckets<u32>,
     principals: Buckets<String>,
+    pub anonymous_writes: BoundedPermits,
+    pub anonymous_write_attempts: RateWindow,
     pub argon2: BoundedPermits,
     pub argon2_attempts: RateWindow,
     #[cfg(test)]
@@ -338,6 +344,12 @@ impl AdmissionLimits {
                 PRINCIPAL_PER_MINUTE * 1000,
                 PRINCIPAL_PER_MINUTE * 1000 / 60,
             ),
+            anonymous_writes: BoundedPermits::new(
+                ANONYMOUS_WRITES,
+                ANONYMOUS_WRITE_WAITING,
+                ANONYMOUS_WRITE_WAIT,
+            ),
+            anonymous_write_attempts: RateWindow::new(ANONYMOUS_WRITES_PER_MINUTE),
             argon2: BoundedPermits::new(ARGON2, ARGON2_WAITING, ARGON2_WAIT),
             argon2_attempts: RateWindow::new(ARGON2_PER_MINUTE),
             #[cfg(test)]

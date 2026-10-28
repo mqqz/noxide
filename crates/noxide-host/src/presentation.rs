@@ -34,6 +34,10 @@ impl Presentation {
     pub(crate) fn validate(&self, manifest: &Manifest) -> Result<()> {
         for name in [&self.session_cookie, &self.login_cookie] {
             ensure!(
+                name != crate::security::ANONYMOUS_COOKIE,
+                "anonymous cookie name is reserved"
+            );
+            ensure!(
                 !name.is_empty()
                     && name.len() <= 64
                     && name
@@ -211,5 +215,30 @@ mod tests {
             .validate(&m)
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod anonymous_cookie_tests {
+    use super::*;
+    #[test]
+    fn session_and_login_cookies_cannot_use_the_fixed_anonymous_name() {
+        let m = crate::test_support::manifest();
+        for session in [false, true] {
+            let mut p = Presentation::default();
+            if session {
+                p.session_cookie = "noxide_anon".into();
+            } else {
+                p.login_cookie = "noxide_anon".into();
+            }
+            assert!(p.validate(&m).is_err());
+        }
+        Presentation {
+            session_cookie: "custom_session".into(),
+            login_cookie: "custom_login".into(),
+            ..Presentation::default()
+        }
+        .validate(&m)
+        .unwrap();
     }
 }

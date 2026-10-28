@@ -145,13 +145,24 @@ fn finish(mut response: Response) -> Response {
     response
 }
 
-fn rendered(value: Rendered) -> Response {
+fn rendered(value: Rendered, secure: bool) -> Response {
     let mut response = (
         StatusCode::from_u16(value.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         value.body,
     )
         .into_response();
+    if let Some(cookie) = value.anonymous_cookie {
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            set_cookie(
+                crate::security::ANONYMOUS_COOKIE,
+                &cookie,
+                secure,
+                crate::security::ANONYMOUS_TTL as u32,
+            ),
+        );
+    }
     if let Some(location) = value.location {
         response.headers_mut().insert(
             header::LOCATION,
@@ -234,6 +245,14 @@ fn decode_form(bytes: &[u8]) -> Result<BTreeMap<String, String>> {
     Ok(result)
 }
 
+fn capability_path(path: &str) -> Option<(u32, u64)> {
+    let (resource, id) = path.strip_prefix("/_noxide/capability/")?.split_once('/')?;
+    let r: u32 = resource.parse().ok()?;
+    let n: u64 = id.parse().ok()?;
+    (r > 0 && n > 0 && n <= i64::MAX as u64 && r.to_string() == resource && n.to_string() == id)
+        .then_some((r, n))
+}
+
 async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Response {
     use crate::runtime::limiter::{AdmissionContext, AdmissionIdentity, RequestClass};
     let app = gateway.app.clone();
@@ -247,12 +266,13 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
         RequestClass::Get
     } else if path == app.presentation.login_path || path == "/register" {
         RequestClass::PasswordHash
-    } else if path
-        .strip_prefix(&format!("{}/", app.presentation.action_path))
-        .and_then(|s| s.parse().ok())
-        .and_then(|id| crate::manifest::action(&app.manifest, id).ok())
-        .and_then(|a| crate::manifest::operation(&app.manifest, a.operation).ok())
-        .is_some_and(|op| op.policy.any == vec![vec![noxide_protocol::Predicate::Public]])
+    } else if capability_path(path).is_some()
+        || path
+            .strip_prefix(&format!("{}/", app.presentation.action_path))
+            .and_then(|s| s.parse().ok())
+            .and_then(|id| crate::manifest::action(&app.manifest, id).ok())
+            .and_then(|a| crate::manifest::operation(&app.manifest, a.operation).ok())
+            .is_some_and(crate::manifest::anonymous_action)
     {
         RequestClass::AnonymousAction
     } else {
@@ -374,6 +394,22 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                 }
             };
         }
+        if let Some((resource, id)) = capability_path(&path) {
+            return match gateway
+                .app
+                .capability_page(
+                    resource,
+                    id,
+                    cookie(headers, crate::security::ANONYMOUS_COOKIE)
+                        .ok()
+                        .as_deref(),
+                )
+                .await
+            {
+                Ok(page) => rendered(page, gateway.origin.secure),
+                Err(e) => error(e, &presentation.login_path),
+            };
+        }
         let route = gateway.app.manifest.routes.iter().find_map(|route| {
             crate::render::match_path(route, &path).map(|target| (route, target))
         });
@@ -393,10 +429,18 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                 };
                 match gateway
                     .app
-                    .view_page(session.as_deref(), route.id, target, cursor)
+                    .view_page_anonymous(
+                        session.as_deref(),
+                        cookie(headers, crate::security::ANONYMOUS_COOKIE)
+                            .ok()
+                            .as_deref(),
+                        route.id,
+                        target,
+                        cursor,
+                    )
                     .await
                 {
-                    Ok(r) => rendered(r),
+                    Ok(r) => rendered(r, gateway.origin.secure),
                     Err(e) => error(e, &presentation.login_path),
                 }
             }
@@ -439,6 +483,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     }
     let session = cookie(headers, &presentation.session_cookie);
     let login = cookie(headers, &presentation.login_cookie);
+    let anonymous = cookie(headers, crate::security::ANONYMOUS_COOKIE);
     let bytes = match tokio::time::timeout(
         Duration::from_secs(30),
         to_bytes(request.into_body(), MAX_ENCODED_FORM_BYTES),
@@ -493,10 +538,35 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                 .into_response(),
         };
     }
-    let Ok(session) = session else {
-        return redirect(&presentation.login_path);
-    };
+    if let Some((resource, id)) = capability_path(&path) {
+        let (Some(submission), Some(secret)) =
+            (form.remove("_submission"), form.remove("_capability"))
+        else {
+            return StatusCode::FORBIDDEN.into_response();
+        };
+        if !form.is_empty() {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+        return match gateway
+            .app
+            .rotate_capability(
+                resource,
+                id,
+                &anonymous.unwrap_or_default(),
+                &csrf,
+                &submission,
+                &secret,
+            )
+            .await
+        {
+            Ok(page) => rendered(page, gateway.origin.secure),
+            Err(e) => error(e, &presentation.login_path),
+        };
+    }
     if path == presentation.logout_path {
+        let Ok(session) = session else {
+            return redirect(&presentation.login_path);
+        };
         if !form.is_empty() {
             return StatusCode::BAD_REQUEST.into_response();
         }
@@ -518,24 +588,64 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let op = match crate::manifest::action(&gateway.app.manifest, action)
+        .and_then(|a| crate::manifest::operation(&gateway.app.manifest, a.operation))
+    {
+        Ok(op) => op,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let capability = form.remove("_capability");
+    if capability.is_some() && !crate::manifest::is_capability(op) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let session = if crate::manifest::anonymous_action(op) {
+        anonymous.unwrap_or_default()
+    } else {
+        match session {
+            Ok(session) => session,
+            Err(_) => return redirect(&presentation.login_path),
+        }
+    };
     let Some(submission) = form.remove("_submission") else {
         return StatusCode::FORBIDDEN.into_response();
     };
     match gateway
         .app
-        .submit(&session, action, &submission, &csrf, form.clone())
+        .submit_with_capability(
+            &session,
+            action,
+            &submission,
+            &csrf,
+            form.clone(),
+            capability.as_deref(),
+        )
         .await
     {
-        Ok(r) => rendered(r),
+        Ok(r) => rendered(r, gateway.origin.secure),
         Err(RequestError::Busy) => busy(),
         Err(e) => {
             let unknown = matches!(e, RequestError::OutcomeUnknown);
-            match gateway
-                .app
-                .recover_form(&session, action, &submission, &csrf, &form, unknown)
-                .await
-            {
-                Ok(r) => rendered(r),
+            let recovered = if let Some(capability) = capability.as_deref() {
+                gateway
+                    .app
+                    .recover_form_with_capability(
+                        &session,
+                        action,
+                        &submission,
+                        &csrf,
+                        &form,
+                        unknown,
+                        Some(capability),
+                    )
+                    .await
+            } else {
+                gateway
+                    .app
+                    .recover_form(&session, action, &submission, &csrf, &form, unknown)
+                    .await
+            };
+            match recovered {
+                Ok(r) => rendered(r, gateway.origin.secure),
                 Err(_) => error(e, &presentation.login_path),
             }
         }
