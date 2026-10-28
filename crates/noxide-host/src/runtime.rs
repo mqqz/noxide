@@ -1,4 +1,5 @@
 mod admission;
+pub(crate) mod limiter;
 
 use anyhow::{Result, ensure};
 use noxide_protocol::*;
