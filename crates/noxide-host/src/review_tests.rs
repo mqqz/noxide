@@ -1148,3 +1148,63 @@ fn private_notes_approval_digest_is_unchanged() {
         "jKUms09nfOJN4kK0zmHL4tweVWcKwmUJtk7UfhuojlA"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable cluster"]
+async fn postgres_schema_lock_contention_is_busy_on_read_requests() {
+    use sqlx::Connection;
+    let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+    let name = format!(
+        "nx_schema_busy_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let mut case = url::Url::parse(&url).unwrap();
+    case.set_path(&format!("/{name}"));
+    let db = Database::postgres(case.as_str()).unwrap();
+    let app = app(db.clone(), fixture::manifest()).await;
+    let challenge = app.login_challenge().await.unwrap();
+    let session = app
+        .login(
+            &challenge.cookie,
+            &challenge.csrf,
+            "alice",
+            "review test password",
+        )
+        .await
+        .unwrap();
+    let before = storage_snapshot(&db).await;
+    let mut writer = db
+        .begin(Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    writer
+        .execute(
+            "LOCK TABLE nx_schema_definition IN ACCESS EXCLUSIVE MODE",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        app.login_challenge().await,
+        Err(crate::RequestError::Busy)
+    ));
+    assert!(matches!(
+        app.view(&session, 1, None).await,
+        Err(crate::RequestError::Busy)
+    ));
+    writer.rollback().await.unwrap();
+    assert_eq!(storage_snapshot(&db).await, before);
+    assert!(app.view(&session, 1, None).await.is_ok());
+    sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+}
