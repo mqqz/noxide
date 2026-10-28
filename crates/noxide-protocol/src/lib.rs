@@ -116,6 +116,7 @@ pub fn decode_response(bytes: &[u8]) -> Result<ResponseIntent, String> {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Predicate {
     Public,
+    Capability,
     Owner,
     SameTenant,
     Role { name: String, tenant_scoped: bool },

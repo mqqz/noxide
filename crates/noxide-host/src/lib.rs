@@ -26,3 +26,6 @@ pub use presentation::Presentation;
 
 #[cfg(test)]
 mod public_tests;
+
+#[cfg(test)]
+mod anonymous_tests;

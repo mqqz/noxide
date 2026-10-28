@@ -707,6 +707,7 @@ mod tests {
 #[derive(Clone)]
 enum PolicyAtom {
     Public,
+    Capability,
     Owner,
     Tenant,
     Role(LitStr, bool),
@@ -716,6 +717,7 @@ fn policy(input: ParseStream<'_>) -> syn::Result<Vec<Vec<PolicyAtom>>> {
     let name: Ident = input.parse()?;
     match name.to_string().as_str() {
         "public" => Ok(vec![vec![PolicyAtom::Public]]),
+        "capability" => Ok(vec![vec![PolicyAtom::Capability]]),
         "owner" => Ok(vec![vec![PolicyAtom::Owner]]),
         "same_tenant" => Ok(vec![vec![PolicyAtom::Tenant]]),
         "role" | "tenant_role" => {
@@ -744,11 +746,11 @@ fn policy(input: ParseStream<'_>) -> syn::Result<Vec<Vec<PolicyAtom>>> {
                 if term
                     .iter()
                     .flatten()
-                    .any(|p| matches!(p, PolicyAtom::Public))
+                    .any(|p| matches!(p, PolicyAtom::Public | PolicyAtom::Capability))
                 {
                     return Err(syn::Error::new(
                         name.span(),
-                        "public cannot appear inside any or all",
+                        "public or capability cannot appear inside any or all",
                     ));
                 }
                 if conjunction {
@@ -790,6 +792,7 @@ fn policy_tokens(rules: &[Vec<PolicyAtom>]) -> Tokens {
     let rules = rules.iter().map(|rule| {
         let predicates = rule.iter().map(|atom| match atom {
             PolicyAtom::Public => quote!(::noxide::__private::Predicate::Public),
+            PolicyAtom::Capability => quote!(::noxide::__private::Predicate::Capability),
             PolicyAtom::Owner => quote!(::noxide::__private::Predicate::Owner),
             PolicyAtom::Tenant => quote!(::noxide::__private::Predicate::SameTenant),
             PolicyAtom::Role(name, tenant_scoped) => quote!(::noxide::__private::Predicate::Role { name: #name.into(), tenant_scoped: #tenant_scoped }),
@@ -940,6 +943,17 @@ fn expand_query(declaration: OperationDeclaration, item: syn::ItemStruct) -> syn
             ));
         }
     };
+    if declaration
+        .policy
+        .iter()
+        .flatten()
+        .any(|p| matches!(p, PolicyAtom::Capability))
+    {
+        return Err(syn::Error::new(
+            item.span(),
+            "capability requires update or delete",
+        ));
+    }
     let public = declaration
         .policy
         .iter()
@@ -1092,15 +1106,22 @@ fn action_label(identifier: &str) -> String {
 fn expand_action(declaration: OperationDeclaration, item: syn::ItemStruct) -> syn::Result<Tokens> {
     marker(&item)?;
     if declaration.visible.is_some()
-        || declaration
+        || (declaration
             .policy
             .iter()
             .flatten()
             .any(|p| matches!(p, PolicyAtom::Public))
+            && declaration.kind != "create")
+        || (declaration
+            .policy
+            .iter()
+            .flatten()
+            .any(|p| matches!(p, PolicyAtom::Capability))
+            && !matches!(declaration.kind.to_string().as_str(), "update" | "delete"))
     {
         return Err(syn::Error::new(
             item.span(),
-            "public is only available on read queries",
+            "public requires create; capability requires update or delete; actions cannot declare visibility",
         ));
     }
     let kind = match declaration.kind.to_string().as_str() {
@@ -2040,6 +2061,50 @@ mod public_tests {
                 syn::parse_quote!(
                     struct CreateArticle;
                 )
+            )
+            .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod anonymous_action_tests {
+    use super::*;
+    #[test]
+    fn public_create_and_capability_mutations_are_the_only_anonymous_action_policies() {
+        for declaration in [
+            "create(Article), allow = public, fields(title), redirect = index",
+            "update(Article), allow = capability, fields(title), redirect = index",
+            "delete(Article), allow = capability, redirect = index",
+        ] {
+            assert!(
+                expand_action(
+                    syn::parse_str(declaration).unwrap(),
+                    syn::parse_quote!(
+                        struct Mutate;
+                    )
+                )
+                .is_ok()
+            );
+        }
+        for declaration in [
+            "create(Article), allow = capability, fields(title), redirect = index",
+            "update(Article), allow = public, fields(title), redirect = index",
+            "delete(Article), allow = public, redirect = index",
+        ] {
+            assert!(
+                expand_action(
+                    syn::parse_str(declaration).unwrap(),
+                    syn::parse_quote!(
+                        struct Mutate;
+                    )
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            syn::parse_str::<OperationDeclaration>(
+                "update(Article), allow = any(capability,owner), fields(title), redirect = index"
             )
             .is_err()
         );

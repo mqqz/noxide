@@ -15,6 +15,7 @@ pub(crate) struct Effects {
     pub request: RequestView,
     pub outcome: Option<ResponseIntent>,
     pub grant: Option<RecordTarget>,
+    pub capability_grant: Option<RecordTarget>,
     pub record: Option<StoredRecord>,
     pub calls: u32,
     pub cursor: Option<u64>,
@@ -27,6 +28,7 @@ pub(crate) struct StoredRecord {
     pub tenant: String,
     pub incarnation: String,
     pub revision: i64,
+    pub cap_version: Option<i64>,
 }
 
 pub(crate) async fn load(
@@ -38,38 +40,45 @@ pub(crate) async fn load(
     ensure!(id > 0 && id <= i64::MAX as u64, "invalid resource target");
     let storage_resource = tx.storage_resource(m, resource).await?;
     let sql = format!(
-        "SELECT owner,tenant,{}, {},CAST(revision AS TEXT) FROM nx_records WHERE resource=$1 AND id=$2",
+        "SELECT COALESCE(owner,''),tenant,{}, {},CAST(revision AS TEXT),COALESCE(CAST(cap_version AS TEXT),'') FROM nx_records WHERE resource=$1 AND id=$2",
         tx.bounded_text("fields", 20_000),
         tx.bounded_text("incarnation", 64)
     );
     let rows = tx
-        .fetch::<5>(
+        .fetch::<6>(
             &sql,
             &[Param::Number(storage_resource), Param::Number(id as i64)],
         )
         .await?;
     rows.into_iter()
         .next()
-        .map(|[owner, tenant, fields, incarnation, revision]| {
-            let fields = serde_json::from_str(&fields)?;
-            manifest::validate_fields(manifest::resource(m, resource)?, &fields)?;
-            let revision = revision.parse()?;
-            ensure!(
-                revision > 0 && !incarnation.is_empty(),
-                "invalid record metadata"
-            );
-            Ok(StoredRecord {
-                record: Record {
-                    resource,
-                    id,
-                    fields,
-                },
-                owner,
-                tenant,
-                incarnation,
-                revision,
-            })
-        })
+        .map(
+            |[owner, tenant, fields, incarnation, revision, cap_version]| {
+                let fields = serde_json::from_str(&fields)?;
+                manifest::validate_fields(manifest::resource(m, resource)?, &fields)?;
+                let revision = revision.parse()?;
+                ensure!(
+                    revision > 0 && !incarnation.is_empty(),
+                    "invalid record metadata"
+                );
+                Ok(StoredRecord {
+                    record: Record {
+                        resource,
+                        id,
+                        fields,
+                    },
+                    owner,
+                    tenant,
+                    incarnation,
+                    revision,
+                    cap_version: if cap_version.is_empty() {
+                        None
+                    } else {
+                        Some(cap_version.parse()?)
+                    },
+                })
+            },
+        )
         .transpose()
 }
 
@@ -78,6 +87,7 @@ pub(crate) fn allowed(policy: &Policy, principal: &Principal, owner: &str, tenan
         !rule.is_empty()
             && rule.iter().all(|p| match (principal, p) {
                 (_, Predicate::Public) => true,
+                (_, Predicate::Capability) => false,
                 (Principal::Anonymous, _) => false,
                 (Principal::User(user), Predicate::Owner) => user.id == owner,
                 (Principal::User(user), Predicate::SameTenant) => {
@@ -175,15 +185,24 @@ impl Effects {
             .await?;
         let value = match op.kind {
             OperationKind::Create => {
-                let user = self.principal.user()?;
-                ensure!(
-                    allowed(&op.policy, &self.principal, &user.id, &user.tenant),
-                    "policy denied"
-                );
+                let public = manifest::is_public(&op);
+                let user = if public {
+                    None
+                } else {
+                    Some(self.principal.user()?)
+                };
+                if let Some(user) = user {
+                    ensure!(
+                        allowed(&op.policy, &self.principal, &user.id, &user.tenant),
+                        "policy denied"
+                    );
+                }
                 let resource = manifest::resource(&self.manifest, op.resource)?;
                 manifest::validate_fields(resource, &self.request.input)?;
-                let used=self.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM (SELECT id FROM nx_records WHERE resource=$1 AND owner=$2 LIMIT 10000) AS quota",&[Param::Number(storage_resource),user.id.as_str().into()]).await?;
-                ensure!(used[0][0].parse::<usize>()? < 10_000, "record quota");
+                if let Some(user) = user {
+                    let used=self.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM (SELECT id FROM nx_records WHERE resource=$1 AND owner=$2 LIMIT 10000) AS quota",&[Param::Number(storage_resource),user.id.as_str().into()]).await?;
+                    ensure!(used[0][0].parse::<usize>()? < 10_000, "record quota");
+                }
                 let id = crate::security::record_id()?;
                 let record = Record {
                     resource: op.resource,
@@ -191,9 +210,14 @@ impl Effects {
                     fields: self.request.input.clone(),
                 };
                 ensure!(self.grant.is_none(), "creation has no existing target");
-                self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES($1,$2,$3,$4,$5,$6,1)",&[
+                if public {
+                    self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version) VALUES($1,$2,NULL,'',$3,$4,1,1)", &[storage_resource.into(), (id as i64).into(), serde_json::to_string(&record.fields)?.into(), crate::security::random_id()?.into()]).await?;
+                } else {
+                    let user = user.expect("private creation requires user");
+                    self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES($1,$2,$3,$4,$5,$6,1)",&[
                     Param::Number(storage_resource),Param::Number(id as i64),user.id.clone().into(),user.tenant.clone().into(),serde_json::to_string(&record.fields)?.into(), crate::security::random_id()?.into()
                 ]).await?;
+                }
                 #[cfg(test)]
                 crate::failure_tests::after_effect(&mut self.tx).await?;
                 let RequestKind::Action(action) = self.request.kind else {
@@ -210,7 +234,9 @@ impl Effects {
                 serde_json::to_vec(&record)?
             }
             OperationKind::Update | OperationKind::Delete => {
-                self.principal.user()?;
+                if !manifest::is_capability(&op) {
+                    self.principal.user()?;
+                }
                 let RequestKind::Action(action) = self.request.kind else {
                     anyhow::bail!("missing action")
                 };
@@ -232,10 +258,18 @@ impl Effects {
                         && stored.revision == grant.revision,
                     "target outside grant"
                 );
-                ensure!(
-                    allowed(&op.policy, &self.principal, &stored.owner, &stored.tenant),
-                    "policy denied"
-                );
+                if manifest::is_capability(&op) {
+                    ensure!(
+                        self.capability_grant.as_ref() == Some(grant)
+                            && stored.cap_version.is_some(),
+                        "missing verified capability grant"
+                    );
+                } else {
+                    ensure!(
+                        allowed(&op.policy, &self.principal, &stored.owner, &stored.tenant),
+                        "policy denied"
+                    );
+                }
                 manifest::validate_input(&self.manifest, a, &self.request.input)?;
                 let mut params = vec![
                     Param::Number(storage_resource),
@@ -292,7 +326,7 @@ impl Effects {
                 ];
                 let visibility = self.visibility_clause(&op, &mut params)?;
                 let sql = format!(
-                    "SELECT owner,tenant,{} FROM nx_records WHERE resource=$1 AND id=$2{visibility}",
+                    "SELECT COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND id=$2{visibility}",
                     self.tx.bounded_text("fields", 20_000)
                 );
                 let rows = self.tx.fetch::<3>(&sql, &params).await?;
@@ -319,6 +353,7 @@ impl Effects {
                     for predicate in rule {
                         let term = match (&self.principal, predicate) {
                             (_, Predicate::Public) => "1=1".into(),
+                            (_, Predicate::Capability) => "1=0".into(),
                             (Principal::Anonymous, _) => "1=0".into(),
                             (Principal::User(user), Predicate::Owner) => {
                                 params.push(user.id.clone().into());
@@ -371,7 +406,7 @@ impl Effects {
                 }
                 params.push(Param::Number(self.cursor.unwrap_or(i64::MAX as u64) as i64));
                 let sql = format!(
-                    "SELECT CAST(id AS TEXT),owner,tenant,{} FROM nx_records WHERE resource=$1 AND ({}) AND id<${} ORDER BY nx_records.id DESC LIMIT 3",
+                    "SELECT CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND ({}) AND id<${} ORDER BY nx_records.id DESC LIMIT 3",
                     self.tx.bounded_text("fields", 20_000),
                     clauses.join(" OR "),
                     params.len()

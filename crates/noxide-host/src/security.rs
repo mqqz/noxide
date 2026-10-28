@@ -17,13 +17,31 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct HostKeys {
     key: [u8; 32],
     incarnation: String,
+    #[serde(default)]
+    edit_keys: Vec<EditKey>,
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditKey {
+    id: u32,
+    key: [u8; 32],
+    signing: bool,
+}
+pub(crate) const ANONYMOUS_TTL: i64 = 900;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum TokenKind {
     Login,
     Session,
+    Anonymous,
+    AnonymousSubmission {
+        contract: String,
+        action: u32,
+        version: u32,
+        target: Option<RecordTarget>,
+    },
     Submission {
         contract: String,
         action: u32,
@@ -78,10 +96,107 @@ impl HostKeys {
         OsRng
             .try_fill_bytes(&mut key)
             .map_err(|_| anyhow::anyhow!("entropy unavailable"))?;
-        Ok(Self {
+        let mut keys = Self {
             key,
             incarnation: random_id()?,
-        })
+            edit_keys: Vec::new(),
+        };
+        keys.rotate_edit_key()?;
+        Ok(keys)
+    }
+    pub fn rotate_edit_key(&mut self) -> Result<()> {
+        let id = self
+            .edit_keys
+            .iter()
+            .map(|k| k.id)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("edit key id exhausted"))?;
+        let mut key = [0; 32];
+        OsRng
+            .try_fill_bytes(&mut key)
+            .map_err(|_| anyhow::anyhow!("entropy unavailable"))?;
+        for old in &mut self.edit_keys {
+            old.signing = false;
+        }
+        self.edit_keys.push(EditKey {
+            id,
+            key,
+            signing: true,
+        });
+        Ok(())
+    }
+    pub(crate) fn signing_edit_key(&self) -> Result<u32> {
+        let mut ids = std::collections::BTreeSet::new();
+        ensure!(
+            self.edit_keys.iter().all(|k| ids.insert(k.id)),
+            "duplicate edit key id"
+        );
+        let keys: Vec<_> = self.edit_keys.iter().filter(|k| k.signing).collect();
+        ensure!(keys.len() == 1, "one signing edit key required");
+        Ok(keys[0].id)
+    }
+    fn edit_mac(&self, key_id: u32, resource: u32, id: u64, version: u64) -> Result<HmacSha256> {
+        let key = self
+            .edit_keys
+            .iter()
+            .find(|k| k.id == key_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown edit key"))?;
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(&key.key).expect("fixed HMAC key length");
+        mac.update(b"noxide/edit/v1");
+        mac.update(&[0]);
+        mac.update(&resource.to_be_bytes());
+        mac.update(&id.to_be_bytes());
+        mac.update(&version.to_be_bytes());
+        Ok(mac)
+    }
+    pub(crate) fn edit_secret(
+        &self,
+        key_id: u32,
+        resource: u32,
+        id: u64,
+        version: u64,
+    ) -> Result<String> {
+        ensure!(version > 0, "invalid capability version");
+        Ok(format!(
+            "nxc1.{key_id}.{version}.{}",
+            URL_SAFE_NO_PAD.encode(
+                self.edit_mac(key_id, resource, id, version)?
+                    .finalize()
+                    .into_bytes()
+            )
+        ))
+    }
+    pub(crate) fn verify_edit(
+        &self,
+        secret: &str,
+        resource: u32,
+        id: u64,
+        version: i64,
+    ) -> Result<()> {
+        ensure!(secret.len() <= 128 && version > 0, "invalid edit secret");
+        let parts: Vec<_> = secret.split('.').collect();
+        ensure!(
+            parts.len() == 4 && parts[0] == "nxc1",
+            "invalid edit secret"
+        );
+        let key: u32 = parts[1].parse()?;
+        let supplied: u64 = parts[2].parse()?;
+        ensure!(supplied == version as u64, "revoked edit secret");
+        self.edit_mac(key, resource, id, supplied)?
+            .verify_slice(&URL_SAFE_NO_PAD.decode(parts[3])?)
+            .map_err(|_| anyhow::anyhow!("invalid edit secret"))
+    }
+    pub(crate) fn anonymous(&self, cookie: &str, now: i64) -> Result<Token> {
+        let token = self.verify(cookie, now)?;
+        ensure!(
+            token.kind == TokenKind::Anonymous
+                && token.subject.is_empty()
+                && token.expires - token.issued <= ANONYMOUS_TTL,
+            "invalid anonymous cookie"
+        );
+        Ok(token)
     }
     fn mac(&self, domain: &[u8], bytes: &[u8]) -> HmacSha256 {
         let mut mac =
@@ -349,5 +464,45 @@ mod tests {
                 .is_err()
         );
         assert!(keys.verify_csrf("alice", &keys.csrf("bob")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+    #[test]
+    fn edit_mac_is_domain_bound_and_old_versions_fail_under_every_key() {
+        let mut keys = HostKeys {
+            key: [8; 32],
+            incarnation: "test".into(),
+            edit_keys: vec![EditKey {
+                id: 5,
+                key: [7; 32],
+                signing: true,
+            }],
+        };
+        let old = keys.edit_secret(5, 3, 9, 1).unwrap();
+        assert!(old == "nxc1.5.1.4fXgQvbcLyudujGVDF26-Anw47Dx4qtZ3UIBmv5Pr34");
+        assert!(keys.verify_edit(&old, 3, 9, 1).is_ok());
+        assert!(keys.verify_edit(&old, 4, 9, 1).is_err());
+        assert!(keys.verify_edit(&old, 3, 10, 1).is_err());
+        keys.rotate_edit_key().unwrap();
+        assert_eq!(keys.signing_edit_key().unwrap(), 6);
+        assert!(keys.verify_edit(&old, 3, 9, 1).is_ok());
+        let newer = keys.edit_secret(6, 3, 9, 1).unwrap();
+        for secret in [&old, &newer] {
+            assert!(keys.verify_edit(secret, 3, 9, 2).is_err());
+        }
+        let rotated = keys.edit_secret(6, 3, 9, 2).unwrap();
+        assert!(keys.verify_edit(&rotated, 3, 9, 2).is_ok());
+        let mut bad = rotated.into_bytes();
+        *bad.last_mut().unwrap() ^= 1;
+        assert!(
+            keys.verify_edit(std::str::from_utf8(&bad).unwrap(), 3, 9, 2)
+                .is_err()
+        );
+        let legacy = serde_json::json!({"key":vec![8;32],"incarnation":"legacy"});
+        let legacy: HostKeys = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.signing_edit_key().is_err());
     }
 }
