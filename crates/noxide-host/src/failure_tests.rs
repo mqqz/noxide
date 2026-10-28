@@ -14,7 +14,7 @@ use std::{
 };
 
 #[path = "../tests/support/record_actions.rs"]
-mod record_actions;
+pub(crate) mod record_actions;
 
 #[derive(Debug)]
 pub(crate) struct Aborted;
@@ -187,6 +187,7 @@ async fn stored_bounds(db: &Database) {
         },
         outcome: None,
         grant: None,
+        capability_grant: None,
         record: None,
         calls: 50,
         cursor: None,
