@@ -68,6 +68,7 @@ pub struct Application {
     deployment: String,
     generation: OnceLock<String>,
     clock: AtomicI64,
+    checkpointed: AtomicI64,
     permits: Semaphore,
     login_permits: Arc<Semaphore>,
 }
@@ -107,6 +108,7 @@ impl Application {
             .parse()?;
         tx.commit().await?;
         self.clock.fetch_max(observed, Ordering::Relaxed);
+        self.checkpointed.fetch_max(observed, Ordering::Relaxed);
         ensure!(
             self.generation.get_or_init(|| generation.clone()) == &generation,
             "concurrent activation differs"
@@ -138,6 +140,9 @@ impl Application {
 
     pub(crate) async fn checkpoint_clock(&self) -> Result<()> {
         let m = self.clock.load(Ordering::Relaxed);
+        if m <= self.checkpointed.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let deadline = Instant::now() + security::CLOCK_CHECKPOINT_BEGIN_DEADLINE;
         timeout_at(deadline, async {
             let mut tx = self.database.begin(deadline.into_std()).await?;
@@ -147,7 +152,9 @@ impl Application {
                 &[m.into()],
             )
             .await?;
-            tx.commit().await
+            tx.commit().await?;
+            self.checkpointed.fetch_max(m, Ordering::Relaxed);
+            Ok(())
         })
         .await?
     }
@@ -203,6 +210,7 @@ impl Application {
             deployment,
             generation: OnceLock::new(),
             clock: AtomicI64::new(0),
+            checkpointed: AtomicI64::new(0),
             permits: Semaphore::new(concurrency),
             login_permits: Arc::new(Semaphore::new(2)),
         })
@@ -1159,6 +1167,70 @@ mod clock_tests {
             .unwrap();
         assert_eq!(tx.snapshot().await.unwrap(), snapshot);
         tx.commit().await.unwrap();
+        db.recover_clock(&HostKeys::generate().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            app.checkpoint_clock().await.is_err(),
+            "a dirty retired process must not checkpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_idle_checkpoint_takes_no_writer_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::sqlite(temp.path().join("idle-checkpoint.db"));
+        db.initialize().await.unwrap();
+        let mut tx = db
+            .begin(std::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        security::observe_clock(&mut tx, 10_000).await.unwrap();
+        tx.commit().await.unwrap();
+        let m = fixture::manifest();
+        let app = Application::new(
+            &fixture::component(None),
+            &serde_json::to_vec(&m).unwrap(),
+            manifest::digest(&m).unwrap(),
+            db.clone(),
+            HostKeys::generate().unwrap(),
+            Limits::default(),
+        )
+        .unwrap();
+        app.activate().await.unwrap();
+        assert_eq!(app.checkpointed.load(Ordering::Relaxed), 10_000);
+        let mut writer = db
+            .begin(std::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_millis(100), app.checkpoint_clock())
+            .await
+            .unwrap()
+            .unwrap();
+        writer.rollback().await.unwrap();
+
+        let high = security::now().unwrap();
+        read_advance(&app, high).await;
+        app.checkpoint_clock().await.unwrap();
+        assert_eq!(app.checkpointed.load(Ordering::Relaxed), high);
+        assert_eq!(stored_clock(&db).await, high);
+        let mut writer = db
+            .begin(std::time::Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        // No read has advanced memory since the successful checkpoint. This
+        // would hit the 200 ms deadline if a second checkpoint opened a writer.
+        tokio::time::timeout(Duration::from_millis(100), app.checkpoint_clock())
+            .await
+            .unwrap()
+            .unwrap();
+        read_advance(&app, high + 1).await;
+        assert!(app.checkpoint_clock().await.is_err());
+        assert_eq!(app.checkpointed.load(Ordering::Relaxed), high);
+        writer.rollback().await.unwrap();
+        app.checkpoint_clock().await.unwrap();
+        assert_eq!(app.checkpointed.load(Ordering::Relaxed), high + 1);
+        assert_eq!(stored_clock(&db).await, high + 1);
     }
 
     #[tokio::test]
