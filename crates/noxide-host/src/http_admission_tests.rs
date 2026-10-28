@@ -859,3 +859,63 @@ async fn postgres_identity_lanes_and_invalid_candidate_costs() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn verified_http_pages_work_with_small_reserves_and_one_runtime_slot() {
+    for reserve in [1, 6, 25] {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::sqlite(temp.path().join("small-shares.db"));
+        db.initialize().await.unwrap();
+        db.create_account("alice", "admission test password", "")
+            .await
+            .unwrap();
+        let m = fixture::manifest();
+        let app = Arc::new(
+            Application::new(
+                &fixture::component(None),
+                &serde_json::to_vec(&m).unwrap(),
+                manifest::digest(&m).unwrap(),
+                db,
+                HostKeys::generate().unwrap(),
+                Limits {
+                    concurrency: 1,
+                    ..Limits::default()
+                },
+            )
+            .unwrap()
+            .with_signed_in_reserve(reserve)
+            .unwrap(),
+        );
+        app.activate().await.unwrap();
+        let challenge = app.login_challenge().await.unwrap();
+        let session = app
+            .login(
+                &challenge.cookie,
+                &challenge.csrf,
+                "alice",
+                "admission test password",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            identity_get(app.clone(), "/", &session, Peer::Local)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let held = app.admission_limits.wasm.acquire().await.unwrap();
+        assert_eq!(
+            identity_get(app.clone(), "/", &session, Peer::Local)
+                .await
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        drop(held);
+        assert_eq!(
+            identity_get(app.clone(), "/", &session, Peer::Local)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+}
