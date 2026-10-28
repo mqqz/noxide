@@ -160,6 +160,10 @@ impl Default for AdmissionLimits {
     }
 }
 impl AdmissionLimits {
+    pub(crate) fn with_wasm_capacity(mut self, concurrency: usize) -> Self {
+        self.wasm = BoundedPermits::new(WASM.min(concurrency), WASM_WAITING, WASM_WAIT);
+        self
+    }
     pub(crate) async fn scope<T>(
         &self,
         permit: Arc<OwnedSemaphorePermit>,
