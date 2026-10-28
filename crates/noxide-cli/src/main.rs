@@ -23,8 +23,27 @@ struct Config {
     approved_contract: String,
     origin: String,
     listen: ListenConfig,
+    #[serde(
+        default = "default_signed_in_reserve",
+        deserialize_with = "signed_in_reserve"
+    )]
+    signed_in_reserve: u8,
     #[serde(default)]
     presentation: noxide_host::Presentation,
+}
+fn default_signed_in_reserve() -> u8 {
+    25
+}
+fn signed_in_reserve<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<u8, D::Error> {
+    let value = u8::deserialize(deserializer)?;
+    if value > 50 {
+        return Err(serde::de::Error::custom(
+            "signed_in_reserve must be between 0 and 50",
+        ));
+    }
+    Ok(value)
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -223,7 +242,8 @@ async fn main() -> Result<()> {
                     keys,
                     Limits::default(),
                 )?
-                .with_presentation(config.presentation)?,
+                .with_presentation(config.presentation)?
+                .with_signed_in_reserve(config.signed_in_reserve)?,
             );
             let origin = Origin::parse(&config.origin)?;
             let shutdown = shutdown_signal()?;
@@ -267,5 +287,40 @@ mod listen_tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod reserve_tests {
+    use super::*;
+    #[test]
+    fn signed_in_reserve_defaults_and_rejects_nonintegers_or_out_of_range_values() {
+        let config = serde_json::json!({"database":{"sqlite":"store.db"}, "keys":"keys.json", "component":"app.wasm", "manifest":"manifest.json", "approved_contract":"", "origin":"http://localhost:8080", "listen":{"tcp":"127.0.0.1:8080"}});
+        assert_eq!(
+            serde_json::from_value::<Config>(config.clone())
+                .unwrap()
+                .signed_in_reserve,
+            25
+        );
+        for reserve in [0, 25, 50] {
+            let mut value = config.clone();
+            value["signed_in_reserve"] = reserve.into();
+            assert_eq!(
+                serde_json::from_value::<Config>(value)
+                    .unwrap()
+                    .signed_in_reserve,
+                reserve as u8
+            );
+        }
+        for reserve in [
+            serde_json::json!(-1),
+            serde_json::json!(51),
+            serde_json::json!(1.5),
+            serde_json::json!("25"),
+        ] {
+            let mut value = config.clone();
+            value["signed_in_reserve"] = reserve;
+            assert!(serde_json::from_value::<Config>(value).is_err());
+        }
     }
 }

@@ -235,20 +235,79 @@ fn decode_form(bytes: &[u8]) -> Result<BTreeMap<String, String>> {
 }
 
 async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Response {
-    let _peer = request
+    use crate::runtime::limiter::{AdmissionContext, AdmissionIdentity, RequestClass};
+    let app = gateway.app.clone();
+    let peer = request
         .extensions()
         .get::<Peer>()
         .copied()
         .unwrap_or(Peer::Local);
-    let Ok(permit) = gateway.app.admission_limits.requests.request().await else {
-        return finish(busy());
+    let path = request.uri().path();
+    let class = if request.method() == axum::http::Method::GET {
+        RequestClass::Get
+    } else if path == app.presentation.login_path || path == "/register" {
+        RequestClass::PasswordHash
+    } else if path
+        .strip_prefix(&format!("{}/", app.presentation.action_path))
+        .and_then(|s| s.parse().ok())
+        .and_then(|id| crate::manifest::action(&app.manifest, id).ok())
+        .and_then(|a| crate::manifest::operation(&app.manifest, a.operation).ok())
+        .is_some_and(|op| op.policy.any == vec![vec![noxide_protocol::Predicate::Public]])
+    {
+        RequestClass::AnonymousAction
+    } else {
+        RequestClass::AuthenticatedAction
     };
-    let app = gateway.app.clone();
-    finish(
-        app.admission_limits
-            .scope(permit, dispatch_inner(gateway, request))
-            .await,
-    )
+    let mut context = AdmissionContext {
+        peer,
+        class,
+        identity: AdmissionIdentity::Anonymous,
+    };
+    if !app
+        .admission_limits
+        .charge_circuit(context.peer, context.class)
+    {
+        return finish(busy());
+    }
+    let public = app
+        .manifest
+        .routes
+        .iter()
+        .find(|r| crate::render::match_path(r, path).is_some())
+        .is_some_and(|r| r.access == noxide_protocol::Access::Public);
+    if !public
+        && !matches!(class, RequestClass::PasswordHash)
+        && let Ok(cookie) = cookie(request.headers(), &app.presentation.session_cookie)
+        && app.session_envelope(&cookie)
+    {
+        context.identity = AdmissionIdentity::Candidate;
+        match app.session_candidate(&cookie).await {
+            Ok(Some(principal)) => context.identity = AdmissionIdentity::Verified { principal },
+            Ok(None) => {
+                app.admission_limits.failed_session(peer);
+                context.identity = AdmissionIdentity::Anonymous;
+            }
+            Err(e) => return finish(error(e, &app.presentation.login_path)),
+        }
+    }
+    if let AdmissionIdentity::Verified { principal } = &context.identity
+        && matches!(class, RequestClass::AuthenticatedAction)
+        && !app.admission_limits.principal_action(principal)
+    {
+        return finish(busy());
+    }
+    app.admission_limits
+        .context(context, async {
+            let Ok(permit) = app.admission_limits.requests().request().await else {
+                return finish(busy());
+            };
+            finish(
+                app.admission_limits
+                    .scope(permit, dispatch_inner(gateway, request))
+                    .await,
+            )
+        })
+        .await
 }
 async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     let presentation = &gateway.app.presentation;
