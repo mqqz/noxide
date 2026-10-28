@@ -920,3 +920,46 @@ async fn verified_http_pages_work_with_small_reserves_and_one_runtime_slot() {
         );
     }
 }
+
+#[tokio::test]
+async fn registration_disconnect_keeps_argon2_capacity_until_hash_finishes() {
+    let (_temp, mut app) = application().await;
+    Arc::get_mut(&mut app).unwrap().registration = crate::Registration::Open;
+    let challenge = app.login_challenge().await.unwrap();
+    let gate = HashGate::new();
+    let _resume = Resume(gate.clone());
+    *app.admission_limits.hash_gate.lock().unwrap() = Some(gate.clone());
+    let (address, stop, server) = tcp_server(app.clone()).await;
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("_csrf", &challenge.csrf)
+        .append_pair("username", "registered")
+        .append_pair("password", "registration test password")
+        .finish();
+    let request = format!(
+        "POST /register HTTP/1.1\r\nHost: {address}\r\nOrigin: http://{address}\r\nCookie: login={}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}",
+        challenge.cookie,
+        body.len()
+    );
+    client.write_all(request.as_bytes()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+        .await
+        .unwrap();
+    client.shutdown().await.unwrap();
+    drop(client);
+    tokio::task::yield_now().await;
+    assert_eq!(app.admission_limits.argon2.available(), 1);
+    gate.finish();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while app.admission_limits.argon2.available() != 2
+            || app.admission_limits.database.available() != 5
+            || app.admission_limits.requests.available() != 44
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    stop.send(()).unwrap();
+    server.await.unwrap();
+}

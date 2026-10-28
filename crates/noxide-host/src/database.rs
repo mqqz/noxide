@@ -370,10 +370,13 @@ impl Transaction {
                 let implicit_key = expected_name == "singleton"
                     || expected_name == "storage_id"
                     || (matches!(table, "nx_accounts" | "nx_sessions") && expected_name == "id")
-                    || (table == "nx_receipts" && expected_name == "nonce");
+                    || (table == "nx_receipts" && expected_name == "nonce")
+                    || (table == "nx_invites" && expected_name == "code_hash");
                 let expected_not_null = if (matches!(self.backend, Backend::Sqlite(_))
                     && implicit_key)
                     || (table == "nx_records" && matches!(expected_name, "owner" | "cap_version"))
+                    || (table == "nx_invites"
+                        && matches!(expected_name, "redeemed_at" | "redeemed_by"))
                 {
                     "0"
                 } else {
@@ -938,7 +941,7 @@ pub(crate) fn retryable(error: &anyhow::Error) -> bool {
     )
 }
 
-const STORAGE_VERSION: i64 = 4;
+const STORAGE_VERSION: i64 = 5;
 const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
     (
         "nx_resource_catalog",
@@ -959,6 +962,16 @@ const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
             ("password", "TEXT"),
             ("tenant", "TEXT"),
             ("epoch", "BIGINT"),
+        ],
+    ),
+    (
+        "nx_invites",
+        &[
+            ("code_hash", "TEXT"),
+            ("issuer", "TEXT"),
+            ("expires", "BIGINT"),
+            ("redeemed_at", "BIGINT"),
+            ("redeemed_by", "TEXT"),
         ],
     ),
     (
@@ -1020,10 +1033,11 @@ const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
 
 const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS nx_storage (singleton BIGINT PRIMARY KEY CHECK(singleton=1), version BIGINT NOT NULL)",
-    "INSERT INTO nx_storage(singleton,version) VALUES(1,4)",
+    "INSERT INTO nx_storage(singleton,version) VALUES(1,5)",
     "CREATE TABLE IF NOT EXISTS nx_resource_catalog (storage_id BIGINT PRIMARY KEY, resource_key TEXT NOT NULL UNIQUE)",
     "CREATE TABLE IF NOT EXISTS nx_schema_definition (singleton BIGINT PRIMARY KEY CHECK(singleton=1), definition TEXT NOT NULL, history TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS nx_accounts (id TEXT PRIMARY KEY, password TEXT NOT NULL, tenant TEXT NOT NULL, epoch BIGINT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS nx_invites (code_hash TEXT PRIMARY KEY, issuer TEXT NOT NULL, expires BIGINT NOT NULL, redeemed_at BIGINT NULL, redeemed_by TEXT NULL REFERENCES nx_accounts(id))",
     "CREATE TABLE IF NOT EXISTS nx_roles (principal TEXT NOT NULL REFERENCES nx_accounts(id), name TEXT NOT NULL, tenant TEXT NOT NULL, PRIMARY KEY(principal,name,tenant))",
     "CREATE TABLE IF NOT EXISTS nx_sessions (id TEXT PRIMARY KEY, principal TEXT NOT NULL REFERENCES nx_accounts(id), epoch BIGINT NOT NULL, expires BIGINT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS nx_records (resource BIGINT NOT NULL, id BIGINT NOT NULL, owner TEXT NULL REFERENCES nx_accounts(id), tenant TEXT NOT NULL, fields TEXT NOT NULL, incarnation TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>=1), cap_version BIGINT NULL, PRIMARY KEY(resource,id))",

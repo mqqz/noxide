@@ -36,6 +36,7 @@ const ANONYMOUS_WRITES: usize = 1;
 const ANONYMOUS_WRITE_WAITING: usize = 4;
 const ANONYMOUS_WRITE_WAIT: Duration = Duration::from_secs(1);
 const ANONYMOUS_WRITES_PER_MINUTE: u32 = 30;
+pub(crate) const INVITE_DEFAULT_EXPIRY: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[derive(Debug)]
 pub(crate) struct Busy;

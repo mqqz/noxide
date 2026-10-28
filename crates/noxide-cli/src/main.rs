@@ -29,6 +29,8 @@ struct Config {
     )]
     signed_in_reserve: u8,
     #[serde(default)]
+    registration: noxide_host::Registration,
+    #[serde(default)]
     presentation: noxide_host::Presentation,
 }
 fn default_signed_in_reserve() -> u8 {
@@ -137,7 +139,7 @@ async fn main() -> Result<()> {
         "schema" => workflow::schema(&args[1..]).await?,
         "help" | "--help" | "-h" => {
             println!(
-                "Noxide {}\n\nCommands:\n  check|build --app APP --name CRATE --kernel KERNEL --toolchain TOOLCHAIN --output NEW_DIR [--framework CHECKOUT]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  init CONFIG.json\n  account CONFIG.json USER PASSWORD_FILE [TENANT]\n  contract-hash MANIFEST.json\n  component CORE.wasm COMPONENT.wasm\n  serve CONFIG.json\n  maintain CONFIG.json\n  recover-clock CONFIG.json (stop serving first; configure a fresh host key)\n  keygen NEW_KEYS.json\n  edit-key-rotate KEYS.json\n\nApplication builds must use the isolated VM recipe. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
+                "Noxide {}\n\nCommands:\n  check|build --app APP --name CRATE --kernel KERNEL --toolchain TOOLCHAIN --output NEW_DIR [--framework CHECKOUT]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  init CONFIG.json\n  account CONFIG.json USER PASSWORD_FILE [TENANT]\n  contract-hash MANIFEST.json\n  component CORE.wasm COMPONENT.wasm\n  serve CONFIG.json\n  maintain CONFIG.json\n  recover-clock CONFIG.json (stop serving first; configure a fresh host key)\n  keygen NEW_KEYS.json\n  edit-key-rotate KEYS.json\n  invite CONFIG.json [--expires-days N]\n\nApplication builds must use the isolated VM recipe. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
                 env!("CARGO_PKG_VERSION")
             );
         }
@@ -222,6 +224,24 @@ async fn main() -> Result<()> {
             create(&base.join(&config.keys), &serde_json::to_vec(&keys)?, true)?;
             println!("Initialized runtime storage and a private host key file.");
         }
+        "invite" => {
+            ensure!(
+                args.len() == 2 || (args.len() == 4 && args[2] == "--expires-days"),
+                "usage: noxide invite CONFIG.json [--expires-days N]"
+            );
+            let (config, base) = config(Path::new(&args[1]))?;
+            let days = args
+                .get(3)
+                .map(|s| {
+                    s.to_str()
+                        .context("invalid expiry")?
+                        .parse::<u64>()
+                        .context("invalid expiry")
+                })
+                .transpose()?;
+            let code = database(&config.database, &base)?.mint_invite(days).await?;
+            println!("{code}");
+        }
         "account" => {
             ensure!(
                 (4..=5).contains(&args.len()),
@@ -259,7 +279,8 @@ async fn main() -> Result<()> {
                     Limits::default(),
                 )?
                 .with_presentation(config.presentation)?
-                .with_signed_in_reserve(config.signed_in_reserve)?,
+                .with_signed_in_reserve(config.signed_in_reserve)?
+                .with_registration(config.registration),
             );
             let origin = Origin::parse(&config.origin)?;
             let shutdown = shutdown_signal()?;
@@ -338,5 +359,37 @@ mod reserve_tests {
             value["signed_in_reserve"] = reserve;
             assert!(serde_json::from_value::<Config>(value).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod registration_config_tests {
+    use super::*;
+    #[test]
+    fn registration_defaults_closed_and_accepts_only_declared_modes() {
+        let base = serde_json::json!({"database":{"sqlite":"runtime.db"},"keys":"keys.json","component":"app.wasm","manifest":"manifest.json","approved_contract":"","origin":"http://localhost:8080","listen":{"tcp":"127.0.0.1:8080"}});
+        assert!(
+            serde_json::from_value::<Config>(base.clone())
+                .unwrap()
+                .registration
+                == noxide_host::Registration::Closed
+        );
+        for (name, mode) in [
+            ("closed", noxide_host::Registration::Closed),
+            ("invite", noxide_host::Registration::Invite),
+            ("open", noxide_host::Registration::Open),
+        ] {
+            let mut config = base.clone();
+            config["registration"] = name.into();
+            assert!(
+                serde_json::from_value::<Config>(config)
+                    .unwrap()
+                    .registration
+                    == mode
+            );
+        }
+        let mut config = base;
+        config["registration"] = "inviter".into();
+        assert!(serde_json::from_value::<Config>(config).is_err());
     }
 }
