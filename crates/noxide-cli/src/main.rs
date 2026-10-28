@@ -49,6 +49,18 @@ fn read(path: &Path, limit: u64) -> Result<Vec<u8>> {
     ensure!(bytes.len() as u64 <= limit, "file limit");
     Ok(bytes)
 }
+fn host_keys(path: &Path) -> Result<HostKeys> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        ensure!(
+            std::fs::metadata(path)?.permissions().mode() & 0o077 == 0,
+            "host key file must be private (mode 0600)"
+        );
+    }
+    Ok(serde_json::from_slice(&read(path, 1024)?)?)
+}
+
 fn create(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.create_new(true).write(true);
@@ -105,7 +117,7 @@ async fn main() -> Result<()> {
         "schema" => workflow::schema(&args[1..]).await?,
         "help" | "--help" | "-h" => {
             println!(
-                "Noxide {}\n\nCommands:\n  check|build --app APP --name CRATE --kernel KERNEL --toolchain TOOLCHAIN --output NEW_DIR [--framework CHECKOUT]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  schema import CONFIG LEGACY_MANIFEST\n  init CONFIG.json\n  account CONFIG.json USER PASSWORD_FILE [TENANT]\n  contract-hash MANIFEST.json\n  component CORE.wasm COMPONENT.wasm\n  serve CONFIG.json\n  maintain CONFIG.json\n  migrate CONFIG.json (stop serving first)\n  keygen NEW_KEYS.json\n\nApplication builds must use the isolated VM recipe. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
+                "Noxide {}\n\nCommands:\n  check|build --app APP --name CRATE --kernel KERNEL --toolchain TOOLCHAIN --output NEW_DIR [--framework CHECKOUT]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  schema import CONFIG LEGACY_MANIFEST\n  init CONFIG.json\n  account CONFIG.json USER PASSWORD_FILE [TENANT]\n  contract-hash MANIFEST.json\n  component CORE.wasm COMPONENT.wasm\n  serve CONFIG.json\n  maintain CONFIG.json\n  recover-clock CONFIG.json (stop serving first; configure a fresh host key)\n  migrate CONFIG.json (stop serving first)\n  keygen NEW_KEYS.json\n\nApplication builds must use the isolated VM recipe. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
                 env!("CARGO_PKG_VERSION")
             );
         }
@@ -133,6 +145,20 @@ async fn main() -> Result<()> {
             let (config, base) = config(Path::new(&args[1]))?;
             database(&config.database, &base)?.migrate().await?;
             println!("Runtime storage is current. Restart with the approved application bundle.");
+        }
+        "recover-clock" => {
+            ensure!(
+                args.len() == 2,
+                "usage: noxide recover-clock CONFIG.json (stop serving first; configure a fresh host key)"
+            );
+            let (config, base) = config(Path::new(&args[1]))?;
+            let keys = host_keys(&base.join(&config.keys))?;
+            database(&config.database, &base)?
+                .recover_clock(&keys)
+                .await?;
+            println!(
+                "Clock recovered. Sessions and forms retired. Restart with the configured host key."
+            );
         }
         "maintain" => {
             ensure!(args.len() == 2, "usage: noxide maintain CONFIG.json");
@@ -191,16 +217,7 @@ async fn main() -> Result<()> {
         "serve" => {
             ensure!(args.len() == 2, "usage: noxide serve CONFIG.json");
             let (config, base) = config(Path::new(&args[1]))?;
-            let key_path = base.join(&config.keys);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                ensure!(
-                    std::fs::metadata(&key_path)?.permissions().mode() & 0o077 == 0,
-                    "host key file must be private (mode 0600)"
-                );
-            }
-            let keys: HostKeys = serde_json::from_slice(&read(&key_path, 1024)?)?;
+            let keys = host_keys(&base.join(&config.keys))?;
             let approved: [u8; 32] = URL_SAFE_NO_PAD
                 .decode(&config.approved_contract)?
                 .try_into()

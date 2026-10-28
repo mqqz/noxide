@@ -221,13 +221,58 @@ impl Database {
         tx.commit().await
     }
 
+    /// Recover from a large clock correction with a fresh host-key incarnation.
+    /// Stop serving first. Old processes, sessions and forms are retired together
+    /// with the clock reset; receipts and application records are preserved.
+    pub async fn recover_clock(&self, keys: &crate::HostKeys) -> Result<()> {
+        let mut tx = self
+            .begin(Instant::now() + Duration::from_secs(300))
+            .await?;
+        if matches!(&tx.backend, Backend::Postgres(_)) {
+            tx.execute("SET LOCAL statement_timeout = '300s'", &[])
+                .await?;
+            tx.execute("SET LOCAL idle_in_transaction_session_timeout = '10s'", &[])
+                .await?;
+        }
+        tx.check_storage().await?;
+        let rows = tx
+            .fetch::<1>(
+                "SELECT incarnation FROM nx_deployment WHERE singleton=1",
+                &[],
+            )
+            .await?;
+        let old = rows
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("deployment missing"))?;
+        ensure!(
+            old[0] != keys.incarnation(),
+            "clock recovery requires a fresh host key"
+        );
+        let now = crate::security::now()?;
+        let generation = crate::security::random_id()?;
+        tx.execute(
+            "UPDATE nx_deployment SET incarnation=$1,generation=$2 WHERE singleton=1",
+            &[keys.incarnation().into(), generation.into()],
+        )
+        .await?;
+        tx.execute("DELETE FROM nx_sessions", &[]).await?;
+        let changed = tx
+            .execute(
+                "UPDATE nx_clock SET observed=$1 WHERE singleton=1",
+                &[now.into()],
+            )
+            .await?;
+        ensure!(changed == 1, "clock missing");
+        tx.commit().await
+    }
+
     /// Bounded operator maintenance. Authenticated expiry remains enforceable
     /// after receipts disappear, including when a persisted clock moves back.
     pub async fn maintain(&self) -> Result<()> {
         let mut tx = self.begin(Instant::now() + Duration::from_secs(2)).await?;
         tx.check_storage().await?;
         let now = crate::security::now()?;
-        crate::security::observe_clock(&mut tx, now).await?;
+        let now = crate::security::observe_clock(&mut tx, now).await?;
         tx.execute("DELETE FROM nx_receipts WHERE nonce IN (SELECT nonce FROM nx_receipts WHERE expires<$1 ORDER BY expires LIMIT 256)",&[(now-60).into()]).await?;
         tx.execute("DELETE FROM nx_sessions WHERE id IN (SELECT id FROM nx_sessions WHERE expires<$1 ORDER BY expires LIMIT 256)",&[(now-60).into()]).await?;
         tx.commit().await
