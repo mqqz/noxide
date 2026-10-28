@@ -926,12 +926,15 @@ pub(crate) fn retryable(error: &anyhow::Error) -> bool {
     if error.is::<crate::failure_tests::Aborted>() {
         return true;
     }
+    if error.is::<tokio::time::error::Elapsed>() {
+        return true;
+    }
     let Some(sqlx::Error::Database(db)) = error.downcast_ref::<sqlx::Error>() else {
         return false;
     };
     matches!(
         db.code().as_deref(),
-        Some("40001" | "40P01" | "55P03" | "5" | "517")
+        Some("40001" | "40P01" | "55P03" | "57014" | "5" | "517")
     )
 }
 
