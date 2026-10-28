@@ -268,6 +268,7 @@ fn effects(
         },
         outcome: None,
         grant: None,
+        capability_grant: None,
         record: None,
         calls: 64,
         cursor: None,

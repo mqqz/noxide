@@ -1,3 +1,4 @@
+mod capabilities;
 use crate::{
     Database, HostKeys, auth,
     database::{Param, Transaction, retryable},
@@ -70,6 +71,15 @@ pub struct Application {
     clock: AtomicI64,
     checkpointed: AtomicI64,
     pub(crate) admission_limits: AdmissionLimits,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditReceipt {
+    resource: u32,
+    id: u64,
+    cap_version: u64,
+    key_id: u32,
 }
 
 pub struct LoginChallenge {
@@ -155,6 +165,14 @@ impl Application {
             .acquire()
             .await
             .map_err(|_| RequestError::Busy)?;
+        if self
+            .manifest
+            .operations
+            .iter()
+            .any(manifest::anonymous_action)
+        {
+            self.keys.signing_edit_key()?;
+        }
         self.presentation.validate(&self.manifest)?;
         let mut tx = self
             .database
@@ -456,6 +474,159 @@ impl Application {
         tx.commit().await.map_err(|_| RequestError::Busy)
     }
 
+    async fn anonymous_write(
+        &self,
+        required: bool,
+    ) -> std::result::Result<Option<tokio::sync::OwnedSemaphorePermit>, RequestError> {
+        if !required {
+            return Ok(None);
+        }
+        if !self.admission_limits.anonymous_write_attempts.allow() {
+            return Err(RequestError::Busy);
+        }
+        self.admission_limits
+            .anonymous_writes
+            .acquire()
+            .await
+            .map(Some)
+            .map_err(|_| RequestError::Busy)
+    }
+    async fn submission_identity(
+        &self,
+        tx: &mut Transaction,
+        action: &Action,
+        cookie: &str,
+        submission: &str,
+        csrf: &str,
+        now: i64,
+    ) -> Result<(Token, Token, auth::Principal)> {
+        let op = manifest::operation(&self.manifest, action.operation)?;
+        if manifest::anonymous_action(op) {
+            let anonymous = self
+                .keys
+                .anonymous(cookie, now)
+                .map_err(|_| RequestError::InvalidRequest)?;
+            self.keys
+                .verify_csrf(&anonymous.nonce, csrf)
+                .map_err(|_| RequestError::InvalidRequest)?;
+            let token = self
+                .keys
+                .verify(submission, now)
+                .map_err(|_| RequestError::InvalidRequest)?;
+            ensure!(
+                matches!(token.kind, TokenKind::AnonymousSubmission { .. })
+                    && token.subject == anonymous.nonce,
+                RequestError::InvalidRequest
+            );
+            Ok((token, anonymous, auth::Principal::Anonymous))
+        } else {
+            let token = self
+                .keys
+                .verify(submission, now)
+                .map_err(|_| RequestError::InvalidRequest)?;
+            ensure!(
+                matches!(token.kind, TokenKind::Submission { .. }),
+                RequestError::InvalidRequest
+            );
+            let (session, principal) = auth::authenticate(tx, &self.keys, cookie, now)
+                .await
+                .map_err(|_| RequestError::Authentication)?;
+            ensure!(token.subject == session.nonce, RequestError::InvalidRequest);
+            self.keys
+                .verify_csrf(&session.nonce, csrf)
+                .map_err(|_| RequestError::InvalidRequest)?;
+            Ok((token, session, principal))
+        }
+    }
+    async fn authorized_target(
+        &self,
+        tx: &mut Transaction,
+        action: &Action,
+        target: &RecordTarget,
+        principal: &auth::Principal,
+        capability: Option<&str>,
+    ) -> Result<Option<StoredRecord>> {
+        if !manifest::is_capability(manifest::operation(&self.manifest, action.operation)?) {
+            return self.current_target(tx, action, target, principal).await;
+        }
+        let Some(stored) = repository::load(tx, &self.manifest, target.resource, target.id).await?
+        else {
+            return Ok(None);
+        };
+        let storage = u32::try_from(tx.storage_resource(&self.manifest, target.resource).await?)?;
+        self.keys
+            .verify_edit(
+                capability.ok_or(RequestError::InvalidRequest)?,
+                storage,
+                target.id,
+                stored.cap_version.ok_or(RequestError::InvalidRequest)?,
+            )
+            .map_err(|_| RequestError::InvalidRequest)?;
+        if let Some(inspection) = &action.inspect {
+            let op = manifest::operation(&self.manifest, inspection.operation)?;
+            ensure!(
+                repository::allowed(&op.policy, principal, &stored.owner, &stored.tenant),
+                "inspection policy denied"
+            );
+        }
+        ensure!(
+            stored.incarnation == target.incarnation,
+            RequestError::InvalidRequest
+        );
+        Ok(Some(stored))
+    }
+    async fn edit_handover(
+        &self,
+        tx: &mut Transaction,
+        receipt: &EditReceipt,
+        route: u32,
+    ) -> Result<Rendered> {
+        let record = repository::load(tx, &self.manifest, receipt.resource, receipt.id).await?;
+        if receipt.cap_version == 0
+            || record
+                .as_ref()
+                .and_then(|r| r.cap_version)
+                .and_then(|v| u64::try_from(v).ok())
+                != Some(receipt.cap_version)
+        {
+            return render::capability_handover(None, None);
+        }
+        let storage = u32::try_from(
+            tx.storage_resource(&self.manifest, receipt.resource)
+                .await?,
+        )?;
+        let Ok(secret) =
+            self.keys
+                .edit_secret(receipt.key_id, storage, receipt.id, receipt.cap_version)
+        else {
+            return render::capability_handover(None, None);
+        };
+        let link = render::resolve(
+            &self.manifest,
+            &RouteRef {
+                route,
+                target: Some(receipt.id),
+            },
+        )?;
+        render::capability_handover(Some(&secret), Some(&link))
+    }
+    async fn receipt_response(
+        &self,
+        tx: &mut Transaction,
+        action: &Action,
+        target: Option<&RecordTarget>,
+        outcome: &str,
+    ) -> Result<Rendered> {
+        let op = manifest::operation(&self.manifest, action.operation)?;
+        if manifest::is_public(op) && op.kind == OperationKind::Create {
+            let receipt: EditReceipt = serde_json::from_str(outcome)?;
+            ensure!(receipt.resource == op.resource, "receipt resource differs");
+            self.edit_handover(tx, &receipt, action.redirect).await
+        } else {
+            self.receipt(action, target, outcome)
+        }
+    }
+
     fn credentials(
         &self,
         action: &Action,
@@ -464,17 +635,22 @@ impl Application {
         target: Option<RecordTarget>,
         values: Fields,
     ) -> Result<FormCredentials> {
-        let (_, submission) = self.keys.issue(
+        let kind = if session.kind == TokenKind::Anonymous {
+            TokenKind::AnonymousSubmission {
+                contract: self.submission_contract(),
+                action: action.id,
+                version: action.version,
+                target,
+            }
+        } else {
             TokenKind::Submission {
                 contract: self.submission_contract(),
                 action: action.id,
                 version: action.version,
                 target,
-            },
-            &session.nonce,
-            now,
-            900,
-        )?;
+            }
+        };
+        let (_, submission) = self.keys.issue(kind, &session.nonce, now, 900)?;
         Ok(FormCredentials {
             csrf: self.keys.csrf(&session.nonce),
             submission,
@@ -483,12 +659,18 @@ impl Application {
     }
 
     fn submission_target(&self, token: &Token, action: &Action) -> Result<Option<RecordTarget>> {
-        let TokenKind::Submission {
+        let (TokenKind::Submission {
             contract,
             action: id,
             version,
             target,
-        } = &token.kind
+        }
+        | TokenKind::AnonymousSubmission {
+            contract,
+            action: id,
+            version,
+            target,
+        }) = &token.kind
         else {
             anyhow::bail!(RequestError::InvalidRequest)
         };
@@ -574,13 +756,11 @@ impl Application {
         tx: &mut Transaction,
         route: u32,
         target: Option<u64>,
-        session: &Token,
+        session: Option<&Token>,
+        anonymous: Option<&Token>,
         principal: &auth::Principal,
         now: i64,
     ) -> Result<BTreeMap<u32, Option<FormCredentials>>> {
-        if matches!(principal, auth::Principal::Anonymous) {
-            return Ok(BTreeMap::new());
-        }
         let r = manifest::route(&self.manifest, route)?;
         let stored = match (r.resource, target) {
             (Some(resource), Some(id)) => {
@@ -592,19 +772,26 @@ impl Application {
         for id in &r.forms {
             let action = manifest::action(&self.manifest, *id)?;
             let op = manifest::operation(&self.manifest, action.operation)?;
+            let subject = if manifest::anonymous_action(op) {
+                anonymous
+            } else {
+                session
+            };
+            let Some(subject) = subject else { continue };
             let credentials = if op.kind == OperationKind::Create {
-                if repository::allowed(
-                    &op.policy,
-                    principal,
-                    &principal.user()?.id,
-                    &principal.user()?.tenant,
-                ) {
-                    Some(self.credentials(action, session, now, None, Fields::new())?)
+                if manifest::is_public(op)
+                    || principal.user().is_ok_and(|user| {
+                        repository::allowed(&op.policy, principal, &user.id, &user.tenant)
+                    })
+                {
+                    Some(self.credentials(action, subject, now, None, Fields::new())?)
                 } else {
                     None
                 }
             } else if let Some(record) = &stored {
-                if self.target_allowed(action, route, principal, record)? {
+                if (manifest::is_capability(op) && record.cap_version.is_some())
+                    || self.target_allowed(action, route, principal, record)?
+                {
                     let grant = RecordTarget {
                         resource: op.resource,
                         id: record.record.id,
@@ -612,12 +799,16 @@ impl Application {
                         revision: record.revision,
                         route,
                     };
-                    let values = action
-                        .fields
-                        .iter()
-                        .map(|name| (name.clone(), record.record.fields[name].clone()))
-                        .collect();
-                    Some(self.credentials(action, session, now, Some(grant), values)?)
+                    let values = if manifest::is_capability(op) {
+                        Fields::new()
+                    } else {
+                        action
+                            .fields
+                            .iter()
+                            .map(|name| (name.clone(), record.record.fields[name].clone()))
+                            .collect()
+                    };
+                    Some(self.credentials(action, subject, now, Some(grant), values)?)
                 } else {
                     None
                 }
@@ -640,9 +831,11 @@ impl Application {
     ) -> Result<Rendered> {
         target.revision = stored.revision;
         let credentials = self.credentials(action, session, now, Some(target), Fields::new())?;
-        let current = if manifest::operation(&self.manifest, action.operation)?.kind
-            == OperationKind::Delete
-        {
+        let operation = manifest::operation(&self.manifest, action.operation)?;
+        // An edit capability grants mutation authority, never a read projection.
+        let current = if manifest::is_capability(operation) {
+            Fields::new()
+        } else if operation.kind == OperationKind::Delete {
             stored.record.fields.clone()
         } else {
             action
@@ -733,6 +926,17 @@ impl Application {
         target: Option<u64>,
         cursor: Option<u64>,
     ) -> std::result::Result<Rendered, RequestError> {
+        self.view_page_anonymous(cookie, None, route, target, cursor)
+            .await
+    }
+    pub(crate) async fn view_page_anonymous(
+        &self,
+        cookie: Option<&str>,
+        anonymous_cookie: Option<&str>,
+        route: u32,
+        target: Option<u64>,
+        cursor: Option<u64>,
+    ) -> std::result::Result<Rendered, RequestError> {
         let _request = self
             .admission_limits
             .requests()
@@ -796,13 +1000,12 @@ impl Application {
                 Some((token, principal)) => (Some(token), principal),
                 None => (None, auth::Principal::Anonymous),
             };
-            let forms = match &session {
-                Some(session) => self
-                    .forms(&mut tx, route, target, session, &principal, now)
-                    .await
-                    .map_err(|_| RequestError::Rejected)?,
-                None => BTreeMap::new(),
-            };
+            let needs_anonymous = manifest::route(&self.manifest, route).map_err(|_| RequestError::InvalidRequest)?.forms.iter().any(|id| manifest::action(&self.manifest,*id).ok().and_then(|a| manifest::operation(&self.manifest,a.operation).ok()).is_some_and(manifest::anonymous_action));
+            let (anonymous, new_cookie) = if needs_anonymous {
+                if let Some(token) = anonymous_cookie.and_then(|c| self.keys.anonymous(c, now).ok()) { (Some(token), None) }
+                else { let (token,cookie) = self.keys.issue(TokenKind::Anonymous, "", now, security::ANONYMOUS_TTL).map_err(|_| RequestError::Rejected)?; (Some(token),Some(cookie)) }
+            } else { (None,None) };
+            let forms = self.forms(&mut tx, route, target, session.as_ref(), anonymous.as_ref(), &principal, now).await.map_err(|_| RequestError::Rejected)?;
             let request = RequestView {
                 available_forms: forms
                     .iter()
@@ -821,6 +1024,7 @@ impl Application {
                 request: request.clone(),
                 outcome: None,
                 grant: None,
+                capability_grant: None,
                 record: None,
                 calls: 16,
                 cursor,
@@ -858,7 +1062,7 @@ impl Application {
                         .path
                 )
             });
-            let rendered = render::render(
+            let mut rendered = render::render(
                 &response,
                 &RenderContext {
                     presentation: &self.presentation,
@@ -871,6 +1075,8 @@ impl Application {
                 },
             )
             .map_err(|_| RequestError::Rejected)?;
+            if let ResponseIntent::Page(doc) | ResponseIntent::NotFound(doc) = &response
+                && doc.nodes.iter().any(|n| matches!(n, Instruction::Form { action } if manifest::action(&self.manifest,*action).ok().and_then(|a| manifest::operation(&self.manifest,a.operation).ok()).is_some_and(manifest::anonymous_action))) { rendered.anonymous_cookie = new_cookie; }
             effects.tx.commit().await.map_err(|_| RequestError::Busy)?;
             Ok(rendered)
         })
@@ -886,12 +1092,28 @@ impl Application {
         csrf: &str,
         input: Fields,
     ) -> std::result::Result<Rendered, RequestError> {
+        self.submit_with_capability(cookie, action, submission, csrf, input, None)
+            .await
+    }
+    pub(crate) async fn submit_with_capability(
+        &self,
+        cookie: &str,
+        action: u32,
+        submission: &str,
+        csrf: &str,
+        input: Fields,
+        capability: Option<&str>,
+    ) -> std::result::Result<Rendered, RequestError> {
         let _request = self
             .admission_limits
             .requests()
             .request()
             .await
             .map_err(|_| RequestError::Busy)?;
+        let op = manifest::action(&self.manifest, action)
+            .and_then(|a| manifest::operation(&self.manifest, a.operation))
+            .map_err(|_| RequestError::InvalidRequest)?;
+        let _anonymous_write = self.anonymous_write(manifest::anonymous_action(op)).await?;
         let _database = self
             .admission_limits
             .database()
@@ -922,6 +1144,7 @@ impl Application {
                     csrf,
                     &input,
                     &input_hash,
+                    capability,
                     &mut fuel,
                     &mut calls,
                     &mut db_calls,
@@ -969,6 +1192,20 @@ impl Application {
         input: &Fields,
         unknown: bool,
     ) -> Result<Rendered> {
+        self.recover_form_with_capability(cookie, action, submission, csrf, input, unknown, None)
+            .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn recover_form_with_capability(
+        &self,
+        cookie: &str,
+        action: u32,
+        submission: &str,
+        csrf: &str,
+        input: &Fields,
+        unknown: bool,
+        capability: Option<&str>,
+    ) -> Result<Rendered> {
         let _request = self
             .admission_limits
             .requests()
@@ -988,12 +1225,8 @@ impl Application {
             self.admission(&mut tx, false).await?;
             let now = security::now()?;
             let now = self.observe_clock_write(&mut tx, now).await?;
-            let token = self.keys.verify(submission, now)?;
+            let (token, session, principal) = self.submission_identity(&mut tx, a, cookie, submission, csrf, now).await?;
             let target = self.submission_target(&token, a)?;
-
-            let (session, principal) = auth::authenticate(&mut tx, &self.keys, cookie, now).await?;
-            ensure!(session.nonce == token.subject, "submission subject");
-            self.keys.verify_csrf(&session.nonce, csrf)?;
             let sql = format!("SELECT subject,contract,input,{} FROM nx_receipts WHERE nonce=$1", tx.bounded_text("outcome", 1024));
             let rows = tx.fetch::<4>(&sql, &[token.nonce.into()]).await?;
             if let Some([subject, contract, digest, outcome]) = rows.first() {
@@ -1001,7 +1234,7 @@ impl Application {
                 let canonical = manifest::canonical_input(&self.manifest, a, input).ok();
                 let expected = canonical.as_ref().map(|input| serde_json::to_vec(&(VERSION, a.version, input))).transpose()?.map(|bytes| URL_SAFE_NO_PAD.encode(Sha256::digest(bytes)));
 
-                let response = if expected.as_ref() == Some(digest) { self.receipt(a, target.as_ref(), outcome)? } else {
+                let response = if expected.as_ref() == Some(digest) { self.receipt_response(&mut tx, a, target.as_ref(), outcome).await? } else {
                     let mut response = render::render(&ResponseIntent::Page(Document::new("Form already used", vec![
                         Instruction::Text("This form already committed different input. Return home to start a new form.".into()),
                         Instruction::Link { destination: RouteRef { route: self.manifest.routes.iter().find(|r| r.path == "/").expect("index route").id, target: None }, text: "Return home".into() },
@@ -1012,13 +1245,13 @@ impl Application {
                 return Ok(response);
             }
             if let Some(target) = target {
-                let Some(stored) = self.current_target(&mut tx, a, &target, &principal).await? else { return render::unavailable(&self.presentation, &self.manifest); };
+                let Some(stored) = self.authorized_target(&mut tx, a, &target, &principal, capability).await? else { return render::unavailable(&self.presentation, &self.manifest); };
                 if stored.revision != target.revision && !unknown {
                     return self.conflict(a, &session, now, target, &stored, input);
                 }
             } else {
                 let op = manifest::operation(&self.manifest, a.operation)?;
-                ensure!(repository::allowed(&op.policy, &principal, &principal.user()?.id, &principal.user()?.tenant), "policy denied");
+                ensure!(manifest::is_public(op) || principal.user().is_ok_and(|user| repository::allowed(&op.policy, &principal, &user.id, &user.tenant)), "policy denied");
             }
             let credentials = FormCredentials { csrf: csrf.into(), submission: submission.into(), values: Fields::new() };
             let rendered = render::recovery(&self.presentation, &self.manifest, action, &credentials, input, render::Recovery::Retry { unknown })?;
@@ -1036,6 +1269,7 @@ impl Application {
         csrf: &str,
         input: &Fields,
         input_hash: &str,
+        capability: Option<&str>,
         fuel: &mut u64,
         calls: &mut u32,
         db_calls: &mut u32,
@@ -1046,19 +1280,10 @@ impl Application {
         self.admission(&mut tx, false).await?;
         let now = security::now()?;
         let now = self.observe_clock_write(&mut tx, now).await?;
-        let token = self
-            .keys
-            .verify(submission, now)
-            .map_err(|_| RequestError::InvalidRequest)?;
+        let (token, session, principal) = self
+            .submission_identity(&mut tx, a, cookie, submission, csrf, now)
+            .await?;
         let target = self.submission_target(&token, a)?;
-
-        let (session, principal) = auth::authenticate(&mut tx, &self.keys, cookie, now)
-            .await
-            .map_err(|_| RequestError::Authentication)?;
-        ensure!(token.subject == session.nonce, RequestError::InvalidRequest);
-        self.keys
-            .verify_csrf(&session.nonce, csrf)
-            .map_err(|_| RequestError::InvalidRequest)?;
         let claimed = tx.execute("INSERT INTO nx_receipts(nonce,subject,contract,action,input,outcome,expires) VALUES($1,$2,$3,$4,$5,'',$6) ON CONFLICT(nonce) DO NOTHING", &[
             token.nonce.as_str().into(), session.nonce.as_str().into(), self.contract.as_str().into(), Param::Number(action.into()), input_hash.into(), Param::Number(token.expires),
         ]).await?;
@@ -1075,11 +1300,16 @@ impl Application {
                 *subject == session.nonce && *contract == self.contract && digest == input_hash,
                 RequestError::InvalidRequest
             );
-            let response = self.receipt(a, target.as_ref(), outcome)?;
+            let response = self
+                .receipt_response(&mut tx, a, target.as_ref(), outcome)
+                .await?;
             return Ok((Some(tx), response));
         }
         let record = if let Some(target) = &target {
-            let Some(stored) = self.current_target(&mut tx, a, target, &principal).await? else {
+            let Some(stored) = self
+                .authorized_target(&mut tx, a, target, &principal, capability)
+                .await?
+            else {
                 let response = render::unavailable(&self.presentation, &self.manifest)?;
                 tx.rollback().await?;
                 return Ok((None, response));
@@ -1093,12 +1323,13 @@ impl Application {
         } else {
             let op = manifest::operation(&self.manifest, a.operation)?;
             ensure!(
-                repository::allowed(
-                    &op.policy,
-                    &principal,
-                    &principal.user()?.id,
-                    &principal.user()?.tenant
-                ),
+                manifest::is_public(op)
+                    || principal.user().is_ok_and(|user| repository::allowed(
+                        &op.policy,
+                        &principal,
+                        &user.id,
+                        &user.tenant
+                    )),
                 "policy denied"
             );
             None
@@ -1127,6 +1358,14 @@ impl Application {
             principal,
             request: request.clone(),
             outcome: None,
+            capability_grant: if manifest::is_capability(manifest::operation(
+                &self.manifest,
+                a.operation,
+            )?) {
+                target.clone()
+            } else {
+                None
+            },
             grant: target,
             record,
             calls: *db_calls,
@@ -1179,23 +1418,50 @@ impl Application {
             effects.tx.rollback().await?;
             return Ok((None, response));
         }
-        ensure!(
-            effects.outcome.as_ref() == Some(&outcome),
-            "action outcome differs from granted mutation"
-        );
-        let response = render::render(
-            &outcome,
-            &RenderContext {
-                presentation: &self.presentation,
-                manifest: Some(&self.manifest),
-                ..RenderContext::empty()
-            },
-        )?;
+        let public_create = manifest::is_public(manifest::operation(&self.manifest, a.operation)?)
+            && manifest::operation(&self.manifest, a.operation)?.kind == OperationKind::Create;
+        if public_create {
+            match (&effects.outcome, &outcome) {
+                (
+                    Some(ResponseIntent::Created {
+                        resource: actual_resource,
+                        id: actual_id,
+                        ..
+                    }),
+                    ResponseIntent::Created { resource, id, .. },
+                ) => ensure!(
+                    resource == actual_resource && id == actual_id,
+                    "create outcome differs"
+                ),
+                _ => anyhow::bail!("public create outcome differs"),
+            }
+        } else {
+            ensure!(
+                effects.outcome.as_ref() == Some(&outcome),
+                "action outcome differs from granted mutation"
+            );
+        }
+        let receipt = if public_create {
+            let Some(ResponseIntent::Created { resource, id, .. }) = &effects.outcome else {
+                anyhow::bail!("public create outcome")
+            };
+            serde_json::to_string(&EditReceipt {
+                resource: *resource,
+                id: *id,
+                cap_version: 1,
+                key_id: self.keys.signing_edit_key()?,
+            })?
+        } else {
+            serde_json::to_string(&outcome)?
+        };
+        let response = self
+            .receipt_response(&mut effects.tx, a, None, &receipt)
+            .await?;
         effects
             .tx
             .execute(
                 "UPDATE nx_receipts SET outcome=$1 WHERE nonce=$2",
-                &[serde_json::to_string(&outcome)?.into(), token.nonce.into()],
+                &[receipt.into(), token.nonce.into()],
             )
             .await?;
         ensure!(Instant::now() < deadline, "request deadline");

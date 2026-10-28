@@ -413,3 +413,25 @@ then verify that an infinite native build loop is killed by the VM deadline.
 The SDK package test creates actual Cargo archives without building application
 code on the host, then compiles the example in a VM using versioned package
 directories. It verifies that WIT binding generation needs no monorepo paths.
+
+### Edit keys and fresh capability storage
+
+Anonymous submissions use storage version 4. Initialize fresh storage for this
+layout; older storage is rejected and no storage converter is provided.
+`noxide keygen` and `noxide init` create one signing edit key. A manifest with
+public creates or capability actions requires a signing edit key at activation.
+
+To add a signing edit key while retaining older keys for verification:
+
+```sh
+noxide edit-key-rotate keys.json
+```
+
+Restart serving processes after updating the key file. Keep its permissions
+private (0600). Key rotation preserves token authority and existing edit-secret
+versions; rotating an individual record through its host-owned capability form
+revokes that record's older secrets under every edit key. Removing an older key
+also prevents its receipts from recovering an edit secret.
+
+The fixed `noxide_anon` cookie name is reserved. Configured session and login
+cookie names must differ from it.

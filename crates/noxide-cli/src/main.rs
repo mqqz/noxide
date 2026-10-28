@@ -78,7 +78,7 @@ fn host_keys(path: &Path) -> Result<HostKeys> {
             "host key file must be private (mode 0600)"
         );
     }
-    Ok(serde_json::from_slice(&read(path, 1024)?)?)
+    Ok(serde_json::from_slice(&read(path, 16_384)?)?)
 }
 
 fn create(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
@@ -137,7 +137,7 @@ async fn main() -> Result<()> {
         "schema" => workflow::schema(&args[1..]).await?,
         "help" | "--help" | "-h" => {
             println!(
-                "Noxide {}\n\nCommands:\n  check|build --app APP --name CRATE --kernel KERNEL --toolchain TOOLCHAIN --output NEW_DIR [--framework CHECKOUT]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  init CONFIG.json\n  account CONFIG.json USER PASSWORD_FILE [TENANT]\n  contract-hash MANIFEST.json\n  component CORE.wasm COMPONENT.wasm\n  serve CONFIG.json\n  maintain CONFIG.json\n  recover-clock CONFIG.json (stop serving first; configure a fresh host key)\n  keygen NEW_KEYS.json\n\nApplication builds must use the isolated VM recipe. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
+                "Noxide {}\n\nCommands:\n  check|build --app APP --name CRATE --kernel KERNEL --toolchain TOOLCHAIN --output NEW_DIR [--framework CHECKOUT]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  init CONFIG.json\n  account CONFIG.json USER PASSWORD_FILE [TENANT]\n  contract-hash MANIFEST.json\n  component CORE.wasm COMPONENT.wasm\n  serve CONFIG.json\n  maintain CONFIG.json\n  recover-clock CONFIG.json (stop serving first; configure a fresh host key)\n  keygen NEW_KEYS.json\n  edit-key-rotate KEYS.json\n\nApplication builds must use the isolated VM recipe. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
                 env!("CARGO_PKG_VERSION")
             );
         }
@@ -156,6 +156,22 @@ async fn main() -> Result<()> {
                 &serde_json::to_vec(&HostKeys::generate()?)?,
                 true,
             )?;
+        }
+        "edit-key-rotate" => {
+            ensure!(args.len() == 2, "usage: noxide edit-key-rotate KEYS.json");
+            let path = Path::new(&args[1]);
+            let mut keys = host_keys(path)?;
+            keys.rotate_edit_key()?;
+            let temporary = path.with_extension(format!("rotation-{}.tmp", std::process::id()));
+            create(&temporary, &serde_json::to_vec(&keys)?, true)?;
+            std::fs::rename(&temporary, path)?;
+            std::fs::File::open(
+                path.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new(".")),
+            )?
+            .sync_all()?;
+            println!("Added a signing edit key. Previous edit keys remain verify-only.");
         }
         "recover-clock" => {
             ensure!(
