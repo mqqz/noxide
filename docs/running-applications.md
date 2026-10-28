@@ -432,3 +432,6 @@ private (0600). Key rotation preserves token authority and existing edit-secret
 versions; rotating an individual record through its host-owned capability form
 revokes that record's older secrets under every edit key. Removing an older key
 also prevents its receipts from recovering an edit secret.
+
+The fixed `noxide_anon` cookie name is reserved. Configured session and login
+cookie names must differ from it.

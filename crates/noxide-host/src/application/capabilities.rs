@@ -233,11 +233,11 @@ impl Application {
             RequestError::InvalidRequest
         );
         let current = stored.cap_version.ok_or(RequestError::InvalidRequest)?;
+        let storage = tx.storage_resource(&self.manifest, resource).await?;
         self.keys
-            .verify_edit(secret, resource, id, current)
+            .verify_edit(secret, u32::try_from(storage)?, id, current)
             .map_err(|_| RequestError::InvalidRequest)?;
         let next = current.checked_add(1).ok_or(RequestError::Rejected)?;
-        let storage = tx.storage_resource(&self.manifest, resource).await?;
         ensure!(tx.execute("UPDATE nx_records SET cap_version=$1 WHERE resource=$2 AND id=$3 AND cap_version=$4", &[next.into(), storage.into(), (id as i64).into(), current.into()]).await? == 1, "capability changed");
         let receipt = EditReceipt {
             resource,
