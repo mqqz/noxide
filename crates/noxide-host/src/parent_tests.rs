@@ -177,6 +177,195 @@ fn parent_admission_rejects_unbound_or_mutable_relationships() {
     assert!(manifest::validate(&bad).is_err());
 }
 #[tokio::test]
+async fn child_updates_cannot_move_parent_and_missing_parents_hide_children() {
+    let tmp = tempfile::tempdir().unwrap();
+    mutation_case(Database::sqlite(tmp.path().join("mutation.db"))).await;
+}
+
+async fn mutation_case(db: Database) {
+    db.initialize().await.unwrap();
+    let mut m = declarations();
+    m.operations.push(Operation {
+        id: 5,
+        resource: 1,
+        kind: OperationKind::Update,
+        policy: Policy {
+            any: vec![vec![Predicate::Role {
+                name: "moderator".into(),
+                tenant_scoped: false,
+            }]],
+        },
+        visibility: None,
+        fields: None,
+    });
+    m.actions.push(Action {
+        id: 2,
+        version: 1,
+        name: "Edit reply".into(),
+        operation: 5,
+        redirect: 2,
+        fields: vec!["body".into()],
+        inspect: None,
+        layout: vec![],
+    });
+    m.routes[1].forms.push(2);
+    m.routes[1].access = Access::PublicOptional;
+    manifest::validate(&m).unwrap();
+    let mut invalid = m.clone();
+    invalid.actions[1].fields.push("thread".into());
+    assert!(
+        manifest::validate(&invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("immutable")
+    );
+    seed(&db, &m).await;
+    let mut e = effects(&db, &m, 2, 12).await;
+    let stored = crate::repository::load(&mut e.tx, &m, 1, 12)
+        .await
+        .unwrap()
+        .unwrap();
+    e.grant = Some(crate::security::RecordTarget {
+        resource: 1,
+        id: 12,
+        route: 2,
+        incarnation: stored.incarnation.clone(),
+        revision: stored.revision,
+    });
+    e.record = Some(stored);
+    e.request.kind = RequestKind::Action(2);
+    e.principal = Principal::User(crate::auth::User {
+        id: "moderator".into(),
+        tenant: "".into(),
+        roles: vec![("moderator".into(), "".into())],
+    });
+    e.request.input = Fields::from([
+        ("body".into(), "edited".into()),
+        ("thread".into(), "20".into()),
+    ]);
+    assert!(e.invoke(5, 0).await.is_err());
+    e.request.input.remove("thread");
+    e.invoke(5, 0).await.unwrap();
+    e.tx.commit().await.unwrap();
+    let mut e = effects(&db, &m, 2, 12).await;
+    let stored = crate::repository::load(&mut e.tx, &m, 1, 12)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.record.fields["thread"], "10");
+    assert_eq!(stored.record.fields["body"], "edited");
+    // Simulate storage corruption outside the host's guarded deletion API.
+    let parent = e.tx.storage_resource(&m, 2).await.unwrap();
+    e.tx.execute(
+        "DELETE FROM nx_records WHERE resource=$1 AND id=10",
+        &[parent.into()],
+    )
+    .await
+    .unwrap();
+    e.tx.commit().await.unwrap();
+    let mut e = effects(&db, &m, 2, 12).await;
+    assert!(
+        serde_json::from_slice::<Option<Record>>(&e.invoke(2, 12).await.unwrap())
+            .unwrap()
+            .is_none()
+    );
+    e.request.kind = RequestKind::Route(3);
+    e.request.target = Some(10);
+    assert!(
+        serde_json::from_slice::<Vec<Record>>(&e.invoke(1, 0).await.unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    e.tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_parent_changes_precede_child_mutation_checks() {
+    let tmp = tempfile::tempdir().unwrap();
+    concurrent_case(Database::sqlite(tmp.path().join("concurrent.db"))).await;
+}
+
+async fn concurrent_case(db: Database) {
+    db.initialize().await.unwrap();
+    let m = declarations();
+    seed(&db, &m).await;
+    for (published, locked) in [(false, false), (true, true)] {
+        set_parent(&db, &m, true, false).await;
+        let mut e = effects(&db, &m, 3, 10).await;
+        let stored = crate::repository::load(&mut e.tx, &m, 2, 10)
+            .await
+            .unwrap()
+            .unwrap();
+        let grant = crate::security::RecordTarget {
+            resource: 2,
+            id: 10,
+            route: 3,
+            incarnation: stored.incarnation.clone(),
+            revision: stored.revision,
+        };
+        e.tx.rollback().await.unwrap();
+        let mut writer = db
+            .begin(Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+        let storage = writer.storage_resource(&m, 2).await.unwrap();
+        let fields = Fields::from([
+            ("published".into(), published.to_string()),
+            ("locked".into(), locked.to_string()),
+        ]);
+        writer
+            .execute(
+                "UPDATE nx_records SET fields=$1,revision=revision+1 WHERE resource=$2 AND id=10",
+                &[
+                    serde_json::to_string(&fields).unwrap().into(),
+                    storage.into(),
+                ],
+            )
+            .await
+            .unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (committed, resume) = tokio::sync::oneshot::channel();
+        let child_db = db.clone();
+        let child_manifest = m.clone();
+        let child = tokio::spawn(async move {
+            // SQLite waits for the writer here; PostgreSQL may begin before commit.
+            started.send(()).unwrap();
+            let mut e = effects(&child_db, &child_manifest, 3, 10).await;
+            resume.await.unwrap();
+            e.request.kind = RequestKind::Action(1);
+            e.request.input = Fields::from([
+                ("body".into(), "racing reply".into()),
+                ("published".into(), "true".into()),
+            ]);
+            e.grant = Some(grant);
+            assert!(
+                e.invoke(3, 0)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("parent unavailable or locked")
+            );
+            e.tx.rollback().await.unwrap();
+        });
+        ready.await.unwrap();
+        writer.commit().await.unwrap();
+        committed.send(()).unwrap();
+        child.await.unwrap();
+        let mut e = effects(&db, &m, 3, 10).await;
+        let storage = e.tx.storage_resource(&m, 1).await.unwrap();
+        let rows =
+            e.tx.fetch::<1>(
+                "SELECT CAST(COUNT(*) AS TEXT) FROM nx_records WHERE resource=$1",
+                &[storage.into()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows[0][0], "12");
+        e.tx.rollback().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn scoped_pages_and_direct_reads_obey_parent_visibility() {
     let tmp = tempfile::tempdir().unwrap();
     parents_case(Database::sqlite(tmp.path().join("parents.db")), true).await;
@@ -456,7 +645,14 @@ async fn postgres_relationships_pagination_forms_and_migrations() {
     use sqlx::Connection;
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-    for case in ["parents", "forms", "integrity", "index_scope"] {
+    for case in [
+        "parents",
+        "forms",
+        "integrity",
+        "index_scope",
+        "mutation",
+        "concurrent",
+    ] {
         let name = format!(
             "nx_parent_{case}_{}",
             std::time::SystemTime::now()
@@ -475,6 +671,8 @@ async fn postgres_relationships_pagination_forms_and_migrations() {
             "parents" => parents_case(db, false).await,
             "forms" => forms_case(db, false).await,
             "integrity" => integrity_case(db, false).await,
+            "mutation" => mutation_case(db).await,
+            "concurrent" => concurrent_case(db).await,
             _ => index_scope_case(db, false).await,
         }
         sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))

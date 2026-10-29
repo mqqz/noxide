@@ -525,6 +525,22 @@ visibility, and creation predicate in the write transaction. A changed parent
 revision requires form recovery; a hidden, locked, missing, or replaced parent
 cannot accept the stale submission.
 
+These checks are a host security invariant. Parent validation and child insertion
+share a write transaction: SQLite serializes writers with `BEGIN IMMEDIATE`;
+PostgreSQL uses serializable isolation. Overlapping creation and moderation may
+serialize in either order; this does not promise that a moderation commit cancels
+an already-running request. A public read started after the visibility change
+commits must hide the child, including direct child URLs. An in-flight read can
+finish using its earlier snapshot. Missing parents fail closed for public reads.
+Parent deletion checks for children in the same transaction as deletion.
+
+The relationship tests cover immutable updates, hidden and missing parents,
+previously issued forms after locking, rejected deletion and orphaning migrations,
+and concurrent parent changes committed before child mutation checks. They run
+against SQLite, with the same cases available in the opt-in PostgreSQL suite.
+Keep these predicates restricted to the declared boolean or choice equality
+checks; this API does not provide arbitrary predicates or graph authorization.
+
 A record page may contain one list query, scoped to its parent target. The host
 applies policy, visibility, and parent filtering before the page limit, and emits
 next-page links retaining the concrete record URL. Pages contain up to three
