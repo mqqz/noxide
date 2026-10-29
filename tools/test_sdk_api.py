@@ -20,7 +20,7 @@ from build_vm import (ROOT, DEFAULT_VM_SECONDS, MAX_OUTPUT, MAX_CONTRACT, Image,
                       check_build_status)
 
 
-EQUIVALENT_APPS = ("private-notes", "task-board", "public-articles", "policy-board")
+EQUIVALENT_APPS = ("private-notes", "task-board", "public-articles", "policy-board", "repeated", "forum")
 ADMISSION_FAILURES = {
     "notes-added-field": b"creation requires every writable field",
     "notes-renamed-field": b"creation requires every writable field",
@@ -150,7 +150,7 @@ def convenience_fixtures():
     comparisons = []
     for app in EQUIVALENT_APPS:
         for variant, path in (
-            ("simple", (ROOT / "tools/fixtures/sdk/policy-board-simple.rs") if app == "policy-board" else ROOT / "examples" / app / "src/lib.rs"),
+            ("simple", (ROOT / "tools/fixtures/sdk" / (app + "-simple.rs")) if app in ("policy-board", "repeated", "forum") else ROOT / "examples" / app / "src/lib.rs"),
             ("explicit", ROOT / "tools/fixtures/sdk" / (app + "-explicit.rs")),
         ):
             name = app + "-" + variant
@@ -218,6 +218,13 @@ def convenience_fixtures():
 }
 '''),
     ]
+    repeated = dict(passing)["repeated-simple"]
+    prefix, block = repeated.split("    // actions\n", 1)
+    entries = block.splitlines()[1:-2]
+    assert len(entries) == 7 and all(entry.strip().startswith(("create ", "update ", "delete ")) for entry in entries), "repeated fixture structure changed"
+    reordered_repeated = prefix + "    // actions\n" + "".join(
+        "    crud! { Reply {\n" + entry + "\n    } }\n" for entry in reversed(entries)) + "}\n"
+    variants += [("repeated-reordered", reordered_repeated)]
     passing += variants
     comparisons += [name for name, _ in variants]
     public = dict(passing)["public-articles-simple"]
@@ -254,6 +261,19 @@ def convenience_fixtures():
         ("conditional-crud", notes.replace("    crud!", "    #[cfg(any())]\n    crud!"), "conditional application declarations"),
         ("conditional-attribute", notes.replace('    #[page("/")]', '    #[cfg_attr(all(), inline)]\n    #[page("/")]'), "conditional application declarations"),
         ("duplicate-action-hooks", notes.rsplit("\n}", 1)[0] + '\n hooks! { EditNote { handler(edit_note) } }\n}\n', "declare hooks once"),
+    ]
+    failures += [
+        ("repeated-name-in-block", repeated.replace("create CreateAnonymousReply {", "create CreateReply {"), "generated action name collision"),
+        ("repeated-name-across-blocks", reordered_repeated.replace("create CreateAnonymousReply {", "create CreateReply {"), "generated action name collision"),
+        ("repeated-name-explicit", repeated.replace("    // actions", "    #[action(create(Reply), fields(body), allow = owner, redirect = reply)] struct CreateReply;\n    // actions"), "generated action name collision"),
+        ("repeated-missing-policy", repeated.replace('key = "replies", owner', 'key = "replies"'), "explicit policy or owner resource"),
+        ("repeated-delete-fields", repeated.replace("delete DeleteReply {", "delete DeleteReply { fields(body),"), "delete accepts no fields"),
+        ("repeated-duplicate-option", repeated.replace("create CreateReply {", "create CreateReply { fields(body),"), "duplicate CRUD option"),
+        ("repeated-missing-redirect", repeated.replace("redirect(parent(thread)), handler(create_reply)", "handler(create_reply)"), "requires redirect"),
+        ("repeated-wrong-handler", repeated.replace("handler(edit_secret)", "handler(edit_reply)"), "mismatched types"),
+        ("repeated-wrong-layout", repeated.replace("layout(secret_layout)", "layout(edit_layout)"), "mismatched types"),
+        ("repeated-owner-moderator-field", repeated.rsplit("\n}", 1)[0] + '\n fn forbidden(f: FormFields<r#EditReply>) { let _ = f.published; }\n}\n', "no field"),
+        ("repeated-capability-moderator-field", repeated.rsplit("\n}", 1)[0] + '\n fn forbidden(f: FormFields<EditSecret>) { let _ = f.published; }\n}\n', "no field"),
     ]
     return passing, failures, comparisons
 
@@ -309,6 +329,7 @@ cd /tmp/work/examples/private-notes
 def validate_contracts(contracts, comparisons, output_dir, host_cli):
     for app in EQUIVALENT_APPS:
         assert contracts[app + "-simple"] == contracts[app + "-explicit"], app + " contract mismatch"
+    assert contracts["repeated-simple"] == contracts["repeated-reordered"], "repeated entry/block order changed contract"
     assert contracts["notes-reordered"] == contracts["private-notes-simple"], "item order changed contract"
     for name in ("notes-explicit-hooks", "notes-qualified-pages", "notes-relocated"):
         assert contracts[name] == contracts["private-notes-simple"], name + " changed contract"
@@ -376,6 +397,7 @@ def validate_contracts(contracts, comparisons, output_dir, host_cli):
             hashes[name] = result.stdout.strip().decode("ascii")
     for app in EQUIVALENT_APPS:
         assert hashes[app + "-simple"] == hashes[app + "-explicit"], app + " approval digest differs"
+    assert hashes["repeated-simple"] == hashes["repeated-reordered"], "repeated entry/block order changed digest"
     assert hashes["notes-reordered"] == hashes["private-notes-simple"]
     for name in ("notes-explicit-hooks", "notes-qualified-pages", "notes-relocated"):
         assert hashes[name] == hashes["private-notes-simple"]

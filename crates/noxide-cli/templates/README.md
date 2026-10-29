@@ -44,7 +44,12 @@ the same SDK, compilation recipe, contract format, and runtime admission checks.
 
 SDK sources and approved dependency archives ship with the CLI. Builds run
 offline and need no framework checkout or manually selected output directory.
-The generated SDK dependency also works with local Rust editor tooling. Advanced
+The generated SDK dependency also works with local Rust editor tooling, which
+may use a different resolution environment. To create or repair a lockfile, run
+`noxide deps resolve --app . --output /tmp/new-lock-candidate`, review the candidate
+and install it using the printed copy command. Then run `noxide deps check` and
+`noxide check` with the same catalog and toolchain. Dependency resolution alone
+does not compile or approve the application. Advanced
 build selection supports `--app . --name __CRATE__`; workspace projects must
 select the application package directory explicitly.
 

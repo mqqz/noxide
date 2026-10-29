@@ -64,6 +64,40 @@ Project discovery walks upward to `Cargo.toml`; ambiguous workspace roots need
 `--app PACKAGE_DIRECTORY` for check/test/build. `dev` operates on the current
 application project.
 
+## Check and resolve dependencies
+
+The supported compatibility checks are `noxide deps check` followed by
+`noxide check` with the same trusted catalog and toolchain. Raw `cargo check`
+and editor tooling may use a different cache, SDK, or resolver environment.
+
+```sh
+noxide deps check --app my-forum --toolchain /path/to/trusted/toolchain
+noxide deps resolve --app my-forum --output /tmp/forum-lock-candidate \
+  --toolchain /path/to/trusted/toolchain
+```
+
+`check` requires an existing lockfile, verifies full catalog identities and the
+locked offline dependency graph, and leaves the source unchanged. `resolve`
+ignores the old lock in its disposable snapshot and writes a validated candidate
+to a new output directory. It prints the candidate, a bounded package comparison,
+and a quoted copy command. Review the candidate, confirm source and catalog
+inputs have not changed, and explicitly install it using that command. Then run
+`noxide deps check` and `noxide check` with the same selections.
+
+Both commands accept `--framework`, `--cargo-home`, `--toolchain`, `--seconds`,
+and `--isolated`/`--kernel` like builds. Omitting `--app` discovers the project;
+omitting `--framework` uses the installed kit. Dependency modes execute Cargo's
+resolver without compiling, running build scripts or macros, collecting a
+contract, or approving a deployment. Successful resolution proves catalog
+compatibility only. Isolation stays inside the selected VM executor; local
+processing retains the trusted-input requirement.
+
+The catalog is the approved SDK dependency closure, not everything in your cache.
+An incompatible lock requires explicit resolution. If manifest requirements or
+features have no solution in that catalog, change the application manifest or
+review a trusted catalog update separately. The commands never download missing
+packages, expand the catalog, or overwrite source manifests and lockfiles.
+
 ## Choose the build executor
 
 Local builds are the default. Build scripts, procedural macros, native tests,
@@ -98,7 +132,7 @@ Build the CLI and its reviewed dependencies on the host:
 ```sh
 cargo fetch --locked
 cargo build --workspace --locked --offline
-cargo test --workspace --locked --offline
+cargo test --workspace --locked --offline -- --test-threads=1
 ```
 
 The CLI build embeds the shared recipe, public SDK sources, and approved
@@ -133,8 +167,9 @@ also collects and validates the contract; `build` additionally admits the compon
 Both use a fresh source snapshot and the same offline dependency catalog.
 Local builds execute build scripts, procedural macros, and the metadata collector
 with your host permissions. Offline Cargo is not network containment. Use this
-mode only when you trust the app and its dependencies. Logs are raw local build
-output; no VM resource or isolation guarantees apply.
+mode only when you trust the app and its dependencies. Build diagnostics are
+bounded and credential-bearing URLs are redacted from saved logs; this does not
+provide VM resource or isolation guarantees for local execution.
 
 ## Build the application in a disposable VM
 
@@ -322,6 +357,36 @@ rm /tmp/noxide-notes-run/password
 target/debug/noxide serve /tmp/noxide-notes-run/runtime.json
 ```
 
+For applications declaring role policies, provision only the required assignment.
+Choose the grant line matching the predicate declared by that application:
+
+```sh
+noxide role grant CONFIG.json alice moderator --global
+noxide role grant CONFIG.json alice moderator --tenant team1
+noxide role list CONFIG.json alice
+noxide role revoke CONFIG.json alice moderator --global
+```
+
+Grant/revoke require exactly one scope flag. Tenant grants require the account's
+existing nonempty tenant; neither scope satisfies the other's policy predicate.
+The grant checks the configured manifest against `approved_contract` and requires
+the exact role and scope in an operation policy, even before first activation.
+List and revoke continue to work after that role disappears from the manifest.
+These commands use trusted operator database credentials and expose no guest or
+HTTP administration interface. Configured paths remain relative to `CONFIG.json`.
+
+Assignments are bounded to 32 per account. Mutations report the exact assignment
+and changed/unchanged only after commit; repeated desired-state operations are
+idempotent. On an error or lost commit acknowledgement, reconcile with `role list`
+before retrying when another operator may have changed the same assignment.
+The printed receipt is not a durable audit trail.
+
+Existing sessions observe committed role changes on subsequent authorization
+transactions. An unused moderator form cannot authorize a new write after
+revocation. Previously committed submissions retain receipt recovery without a
+second mutation and with current navigation checks. In-flight transactions may
+complete under their established isolation; revocation does not force logout.
+
 Visit `http://localhost:8080`. Sign in, save text containing `<script>` or an image
 tag, and confirm it appears literally. Provision Bob the same way to verify that
 his list and direct note requests cannot expose Alice's content. Lists have a
@@ -496,10 +561,12 @@ host process crashes, and replay; they do not certify hardware power-loss behavi
 ## Run the acceptance suites
 
 ```sh
-cargo test --workspace --locked --offline
+cargo test --workspace --locked --offline -- --test-threads=1
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 python3 tools/test_build_inputs.py
+python3 tools/test_build_local.py
+python3 tools/test_dependencies.py
 ```
 
 The PostgreSQL tests require a disposable cluster with CREATE DATABASE permission;
@@ -509,9 +576,10 @@ ignored by the default suite, so run them separately:
 ```sh
 export NOXIDE_TEST_POSTGRES='postgresql://test@localhost/postgres?host=/private/test/socket'
 cargo test --workspace --locked --offline -- \
-  --include-ignored \
+  --include-ignored --test-threads=1 \
   --skip failure_tests::crash_worker \
-  --skip postgres_nojs_browser_flow
+  --skip postgres_nojs_browser_flow \
+  --skip postgres_typed_forms_browser_flow
 ```
 
 For VM and browser acceptance:

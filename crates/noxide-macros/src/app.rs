@@ -370,7 +370,6 @@ impl Parse for CrudBlock {
         let body;
         braced!(body in input);
         let mut entries = Vec::new();
-        let mut kinds = BTreeSet::new();
         while !body.is_empty() {
             let kind: Ident = body.parse()?;
             if !["create", "update", "delete"].contains(&kind.to_string().as_str()) {
@@ -378,9 +377,6 @@ impl Parse for CrudBlock {
                     kind.span(),
                     "expected create, update, or delete",
                 ));
-            }
-            if !kinds.insert(kind.to_string()) {
-                return Err(syn::Error::new(kind.span(), "duplicate CRUD operation"));
             }
             let name = body.parse()?;
             let content;
@@ -573,10 +569,85 @@ mod app_policy_tests {
             "Note { create CreateNote { redirect(show) } }",
             "Note { update EditNote { fields(body) } }",
             "Note { delete DeleteNote { fields(body), redirect(index) } }",
-            "Note { delete A { redirect(index) } delete B { redirect(index) } }",
+            "Note { create A { fields(body), fields(title), redirect(index) } }",
+            "Note { update A { fields(body), redirect(index), redirect(show) } }",
+            "Note { delete A { redirect(index), allow = owner, allow = public } }",
         ] {
             assert!(syn::parse_str::<CrudBlock>(input).is_err(), "{input}");
         }
+    }
+
+    #[test]
+    fn repeated_named_actions_keep_independent_policies_and_destinations() {
+        let output = expand_app(syn::parse_quote! {
+            mod app {
+                #[resource(key = "notes", owner)] struct Note;
+                crud! { Note {
+                    create Create { fields(body), redirect(parent(show)) }
+                    create Anonymous { fields(body), allow = public, redirect(show) }
+                    update Edit { fields(body), redirect(show) }
+                    update Secret { fields(body), allow = capability, redirect(parent(show)) }
+                    update Moderate { fields(published), allow = role("moderator"), redirect(show) }
+                    delete Delete { redirect(index) }
+                    delete Remove { allow = capability, redirect(parent(show)) }
+                } }
+                #[page("/")] fn index() -> Page { todo!() }
+            }
+        })
+        .unwrap()
+        .to_string();
+        assert_eq!(output.matches("Predicate :: Owner").count(), 3);
+        assert_eq!(output.matches("Predicate :: Public").count(), 1);
+        assert_eq!(output.matches("Predicate :: Capability").count(), 2);
+        assert_eq!(output.matches("Redirect :: Parent").count(), 3);
+        assert_eq!(output.matches("Redirect :: Page").count(), 4);
+    }
+
+    #[test]
+    fn repeated_names_use_the_module_collision_check() {
+        for declarations in [
+            quote!(
+                crud! { Note { delete Delete { redirect(index) } delete Delete { redirect(index) } } }
+            ),
+            quote!(crud! { Note { delete Delete { redirect(index) } } } crud! { Note { create Delete { fields(body), redirect(index) } } }),
+            quote! {
+                struct Delete;
+                crud! { Note { delete Delete { redirect(index) } } }
+            },
+        ] {
+            let error = expand_app(
+                syn::parse2(quote! {
+                    mod app {
+                        #[resource(key = "notes", owner)] struct Note;
+                        #declarations
+                        #[page("/")] fn index() -> Page { todo!() }
+                    }
+                })
+                .unwrap(),
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("generated action name collision")
+            );
+        }
+    }
+
+    #[test]
+    fn each_repeated_entry_requires_its_own_policy() {
+        let error = expand_app(syn::parse_quote! {
+            mod app {
+                #[resource(key = "notes")] struct Note;
+                crud! { Note {
+                    create Public { fields(body), allow = public, redirect(show) }
+                    create Missing { fields(body), redirect(show) }
+                } }
+                #[page("/")] fn index() -> Page { todo!() }
+            }
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("explicit policy"));
     }
 
     #[test]

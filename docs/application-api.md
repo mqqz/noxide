@@ -75,8 +75,12 @@ The host binds owner policy to the authenticated user. `owner` is a default for
 shorthand, so explicit queries may still declare other approved policies.
 An unmarked resource receives no inferred access policy.
 
-CRUD entries name each enabled mutation. Create and update require separate
-`fields(...)` lists, and every entry requires `redirect(page_name)`. Omitted
+CRUD entries name each enabled mutation. A resource may have multiple named
+creates, updates, and deletes, in one block or across blocks. Names must be unique
+across the module, including explicit actions. Each action retains its own policy,
+fields, redirect, hooks, layout, and `Form<Action>` route binding. Create and update
+require separate `fields(...)` lists. Every entry requires `redirect(page_name)`
+or the typed parent destination `redirect(parent(page_name))`. Omitted
 operations generate nothing. Existing host rules require create to name every writable
 ordinary stored field (parent references are host-bound) and ordinary create/update
 redirects to target a record page. Adding a writable field
@@ -179,6 +183,12 @@ Policies support `owner`, `same_tenant`, `role("writer")`,
 `all(same_tenant, any(owner, tenant_role("moderator")))`. The deployment operator
 approves the generated contract. Guest code can reject an operation but cannot
 override host policy.
+
+Operators manage assignments with `noxide role grant|revoke CONFIG.json USER ROLE
+--global` or `--tenant TENANT`, and inspect them with `noxide role list CONFIG.json
+USER`. Global `role` and scoped `tenant_role` predicates are distinct; a tenant
+grant must match the account's existing nonempty tenant. Grants require that exact
+role and scope in the configured approved manifest. Registration grants no roles.
 
 ## Pages, components, and routes
 

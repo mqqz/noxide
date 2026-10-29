@@ -9,6 +9,8 @@ use argon2::{
     password_hash::{PasswordHash, SaltString, rand_core::OsRng},
 };
 
+pub(crate) const MAX_ROLES: usize = 32;
+
 #[derive(Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Registration {
@@ -157,12 +159,15 @@ pub(crate) async fn authenticate(
     let row = rows.first().ok_or(AuthError::Invalid)?;
     let roles = tx
         .fetch::<2>(
-            "SELECT name,tenant FROM nx_roles WHERE principal=$1 LIMIT 33",
+            &format!(
+                "SELECT name,tenant FROM nx_roles WHERE principal=$1 LIMIT {}",
+                MAX_ROLES + 1
+            ),
             &[row[0].as_str().into()],
         )
         .await
         .map_err(|_| AuthError::Unavailable)?;
-    if roles.len() > 32 {
+    if roles.len() > MAX_ROLES {
         return Err(AuthError::Invalid);
     }
     Ok((
