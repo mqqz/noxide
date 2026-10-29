@@ -77,4 +77,18 @@ inside the reply's write transaction. See the [relationship API](../../docs/appl
 - Search, public author profiles, and multi-resource write workflows are not
   implemented. Attachments remain deferred.
 
-Pending posts are visible to moderators; the example has no owner-only pending-post page. A create redirect may therefore lead to a public 404 until approval. Save anonymous edit secrets at handover.
+Signed-in owners can read and edit their pending threads and replies on the usual
+record URLs, including their own replies beneath hidden threads. Other readers
+still receive a 404 until publication.
+
+- Edit secrets grant updates/deletes, not read access. Anonymous authors cannot
+  view or edit pending posts through these pages until approval. Save the secret
+  at handover. A host-authorized secret read/unlock flow remains deferred.
+- Moderation gates initial publication only. Owner and edit-secret changes to
+  approved content become public immediately. Keeping approved content visible
+  while edits await approval needs separate pending revisions and host-enforced,
+  atomic approval of the exact reviewed revision; this remains deferred.
+- Choice-enum `initial` syntax in the macro remains deferred; the host already
+  validates choice initial values.
+- A readable operator approval summary listing which update actions can write
+  each initial field remains deferred.
