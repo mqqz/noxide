@@ -57,6 +57,7 @@ fn declarations() -> Manifest {
         }
     }
     m.operations.push(Operation {
+        list: None,
         id: 4,
         resource: 2,
         kind: OperationKind::Read,
@@ -92,7 +93,8 @@ async fn seed(db: &Database, m: &Manifest) {
     tx.bind_schema(m).await.unwrap();
     let parent = tx.storage_resource(m, 2).await.unwrap();
     for id in [10i64, 20] {
-        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES($1,$2,NULL,'',$3,'parent',1)", &[parent.into(),id.into(),r#"{"published":"true","locked":"false"}"#.into()]).await.unwrap();
+        tx.allocate_creation().await.unwrap();
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,NULL,'',$3,'parent',1,(SELECT value FROM nx_creation_counter WHERE singleton=1))", &[parent.into(),id.into(),r#"{"published":"true","locked":"false"}"#.into()]).await.unwrap();
     }
     let child = tx.storage_resource(m, 1).await.unwrap();
     for id in 1i64..=12 {
@@ -104,7 +106,8 @@ async fn seed(db: &Database, m: &Manifest) {
                 if id % 2 == 0 { "10" } else { "20" }.into(),
             ),
         ]);
-        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version) VALUES($1,$2,NULL,'',$3,'child',1,1)", &[child.into(),id.into(),serde_json::to_string(&fields).unwrap().into()]).await.unwrap();
+        tx.allocate_creation().await.unwrap();
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version,created_seq) VALUES($1,$2,NULL,'',$3,'child',1,1,(SELECT value FROM nx_creation_counter WHERE singleton=1))", &[child.into(),id.into(),serde_json::to_string(&fields).unwrap().into()]).await.unwrap();
     }
     tx.commit().await.unwrap();
 }
@@ -188,6 +191,7 @@ async fn mutation_case(db: Database) {
     db.initialize().await.unwrap();
     let mut m = declarations();
     m.operations.push(Operation {
+        list: None,
         id: 5,
         resource: 1,
         kind: OperationKind::Update,
@@ -381,11 +385,12 @@ async fn parents_case(db: Database, sqlite: bool) {
         .await
         .unwrap();
     let storage = tx.storage_resource(&m, 1).await.unwrap();
-    tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES($1,$2,NULL,'',$3,'maximum-id',1)", &[storage.into(), i64::MAX.into(), r#"{"body":"maximum ID","published":"true","thread":"20"}"#.into()]).await.unwrap();
+    tx.allocate_creation().await.unwrap();
+    tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,NULL,'',$3,'maximum-id',1,(SELECT value FROM nx_creation_counter WHERE singleton=1))", &[storage.into(), i64::MAX.into(), r#"{"body":"maximum ID","published":"true","thread":"20"}"#.into()]).await.unwrap();
     tx.commit().await.unwrap();
     for (parent, expected) in [
-        (10, vec![12, 10, 8, 6, 4, 2]),
-        (20, vec![i64::MAX as u64, 11, 9, 7, 5, 3, 1]),
+        (10, vec![2, 4, 6, 8, 10, 12]),
+        (20, vec![1, 3, 5, 7, 9, 11, i64::MAX as u64]),
     ] {
         let mut e = effects(&db, &m, 3, parent).await;
         let mut seen = vec![];
@@ -411,7 +416,7 @@ async fn parents_case(db: Database, sqlite: bool) {
             )
             .await
             .unwrap();
-        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes.len(), 3);
         e.tx.rollback().await.unwrap();
     }
     set_parent(&db, &m, false, false).await;
@@ -467,6 +472,14 @@ async fn forms_case(db: Database, _sqlite: bool) {
     let mut forged = input.clone();
     forged.insert("thread".into(), "20".into());
     assert!(app.submit(&cookie, 1, &token, &csrf, forged).await.is_err());
+    let mut forged_order = input.clone();
+    forged_order.insert("created_seq".into(), "1".into());
+    assert!(
+        app.submit(&cookie, 1, &token, &csrf, forged_order)
+            .await
+            .is_err(),
+        "guest cannot submit creation metadata"
+    );
     set_parent(&db, &m, true, true).await;
     let denied = app
         .submit(&cookie, 1, &token, &csrf, input.clone())
@@ -525,6 +538,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         tenant_scoped: false,
     };
     m.operations.push(Operation {
+        list: None,
         id: 5,
         resource: 2,
         kind: OperationKind::Delete,
@@ -637,7 +651,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
     db.schema_apply(&renamed, &migration).await.unwrap();
     let mut e = effects(&db, &renamed, 3, 10).await;
     let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
-    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [12, 10, 8]);
+    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [2, 4, 6]);
     e.tx.rollback().await.unwrap();
 }
 
@@ -648,6 +662,7 @@ async fn postgres_relationships_pagination_forms_and_migrations() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     for case in [
+        "prefix",
         "parents",
         "forms",
         "integrity",
@@ -670,6 +685,7 @@ async fn postgres_relationships_pagination_forms_and_migrations() {
         case_url.set_path(&format!("/{name}"));
         let db = Database::postgres(case_url.as_str()).unwrap();
         match case {
+            "prefix" => chronological_prefix_case(db).await,
             "parents" => parents_case(db, false).await,
             "forms" => forms_case(db, false).await,
             "integrity" => integrity_case(db, false).await,
@@ -756,7 +772,8 @@ async fn index_scope_case(db: Database, sqlite: bool) {
             ("parent_thread".into(), value),
         ]);
         manifest::validate_fields(&m.resources[2], &fields).unwrap();
-        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES($1,$2,NULL,'',$3,'unrelated',1)", &[unrelated.into(), id.into(), serde_json::to_string(&fields).unwrap().into()]).await.unwrap();
+        tx.allocate_creation().await.unwrap();
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,NULL,'',$3,'unrelated',1,(SELECT value FROM nx_creation_counter WHERE singleton=1))", &[unrelated.into(), id.into(), serde_json::to_string(&fields).unwrap().into()]).await.unwrap();
     }
     let fields = Fields::from([
         ("thread".into(), text(2)),
@@ -790,7 +807,7 @@ async fn index_scope_case(db: Database, sqlite: bool) {
     db.schema_apply(&renamed, &migration).await.unwrap();
     let mut e = effects(&db, &renamed, 3, 10).await;
     let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
-    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [12, 10, 8]);
+    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [2, 4, 6]);
     let stored =
         e.tx.fetch::<1>(
             "SELECT fields FROM nx_records WHERE resource=$1 AND id=2",
@@ -802,8 +819,58 @@ async fn index_scope_case(db: Database, sqlite: bool) {
         serde_json::from_str::<Fields>(&stored[0][0]).unwrap(),
         fields
     );
+    let storage = e.tx.storage_resource(&renamed, 1).await.unwrap();
+    let expression = e.tx.parent_expression("parent_thread").unwrap();
     if !sqlite {
-        // Generic prepared plans must still be able to use the scoped index.
+        e.tx.execute("SET LOCAL enable_seqscan=off", &[])
+            .await
+            .unwrap();
+    }
+    for (filter, index) in [
+        (
+            format!("resource={storage} AND owner='alice'"),
+            "nx_records_owner".to_owned(),
+        ),
+        (
+            format!("resource={storage} AND tenant='team'"),
+            "nx_records_tenant".to_owned(),
+        ),
+        (
+            format!("resource={storage} AND {expression}='10' AND owner='alice'"),
+            format!("nx_parent_{storage}_owner"),
+        ),
+        (
+            format!("resource={storage} AND {expression}='10' AND tenant='team'"),
+            format!("nx_parent_{storage}_tenant"),
+        ),
+    ] {
+        let query = format!(
+            "SELECT id FROM nx_records WHERE {filter} AND created_seq>0 ORDER BY nx_records.created_seq LIMIT 3"
+        );
+        let plan = e.tx.explain(&query).await.unwrap();
+        // PostgreSQL may prefer the equally ordered global owner/tenant
+        // index on tiny fixtures. Require an ordered indexed seek, while
+        // allowing that legitimate cost-based choice.
+        let alternative = if index.ends_with("_owner") {
+            "nx_records_owner"
+        } else {
+            "nx_records_tenant"
+        };
+        assert!(
+            plan.iter()
+                .any(|line| line.contains(&index) || line.contains(alternative)),
+            "{index}: {plan:?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|line| line.contains("Sort") || line.contains("TEMP B-TREE")),
+            "{plan:?}"
+        );
+    }
+    if !sqlite {
+        // Generic prepared plans retain an ordered seek. Cost estimates on
+        // tiny fixtures may prefer the global creation index.
         let storage = e.tx.storage_resource(&renamed, 1).await.unwrap();
         let expression = e.tx.parent_expression("parent_thread").unwrap();
         e.tx.execute("SET LOCAL plan_cache_mode=force_generic_plan", &[])
@@ -812,17 +879,22 @@ async fn index_scope_case(db: Database, sqlite: bool) {
         e.tx.execute("SET LOCAL enable_seqscan=off", &[])
             .await
             .unwrap();
-        e.tx.execute(&format!("PREPARE parent_index_scope(bigint,text,bigint) AS SELECT id FROM nx_records WHERE resource=$1 AND resource={storage} AND {expression}=$2 AND id<$3 ORDER BY id DESC LIMIT 3"), &[]).await.unwrap();
+        e.tx.execute(&format!("PREPARE parent_index_scope(bigint,text,bigint) AS SELECT id FROM nx_records WHERE resource=$1 AND resource={storage} AND {expression}=$2 AND created_seq>$3 ORDER BY nx_records.created_seq ASC LIMIT 3"), &[]).await.unwrap();
         let plan =
             e.tx.fetch::<1>(
-                &format!("EXPLAIN EXECUTE parent_index_scope({storage},'10',9223372036854775807)"),
+                &format!("EXPLAIN EXECUTE parent_index_scope({storage},'10',0)"),
                 &[],
             )
             .await
             .unwrap();
         assert!(
             plan.iter()
-                .any(|line| line[0].contains(&format!("nx_parent_{storage}"))),
+                .any(|line| line[0].contains(&format!("nx_parent_{storage}"))
+                    || line[0].contains("nx_records_created")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|line| line[0].contains("Sort")),
             "{plan:?}"
         );
         e.tx.execute("DEALLOCATE parent_index_scope", &[])
@@ -830,4 +902,374 @@ async fn index_scope_case(db: Database, sqlite: bool) {
             .unwrap();
     }
     e.tx.rollback().await.unwrap();
+}
+
+async fn chronological_prefix_case(db: Database) {
+    db.initialize().await.unwrap();
+    let mut m = declarations();
+    m.operations[0].list = Some(ListSettings {
+        order: ListOrder::CreatedAsc,
+        page_size: 20,
+    });
+    m.resources[0].fields.push(TextField {
+        initial: None,
+        name: "extra".into(),
+        label: "Extra".into(),
+        kind: FieldKind::Text,
+        optional: false,
+        max_bytes: 4096,
+    });
+    m.operations[0]
+        .fields
+        .as_mut()
+        .unwrap()
+        .push("extra".into());
+    seed(&db, &m).await;
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    let storage = tx.storage_resource(&m, 1).await.unwrap();
+    for id in 1i64..=12 {
+        let fields = Fields::from([
+            ("body".into(), "\\".repeat(4096)),
+            ("extra".into(), "\"".repeat(4096)),
+            ("published".into(), "true".into()),
+            (
+                "thread".into(),
+                if id % 2 == 0 { "10" } else { "20" }.into(),
+            ),
+        ]);
+        tx.execute(
+            "UPDATE nx_records SET fields=$1 WHERE resource=$2 AND id=$3",
+            &[
+                serde_json::to_string(&fields).unwrap().into(),
+                storage.into(),
+                id.into(),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    let mut e = effects(&db, &m, 3, 10).await;
+    let bytes = e.invoke(1, 0).await.unwrap();
+    assert!(bytes.len() <= MAX_RESULT_BYTES);
+    let rows: Vec<Record> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [2, 4, 6]);
+    e.cursor = e.more.take();
+    assert!(e.cursor.is_some());
+    let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [8, 10, 12]);
+    assert!(e.more.is_none());
+    e.tx.rollback().await.unwrap();
+    // Visibility changes behind the cursor do not turn live continuation into a snapshot.
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    tx.execute(
+        "UPDATE nx_records SET fields=replace(fields,'true','false') WHERE resource=$1 AND id=2",
+        &[storage.into()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let mut e = effects(&db, &m, 3, 10).await;
+    let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [4, 6, 8]);
+    let after = e.more;
+    e.tx.rollback().await.unwrap();
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    tx.execute(
+        "UPDATE nx_records SET fields=replace(fields,'false','true') WHERE resource=$1 AND id=2",
+        &[storage.into()],
+    )
+    .await
+    .unwrap();
+    let sequence = tx.allocate_creation().await.unwrap();
+    let fields = Fields::from([
+        ("body".into(), "later reply".into()),
+        ("extra".into(), "small".into()),
+        ("published".into(), "true".into()),
+        ("thread".into(), "10".into()),
+    ]);
+    tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,99,NULL,'',$2,'later',1,$3)",&[storage.into(),serde_json::to_string(&fields).unwrap().into(),sequence.into()]).await.unwrap();
+    tx.commit().await.unwrap();
+    let mut e = effects(&db, &m, 3, 10).await;
+    e.cursor = after;
+    let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [10, 12, 99]);
+    e.tx.rollback().await.unwrap();
+}
+#[tokio::test]
+async fn sqlite_chronological_byte_prefix_and_late_visibility() {
+    let tmp = tempfile::tempdir().unwrap();
+    chronological_prefix_case(Database::sqlite(tmp.path().join("prefix.db"))).await;
+}
+
+#[tokio::test]
+async fn opaque_cursors_bind_parent_contract_deployment_and_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = Database::sqlite(tmp.path().join("cursor.db"));
+    db.initialize().await.unwrap();
+    let m = declarations();
+    let keys = HostKeys::generate().unwrap();
+    let app = Application::new(
+        &fixture::component(Some("list")),
+        &serde_json::to_vec(&m).unwrap(),
+        manifest::digest(&m).unwrap(),
+        db.clone(),
+        serde_json::from_slice(&serde_json::to_vec(&keys).unwrap()).unwrap(),
+        Limits::default(),
+    )
+    .unwrap();
+    app.activate().await.unwrap();
+    seed(&db, &m).await;
+    let page = app.view_page(None, 3, Some(10), None).await.unwrap();
+    let html = String::from_utf8(page.body).unwrap();
+    let cursor = html
+        .split_once("?cursor=")
+        .expect("next link")
+        .1
+        .split('"')
+        .next()
+        .unwrap();
+    assert!(app.view_page(None, 3, Some(10), Some(cursor)).await.is_ok());
+    assert!(matches!(
+        app.view_page(None, 3, Some(20), Some(cursor)).await,
+        Err(crate::RequestError::InvalidCursor)
+    ));
+    assert!(matches!(
+        app.view_page(None, 3, Some(10), Some("42")).await,
+        Err(crate::RequestError::InvalidCursor)
+    ));
+    set_parent(&db, &m, true, true).await;
+    assert!(
+        app.view_page(None, 3, Some(10), Some(cursor)).await.is_ok(),
+        "parent revision is not cursor identity"
+    );
+    db.create_account("alice", "cursor test password", "")
+        .await
+        .unwrap();
+    let challenge = app.login_challenge().await.unwrap();
+    let cookie = app
+        .login(
+            &challenge.cookie,
+            &challenge.csrf,
+            "alice",
+            "cursor test password",
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        app.view_page(Some(&cookie), 3, Some(10), Some(cursor))
+            .await,
+        Err(crate::RequestError::InvalidCursor)
+    ));
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(3))
+        .await
+        .unwrap();
+    let parent = tx.storage_resource(&m, 2).await.unwrap();
+    tx.execute(
+        "UPDATE nx_records SET incarnation='replacement' WHERE resource=$1 AND id=10",
+        &[parent.into()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert!(matches!(
+        app.view_page(None, 3, Some(10), Some(cursor)).await,
+        Err(crate::RequestError::InvalidCursor)
+    ));
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(3))
+        .await
+        .unwrap();
+    tx.execute(
+        "UPDATE nx_records SET incarnation='parent' WHERE resource=$1 AND id=10",
+        &[parent.into()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let mut changed = m.clone();
+    changed.operations[0].list = Some(ListSettings {
+        order: ListOrder::CreatedAsc,
+        page_size: 4,
+    });
+    let redeployed = Application::new(
+        &fixture::component(Some("list")),
+        &serde_json::to_vec(&changed).unwrap(),
+        manifest::digest(&changed).unwrap(),
+        db.clone(),
+        serde_json::from_slice(&serde_json::to_vec(&keys).unwrap()).unwrap(),
+        Limits::default(),
+    )
+    .unwrap();
+    redeployed.activate().await.unwrap();
+    assert!(matches!(
+        redeployed.view_page(None, 3, Some(10), Some(cursor)).await,
+        Err(crate::RequestError::InvalidCursor)
+    ));
+    // Same contract, different component identity also invalidates continuation.
+    let mut component = fixture::component(Some("list"));
+    // A valid custom section changes identity without changing guest behavior.
+    component.extend_from_slice(&[0, 2, 1, b'x']);
+    let redeployed = Application::new(
+        &component,
+        &serde_json::to_vec(&m).unwrap(),
+        manifest::digest(&m).unwrap(),
+        db.clone(),
+        keys,
+        Limits::default(),
+    )
+    .unwrap();
+    redeployed.activate().await.unwrap();
+    assert!(matches!(
+        redeployed.view_page(None, 3, Some(10), Some(cursor)).await,
+        Err(crate::RequestError::InvalidCursor)
+    ));
+}
+
+async fn full_creation_benchmark(db: Database) {
+    db.initialize().await.unwrap();
+    let mut m = declarations();
+    m.operations
+        .iter_mut()
+        .find(|op| op.kind == OperationKind::Create)
+        .unwrap()
+        .policy
+        .any = vec![vec![Predicate::Owner]];
+    let app = Arc::new(
+        Application::new(
+            &fixture::component(Some("list")),
+            &serde_json::to_vec(&m).unwrap(),
+            manifest::digest(&m).unwrap(),
+            db.clone(),
+            HostKeys::generate().unwrap(),
+            Limits::default(),
+        )
+        .unwrap(),
+    );
+    app.activate().await.unwrap();
+    seed(&db, &m).await;
+    let mut sessions = Vec::new();
+    for worker in 0..16 {
+        let user = format!("worker{worker}");
+        db.create_account(&user, "benchmark password", "")
+            .await
+            .unwrap();
+        let challenge = app.login_challenge().await.unwrap();
+        sessions.push(
+            app.login(
+                &challenge.cookie,
+                &challenge.csrf,
+                &user,
+                "benchmark password",
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    for concurrency in [1usize, 4, 16] {
+        crate::database::CREATION_HOLD_MAX.store(0, std::sync::atomic::Ordering::Relaxed);
+        let started = Instant::now();
+        let mut tasks = tokio::task::JoinSet::new();
+        for (worker, session) in sessions.iter().enumerate().take(concurrency) {
+            let app = app.clone();
+            let cookie = session.clone();
+            tasks.spawn(async move {
+                let mut samples = Vec::new();
+                let mut failures = 0;
+                for _ in 0..10 {
+                    let result = async {
+                        let page = app
+                            .view_page(
+                                Some(&cookie),
+                                3,
+                                Some(if worker % 2 == 0 { 10 } else { 20 }),
+                                None,
+                            )
+                            .await?;
+                        let html = String::from_utf8(page.body).unwrap();
+                        let token = fixture::hidden(&html, "_submission");
+                        let csrf = fixture::hidden(&html, "_csrf");
+                        let started = Instant::now();
+                        let response = app
+                            .submit(
+                                &cookie,
+                                1,
+                                &token,
+                                &csrf,
+                                Fields::from([
+                                    ("body".into(), "benchmark reply".into()),
+                                    ("published".into(), "true".into()),
+                                ]),
+                            )
+                            .await?;
+                        if response.status >= 400 {
+                            return Err(crate::RequestError::Rejected);
+                        }
+                        Ok(started.elapsed())
+                    }
+                    .await;
+                    match result {
+                        Ok(sample) => samples.push(sample),
+                        Err(_) => failures += 1,
+                    }
+                }
+                (samples, failures)
+            });
+        }
+        let mut samples = Vec::new();
+        let mut failures = 0;
+        while let Some(result) = tasks.join_next().await {
+            let (batch, failed) = result.unwrap();
+            samples.extend(batch);
+            failures += failed;
+        }
+        samples.sort();
+        let n = samples.len();
+        assert!(n > 0);
+        eprintln!(
+            "full creation concurrency={concurrency} committed={n} failures={failures} workflow_throughput={:.1}/s submit_p50={:?} submit_p95={:?} submit_p99={:?} max_postallocation_hold_us={}",
+            n as f64 / started.elapsed().as_secs_f64(),
+            samples[n / 2],
+            samples[(n - 1) * 95 / 100],
+            samples[(n - 1) * 99 / 100],
+            crate::database::CREATION_HOLD_MAX.load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+}
+#[tokio::test]
+#[ignore = "manual full-path creation contention benchmark"]
+async fn sqlite_full_creation_benchmark() {
+    let tmp = tempfile::tempdir().unwrap();
+    full_creation_benchmark(Database::sqlite(tmp.path().join("full-bench.db"))).await;
+}
+#[tokio::test]
+#[ignore = "manual full-path creation contention benchmark; requires NOXIDE_TEST_POSTGRES"]
+async fn postgres_full_creation_benchmark() {
+    use sqlx::Connection;
+    let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+    let name = format!(
+        "nx_full_bench_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let mut url = url::Url::parse(&url).unwrap();
+    url.set_path(&name);
+    full_creation_benchmark(Database::postgres(url.as_str()).unwrap()).await;
 }

@@ -65,6 +65,7 @@ fn declarations() -> Manifest {
         ),
     ] {
         m.operations.push(Operation {
+            list: None,
             id,
             resource: 1,
             kind: OperationKind::List,
@@ -183,6 +184,7 @@ fn manifest_private_operations_forbid_public_metadata() {
 fn manifest_action_inspection_cannot_use_public_read() {
     let mut m = declarations();
     m.operations.push(Operation {
+        list: None,
         id: 8,
         resource: 1,
         kind: OperationKind::Update,
@@ -318,7 +320,8 @@ async fn public_repository(db: Database, choice: bool) {
             ),
             ("secret".into(), "hidden".into()),
         ]);
-        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES(1,$1,'alice','',$2,'public-fixture',1)", &[id.into(), serde_json::to_string(&fields).unwrap().into()]).await.unwrap();
+        tx.allocate_creation().await.unwrap();
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,$1,'alice','',$2,'public-fixture',1,(SELECT value FROM nx_creation_counter WHERE singleton=1))", &[id.into(), serde_json::to_string(&fields).unwrap().into()]).await.unwrap();
     }
     tx.commit().await.unwrap();
     for principal in [
@@ -439,7 +442,7 @@ async fn public_repository(db: Database, choice: bool) {
         ("secret".into(), "invalid\u{1}".into()),
     ]);
     tx.execute(
-        "UPDATE nx_records SET fields=$1 WHERE id=19",
+        "UPDATE nx_records SET fields=$1 WHERE id=1",
         &[serde_json::to_string(&invalid).unwrap().into()],
     )
     .await
@@ -455,8 +458,8 @@ async fn public_repository(db: Database, choice: bool) {
         "validate hidden stored fields before projecting"
     );
     e.request.kind = RequestKind::Route(2);
-    e.request.target = Some(19);
-    assert!(e.invoke(2, 19).await.is_err());
+    e.request.target = Some(1);
+    assert!(e.invoke(2, 1).await.is_err());
     e.tx.rollback().await.unwrap();
 }
 
@@ -838,6 +841,7 @@ async fn sqlite_initial_create_commit_is_host_owned() {
             tx.commit().await.unwrap();
             let mut updates = m.clone();
             updates.operations.push(Operation {
+                list: None,
                 id: 4,
                 resource: 1,
                 kind: OperationKind::Update,

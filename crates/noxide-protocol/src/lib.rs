@@ -217,6 +217,8 @@ pub enum OperationKind {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list: Option<ListSettings>,
     pub id: u32,
     pub resource: u32,
     pub kind: OperationKind,
@@ -225,6 +227,18 @@ pub struct Operation {
     pub visibility: Option<Visibility>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ListSettings {
+    pub order: ListOrder,
+    pub page_size: u8,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ListOrder {
+    CreatedAsc,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -63,9 +63,13 @@ inside the reply's write transaction. See the [relationship API](../../docs/appl
 
 ## Remaining development findings
 
-- Pagination uses three records per page and descending random IDs. It is stable
-  for an unchanged dataset, but is not chronological. Creation-order sorting is
-  the next practical forum requirement.
+- Public reply lists request up to six records in host-controlled creation order.
+  This reserves Document IR space for the parent, forms, and markup even when
+  maximum-length text requires JSON escaping. Moderator lists request up to 20
+  replies and render links only. Serialized byte limits may shorten a page.
+  Opaque cursors expire after 15 minutes; restart pagination after expiry or
+  redeployment. Traversal is live:
+  publishing an older reply behind the cursor requires restarting to see it.
 - Multiple create/update actions require explicit `#[action]` declarations;
   `crud!` permits one declaration per operation kind.
 - Text is bounded to 4096 bytes per field and rendered as escaped plain text.

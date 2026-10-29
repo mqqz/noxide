@@ -326,6 +326,8 @@ mod tests {
 }
 
 struct OperationDeclaration {
+    order: Option<Ident>,
+    page_size: Option<u8>,
     kind: Ident,
     resource: Type,
     policy: Vec<Vec<PolicyAtom>>,
@@ -347,6 +349,8 @@ impl Parse for OperationDeclaration {
             return Err(resource.error("expected one resource type"));
         }
         let mut result = Self {
+            order: None,
+            page_size: None,
             kind,
             resource: resource_type,
             policy: Vec::new(),
@@ -371,6 +375,26 @@ impl Parse for OperationDeclaration {
                 ));
             }
             match option.to_string().as_str() {
+                "order" => {
+                    input.parse::<Token![=]>()?;
+                    let order: Ident = input.parse()?;
+                    if order != "created_asc" || result.kind != "list" {
+                        return Err(syn::Error::new(
+                            order.span(),
+                            "only list order=created_asc is supported",
+                        ));
+                    }
+                    result.order = Some(order);
+                }
+                "page_size" => {
+                    input.parse::<Token![=]>()?;
+                    let n: LitInt = input.parse()?;
+                    let size: u8 = n.base10_parse()?;
+                    if result.kind != "list" || !(1..=20).contains(&size) {
+                        return Err(syn::Error::new(n.span(), "list page_size must be 1..=20"));
+                    }
+                    result.page_size = Some(size);
+                }
                 "allow" => {
                     input.parse::<Token![=]>()?;
                     result.policy = policy(input)?;
@@ -1103,7 +1127,8 @@ mod public_tests {
             "list(Article), allow = any(owner, all(public))",
         ] {
             assert!(
-                syn::parse_str::<OperationDeclaration>(declaration).is_err(),
+                syn::parse_str::<OperationDeclaration>(&format!("{declaration}, allow=owner"))
+                    .is_err(),
                 "{declaration}"
             );
         }
@@ -1176,6 +1201,37 @@ mod anonymous_action_tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod pagination_tests {
+    use super::*;
+    #[test]
+    fn list_settings_are_narrow_and_bounded() {
+        for declaration in [
+            "list(Reply), order=created_asc, page_size=20",
+            "list(Reply)",
+        ] {
+            assert!(
+                syn::parse_str::<OperationDeclaration>(&format!("{declaration}, allow=owner"))
+                    .is_ok()
+            );
+        }
+        for declaration in [
+            "list(Reply),order=updated_desc",
+            "list(Reply),page_size=0",
+            "list(Reply),page_size=21",
+            "read(Reply),page_size=3",
+            "create(Reply),order=created_asc",
+            "list(Reply),page_size=3,page_size=4",
+        ] {
+            assert!(
+                syn::parse_str::<OperationDeclaration>(&format!("{declaration}, allow=owner"))
+                    .is_err(),
+                "{declaration}"
+            );
+        }
     }
 }
 

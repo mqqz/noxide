@@ -29,6 +29,7 @@ use tokio::time::{Instant, timeout_at};
 pub enum RequestError {
     Authentication,
     InvalidRequest,
+    InvalidCursor,
     Rejected,
     Busy,
     OutcomeUnknown,
@@ -49,6 +50,8 @@ impl std::fmt::Display for RequestError {
             "{}",
             match self {
                 Self::Authentication => "Sign in to continue.",
+                Self::InvalidCursor =>
+                    "This pagination link is invalid or has expired. Restart pagination.",
                 Self::InvalidRequest => "This request is invalid or has expired.",
                 Self::Rejected => "The request could not be completed.",
                 Self::Busy => "The service is busy. Retry this request.",
@@ -1082,7 +1085,7 @@ impl Application {
         cookie: Option<&str>,
         route: u32,
         target: Option<u64>,
-        cursor: Option<u64>,
+        cursor: Option<&str>,
     ) -> std::result::Result<Rendered, RequestError> {
         self.view_page_anonymous(cookie, None, route, target, cursor)
             .await
@@ -1093,7 +1096,7 @@ impl Application {
         anonymous_cookie: Option<&str>,
         route: u32,
         target: Option<u64>,
-        cursor: Option<u64>,
+        cursor: Option<&str>,
     ) -> std::result::Result<Rendered, RequestError> {
         let _request = self
             .admission_limits
@@ -1107,8 +1110,8 @@ impl Application {
             .acquire()
             .await
             .map_err(|_| RequestError::Busy)?;
-        if cursor.is_some_and(|c| c == 0 || c > i64::MAX as u64) {
-            return Err(RequestError::InvalidRequest);
+        if cursor.is_some_and(|c| c.len() > 4096) {
+            return Err(RequestError::InvalidCursor);
         }
         let reference = RouteRef { route, target };
         render::resolve(&self.manifest, &reference).map_err(|_| RequestError::InvalidRequest)?;
@@ -1136,6 +1139,20 @@ impl Application {
                 Some((token, principal)) => (Some(token), principal),
                 None => (None, auth::Principal::Anonymous),
             };
+            let list = manifest::route(&self.manifest,route).map_err(|_| RequestError::InvalidRequest)?.operations.iter().filter_map(|id| manifest::operation(&self.manifest,*id).ok()).find(|op| op.kind==OperationKind::List);
+            let parent_incarnation = if let (Some(target),Some(op)) = (target,list) {
+                if let Some(parent)=manifest::parent_resource(&self.manifest,op.resource).map_err(|_| RequestError::Rejected)? {
+                    crate::repository::load(&mut tx,&self.manifest,parent.id,target).await.map_err(RequestError::database)?.map(|r|r.incarnation)
+                } else {None}
+            } else {None};
+            let subject=principal.user().map(|u|u.id.as_str()).unwrap_or("");
+            let scope=serde_json::to_string(&(&self.contract,&self.deployment,route,target,parent_incarnation,list,subject)).map_err(|_|RequestError::Rejected)?;
+            // A fixed-size digest binds every approved setting without exposing it in URLs.
+            let scope=URL_SAFE_NO_PAD.encode(Sha256::digest(scope.as_bytes()));
+            let cursor = cursor.map(|encoded| {
+                let token=self.keys.verify_cursor(encoded,now).map_err(|_|RequestError::InvalidCursor)?;
+                match token.kind { TokenKind::Cursor { scope: bound,after } if list.is_some() && bound==scope && after>0 && after<=i64::MAX as u64 => Ok(after), _=>Err(RequestError::InvalidCursor) }
+            }).transpose()?;
             let needs_anonymous = manifest::route(&self.manifest, route).map_err(|_| RequestError::InvalidRequest)?.forms.iter().any(|id| manifest::action(&self.manifest,*id).ok().and_then(|a| manifest::operation(&self.manifest,a.operation).ok()).is_some_and(manifest::anonymous_action));
             let (anonymous, new_cookie) = if needs_anonymous {
                 if let Some(token) = anonymous_cookie.and_then(|c| self.keys.anonymous(c, now).ok()) { (Some(token), None) }
@@ -1190,12 +1207,10 @@ impl Application {
             ) {
                 return Err(RequestError::Rejected);
             }
-            let next_page = effects.more.map(|id| {
-                format!(
-                    "{}?before={id}",
-                    crate::routing::resolve(&self.manifest, &reference).expect("validated route")
-                )
-            });
+            let next_page = effects.more.map(|after| {
+                let (_,encoded)=self.keys.issue(TokenKind::Cursor {scope:scope.clone(),after},"",now,900).map_err(|_|RequestError::Rejected)?;
+                Ok(format!("{}?cursor={encoded}",crate::routing::resolve(&self.manifest,&reference).expect("validated route")))
+            }).transpose()?;
             let mut rendered = render::render(
                 &response,
                 &RenderContext {

@@ -90,7 +90,7 @@ async fn conformance(db: Database, mut inspect: InspectDb) {
     inspect
         .execute("INSERT INTO nx_roles(principal,name,tenant) VALUES('alice','writer','')")
         .await;
-    inspect.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES(1,42,'alice','one','{\"body\":\"original\",\"tag\":\"private tag\"}','first-incarnation',1),(1,43,'alice','one','{\"body\":\"other\",\"tag\":\"other tag\"}','other-incarnation',1)").await;
+    inspect.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,42,'alice','one','{\"body\":\"original\",\"tag\":\"private tag\"}','first-incarnation',1,1),(1,43,'alice','one','{\"body\":\"other\",\"tag\":\"other tag\"}','other-incarnation',1,2)").await;
     let alice = login(&app, "alice").await;
     let bob = login(&app, "bob").await;
     let page = String::from_utf8(app.view(&alice, 2, Some(42)).await.unwrap().body).unwrap();
@@ -338,7 +338,7 @@ async fn conformance(db: Database, mut inspect: InspectDb) {
             .status,
         404
     );
-    inspect.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES(1,42,'alice','one','{\"body\":\"replacement secret\",\"tag\":\"replacement\"}','second-incarnation',3)").await;
+    inspect.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,42,'alice','one','{\"body\":\"replacement secret\",\"tag\":\"replacement\"}','second-incarnation',3,3)").await;
     let result = app
         .submit(&alice, 3, &other_delete, &csrf, Fields::new())
         .await
