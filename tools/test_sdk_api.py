@@ -22,8 +22,8 @@ from build_vm import (ROOT, DEFAULT_VM_SECONDS, MAX_OUTPUT, MAX_CONTRACT, Image,
 
 EQUIVALENT_APPS = ("private-notes", "task-board", "public-articles", "policy-board")
 ADMISSION_FAILURES = {
-    "notes-added-field": b"creation requires every field",
-    "notes-renamed-field": b"creation requires every field",
+    "notes-added-field": b"creation requires every writable field",
+    "notes-renamed-field": b"creation requires every writable field",
     "policy-board-cross-resource-form": b"mutation form requires its record route",
     "policy-board-public-forms": b"public routes cannot have forms",
 }
@@ -221,7 +221,18 @@ def convenience_fixtures():
     passing += variants
     comparisons += [name for name, _ in variants]
     public = dict(passing)["public-articles-simple"]
+    initial = notes.replace("        body: String,", '        body: String,\n        #[field(initial = true)]\n        published: bool,')
+    initial_input = initial.rsplit("\n}", 1)[0] + """
+    fn forbidden_input(s: Submission<CreateNote>) { let _ = s.input().published; }
+}
+"""
+    initial_form = initial.rsplit("\n}", 1)[0] + """
+    fn forbidden_form(f: FormFields<CreateNote>) { let _ = f.published; }
+}
+"""
     failures = [
+        ("initial-create-input", initial_input, "no field"),
+        ("initial-create-form", initial_form, "no field"),
         ("unscoped-shorthand", notes.replace('key = "notes", owner', 'key = "notes"'), "owner resource"),
         ("external-app", '#[noxide::app] mod notes;', "app requires an inline module"),
         ("query-collision", notes.replace('    crud!', '    struct __Noxide_list_Note;\n    crud!'), "generated query name collision"),

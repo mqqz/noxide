@@ -897,6 +897,7 @@ mod application_schema_tests {
             max_bytes: 5,
             kind: FieldKind::Boolean,
             optional: false,
+            initial: None,
         });
         manifest.actions[0].fields.push("completed".into());
         manifest

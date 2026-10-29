@@ -333,7 +333,7 @@ and select **Save these changes** to submit against the current revision. The
 **Delete record** button removes the note with one POST; there is no confirmation
 round trip or trash view.
 
-Declarations use protocol version 3. A record route declares its generated resource ID;
+Declarations use protocol version 4. A record route declares its generated resource ID;
 list routes use `null`. Every action declares a `fields` list: all resource fields
 for creation, a nonempty subset for updates, and an empty list for deletion.
 The host rejects extra fields and missing required values, supplies false/None

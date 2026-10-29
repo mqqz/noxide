@@ -802,6 +802,7 @@ mod tests {
         m.resources[0].fields.push(TextField {
             kind: noxide_protocol::FieldKind::Text,
             optional: false,
+            initial: None,
             name: "extra".into(),
             label: "Extra".into(),
             max_bytes: 4096,

@@ -50,7 +50,7 @@ output directory.
   and links to individual reply moderation.
 - `/reply_review/{reply}`: moderator hide/restore for a reply.
 
-Select Published when creating a thread or reply. Save the anonymous edit secret
+New threads and replies start unpublished and await moderator approval. Save the anonymous edit secret
 on the host's handover page. Authors edit content only; moderator visibility and
 lock state cannot be changed by owner or edit-secret updates. Hiding a thread
 removes its replies from public access, including direct reply URLs. Moderators
@@ -63,8 +63,6 @@ inside the reply's write transaction. See the [relationship API](../../docs/appl
 
 ## Remaining development findings
 
-- Create-time defaults would remove Published and Locked from author input.
-  Creation currently requires all ordinary stored fields.
 - Reply lists request up to 20 records in host-controlled creation order.
   Serialized byte limits may shorten a page. Opaque cursors expire after 15
   minutes; restart pagination after expiry or redeployment. Traversal is live:
@@ -75,3 +73,5 @@ inside the reply's write transaction. See the [relationship API](../../docs/appl
 - Moderator role administration currently requires operator database access.
 - Search, public author profiles, and multi-resource write workflows are not
   implemented. Attachments remain deferred.
+
+Pending posts are visible to moderators; the example has no owner-only pending-post page. A create redirect may therefore lead to a public 404 until approval. Save anonymous edit secrets at handover.
