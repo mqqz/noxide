@@ -649,3 +649,6 @@ the original form's recovery information and replay that submission to recover
 the same receipt and secret; replay does not create another record or generate
 a replacement secret. Each replay evaluates parent visibility again, including
 after the child has been deleted.
+
+The [architecture layers](architecture/layers.md) describe explicit SDK declarations,
+optional convenience lowering, and independent host enforcement.
