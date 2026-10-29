@@ -11,6 +11,122 @@ values, checkboxes, and custom form layouts.
 Use `noxide::prelude::*` for the common declarations and rendering types, or
 import individual names as the examples do.
 
+## Start with one application module
+
+Create a project with the trusted CLI:
+
+```sh
+noxide new my-notes
+```
+
+The destination must be new and its parent must exist. The command writes a
+standalone notes application and a README with isolated check/build commands.
+It does not run Cargo, fetch dependencies, or approve deployment. Existing files
+are never overwritten. Package names use lowercase ASCII letters, digits,
+underscores, or hyphens and start with a letter.
+
+Use an inline module at crate root. The macro registers immediate pages, explicit
+actions, CRUD declarations, and the resources they use. Unused resource types add
+no schema or operations. It emits the existing application entry point and
+contract collector.
+
+```rust
+#[noxide::app]
+mod notes {
+    use noxide::prelude::*;
+
+    #[derive(Resource)]
+    #[resource(key = "notes", owner)]
+    struct Note {
+        #[id]
+        id: Id<Self>,
+        #[field(max_bytes = 4096)]
+        body: String,
+    }
+
+    #[page("/")]
+    fn index(mut notes: List<Note>, create: Form<CreateNote>) -> Page {
+        Page::new("Notes", html! {
+            main {
+                h1 { "My notes" }
+                @for note in notes.fetch() { p { (&note.body) } }
+                (create)
+            }
+        })
+    }
+
+    #[page("/notes/{note}")]
+    fn show(note: Id<Note>, mut read: Read<Note>) -> PageResult {
+        let note = read.get(note).ok_or(NotFound)?;
+        Ok(Page::new("Note", html! { main { p { (&note.body) } } }))
+    }
+
+    crud! { Note {
+        create CreateNote { fields(body), redirect(show) }
+    } }
+}
+```
+
+`List<Resource>` and `Read<Resource>` are app-macro shorthand for distinct typed
+queries. They expose the existing `fetch()` and `get(id)` methods. They require
+a directly named resource in this module with an explicit `owner` annotation.
+The host binds owner policy to the authenticated user. `owner` is a default for
+shorthand, so explicit queries may still declare other approved policies.
+An unmarked resource receives no inferred access policy.
+
+CRUD entries name each enabled mutation. Create and update require separate
+`fields(...)` lists, and every entry requires `redirect(page_name)`. Omitted
+operations generate nothing. Existing host rules require create to name every
+stored field and create/update redirects to target a record page. Adding a field
+therefore requires updating create explicitly before admission succeeds. An optional `allow = ...` forwards to the existing
+policy parser; otherwise the resource must be marked `owner`. For example:
+
+```rust
+crud! { Note {
+    create CreateNote { fields(body), redirect(show_note), handler(create_note) }
+    update EditNote { fields(body), redirect(show_note), handler(edit_note), layout(note_editor) }
+    delete DeleteNote { redirect(index) }
+} }
+```
+
+Hooks use the existing `Submission<Action>` and `FormFields<Action>` signatures.
+For an explicit `#[action(...)] struct EditNote;`, associate hooks with:
+
+```rust
+hooks! {
+    EditNote { handler(edit_note), layout(note_editor) }
+}
+```
+
+Each hook must name an immediate, unconditional function in the app module; that
+function may call helpers imported from elsewhere. Do not repeat a hook
+association already supplied in a CRUD entry. Merely registering an action does
+not bind it to every page: the page must receive `Form<Action>` and the host
+continues checking route, target, fields, CSRF, and submission scope.
+
+Use `Query<ExplicitQuery>` for public projections, tenant/role policies, imported
+resources, and other advanced cases. The [public-articles example](../examples/public-articles/src/lib.rs)
+shows anonymous list and record pages that cannot read unpublished rows or private
+fields. The resource's owner default does not override those explicit policies.
+
+Resource keys remain explicit. Field keys default to their Rust names and labels
+to human-readable names; explicit `key` and `label` options override these defaults.
+Text still requires `max_bytes`. Renaming an inferred field key is a schema
+change: review the contract diff and use the existing explicit schema workflow.
+Use explicit field keys when Rust names should be independently refactorable.
+
+The macro accepts inline modules only and does not discover nested modules,
+imported declarations, or declarations produced by other macros. It rejects
+conditional contract declarations and hooks. Ordinary helper code may use
+conditional compilation. Declare exactly one app module at crate root.
+Generated query names (`__Noxide_list_Note`, `__Noxide_read_Note`) are reserved
+implementation names. Adding routes or operations still requires operator
+approval; moving declarations to another Rust namespace changes operation IDs.
+
+The [lowering contract](sdk-lowering.md) describes the explicit equivalents and
+verification. The remaining sections document the explicit SDK, which remains
+available when application structure or policies need more control.
+
 ## Security requirements for application APIs
 
 The [security contract](architecture/runtime.md#security-contract) governs all
@@ -180,7 +296,7 @@ tenant, or role authority. All responses retain `Cache-Control: no-store`.
 
 ## Actions and forms
 
-Register declarations once:
+With the explicit SDK, register declarations once:
 
 ```rust
 noxide::application! {
