@@ -17,8 +17,6 @@ pub mod http;
 #[cfg(test)]
 mod failure_tests;
 #[cfg(test)]
-mod review_tests;
-#[cfg(test)]
 #[path = "../tests/support/mod.rs"]
 mod test_support;
 

@@ -1034,6 +1034,121 @@ use tokio::sync::Semaphore;
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn browser_encoded_maximum_fields_save_and_recover() {
+        use crate::{
+            Application, Database, HostKeys, manifest, runtime::Limits, test_support as fixture,
+        };
+        use noxide_protocol::{Fields, Manifest, TextField};
+        use std::sync::Arc;
+
+        async fn app(db: Database, m: Manifest) -> Arc<Application> {
+            db.initialize().await.unwrap();
+            db.create_account("alice", "review test password", "")
+                .await
+                .unwrap();
+            let app = Arc::new(
+                Application::new(
+                    &fixture::component(None),
+                    &serde_json::to_vec(&m).unwrap(),
+                    manifest::digest(&m).unwrap(),
+                    db,
+                    HostKeys::generate().unwrap(),
+                    Limits::default(),
+                )
+                .unwrap(),
+            );
+            app.activate().await.unwrap();
+            app
+        }
+
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+        let temp = tempfile::tempdir().unwrap();
+        let mut m = fixture::manifest();
+        m.resources[0].fields.push(TextField {
+            kind: noxide_protocol::FieldKind::Text,
+            optional: false,
+            name: "extra".into(),
+            label: "Extra".into(),
+            max_bytes: 4096,
+        });
+        m.actions[0].fields.push("extra".into());
+        let app = app(Database::sqlite(temp.path().join("forms.db")), m).await;
+        let challenge = app.login_challenge().await.unwrap();
+        let session = app
+            .login(
+                &challenge.cookie,
+                &challenge.csrf,
+                "alice",
+                "review test password",
+            )
+            .await
+            .unwrap();
+        let page = String::from_utf8(app.view(&session, 1, None).await.unwrap().body).unwrap();
+        let token = fixture::hidden(&page, "_submission");
+        let csrf = fixture::hidden(&page, "_csrf");
+        let router = crate::http::router(
+            app.clone(),
+            crate::http::Origin::parse("http://localhost:8080").unwrap(),
+        );
+        let request = |body| {
+            Request::builder()
+                .method("POST")
+                .uri("/actions/1")
+                .header("Host", "localhost:8080")
+                .header("Origin", "http://localhost:8080")
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .header("Cookie", format!("session={session}"))
+                .body(Body::from(body))
+                .unwrap()
+        };
+        let encoded = |tail: &str, token: &str| {
+            url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("_csrf", &csrf)
+                .append_pair("_submission", token)
+                .append_pair("body", &format!("{}{tail}", "\r\n".repeat(4095)))
+                .append_pair("extra", &format!("{}x", "\r\n".repeat(4095)))
+                .finish()
+        };
+        let body = encoded("x", &token);
+        assert!(body.len() > 49_000);
+        let saved = router.clone().oneshot(request(body)).await.unwrap();
+        assert_eq!(saved.status(), StatusCode::SEE_OTHER);
+        // An equivalent non-CRLF encoding has the same canonical receipt identity.
+        let canonical = Fields::from([
+            ("body".into(), format!("{}x", "\n".repeat(4095))),
+            ("extra".into(), format!("{}x", "\n".repeat(4095))),
+        ]);
+        let replay = app
+            .submit(&session, 1, &token, &csrf, canonical)
+            .await
+            .unwrap();
+        assert_eq!(saved.headers()["Location"], replay.location.unwrap());
+        let page = String::from_utf8(app.view(&session, 1, None).await.unwrap().body).unwrap();
+        let fresh = fixture::hidden(&page, "_submission");
+        let invalid = router
+            .clone()
+            .oneshot(request(encoded("xx", &fresh)))
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let html = String::from_utf8(
+            to_bytes(invalid.into_body(), noxide_protocol::MAX_OUTPUT_BYTES)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(html.contains("aria-invalid=\"true\"") && html.contains(&fresh));
+        assert!(html.contains(&format!(">{}xx</textarea>", "\n".repeat(4096))));
+        let oversized = router.oneshot(request("x".repeat(65_537))).await.unwrap();
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     use super::*;
     #[cfg(unix)]
     #[tokio::test]
@@ -1267,5 +1382,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "http_admission_tests.rs"]
 mod admission_tests;

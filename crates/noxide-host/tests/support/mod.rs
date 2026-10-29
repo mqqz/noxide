@@ -1,3 +1,7 @@
+// Shared fixtures are used selectively by each test target.
+#[allow(dead_code)]
+pub mod record_actions;
+
 use noxide_protocol::*;
 
 pub fn manifest() -> Manifest {
