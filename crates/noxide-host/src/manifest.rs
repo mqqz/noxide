@@ -368,9 +368,23 @@ pub fn validate(m: &Manifest) -> Result<()> {
             projected_fields(resource(m, op.resource)?, &inspect.fields)?;
         }
         validate_layout(m, a)?;
-        let r = route(m, a.redirect)?;
+        let r = route(m, a.redirect.route())?;
+        if matches!(a.redirect, Redirect::Parent { .. }) {
+            ensure!(
+                r.operations
+                    .iter()
+                    .filter(|id| operation(m, **id)
+                        .is_ok_and(|read| read.kind == OperationKind::Read
+                            && Some(read.resource) == r.resource))
+                    .count()
+                    == 1,
+                "parent destination requires one unambiguous resource read"
+            );
+        }
         ensure!(
-            if op.kind == OperationKind::Delete {
+            if matches!(a.redirect, Redirect::Parent { .. }) {
+                r.resource == parent_resource(m, op.resource)?.map(|p| p.id) && r.resource.is_some()
+            } else if op.kind == OperationKind::Delete {
                 r.resource.is_none()
             } else {
                 r.resource == Some(op.resource)

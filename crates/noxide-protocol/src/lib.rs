@@ -275,6 +275,21 @@ pub struct Route {
     pub access: Access,
 }
 
+/// Host-resolved action navigation. Ordinary page IDs retain their wire format.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum Redirect {
+    Page(u32),
+    Parent { parent: u32 },
+}
+impl Redirect {
+    pub fn route(&self) -> u32 {
+        match self {
+            Self::Page(route) | Self::Parent { parent: route } => *route,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Action {
@@ -283,7 +298,7 @@ pub struct Action {
     pub version: u32,
     pub name: String,
     pub operation: u32,
-    pub redirect: u32,
+    pub redirect: Redirect,
     /// Every listed field is required; all other application fields are rejected.
     pub fields: Vec<String>,
     pub inspect: Option<Inspection>,
