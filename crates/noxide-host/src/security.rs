@@ -33,6 +33,10 @@ pub(crate) const ANONYMOUS_TTL: i64 = 900;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum TokenKind {
+    Cursor {
+        scope: String,
+        after: u64,
+    },
     Login,
     Session,
     Anonymous,
@@ -227,11 +231,19 @@ impl HostKeys {
                 .ok_or_else(|| anyhow::anyhow!("clock overflow"))?,
             incarnation: self.incarnation.clone(),
         };
+        let cursor = matches!(token.kind, TokenKind::Cursor { .. });
         let bytes = serde_json::to_vec(&token)?;
         // Use a domain-separated encryption key. CSRF authentication continues
         // to use the existing HMAC domains; token plaintext never leaves the host.
         let key = self
-            .mac(b"noxide/token/encryption/v2", &[])
+            .mac(
+                if cursor {
+                    b"noxide/cursor/encryption/v1"
+                } else {
+                    b"noxide/token/encryption/v2"
+                },
+                &[],
+            )
             .finalize()
             .into_bytes();
         let cipher = XChaCha20Poly1305::new(&key);
@@ -258,11 +270,24 @@ impl HostKeys {
         Ok((token, encoded))
     }
     pub(crate) fn verify(&self, encoded: &str, now: i64) -> Result<Token> {
+        self.verify_domain(encoded, now, false)
+    }
+    pub(crate) fn verify_cursor(&self, encoded: &str, now: i64) -> Result<Token> {
+        self.verify_domain(encoded, now, true)
+    }
+    fn verify_domain(&self, encoded: &str, now: i64, cursor: bool) -> Result<Token> {
         ensure!(encoded.len() <= 2048, "token limit");
         let envelope = URL_SAFE_NO_PAD.decode(encoded)?;
         ensure!(envelope.len() >= 41 && envelope[0] == 2, "invalid token");
         let key = self
-            .mac(b"noxide/token/encryption/v2", &[])
+            .mac(
+                if cursor {
+                    b"noxide/cursor/encryption/v1"
+                } else {
+                    b"noxide/token/encryption/v2"
+                },
+                &[],
+            )
             .finalize()
             .into_bytes();
         let cipher = XChaCha20Poly1305::new(&key);
@@ -504,5 +529,37 @@ mod edit_tests {
         let legacy = serde_json::json!({"key":vec![8;32],"incarnation":"legacy"});
         let legacy: HostKeys = serde_json::from_value(legacy).unwrap();
         assert!(legacy.signing_edit_key().is_err());
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+    #[test]
+    fn cursor_tokens_are_opaque_expiring_and_domain_separated() {
+        let keys = HostKeys::generate().unwrap();
+        let kind = TokenKind::Cursor {
+            scope: "approved-context".into(),
+            after: 42,
+        };
+        let (_, encoded) = keys.issue(kind.clone(), "", 100, 900).unwrap();
+        assert!(!encoded.contains("approved-context"));
+        assert_eq!(keys.verify_cursor(&encoded, 100).unwrap().kind, kind);
+        assert!(keys.verify(&encoded, 100).is_err());
+        assert!(keys.verify_cursor(&encoded, 1000).is_err());
+        assert!(
+            HostKeys::generate()
+                .unwrap()
+                .verify_cursor(&encoded, 100)
+                .is_err()
+        );
+        let (_, submission) = keys.issue(TokenKind::Login, "", 100, 900).unwrap();
+        assert!(keys.verify_cursor(&submission, 100).is_err());
+        let mut bad = encoded.into_bytes();
+        bad[30] = if bad[30] == b'A' { b'B' } else { b'A' };
+        assert!(
+            keys.verify_cursor(std::str::from_utf8(&bad).unwrap(), 100)
+                .is_err()
+        );
     }
 }

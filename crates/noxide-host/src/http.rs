@@ -178,11 +178,20 @@ fn rendered(value: Rendered, secure: bool, presentation: &crate::Presentation) -
 fn redirect(location: &str) -> Response {
     (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
 }
+fn cursor_error(restart: &str) -> Response {
+    let escaped = restart
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    (StatusCode::BAD_REQUEST,[(header::CONTENT_TYPE,"text/html; charset=utf-8")],format!("<!doctype html><p>This pagination link is invalid or has expired.</p><a href=\"{escaped}\">Restart pagination</a>")).into_response()
+}
+
 fn error(error: RequestError, login_path: &str) -> Response {
     let status = match error {
         RequestError::Authentication => return redirect(login_path),
         RequestError::Busy => return busy(),
-        RequestError::InvalidRequest => StatusCode::BAD_REQUEST,
+        RequestError::InvalidRequest | RequestError::InvalidCursor => StatusCode::BAD_REQUEST,
         RequestError::Rejected => StatusCode::UNPROCESSABLE_ENTITY,
         RequestError::OutcomeUnknown => StatusCode::SERVICE_UNAVAILABLE,
     };
@@ -354,16 +363,10 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     if request.uri().path().len() > 256 {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let cursor = match request.uri().query() {
-        None => None,
-        Some(query) => match query
-            .strip_prefix("before=")
-            .and_then(|s| s.parse::<u64>().ok())
-        {
-            Some(id) if id > 0 && id <= i64::MAX as u64 => Some(id),
-            _ => return StatusCode::BAD_REQUEST.into_response(),
-        },
-    };
+    let cursor = request
+        .uri()
+        .query()
+        .map(|q| q.strip_prefix("cursor=").unwrap_or(""));
     let path = request.uri().path().to_owned();
     if path == presentation.registration_path
         && gateway.app.registration == crate::Registration::Closed
@@ -488,6 +491,20 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                     .await
                 {
                     Ok(r) => rendered(r, gateway.origin.secure, presentation),
+                    Err(RequestError::InvalidCursor) => {
+                        // Resolve the restart URL from the current route, never token data.
+                        let restart = crate::routing::resolve(
+                            &gateway.app.manifest,
+                            &noxide_protocol::RouteRef {
+                                route: route.id,
+                                target,
+                            },
+                        );
+                        match restart {
+                            Ok(url) => cursor_error(&url),
+                            Err(_) => error(RequestError::InvalidRequest, &presentation.login_path),
+                        }
+                    }
                     Err(e) => error(e, &presentation.login_path),
                 }
             }
@@ -1097,3 +1114,28 @@ mod tests {
 
 #[cfg(test)]
 mod admission_tests;
+
+#[cfg(test)]
+mod cursor_recovery_tests {
+    use super::*;
+    #[tokio::test]
+    async fn invalid_cursor_has_safe_restart_link() {
+        let response = cursor_error("/threads/10");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert!(html.contains("href=\"/threads/10\">Restart pagination</a>"));
+        assert!(!html.contains("?cursor="));
+        let response = cursor_error("/x?value=\"<&");
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert!(
+            std::str::from_utf8(&body)
+                .unwrap()
+                .contains("&quot;&lt;&amp;")
+        );
+    }
+}

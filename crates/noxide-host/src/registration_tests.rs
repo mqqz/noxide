@@ -112,7 +112,7 @@ async fn invitation_contract(db: Database) {
         tx.fetch::<1>("SELECT CAST(version AS TEXT) FROM nx_storage", &[])
             .await
             .unwrap()[0][0],
-        "5"
+        "6"
     );
     let invites=tx.fetch::<4>("SELECT issuer,CAST(expires AS TEXT),CASE WHEN redeemed_at IS NULL THEN 'fresh' ELSE 'used' END,CASE WHEN redeemed_by IS NULL THEN 'none' ELSE redeemed_by END FROM nx_invites ORDER BY expires DESC",&[]).await.unwrap();
     assert_eq!(invites.len(), 2);
@@ -216,7 +216,7 @@ async fn invitation_contract(db: Database) {
             .unwrap()[0][0],
         "1"
     );
-    tx.execute("UPDATE nx_storage SET version=4", &[])
+    tx.execute("UPDATE nx_storage SET version=5", &[])
         .await
         .unwrap();
     assert!(tx.check_storage().await.is_err());
@@ -229,13 +229,13 @@ async fn invitation_contract(db: Database) {
     assert!(!signed.is_empty());
 }
 #[tokio::test]
-async fn sqlite_invites_are_atomic_single_use_and_fresh_v5_rejects_v4() {
+async fn sqlite_invites_are_atomic_single_use_and_fresh_v6_rejects_v5() {
     let temp = tempfile::tempdir().unwrap();
     invitation_contract(Database::sqlite(temp.path().join("registration.db"))).await;
 }
 #[tokio::test]
 #[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable cluster"]
-async fn postgres_invites_are_atomic_single_use_and_fresh_v5_rejects_v4() {
+async fn postgres_invites_are_atomic_single_use_and_fresh_v6_rejects_v5() {
     use sqlx::Connection;
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();

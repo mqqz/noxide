@@ -203,7 +203,7 @@ pub(super) fn expand_action(
             }
             fn operation() -> ::noxide::__private::Operation {
                 ::noxide::__private::Operation {
-                    visibility: None, fields: None,
+                    list: None, visibility: None, fields: None,
                     id: ::noxide::stable_id(concat!("mutation:", module_path!(), "::", stringify!(#name))),
                     resource: <#resource as ::noxide::ResourceType>::definition().id,
                     kind: #kind, policy: #policy,

@@ -24,6 +24,7 @@ pub fn manifest() -> Manifest {
         }],
         operations: vec![
             Operation {
+                list: None,
                 visibility: None,
                 fields: None,
                 id: 1,
@@ -32,6 +33,7 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
+                list: None,
                 visibility: None,
                 fields: None,
                 id: 2,
@@ -40,6 +42,7 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
+                list: None,
                 visibility: None,
                 fields: None,
                 id: 3,
@@ -153,7 +156,7 @@ pub fn component(failure: Option<&str>) -> Vec<u8> {
       (core instance $i (instantiate $m (with "h" (instance
         (export "emit" (func $emit)) (export "request" (func $request))
         (export "invoke" (func $invoke)) (export "result" (func $result))))))
-      (func (export "handle") (canon lift (core func $i "handle"))))"#,page=emit(&page))).unwrap()
+      (func (export "handle") (canon lift (core func $i "handle"))))"#,page=if failure==Some("list") {format!("i32.const 1 i64.const 0 call $invoke drop {}",emit(&page))} else {emit(&page)})).unwrap()
 }
 
 pub fn hidden(html: &str, name: &str) -> String {
