@@ -20,6 +20,7 @@ fn declarations() -> Manifest {
         TextField {
             kind: FieldKind::Boolean,
             optional: false,
+            initial: None,
             name: "published".into(),
             label: "Published".into(),
             max_bytes: 5,
@@ -27,6 +28,7 @@ fn declarations() -> Manifest {
         TextField {
             kind: FieldKind::Text,
             optional: false,
+            initial: None,
             name: "secret".into(),
             label: "Secret".into(),
             max_bytes: 64,

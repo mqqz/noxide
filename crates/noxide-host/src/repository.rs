@@ -208,6 +208,14 @@ impl Effects {
                 } else {
                     ensure!(self.grant.is_none(), "creation has no existing target");
                 }
+                for field in &manifest::resource(&self.manifest, op.resource)?.fields {
+                    if let Some(value) = &field.initial {
+                        ensure!(
+                            input.insert(field.name.clone(), value.clone()).is_none(),
+                            "initial value cannot be submitted"
+                        );
+                    }
+                }
                 let public = manifest::is_public(&op);
                 let user = if public {
                     None
