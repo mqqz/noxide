@@ -4,18 +4,20 @@
 queues, manual dispatch, and every Monday at 03:23 UTC. For branch protection,
 require `PR checks`. Publishing and deployment are outside this workflow.
 
-Pull requests run formatting, Python build-input and local-runner tests, and ShellCheck.
-They do not compile Rust, run database tests, or build applications in VMs.
+Pull requests run formatting, a locked workspace build, Clippy across all targets
+with warnings denied (`-D warnings`), Python build-input and local-runner tests,
+and ShellCheck. Database tests and VM application builds run in the other jobs.
 `Runtime` and `Packaged SDK and browser` run on pushes to `main`, merge queues,
 manual dispatch, and the weekly schedule. Both jobs are skipped on pull requests;
-compilation and integration failures can therefore be discovered after merging
-when a merge queue is not used.
+database and browser integration failures can therefore be discovered after
+merging when a merge queue is not used.
 
 ## Checks
 
 `PR checks` runs on every workflow event using Rust 1.98.0 on Ubuntu 24.04.
-It checks workspace and example formatting, Python build-input and local-runner tests, and
-ShellCheck without fetching or compiling framework dependencies.
+It checks workspace and example formatting, fetches locked dependencies, builds
+the workspace offline, and runs Clippy across all targets with warnings denied.
+It also runs Python build-input and local-runner tests and ShellCheck.
 
 `Runtime` uses Rust 1.98.0 on Ubuntu 24.04. It checks workspace and example
 formatting, Clippy with warnings denied, documentation with warnings denied,
