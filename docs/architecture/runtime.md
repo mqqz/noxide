@@ -8,6 +8,28 @@ during both compilation and execution.
 The private-notes application exercises creation, editing, and hard deletion on
 both SQLite and PostgreSQL, including stale-form recovery and transactional retries.
 
+## Security contract
+
+The [five security principles](../../README.md#security-principles) are mandatory
+constraints on new APIs and runtime changes. Treat application code and its
+dependencies as hostile. Enforce each constraint in the trusted host; guest
+validation or cooperation cannot establish it.
+
+| Principle | Enforcement and review requirement |
+| --- | --- |
+| Contain application compromise | Keep the Wasmtime import surface closed by default. Filesystem, network, process, and host-secret access require an explicitly approved, scoped host capability. Keep untrusted native build code inside the disposable build VM. |
+| Prevent authentication and authorization bypass | Derive identity and grants from host-owned state. Check deployment permission, request/action scope, and current principal/resource policy for every sensitive operation, including reads, retries, and reference resolution. |
+| Safe browser output | Validate Document IR and serialize it in the host. Keep escaping, headers, cookies, CSRF, forms, and redirects under host control; no guest raw response escape hatch. |
+| Bounded requests | Enforce memory, CPU/fuel, elapsed time, input, and output budgets before allocating or performing the relevant work. Include initialization, host calls, database work, retries, rendering, cleanup, and response transfer; bound aggregate admission too. |
+| Anonymity by default | Keep runtime effects and browser resources local by default. Do not add external requests, third-party resources, sensitive logs, or implicit network access. Review any approved network capability for destination scope and metadata disclosure. |
+
+A declaration requests authority; it does not confer it. New capabilities must
+preserve host authentication, authorization, rendering, and budget checks. Naming
+an API `unsafe` or `dangerous` does not exempt it from these requirements.
+The trusted computing base and deployment controls below remain part of the
+boundary; these requirements do not establish resistance to host vulnerabilities
+or all side channels.
+
 ## Trust and authority
 
 The trusted computing base includes the Noxide host and its dependencies,
@@ -389,6 +411,23 @@ outcome.
 Logs contain bounded host-defined events. Application text, note contents,
 credentials, tokens, cookies, and raw request identifiers are not default log
 fields. Guest logging is a separately budgeted capability, not ambient stdout.
+
+## Anonymity and network policy
+
+The framework must not introduce external requests or third-party browser
+resources by default, including telemetry, remote fonts, analytics, CDNs, and
+implicit fetches. Guests have no ambient network imports. Framework-owned
+rendering and resource validation must prevent browser content from creating an
+unapproved outbound channel. Keep sensitive data out of default logs as described
+above, including when reporting failures.
+
+Operator-configured infrastructure, such as a PostgreSQL connection or Tor
+listener, is an explicit deployment choice. It does not grant networking to the
+guest. Any future outbound capability must have approved destinations, bounded
+work, and a review of data and metadata disclosure. Loopback/Unix listeners and
+Tor integration are described in [Running an application](../running-applications.md#tor-deployment).
+These defaults reduce accidental disclosure; they do not certify transport
+anonymity or conceal data from an application authorized to read it.
 
 ## Build and deployment boundary
 
