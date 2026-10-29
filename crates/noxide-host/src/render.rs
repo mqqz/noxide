@@ -288,7 +288,9 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
             "<nav aria-label=\"Account\"><a href=\"/\">Home</a><form method=\"post\" action=\"",
         )?;
         out.text(&context.presentation.logout_path)?;
-        out.push("\"><input type=\"hidden\" name=\"_csrf\" value=\"")?;
+        out.push("\"><input type=\"hidden\" name=\"")?;
+        out.text(&context.presentation.csrf_field)?;
+        out.push("\" value=\"")?;
         out.text(csrf)?;
         out.push("\"><button>Sign out</button></form></nav>")?;
     }
@@ -460,13 +462,16 @@ fn form(
         presentation.action_path, action.id
     ))?;
     for (name, value) in [
-        ("_csrf", &credentials.csrf),
-        ("_submission", &credentials.submission),
+        (presentation.csrf_field.as_str(), &credentials.csrf),
+        (
+            presentation.submission_field.as_str(),
+            &credentials.submission,
+        ),
     ] {
         hidden(out, name, value)?;
     }
     if crate::manifest::is_capability(crate::manifest::operation(m, action.operation)?) {
-        out.push("<label>Edit secret<input type=\"password\" name=\"_capability\" autocomplete=\"off\" maxlength=\"128\" required></label>")?;
+        out.push(&format!("<label>Edit secret<input type=\"password\" name=\"{}\" autocomplete=\"off\" maxlength=\"128\" required></label>", presentation.capability_field))?;
     }
     let default_button =
         if crate::manifest::operation(m, action.operation)?.kind == OperationKind::Delete {
@@ -1269,17 +1274,23 @@ pub(crate) fn capability_handover(secret: Option<&str>, link: Option<&str>) -> R
 }
 
 pub(crate) fn capability_rotation(
+    presentation: &crate::Presentation,
     credentials: &FormCredentials,
     resource: u32,
     id: u64,
 ) -> Result<Rendered> {
     let mut out = Buffer("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Rotate edit secret</title></head><body><main><h1>Rotate edit secret</h1>".into());
     out.push(&format!(
-        "<form method=\"post\" action=\"/_noxide/capability/{resource}/{id}\">"
+        "<form method=\"post\" action=\"{}/{resource}/{id}\">",
+        presentation.capability_path
     ))?;
-    hidden(&mut out, "_csrf", &credentials.csrf)?;
-    hidden(&mut out, "_submission", &credentials.submission)?;
-    out.push("<label>Current edit secret<input type=\"password\" name=\"_capability\" autocomplete=\"off\" maxlength=\"128\" required></label><button>Rotate secret</button></form></main></body></html>")?;
+    hidden(&mut out, &presentation.csrf_field, &credentials.csrf)?;
+    hidden(
+        &mut out,
+        &presentation.submission_field,
+        &credentials.submission,
+    )?;
+    out.push(&format!("<label>Current edit secret<input type=\"password\" name=\"{}\" autocomplete=\"off\" maxlength=\"128\" required></label><button>Rotate secret</button></form></main></body></html>", presentation.capability_field))?;
     Ok(Rendered {
         status: 200,
         body: out.0.into_bytes(),

@@ -332,8 +332,8 @@ forms start with blank values, so their fields cannot disclose values outside a
 public read projection. A capability never grants an owner, role, tenant, or
 inspection policy to application code.
 
-The host issues or reuses a 900-second `noxide_anon` cookie and binds form tokens
-and CSRF to that browser. Cookies and edit secrets never enter `RequestView`.
+The host issues or reuses a 900-second anonymous cookie (`noxide_anon` by default)
+and binds form tokens and CSRF to that browser. Cookies and edit secrets never enter `RequestView`.
 Every anonymous mutation uses the receipt protocol and bounded anonymous-write
 admission. Responses retain `Cache-Control: no-store`.
 
@@ -343,7 +343,9 @@ recovers the same secret while it remains current. The host stores only record,
 capability-version and key identifiers in the receipt outcome. It ignores the
 application's create redirect when displaying this handover.
 
-`GET /_noxide/capability/{resource}/{id}` offers a host-owned rotation form.
+`GET /_noxide/capability/{resource}/{id}` offers a host-owned rotation form by
+default. Operators can change its prefix, cookie name and host field names in the
+[deployment presentation settings](running-applications.md#deployment-presentation).
 Submitting the current secret replaces it. Retrying that rotation recovers the
 same replacement; retrying an earlier create or rotation after its version has
 been replaced displays a revoked message. Deleting the record also revokes its

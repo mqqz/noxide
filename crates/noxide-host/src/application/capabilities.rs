@@ -88,6 +88,7 @@ impl Application {
                 )
                 .map_err(|_| RequestError::Rejected)?;
             let mut page = render::capability_rotation(
+                &self.presentation,
                 &FormCredentials {
                     csrf: self.keys.csrf(&anonymous.nonce),
                     submission,
