@@ -1649,6 +1649,27 @@ async fn sqlite_initial_fields_reject_clients_and_stale_contracts() {
                 .await
                 .is_ok()
         );
+        // Reactivation alone must preserve unused submissions.
+        let page = app
+            .view_page(if public { None } else { Some(&cookie) }, 1, None, None)
+            .await
+            .unwrap();
+        let control_cookie = page
+            .anonymous_cookie
+            .clone()
+            .unwrap_or_else(|| cookie.clone());
+        let unchanged = make(&m);
+        unchanged.activate().await.unwrap();
+        unchanged
+            .submit(
+                &control_cookie,
+                1,
+                &token(&page, 1),
+                &fixture::hidden(text(&page), "_csrf"),
+                input.clone(),
+            )
+            .await
+            .unwrap();
         // Use an unused token, so rejection cannot be explained by receipt replay.
         let page = app
             .view_page(
@@ -1672,11 +1693,31 @@ async fn sqlite_initial_fields_reject_clients_and_stale_contracts() {
         changed.resources[0].fields[1].initial = Some("false".into());
         let changed = make(&changed);
         changed.activate().await.unwrap();
-        assert!(
+        let before = rows(&db).await;
+        assert!(matches!(
             changed
-                .submit(&stale_cookie, 1, &submission, &csrf, input)
-                .await
-                .is_err()
-        );
+                .submit(&stale_cookie, 1, &submission, &csrf, input.clone())
+                .await,
+            Err(crate::RequestError::InvalidRequest)
+        ));
+        assert_eq!(rows(&db).await, before);
+        let fresh = changed
+            .view_page(if public { None } else { Some(&cookie) }, 1, None, None)
+            .await
+            .unwrap();
+        let fresh_cookie = fresh
+            .anonymous_cookie
+            .clone()
+            .unwrap_or_else(|| cookie.clone());
+        changed
+            .submit(
+                &fresh_cookie,
+                1,
+                &token(&fresh, 1),
+                &fixture::hidden(text(&fresh), "_csrf"),
+                input,
+            )
+            .await
+            .unwrap();
     }
 }
