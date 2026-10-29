@@ -1,6 +1,95 @@
-use super::*;
+use proc_macro2::TokenStream as Tokens;
+use quote::quote;
+use syn::{
+    Ident, LitStr, Pat, Token, Type,
+    parse::{Parse, ParseStream},
+    spanned::Spanned,
+};
+pub(crate) struct PageDeclaration {
+    pub(crate) path: LitStr,
+    pub(crate) access: Ident,
+}
+impl Parse for PageDeclaration {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let option: Ident = input.parse()?;
+        if option != "path" {
+            return Err(syn::Error::new(
+                option.span(),
+                "pages require path = \"/path\"",
+            ));
+        }
+        input.parse::<Token![=]>()?;
+        let path: LitStr = input.parse()?;
+        let mut access = Ident::new("Authenticated", path.span());
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
+            if !input.is_empty() {
+                let option: Ident = input.parse()?;
+                if option != "access" {
+                    return Err(syn::Error::new(option.span(), "unknown page option"));
+                }
+                input.parse::<Token![=]>()?;
+                let value: Ident = input.parse()?;
+                access = Ident::new(
+                    match value.to_string().as_str() {
+                        "authenticated" => "Authenticated",
+                        "public" => "Public",
+                        "public_optional" => "PublicOptional",
+                        _ => {
+                            return Err(syn::Error::new(
+                                value.span(),
+                                "expected authenticated, public, or public_optional",
+                            ));
+                        }
+                    },
+                    value.span(),
+                );
+                if input.peek(Token![,]) {
+                    input.parse::<Token![,]>()?;
+                }
+            }
+        }
+        if !input.is_empty() {
+            return Err(input.error("unknown page option"));
+        }
+        Ok(Self { path, access })
+    }
+}
 
-pub(super) fn expand_page(declaration: PageDeclaration, item: syn::ItemFn) -> syn::Result<Tokens> {
+pub(crate) fn generic_argument(ty: &Type) -> syn::Result<(&Ident, &Type)> {
+    let Type::Path(path) = ty else {
+        return Err(syn::Error::new(
+            ty.span(),
+            "page inputs must be owned Query<Q>, Form<A>, or Id<R> values",
+        ));
+    };
+    let segment = path
+        .path
+        .segments
+        .last()
+        .ok_or_else(|| syn::Error::new(ty.span(), "missing page input type"))?;
+    let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return Err(syn::Error::new(
+            ty.span(),
+            "expected a typed capability argument",
+        ));
+    };
+    if arguments.args.len() != 1 {
+        return Err(syn::Error::new(
+            ty.span(),
+            "expected one capability type parameter",
+        ));
+    }
+    let Some(syn::GenericArgument::Type(inner)) = arguments.args.first() else {
+        return Err(syn::Error::new(
+            ty.span(),
+            "expected one capability type parameter",
+        ));
+    };
+    Ok((&segment.ident, inner))
+}
+
+pub(crate) fn expand_page(declaration: PageDeclaration, item: syn::ItemFn) -> syn::Result<Tokens> {
     if item.sig.asyncness.is_some()
         || item.sig.unsafety.is_some()
         || item.sig.abi.is_some()
