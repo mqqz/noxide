@@ -431,9 +431,14 @@ anonymity or conceal data from an application authorized to read it.
 
 ## Build and deployment boundary
 
-The initial runner is QEMU with TCG and a freshly generated initramfs. The tested
+Trusted applications and dependencies build locally by default, with the invoking
+user's host authority. This mode provides no build containment. Use `--isolated`
+for untrusted inputs. Runtime admission and capability enforcement apply to both
+build modes.
+
+The optional isolated runner is QEMU with TCG and a freshly generated initramfs. The tested
 recipe has two virtual CPUs, 6 GiB RAM, a 2 GiB scratch tmpfs, no NIC or disks, no
-host shares, and a 600-second deadline. QEMU's seccomp sandbox is enabled; native
+host shares, and a 900-second guest deadline. QEMU's seccomp sandbox is enabled; native
 build code runs as an unprivileged guest user. See [the runnable recipe](../running-applications.md).
 A framework-managed cross-platform builder remains deferred.
 
@@ -442,7 +447,7 @@ Targeting Wasm does not contain them.
 ([Cargo build scripts](https://doc.rust-lang.org/cargo/reference/build-scripts.html),
 [procedural macros](https://doc.rust-lang.org/reference/procedural-macros.html))
 
-The build contract requires:
+The isolated build contract requires:
 
 - A trusted acquisition step prepares pinned toolchain and dependency inputs
   without executing application code. Credentials used there never enter the VM.

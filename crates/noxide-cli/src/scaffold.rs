@@ -50,7 +50,7 @@ pub fn create(destination: &Path) -> Result<()> {
         )
     })?;
     println!(
-        "Created {}. Start with src/lib.rs; README.md has the isolated check/build commands.",
+        "Created {}. Start with src/lib.rs; README.md has the check/build commands.",
         destination.display()
     );
     Ok(())

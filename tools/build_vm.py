@@ -2,11 +2,13 @@
 """Build approved application inputs inside a disposable, disconnected QEMU VM.
 
 This Linux x86-64 recipe uses the operator's trusted kernel and Rust/GCC tools.
-It never runs Cargo, build scripts, macros, or output binaries from the application
-on the host. The framework lockfile is the approved public dependency catalog.
+By default it never runs application code on the host. The explicit --local
+mode instead trusts the application and dependencies with host access. The framework lockfile is the approved public dependency
+catalog.
 """
 
 import argparse
+from build_local import run_local
 import base64
 import gzip
 import hashlib
@@ -352,9 +354,9 @@ cargo run --quiet --locked --offline --release --bin noxide-contract -j 2 > /tmp
 def check_build_status(output):
     statuses = re.findall(rb"(?m)^NOXIDE_BUILD_STATUS=(\d+)$", output)
     if statuses == [b"124"]:
-        raise ValueError("VM build deadline exceeded; inspect sanitized VM log")
+        raise ValueError("build deadline exceeded; inspect build.log")
     if statuses != [b"0"]:
-        raise ValueError("VM build failed; inspect sanitized VM log")
+        raise ValueError("application build failed; inspect build.log")
 
 
 def limits():
@@ -423,21 +425,27 @@ def artifact(output, kind, limit):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--kernel", type=Path, required=True)
-    parser.add_argument("--toolchain", type=Path, required=True)
+    parser.add_argument("--local", action="store_true", help="build trusted code on the host without VM isolation")
+    parser.add_argument("--kernel", type=Path)
+    parser.add_argument("--toolchain", type=Path)
     parser.add_argument("--cargo-home", type=Path, default=Path.home() / ".cargo")
     parser.add_argument("--source", "--app", dest="source", type=Path,
                         default=ROOT / "examples/private-notes")
     parser.add_argument("--name", default="private_notes", help="Rust library artifact name")
     parser.add_argument("--check", action="store_true", help="type-check instead of emitting Wasm")
-    parser.add_argument("--metadata", action="store_true", help="extract generated contract inside the VM")
+    parser.add_argument("--metadata", action="store_true", help="extract generated contract using the selected build backend")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seconds", type=int, default=DEFAULT_VM_SECONDS)
     options = parser.parse_args()
+    if not options.local and (options.kernel is None or options.toolchain is None):
+        parser.error("VM builds require --kernel and --toolchain")
+    if options.toolchain is None:
+        options.toolchain = Path(subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip())
     init, build = recipe(options.name, options.check, options.metadata)
     options.output.mkdir(mode=0o700, parents=True, exist_ok=False)
     image = Image()
-    toolchain(image, options.toolchain.resolve())
+    if not options.local:
+        toolchain(image, options.toolchain.resolve())
     catalog(image, options.cargo_home)
     # Public framework SDK inputs, never the deployment directory or key files.
     for name in ("noxide", "noxide-protocol", "noxide-macros"):
@@ -452,23 +460,26 @@ def main():
     source_files(image, options.source.absolute(), "src/examples/private-notes")
     image.add("init", init.encode(), 0o755)
     image.add("build-command", build.encode(), 0o755)
-    print("Writing immutable VM input image...", flush=True)
-    with tempfile.TemporaryDirectory(prefix="noxide-build-") as temporary:
-        initrd = Path(temporary) / "input.cpio.gz"
-        image.write(initrd)
-        print("Building in a fresh QEMU VM (no NIC, disks, host shares, or sockets)...", flush=True)
-        output = run_vm(options.kernel, initrd, options.output / "build.log", options.seconds)
+    if options.local:
+        output = run_local(image, options.toolchain, options.output / "build.log", options.seconds)
+    else:
+        print("Writing immutable VM input image...", flush=True)
+        with tempfile.TemporaryDirectory(prefix="noxide-build-") as temporary:
+            initrd = Path(temporary) / "input.cpio.gz"
+            image.write(initrd)
+            print("Building in a fresh QEMU VM (no NIC, disks, host shares, or sockets)...", flush=True)
+            output = run_vm(options.kernel, initrd, options.output / "build.log", options.seconds)
     check_build_status(output)
     outputs = [("Cargo.lock", artifact(output, "LOCK", 131072))]
     if not options.check:
         wasm = artifact(output, "WASM", MAX_OUTPUT)
         if not wasm.startswith(b"\0asm\x01\0\0\0"):
-            raise ValueError("VM did not produce portable core Wasm")
+            raise ValueError("builder did not produce portable core Wasm")
         outputs.append((f"{options.name}.wasm", wasm))
     if options.metadata:
         contract = artifact(output, "CONTRACT", MAX_CONTRACT)
         if not isinstance(json.loads(contract), dict):
-            raise ValueError("VM contract must be a JSON object")
+            raise ValueError("builder contract must be a JSON object")
         outputs.append(("manifest.json", contract))
     for name, data in outputs:
         with (options.output / name).open("xb") as file:

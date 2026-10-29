@@ -3,7 +3,8 @@
 ## Mandatory security principles
 
 Preserve these requirements in implementation, reviews, tests, and documentation.
-Treat application code and dependencies as hostile during builds and execution.
+Treat application code as hostile during execution. Local builds are for trusted
+application code and dependencies; use isolated builds for untrusted inputs.
 
 1. Application compromise must not trivially become host compromise. Guests have
    no filesystem, network, process, or host-secret access without explicit,

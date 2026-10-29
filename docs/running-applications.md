@@ -33,12 +33,31 @@ target/debug/noxide new my-notes
 ```
 
 This writes a standalone notes application with owner-scoped queries, validation,
-forms, and explicit CRUD intent. Read `my-notes/README.md` for the first isolated
+forms, and explicit CRUD intent. Read `my-notes/README.md` for the first
 check/build command. Creating the project executes no application code and
 performs no dependency downloads or deployment approval. The generated SDK path
-refers to the disposable builder's fixed layout, so the project can live outside
+refers to the builder's staged SDK layout, so the project can live outside
 the framework checkout. Use `--framework /path/to/noxide` on check/build if the CLI
 was installed separately from the trusted framework sources.
+
+## Build a trusted application locally
+
+On Linux, install Python 3.11+, Rust 1.98.0 with the `wasm32-unknown-unknown` target,
+and native compiler/linker tools. Fetch the framework dependencies with
+`cargo fetch --locked`, then run:
+
+```sh
+target/debug/noxide build --app examples/private-notes --name private_notes \
+  --output /tmp/noxide-notes-build
+```
+
+The CLI uses the active Rust toolchain unless `--toolchain` is supplied. `check`
+also collects and validates the contract; `build` additionally admits the component.
+Both use a fresh source snapshot and the offline dependency catalog described below.
+Local builds execute build scripts, procedural macros, and the metadata collector
+with your host permissions. Offline Cargo is not network containment. Use this
+mode only when you trust the app and its dependencies. Logs are raw local build
+output; no VM resource or isolation guarantees apply.
 
 ## Build the application in a disposable VM
 
@@ -61,7 +80,7 @@ Run from the repository root, substituting the installed kernel and toolchain
 paths. `--output` must name a new directory.
 
 ```sh
-target/debug/noxide build \
+target/debug/noxide build --isolated \
   --app examples/private-notes --name private_notes \
   --kernel /boot/vmlinuz-6.18.41_1 \
   --toolchain "$HOME/.rustup/toolchains/stable-x86_64-unknown-linux-gnu" \
