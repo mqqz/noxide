@@ -888,6 +888,16 @@ async fn sqlite_initial_create_commit_is_host_owned() {
             e.record = Some(stored);
             e.invoke(4, 0).await.unwrap();
             e.tx.commit().await.unwrap();
+            let mut tx = db
+                .begin_read(Instant::now() + Duration::from_secs(5))
+                .await
+                .unwrap();
+            let updated = repository::load(&mut tx, &updates, 1, record.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(updated.record.fields["published"], "false");
+            tx.commit().await.unwrap();
             updates.actions[1].fields = vec!["body".into()];
             assert!(
                 manifest::canonical_input(
