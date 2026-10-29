@@ -8,6 +8,7 @@ catalog.
 """
 
 import argparse
+from build_catalog import catalog_packages, path_packages, validate_lock, summary, shell_command, safe_log
 from build_local import run_local
 from build_recipe import INIT, BUILD, recipe, emission
 import base64
@@ -183,58 +184,49 @@ def source_files(image, root, prefix):
         os.close(descriptor)
 
 
-def catalog(image, cargo_home):
-    packages = tomllib.loads((ROOT / "Cargo.lock").read_text())["package"]
-    seen = set()
-    todo = ["noxide", "wit-bindgen"]
-    while todo:
-        reference = todo.pop().split()
-        for package in packages:
-            key = (package["name"], package["version"])
-            if key in seen or key[0] != reference[0] or (len(reference) > 1 and key[1] != reference[1]):
-                continue
-            seen.add(key)
-            todo.extend(package.get("dependencies", []))
-            if "source" not in package:
-                continue
-            if package["source"] != "registry+https://github.com/rust-lang/crates.io-index":
-                raise ValueError("only the approved public crates.io catalog is supported")
-            root = Path(f"{key[0]}-{key[1]}")
-            archive = ROOT / "registry" / f"{root.name}.crate"
-            if not archive.is_file():
-                archives = list((cargo_home / "registry/cache").glob(f"*/{root.name}.crate"))
-                if len(archives) != 1:
-                    raise ValueError(f"prefetch the framework lockfile: missing {key}")
-                archive = archives[0]
-            with archive.open("rb") as source:
-                raw = source.read(32 * 1024 * 1024 + 1)
-            if len(raw) > 32 * 1024 * 1024:
-                raise ValueError("compressed dependency archive budget")
-            if hashlib.sha256(raw).hexdigest() != package["checksum"]:
-                raise ValueError("catalog archive checksum mismatch")
-            import io
-            import tarfile
-            checksums = {}
-            size = 0
-            with gzip.GzipFile(fileobj=io.BytesIO(raw)) as compressed:
-                unpacked = compressed.read(128 * 1024 * 1024 + 1)
-            if len(unpacked) > 128 * 1024 * 1024:
-                raise ValueError("expanded dependency archive budget")
-            with tarfile.open(fileobj=io.BytesIO(unpacked), mode="r:") as tar:
-                for entry in tar:
-                    parts = Path(entry.name).parts
-                    if entry.isdir():
-                        continue
-                    if not entry.isfile() or len(parts) < 2 or parts[0] != root.name or ".." in parts:
-                        raise ValueError("unsafe dependency archive entry")
-                    size += entry.size
-                    if size > 128 * 1024 * 1024 or len(checksums) >= 16384:
-                        raise ValueError("dependency archive budget")
-                    name = "/".join(parts[1:])
-                    data = tar.extractfile(entry).read()
-                    checksums[name] = hashlib.sha256(data).hexdigest()
-                    image.add(f"vendor/{root.name}/{name}", data)
-            image.add(f"vendor/{root.name}/.cargo-checksum.json", json.dumps({"package": package["checksum"], "files": checksums}).encode())
+def catalog(image, cargo_home, packages=None):
+    if packages is None:
+        packages = catalog_packages((ROOT / "Cargo.lock").read_bytes())
+    for package in packages:
+        if "source" not in package:
+            continue
+        key = (package["name"], package["version"])
+        root = Path(f"{key[0]}-{key[1]}")
+        archive = ROOT / "registry" / f"{root.name}.crate"
+        if not archive.is_file():
+            archives = list((cargo_home / "registry/cache").glob(f"*/{root.name}.crate"))
+            if len(archives) != 1:
+                raise ValueError(f"prefetch the framework lockfile: missing {key}")
+            archive = archives[0]
+        with archive.open("rb") as source:
+            raw = source.read(32 * 1024 * 1024 + 1)
+        if len(raw) > 32 * 1024 * 1024:
+            raise ValueError("compressed dependency archive budget")
+        if hashlib.sha256(raw).hexdigest() != package["checksum"]:
+            raise ValueError("catalog archive checksum mismatch")
+        import io
+        import tarfile
+        checksums = {}
+        size = 0
+        with gzip.GzipFile(fileobj=io.BytesIO(raw)) as compressed:
+            unpacked = compressed.read(128 * 1024 * 1024 + 1)
+        if len(unpacked) > 128 * 1024 * 1024:
+            raise ValueError("expanded dependency archive budget")
+        with tarfile.open(fileobj=io.BytesIO(unpacked), mode="r:") as tar:
+            for entry in tar:
+                parts = Path(entry.name).parts
+                if entry.isdir():
+                    continue
+                if not entry.isfile() or len(parts) < 2 or parts[0] != root.name or ".." in parts:
+                    raise ValueError("unsafe dependency archive entry")
+                size += entry.size
+                if size > 128 * 1024 * 1024 or len(checksums) >= 16384:
+                    raise ValueError("dependency archive budget")
+                name = "/".join(parts[1:])
+                data = tar.extractfile(entry).read()
+                checksums[name] = hashlib.sha256(data).hexdigest()
+                image.add(f"vendor/{root.name}/{name}", data)
+        image.add(f"vendor/{root.name}/.cargo-checksum.json", json.dumps({"package": package["checksum"], "files": checksums}).encode())
 
 
 def rewrite_sdk_path(image, manifest_name):
@@ -259,7 +251,7 @@ def toolchain(image, path):
         if directory.is_file() and "share" not in directory.parts:
             image.trusted(directory, "toolchain/" + str(directory.relative_to(path)))
     for binary in ("bash", "mount", "mkdir", "chmod", "cp", "setpriv", "env", "cat",
-                   "base64", "timeout", "poweroff", "gcc", "as", "ld", "ar"):
+                   "base64", "rm", "cmp", "timeout", "poweroff", "gcc", "as", "ld", "ar"):
         image.executable(binary)
     image.trusted(shutil.which("bash"), "usr/bin/sh")
     image.trusted(shutil.which("gcc"), "usr/bin/cc")
@@ -341,7 +333,7 @@ def run_vm(kernel, initrd, log_path, seconds):
             process.wait()
             selector.close()
             # Diagnostics remain untrusted. Strip terminal controls before display.
-            safe = bytes(b for b in output if b in (10, 13) or 32 <= b < 127)
+            safe = safe_log(bytes(output))
             log_path.write_bytes(safe)
             log_path.with_suffix(".metrics.json").write_text(json.dumps({"wall_seconds":round(time.monotonic()-started,3),"peak_rss_kib":peak_kib,"exit_code":process.returncode,"vm_memory_mib":6144,"vcpus":2,"command":args},indent=2))
     return bytes(output).replace(b"\r\n", b"\n")
@@ -362,7 +354,7 @@ def artifact(output, kind, limit):
 
 def main():
     def interrupted(signum, frame):
-        raise InterruptedError("build interrupted")
+        raise RuntimeError("build interrupted")
     signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--local", action="store_true", help="build trusted code on the host without VM isolation")
@@ -375,9 +367,19 @@ def main():
     parser.add_argument("--test", action="store_true", help="run native tests using the selected executor")
     parser.add_argument("--check", action="store_true", help="type-check instead of emitting Wasm")
     parser.add_argument("--metadata", action="store_true", help="extract generated contract using the selected build backend")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--deps-check", action="store_true")
+    modes.add_argument("--deps-resolve", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seconds", type=int, default=DEFAULT_VM_SECONDS)
     options = parser.parse_args()
+    dependencies = options.deps_check or options.deps_resolve
+    if dependencies:
+        shell_command([str(options.source.absolute()), str(options.output.absolute()), str(options.toolchain), str(options.cargo_home), str(ROOT)])
+    if dependencies and (options.check or options.test or options.metadata):
+        parser.error("dependency modes cannot combine with check/test/metadata")
+    if options.local and options.kernel:
+        parser.error("--kernel requires isolated execution")
     if not options.local and options.kernel is None:
         configured = os.environ.get("NOXIDE_VM_KERNEL")
         if configured:
@@ -391,14 +393,15 @@ def main():
     if options.toolchain is None:
         options.toolchain = Path(subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip())
     target = options.toolchain / "lib/rustlib/wasm32-unknown-unknown/lib"
-    if not target.is_dir():
+    if not dependencies and not target.is_dir():
         parser.error("selected toolchain lacks wasm32-unknown-unknown; install it with rustup target add wasm32-unknown-unknown")
-    init, build = recipe(options.name, options.check, options.metadata, options.test)
+    init, build = recipe(options.name, options.check, options.metadata, options.test, options.deps_check, options.deps_resolve)
     options.output.mkdir(mode=0o700, parents=True, exist_ok=False)
     image = Image()
     if not options.local:
         toolchain(image, options.toolchain.resolve())
-    catalog(image, options.cargo_home)
+    approved = catalog_packages((ROOT / "Cargo.lock").read_bytes())
+    catalog(image, options.cargo_home, approved)
     # Public framework SDK inputs, never the deployment directory or key files.
     for name in ("noxide", "noxide-protocol", "noxide-macros"):
         crate = ROOT / "crates" / name
@@ -411,7 +414,19 @@ def main():
     image.add("src/README.md", (ROOT / "README.md").read_bytes())
     source_files(image, options.source.absolute(), "src/examples/private-notes")
     rewrite_sdk_path(image, "src/examples/private-notes/Cargo.toml")
-    image.add("artifact-command", emission(options.name, options.check, options.metadata).encode())
+    paths = path_packages(image.files)
+    old_lock = image.files.get("src/examples/private-notes/Cargo.lock", (None,))[0]
+    if options.deps_check and old_lock is None:
+        raise ValueError("missing Cargo.lock; run noxide deps resolve with the same catalog selection")
+    if old_lock is not None and not options.deps_resolve:
+        try:
+            validate_lock(old_lock, approved, paths)
+        except ValueError as error:
+            invocation = ["noxide", "deps", "resolve", "--app", str(options.source.absolute()), "--output", "NEW_DIRECTORY", "--framework", str(ROOT), "--toolchain", str(options.toolchain), "--cargo-home", str(options.cargo_home), "--seconds", str(options.seconds)]
+            if not options.local:
+                invocation.extend(["--isolated", "--kernel", str(options.kernel)])
+            raise ValueError(str(error) + "\n" + shell_command(invocation)) from None
+    image.add("artifact-command", emission(options.name, options.check or dependencies, options.metadata).encode())
     image.add("init", init.encode(), 0o755)
     image.add("build-command", build.encode(), 0o755)
     if options.local:
@@ -423,9 +438,22 @@ def main():
             image.write(initrd)
             print("Building in a fresh QEMU VM (no NIC, disks, host shares, or sockets)...", flush=True)
             output = run_vm(options.kernel, initrd, options.output / "build.log", options.seconds)
-    check_build_status(output)
-    outputs = [("Cargo.lock", artifact(output, "LOCK", 131072))]
-    if not options.check:
+    try:
+        check_build_status(output)
+    except ValueError:
+        if dependencies:
+            # Scrub before truncation so a boundary cannot expose a URL suffix.
+            explanation = safe_log(output)[-4096:].decode('ascii')
+            raise ValueError("dependency resolution failed: missing/stale lockfile or manifest requirements/features have no catalog solution; run deps resolve with the same catalog, or change the manifest/trusted catalog separately.\n" + explanation) from None
+        raise
+    if dependencies and any(marker in output for marker in (b"NOXIDE_WASM_", b"NOXIDE_CONTRACT_")):
+        raise ValueError("unexpected compilation artifact in dependency mode")
+    candidate = artifact(output, "LOCK", 131072)
+    validate_lock(candidate, approved, paths)
+    if options.deps_check and candidate != old_lock:
+        raise ValueError("dependency check changed staged lockfile")
+    outputs = [("Cargo.lock", candidate)]
+    if not options.check and not dependencies:
         wasm = artifact(output, "WASM", MAX_OUTPUT)
         if not wasm.startswith(b"\0asm\x01\0\0\0"):
             raise ValueError("builder did not produce portable core Wasm")
@@ -438,10 +466,21 @@ def main():
     for name, data in outputs:
         with (options.output / name).open("xb") as file:
             file.write(data)
-    print("Check finished." if options.check else
+    if options.deps_resolve:
+        print("Candidate: " + repr(str(options.output / "Cargo.lock")))
+        print(summary(old_lock, candidate))
+        print("Review inputs, then install: " + shell_command(["cp", "--", str((options.output / "Cargo.lock").absolute()), str(options.source.absolute() / "Cargo.lock")]))
+        print("Then run noxide deps check and noxide check with the same catalog/toolchain. Resolution does not prove compilation or approval.")
+    print("Dependency check finished." if options.deps_check else "Dependency resolution finished." if options.deps_resolve else "Check finished." if options.check else
           "Build finished. Outputs remain untrusted; use noxide component and contract admission.")
 
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+        # Input-derived exceptions are diagnostics, never terminal instructions or URLs.
+        text = safe_log(str(error).encode()).decode('ascii')
+        text = ''.join(c if c in '\n\t' or 32 <= ord(c) < 127 else '\\u%04x' % ord(c) for c in text[:8192])
+        raise SystemExit(text) from None

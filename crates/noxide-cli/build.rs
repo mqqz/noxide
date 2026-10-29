@@ -17,6 +17,7 @@ fn main() {
         "tools/build_vm.py",
         "tools/build_local.py",
         "tools/build_recipe.py",
+        "tools/build_catalog.py",
         "crates/noxide",
         "crates/noxide-macros",
         "crates/noxide-protocol",

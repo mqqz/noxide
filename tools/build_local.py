@@ -5,11 +5,14 @@ Staging and offline Cargo resolution are conveniences, not a security boundary.
 Native build code has the invoking user's host authority.
 """
 import json
+from build_catalog import safe_log
 import os
 from pathlib import Path
 import re
 import shlex
 import signal
+import selectors
+import time
 import subprocess
 import tempfile
 
@@ -45,16 +48,35 @@ def run_local(image, toolchain, log_path, seconds):
         env.update(CARGO_HOME=str(cargo_home), CARGO_TARGET_DIR=str(scratch / 'target'),
                    PATH=str(toolchain.resolve() / 'bin') + os.pathsep + env['PATH'])
         print('Local build: dependency build scripts, procedural macros, tests, and the metadata collector execute native code with your user permissions. Use --isolated for untrusted inputs.', flush=True)
+        output = bytearray()
         with log_path.open('wb') as log:
             process = subprocess.Popen(['sh', str(script_path)], cwd=root, env=env,
-                                       stdout=log, stderr=subprocess.STDOUT,
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        start_new_session=True)
             previous = signal.getsignal(signal.SIGTERM)
             def interrupted(signum, frame):
-                raise InterruptedError("local build interrupted")
+                raise RuntimeError("local build interrupted")
             signal.signal(signal.SIGTERM, interrupted)
             try:
-                process.wait(timeout=seconds)
+                selector = selectors.DefaultSelector()
+                selector.register(process.stdout, selectors.EVENT_READ)
+                until = time.monotonic() + seconds
+                size = 0
+                try:
+                    while time.monotonic() < until:
+                        if selector.select(min(1, max(0, until - time.monotonic()))):
+                            chunk = os.read(process.stdout.fileno(), 65536)
+                            if not chunk:
+                                break
+                            size += len(chunk)
+                            if size > 16 * 1024 * 1024:
+                                raise ValueError("local output limit exceeded")
+                            output.extend(chunk)
+                    else:
+                        raise subprocess.TimeoutExpired(process.args, seconds)
+                finally:
+                    selector.close()
+                    process.stdout.close()
             finally:
                 # Also clean up descendants after a successful trusted build.
                 try:
@@ -63,4 +85,5 @@ def run_local(image, toolchain, log_path, seconds):
                     pass
                 process.wait()
                 signal.signal(signal.SIGTERM, previous)
-        return log_path.read_bytes()
+                log.write(safe_log(bytes(output)))
+        return bytes(output)

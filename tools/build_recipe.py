@@ -48,14 +48,27 @@ set -eu
 cp -r /src/. /tmp/work/
 cd /tmp/work/examples/private-notes
 if [ ! -f Cargo.lock ]; then cargo generate-lockfile --offline; fi
+cargo metadata --format-version 1 --locked --offline > /dev/null
 cargo build -vv --locked --offline --release --target wasm32-unknown-unknown -j 2
 '''
 
 
-def recipe(name="private_notes", check=False, metadata=False, test=False):
+def recipe(name="private_notes", check=False, metadata=False, test=False, deps_check=False, deps_resolve=False):
     """Select trusted commands; never interpolate application-provided shell code."""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name):
         raise ValueError("artifact name must be a Rust crate identifier")
+    if (deps_check and deps_resolve) or ((deps_check or deps_resolve) and (check or metadata or test)):
+        raise ValueError("conflicting dependency execution modes")
+    if deps_check or deps_resolve:
+        build = BUILD.split('if [ ! -f Cargo.lock ]')[0]
+        if deps_resolve:
+            build += "rm -f Cargo.lock\ncargo generate-lockfile --offline\n"
+        else:
+            build += "test -f Cargo.lock\ncp Cargo.lock /tmp/original.lock\n"
+        build += "cargo metadata --format-version 1 --locked --offline > /dev/null\n"
+        if deps_check:
+            build += "cmp Cargo.lock /tmp/original.lock\n"
+        return INIT.replace(emission(), emission(name, True)), build
     init = INIT.replace(emission(), emission(name, check, metadata))
     build = BUILD
     if check:

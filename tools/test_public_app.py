@@ -64,6 +64,7 @@ def main():
             else:
                 raise TimeoutError("public host did not become ready")
             with sqlite3.connect(args.output / "articles.db") as database:
+                database.execute("BEGIN IMMEDIATE")
                 resource = database.execute(
                     "SELECT storage_id FROM nx_resource_catalog WHERE resource_key='articles'"
                 ).fetchone()[0]
@@ -71,9 +72,14 @@ def main():
                     fields = {"title": "Public <script>" if identifier == 1 else "Unpublished fixture",
                               "body": "Published body" if identifier == 1 else "Hidden body",
                               "published": published, "private_notes": "Private editorial fixture"}
+                    # Allocate creation order in the same transaction as the fixture row.
+                    sequence = database.execute(
+                        "UPDATE nx_creation_counter SET value=value+1 "
+                        "WHERE singleton=1 AND value<9223372036854775807 RETURNING value"
+                    ).fetchone()[0]
                     database.execute(
-                        "INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES(?,?,NULL,'',?,?,1)",
-                        (resource, identifier, json.dumps(fields), f"fixture-{identifier}"))
+                        "INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(?,?,NULL,'',?,?,1,?)",
+                        (resource, identifier, json.dumps(fields), f"fixture-{identifier}", sequence))
             status, headers, body = get("/")
             assert status == 200 and "Public &lt;script&gt;" in body
             assert "Unpublished fixture" not in body and "Private editorial fixture" not in body
