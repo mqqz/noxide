@@ -49,6 +49,14 @@ pub fn validate(m: &Manifest) -> Result<()> {
                 && r.fields.len() <= 8,
             "invalid resource"
         );
+        ensure!(
+            r.fields
+                .iter()
+                .filter(|f| matches!(f.kind, FieldKind::Parent { .. }))
+                .count()
+                <= 1,
+            "one parent per resource"
+        );
         let mut fields = BTreeSet::new();
         for f in &r.fields {
             ensure!(
@@ -57,6 +65,39 @@ pub fn validate(m: &Manifest) -> Result<()> {
             );
             ensure!(f.max_bytes > 0 && f.max_bytes <= 4096, "field limit");
             match &f.kind {
+                FieldKind::Parent {
+                    resource: key,
+                    visible,
+                    create_when,
+                } => {
+                    ensure!(
+                        !f.optional && f.max_bytes >= 19,
+                        "parent must be required and hold an ID"
+                    );
+                    let parent = m
+                        .resources
+                        .iter()
+                        .find(|p| &p.name == key)
+                        .ok_or_else(|| anyhow::anyhow!("unknown parent resource"))?;
+                    ensure!(
+                        parent.id != r.id && parent_field(parent).is_none(),
+                        "parent relationships have one level"
+                    );
+                    for predicate in [visible, create_when] {
+                        let field = parent
+                            .fields
+                            .iter()
+                            .find(|f| f.name == predicate.field)
+                            .ok_or_else(|| anyhow::anyhow!("unknown parent predicate field"))?;
+                        ensure!(
+                            matches!(field.kind, FieldKind::Boolean | FieldKind::Choice { .. })
+                                && field
+                                    .canonical(&predicate.equals)
+                                    .is_ok_and(|v| v == predicate.equals),
+                            "invalid parent predicate"
+                        );
+                    }
+                }
                 FieldKind::Text => {}
                 FieldKind::Boolean => ensure!(f.max_bytes >= 5, "boolean field budget"),
                 FieldKind::Integer { min, max } => {
@@ -197,34 +238,50 @@ pub fn validate(m: &Manifest) -> Result<()> {
             }
         }
         ensure!(
-            r.resource.is_some() || r.operations.len() <= 1,
+            r.operations
+                .iter()
+                .filter(|id| operation(m, **id).is_ok_and(|op| op.kind == OperationKind::List))
+                .count()
+                <= 1,
             "a list route has one cursor scope"
         );
         for id in &r.operations {
             let op = operation(m, *id)?;
-            ensure!(
-                matches!(
-                    (&op.kind, r.resource.is_some()),
-                    (OperationKind::List, false) | (OperationKind::Read, true)
-                ),
-                "route operation mismatch"
-            );
-            ensure!(
-                r.resource.is_none_or(|resource| resource == op.resource),
-                "route resource mismatch"
-            );
+            let parent = parent_resource(m, op.resource)?;
+            if op.kind == OperationKind::List {
+                ensure!(
+                    r.resource == parent.map(|p| p.id),
+                    "list requires its parent route or a collection route"
+                );
+            } else {
+                ensure!(
+                    op.kind == OperationKind::Read && r.resource == Some(op.resource),
+                    "route operation mismatch"
+                );
+            }
         }
         if let Some(id) = r.resource {
             resource(m, id)?;
             ensure!(
-                !r.operations.is_empty(),
+                r.operations
+                    .iter()
+                    .any(|id| operation(m, *id)
+                        .is_ok_and(|op| op.kind == OperationKind::Read
+                            && op.resource == r.resource.unwrap())),
                 "record route requires a read operation"
             );
         }
         for id in &r.forms {
             let a = action(m, *id)?;
             let op = operation(m, a.operation)?;
-            if op.kind != OperationKind::Create {
+            if op.kind == OperationKind::Create {
+                if let Some(parent) = parent_resource(m, op.resource)? {
+                    ensure!(
+                        r.resource == Some(parent.id),
+                        "child create requires parent route"
+                    );
+                }
+            } else {
                 ensure!(
                     r.resource == Some(op.resource),
                     "mutation form requires its record route"
@@ -248,12 +305,21 @@ pub fn validate(m: &Manifest) -> Result<()> {
         );
         let op = operation(m, a.operation)?;
         let fields = action_fields(m, a)?;
+        ensure!(
+            fields
+                .iter()
+                .all(|f| !matches!(f.kind, FieldKind::Parent { .. })),
+            "parent is host-bound and immutable"
+        );
         match op.kind {
             OperationKind::Create => ensure!(
-                fields.len() == resource(m, op.resource)?.fields.len(),
+                fields.len() + usize::from(parent_resource(m, op.resource)?.is_some())
+                    == resource(m, op.resource)?.fields.len(),
                 "creation requires every field"
             ),
-            OperationKind::Update => ensure!(!fields.is_empty(), "update requires writable fields"),
+            OperationKind::Update => {
+                ensure!(!fields.is_empty(), "update requires writable fields")
+            }
             OperationKind::Delete => ensure!(fields.is_empty(), "delete has no writable fields"),
             _ => anyhow::bail!("action must declare a mutation"),
         }
@@ -281,6 +347,39 @@ pub fn validate(m: &Manifest) -> Result<()> {
         );
     }
     Ok(())
+}
+
+pub(crate) fn parent_field(resource: &Resource) -> Option<&TextField> {
+    resource
+        .fields
+        .iter()
+        .find(|f| matches!(f.kind, FieldKind::Parent { .. }))
+}
+pub(crate) fn parent_resource(m: &Manifest, child: u32) -> Result<Option<&Resource>> {
+    match parent_field(resource(m, child)?) {
+        Some(TextField {
+            kind: FieldKind::Parent { resource: key, .. },
+            ..
+        }) => Ok(Some(
+            m.resources
+                .iter()
+                .find(|r| &r.name == key)
+                .ok_or_else(|| anyhow::anyhow!("unknown parent"))?,
+        )),
+        _ => Ok(None),
+    }
+}
+pub(crate) fn parent_permits(field: &TextField, parent: &Fields, write: bool) -> bool {
+    let FieldKind::Parent {
+        visible,
+        create_when,
+        ..
+    } = &field.kind
+    else {
+        return false;
+    };
+    parent.get(&visible.field) == Some(&visible.equals)
+        && (!write || parent.get(&create_when.field) == Some(&create_when.equals))
 }
 
 pub(crate) fn is_public(op: &Operation) -> bool {

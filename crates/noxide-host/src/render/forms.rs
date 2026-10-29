@@ -129,6 +129,7 @@ fn render_field(
             FieldKind::Boolean if !field.optional => Control::Checkbox,
             FieldKind::Boolean | FieldKind::Choice { .. } => Control::Select,
             FieldKind::Integer { .. } => Control::TextInput,
+            FieldKind::Parent { .. } => anyhow::bail!("parent fields cannot be form controls"),
         },
         control => control.clone(),
     };
@@ -285,6 +286,7 @@ fn render_field(
                 FieldKind::Boolean => "Choose a boolean value.".into(),
                 FieldKind::Integer { .. } => "Enter an integer within the declared bounds.".into(),
                 FieldKind::Choice { .. } => "Choose a declared option.".into(),
+                FieldKind::Parent { .. } => anyhow::bail!("parent fields cannot be form controls"),
             })?;
         }
         out.push("</p>")?;

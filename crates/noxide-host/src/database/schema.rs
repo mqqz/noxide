@@ -157,7 +157,38 @@ impl Transaction {
             )
             .await?;
         }
+        self.parent_indexes(&manifest.resources).await?;
         self.store_schema(&manifest.resources, &[]).await
+    }
+
+    async fn parent_indexes(&mut self, resources: &[noxide_protocol::Resource]) -> Result<()> {
+        for resource in resources {
+            if let Some(field) = crate::manifest::parent_field(resource) {
+                let storage = self.storage_key(&resource.name).await?;
+                let expression = self.parent_expression(&field.name)?;
+                self.execute(&format!("CREATE INDEX nx_parent_{storage} ON nx_records(resource, ({expression}), id) WHERE resource={storage}"), &[]).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn validate_parents(&mut self, resources: &[noxide_protocol::Resource]) -> Result<()> {
+        for child in resources {
+            if let Some(field) = crate::manifest::parent_field(child) {
+                let noxide_protocol::FieldKind::Parent {
+                    resource: parent, ..
+                } = &field.kind
+                else {
+                    unreachable!()
+                };
+                let child_storage = self.storage_key(&child.name).await?;
+                let parent_storage = self.storage_key(parent).await?;
+                let expression = self.parent_expression(&field.name)?;
+                let missing = self.fetch::<1>(&format!("SELECT CAST(child.id AS TEXT) FROM (SELECT id,{expression} AS parent_id FROM nx_records WHERE resource=$1) child WHERE NOT EXISTS (SELECT 1 FROM nx_records parent WHERE parent.resource=$2 AND CAST(parent.id AS TEXT)=child.parent_id) LIMIT 1"), &[child_storage.into(), parent_storage.into()]).await?;
+                ensure!(missing.is_empty(), "migration would orphan a child record");
+            }
+        }
+        Ok(())
     }
 
     pub(super) async fn row_fields(
@@ -253,6 +284,13 @@ impl Transaction {
         );
         ensure!(history.len() < 128, "migration history limit");
         schema::transition(&source, &target.resources, &migration.operations)?;
+        for resource in &source {
+            if crate::manifest::parent_field(resource).is_some() {
+                let storage = self.storage_key(&resource.name).await?;
+                self.execute(&format!("DROP INDEX nx_parent_{storage}"), &[])
+                    .await?;
+            }
+        }
         for op in &migration.operations {
             match op {
                 MigrationOp::AddResource { resource } => {
@@ -364,6 +402,8 @@ impl Transaction {
             }
         }
         self.validate_stored_resources(&target.resources).await?;
+        self.validate_parents(&target.resources).await?;
+        self.parent_indexes(&target.resources).await?;
         history.push(schema::AppliedMigration {
             from: migration.from.clone(),
             to: migration.to.clone(),

@@ -48,7 +48,15 @@ pub(super) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
             decoding.push(quote!(#rust_name: ::noxide::Id::<Self>::new(record.id)));
             continue;
         }
-        validate_field_type(ty, false)?;
+        let parent = generic_argument(ty)
+            .ok()
+            .filter(|(kind, _)| *kind == "Id")
+            .map(|(_, ty)| ty);
+        if parent.is_none() {
+            validate_field_type(ty, false)?;
+        }
+        let mut visible = None;
+        let mut create_when = None;
         let mut field_key = None;
         let mut label = None;
         let mut maximum = None;
@@ -66,7 +74,24 @@ pub(super) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
             ));
         }
         attrs[0].parse_nested_meta(|meta| {
-            if meta.path.is_ident("key") && field_key.is_none() {
+            if meta.path.is_ident("visible") || meta.path.is_ident("create_when") {
+                let content;
+                parenthesized!(content in meta.input);
+                let name: Ident = content.parse()?;
+                content.parse::<Token![=]>()?;
+                let value: Expr = content.parse()?;
+                if !content.is_empty() {
+                    return Err(content.error("expected one parent predicate"));
+                }
+                let slot = if meta.path.is_ident("visible") {
+                    &mut visible
+                } else {
+                    &mut create_when
+                };
+                if slot.replace((name, value)).is_some() {
+                    return Err(meta.error("duplicate parent predicate"));
+                }
+            } else if meta.path.is_ident("key") && field_key.is_none() {
                 field_key = Some(key(meta.value()?.parse()?)?);
             } else if meta.path.is_ident("label") && label.is_none() {
                 label = Some(meta.value()?.parse::<LitStr>()?);
@@ -120,7 +145,36 @@ pub(super) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
                 "labels must contain 1 to 128 bytes without control characters",
             ));
         }
-        let bounds = if min.is_some() || max.is_some() {
+        let bounds = if let Some(parent) = parent {
+            if min.is_some() || max.is_some() {
+                return Err(syn::Error::new(
+                    ty.span(),
+                    "parent cannot have numeric bounds",
+                ));
+            }
+            let (vf, vv) = visible
+                .ok_or_else(|| syn::Error::new(ty.span(), "parent requires visible(...)"))?;
+            let (wf, wv) = create_when
+                .ok_or_else(|| syn::Error::new(ty.span(), "parent requires create_when(...)"))?;
+            let vh = stable_id(&vf.to_string());
+            let wh = stable_id(&wf.to_string());
+            quote!(::noxide::FieldKind::Parent {
+                resource: <#parent as ::noxide::ResourceType>::KEY.into(),
+                visible: ::noxide::__private::Visibility {
+                    field: <#parent as ::noxide::FieldSpec<#vh>>::KEY.into(),
+                    equals: ::noxide::FieldValue::encode(&#vv),
+                },
+                create_when: ::noxide::__private::Visibility {
+                    field: <#parent as ::noxide::FieldSpec<#wh>>::KEY.into(),
+                    equals: ::noxide::FieldValue::encode(&#wv),
+                },
+            })
+        } else if visible.is_some() || create_when.is_some() {
+            return Err(syn::Error::new(
+                ty.span(),
+                "parent predicates require Id<Resource>",
+            ));
+        } else if min.is_some() || max.is_some() {
             let lower = min.map_or_else(|| quote!(None), |v| quote!(Some(#v)));
             let upper = max.map_or_else(|| quote!(None), |v| quote!(Some(#v)));
             quote! {

@@ -323,6 +323,7 @@ fn same_kind(a: &FieldKind, b: &FieldKind) -> bool {
             | (FieldKind::Boolean, FieldKind::Boolean)
             | (FieldKind::Integer { .. }, FieldKind::Integer { .. })
             | (FieldKind::Choice { .. }, FieldKind::Choice { .. })
+            | (FieldKind::Parent { .. }, FieldKind::Parent { .. })
     )
 }
 

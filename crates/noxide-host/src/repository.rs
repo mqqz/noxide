@@ -85,6 +85,20 @@ pub(crate) async fn load(
 pub(crate) use crate::policy::allowed;
 
 impl Effects {
+    async fn parent_visible(&mut self, child: u32, fields: &Fields) -> Result<bool> {
+        let Some(parent) = manifest::parent_resource(&self.manifest, child)? else {
+            return Ok(true);
+        };
+        let field =
+            manifest::parent_field(manifest::resource(&self.manifest, child)?).expect("parent");
+        let id = fields
+            .get(&field.name)
+            .ok_or_else(|| anyhow::anyhow!("missing parent"))?
+            .parse()?;
+        let record = load(&mut self.tx, &self.manifest, parent.id, id).await?;
+        Ok(record.is_some_and(|r| manifest::parent_permits(field, &r.record.fields, false)))
+    }
+
     fn visibility_clause(&self, op: &Operation, params: &mut Vec<Param>) -> Result<String> {
         if !manifest::is_public(op) {
             return Ok(String::new());
@@ -130,7 +144,12 @@ impl Effects {
                 let route = manifest::route(&self.manifest, *id)?;
                 ensure!(
                     route.operations.contains(&operation)
-                        && target == self.request.target.unwrap_or(0),
+                        && target
+                            == if op.kind == OperationKind::List {
+                                0
+                            } else {
+                                self.request.target.unwrap_or(0)
+                            },
                     "operation outside request grant"
                 );
                 ensure!(
@@ -158,6 +177,37 @@ impl Effects {
             .await?;
         let value = match op.kind {
             OperationKind::Create => {
+                let mut input = self.request.input.clone();
+                if let Some(parent) = manifest::parent_resource(&self.manifest, op.resource)? {
+                    let field =
+                        manifest::parent_field(manifest::resource(&self.manifest, op.resource)?)
+                            .expect("parent field");
+                    let grant = self
+                        .grant
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("missing parent grant"))?;
+                    ensure!(
+                        grant.resource == parent.id && self.request.target == Some(grant.id),
+                        "invalid parent grant"
+                    );
+                    let stored = load(&mut self.tx, &self.manifest, parent.id, grant.id)
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("missing parent"))?;
+                    ensure!(
+                        stored.incarnation == grant.incarnation
+                            && stored.revision == grant.revision
+                            && manifest::parent_permits(field, &stored.record.fields, true),
+                        "parent unavailable or locked"
+                    );
+                    ensure!(
+                        input
+                            .insert(field.name.clone(), grant.id.to_string())
+                            .is_none(),
+                        "parent cannot be submitted"
+                    );
+                } else {
+                    ensure!(self.grant.is_none(), "creation has no existing target");
+                }
                 let public = manifest::is_public(&op);
                 let user = if public {
                     None
@@ -171,7 +221,7 @@ impl Effects {
                     );
                 }
                 let resource = manifest::resource(&self.manifest, op.resource)?;
-                manifest::validate_fields(resource, &self.request.input)?;
+                manifest::validate_fields(resource, &input)?;
                 if let Some(user) = user {
                     let used=self.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM (SELECT id FROM nx_records WHERE resource=$1 AND owner=$2 LIMIT 10000) AS quota",&[Param::Number(storage_resource),user.id.as_str().into()]).await?;
                     ensure!(used[0][0].parse::<usize>()? < 10_000, "record quota");
@@ -180,9 +230,8 @@ impl Effects {
                 let record = Record {
                     resource: op.resource,
                     id,
-                    fields: self.request.input.clone(),
+                    fields: input,
                 };
-                ensure!(self.grant.is_none(), "creation has no existing target");
                 if public {
                     self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version) VALUES($1,$2,NULL,'',$3,$4,1,1)", &[storage_resource.into(), (id as i64).into(), serde_json::to_string(&record.fields)?.into(), crate::security::random_id()?.into()]).await?;
                 } else {
@@ -273,6 +322,18 @@ impl Effects {
                         },
                     }
                 } else {
+                    for child in &self.manifest.resources {
+                        if manifest::parent_resource(&self.manifest, child.id)?
+                            .is_some_and(|p| p.id == op.resource)
+                        {
+                            let field = manifest::parent_field(child).expect("parent");
+                            let child_storage =
+                                self.tx.storage_resource(&self.manifest, child.id).await?;
+                            let expression = self.tx.parent_expression(&field.name)?;
+                            let rows = self.tx.fetch::<1>(&format!("SELECT CAST(id AS TEXT) FROM nx_records WHERE resource={child_storage} AND {expression}=$1 LIMIT 1"), &[grant.id.to_string().into()]).await?;
+                            ensure!(rows.is_empty(), "parent has children");
+                        }
+                    }
                     ensure!(self.tx.execute("DELETE FROM nx_records WHERE resource=$1 AND id=$2 AND incarnation=$3 AND revision=$4", &params).await? == 1, "record changed");
                     ResponseIntent::Deleted {
                         resource: op.resource,
@@ -307,7 +368,13 @@ impl Effects {
                     Some([owner, tenant, fields])
                         if allowed(&op.policy, &self.principal, owner, tenant) =>
                     {
-                        let fields = self.visible_fields(&op, serde_json::from_str(fields)?)?;
+                        let fields: Fields = serde_json::from_str(fields)?;
+                        if manifest::is_public(&op)
+                            && !self.parent_visible(op.resource, &fields).await?
+                        {
+                            return Ok(serde_json::to_vec(&Option::<Record>::None)?);
+                        }
+                        let fields = self.visible_fields(&op, fields)?;
                         Some(Record {
                             resource: op.resource,
                             id: target,
@@ -328,9 +395,35 @@ impl Effects {
                             .to_owned(),
                     ];
                 }
+                let mut parent_clause = String::new();
+                if let Some(parent) = manifest::parent_resource(&self.manifest, op.resource)? {
+                    let id = self
+                        .request
+                        .target
+                        .ok_or_else(|| anyhow::anyhow!("missing parent target"))?;
+                    let field =
+                        manifest::parent_field(manifest::resource(&self.manifest, op.resource)?)
+                            .expect("parent");
+                    let record = load(&mut self.tx, &self.manifest, parent.id, id).await?;
+                    if record.as_ref().is_none_or(|r| {
+                        manifest::is_public(&op)
+                            && !manifest::parent_permits(field, &r.record.fields, false)
+                    }) {
+                        return Ok(serde_json::to_vec(&Vec::<Record>::new())?);
+                    }
+                    params.push(id.to_string().into());
+                    // A catalog-derived constant lets PostgreSQL's generic plans
+                    // prove the partial-index predicate despite resource=$1.
+                    parent_clause = format!(
+                        " AND resource={storage_resource} AND {}=${}",
+                        self.tx.parent_expression(&field.name)?,
+                        params.len()
+                    );
+                }
                 params.push(Param::Number(self.cursor.unwrap_or(i64::MAX as u64) as i64));
+                let comparison = if self.cursor.is_some() { "<" } else { "<=" };
                 let sql = format!(
-                    "SELECT CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND ({}) AND id<${} ORDER BY nx_records.id DESC LIMIT 3",
+                    "SELECT CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND ({}){parent_clause} AND id{comparison}${} ORDER BY nx_records.id DESC LIMIT 3",
                     self.tx.bounded_text("fields", 20_000),
                     clauses.join(" OR "),
                     params.len()
@@ -349,8 +442,17 @@ impl Effects {
                         fields,
                     });
                 }
+                self.more = None;
                 if records.len() == 3 {
-                    self.more = records.last().map(|r| r.id);
+                    let last = records.last().expect("full page").id;
+                    *params.last_mut().expect("cursor") = Param::Number(last as i64);
+                    let next = self.tx.fetch::<1>(&format!(
+                        "SELECT CAST(id AS TEXT) FROM nx_records WHERE resource=$1 AND ({}){parent_clause} AND id<${} ORDER BY id DESC LIMIT 1",
+                        clauses.join(" OR "), params.len()
+                    ), &params).await?;
+                    if !next.is_empty() {
+                        self.more = Some(last);
+                    }
                 }
                 serde_json::to_vec(&records)?
             }

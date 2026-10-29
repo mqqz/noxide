@@ -147,6 +147,11 @@ pub enum FieldKind {
     #[default]
     Text,
     Boolean,
+    Parent {
+        resource: String,
+        visible: Visibility,
+        create_when: Visibility,
+    },
     Integer {
         min: Option<i64>,
         max: Option<i64>,
@@ -331,6 +336,13 @@ impl TextField {
                 "false" => "false".into(),
                 _ => return Err("Choose true or false.".into()),
             },
+            FieldKind::Parent { .. } => {
+                let id = input.parse::<u64>().map_err(|_| "invalid parent ID")?;
+                if id == 0 || id > i64::MAX as u64 || id.to_string() != input {
+                    return Err("invalid parent ID".into());
+                }
+                id.to_string()
+            }
             FieldKind::Integer { min, max } => {
                 let value: i64 = input.parse().map_err(|_| "Enter a whole number.")?;
                 if min.is_some_and(|min| value < min) || max.is_some_and(|max| value > max) {
