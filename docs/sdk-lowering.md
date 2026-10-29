@@ -12,6 +12,8 @@ transaction machinery, and resource budgets are shared.
 | Task board | [source](../examples/task-board/src/lib.rs) | [declarations](../tools/fixtures/sdk/task-board-explicit.rs) |
 | Policy matrix | [fixture](../tools/fixtures/sdk/policy-board-simple.rs) | [declarations](../tools/fixtures/sdk/policy-board-explicit.rs) |
 | Public articles | [source](../examples/public-articles/src/lib.rs) | [declarations](../tools/fixtures/sdk/public-articles-explicit.rs) |
+| Repeated actions | [fixture](../tools/fixtures/sdk/repeated-simple.rs) | [declarations](../tools/fixtures/sdk/repeated-explicit.rs) |
+| Forum conversion before layouts | [fixture](../tools/fixtures/sdk/forum-simple.rs) | [baseline declarations](../tools/fixtures/sdk/forum-explicit.rs) |
 
 The explicit equivalents are maintained independently. They use the same crate
 and module identities during comparison, including deterministic generated query
@@ -32,7 +34,9 @@ the comparison and identifiers are not normalized away.
    metadata extraction and emit the existing component export.
 
 Queries have one deterministic name per operation/resource within the module.
-CRUD action names are supplied by the developer. Collisions produce compilation
+CRUD action names are supplied by the developer; operation kinds may repeat. Each
+entry lowers independently through the same action implementation, with its own
+policy, fields, redirect, hooks and layout. Collisions produce compilation
 errors. Meaningful order, including resource fields and form layouts, is retained.
 The macro neither reads files nor analyzes function bodies.
 
@@ -61,6 +65,9 @@ conditional declarations/hooks, and invalid shorthand. Its multi-resource policy
 matrix covers tenant/role compositions, anonymous create, capability mutations,
 and separate create/update field projections. Reordering resources, queries,
 pages, and CRUD blocks must preserve the entire contract and approval hash.
+Repeated-action fixtures cover two creates, three updates, two deletes, independent
+hooks and layouts, raw identifiers, and ordinary/parent redirects. Frozen forum
+fixtures isolate pure shorthand conversion from intentional layout changes.
 Adding a query must retain every existing operation and policy; removing a form
 must change only its route binding. Cross-resource mutation forms and forms on
 strictly public routes must fail host admission.
@@ -90,6 +97,8 @@ unrelated qualified `List`/`Read` types rather than silently assigning framework
 capabilities to them. Starter creation refuses existing destinations, and the
 builder never transports its regular `.gitignore` into the VM.
 
-Focused regressions exercise these fixes and the generated starter. Full Firefox
-and PostgreSQL validation, and remote CI execution, remain deferred. The review
-and local checks do not constitute an independent security audit.
+Focused regressions exercise these fixes and the generated starter. Local
+SQLite/PostgreSQL coverage includes fresh role authorization, quota races, and
+receipt recovery; the SDK suite compares complete contracts and approval hashes.
+Browser smoke tests and remote CI are separate checks. These reviews and local
+checks do not constitute an independent security audit.
