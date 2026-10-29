@@ -135,15 +135,23 @@ def main():
     with (root / 'serve.log').open('wb') as log_file:
         serving = subprocess.Popen([cli, 'serve'], cwd=app, env=environment, stdout=log_file, stderr=subprocess.STDOUT)
         try:
-            deadline = time.monotonic() + 10
+            # Cold component compilation can exceed 10 seconds on CI runners.
+            # Use the same bounded startup allowance as the dev process.
+            deadline = time.monotonic() + 180
             while time.monotonic() < deadline:
+                if serving.poll() is not None:
+                    raise AssertionError(
+                        f'serve exited with {serving.returncode}: '
+                        + (root / 'serve.log').read_text(errors='replace'))
                 try:
                     assert 'Sign in' in get('/login')
                     break
                 except OSError:
                     time.sleep(0.1)
             else:
-                raise AssertionError('serve did not start')
+                raise AssertionError(
+                    'serve did not start within 180 seconds: '
+                    + (root / 'serve.log').read_text(errors='replace'))
         finally:
             serving.send_signal(signal.SIGTERM)
             serving.wait(timeout=10)
