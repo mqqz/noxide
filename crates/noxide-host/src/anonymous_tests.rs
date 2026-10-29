@@ -58,7 +58,7 @@ fn declarations() -> Manifest {
         version: 1,
         name: "Edit".into(),
         operation: 4,
-        redirect: 2,
+        redirect: noxide_protocol::Redirect::Page(2),
         fields: vec!["body".into(), "private".into()],
         layout: vec![],
         inspect: None,
@@ -68,7 +68,7 @@ fn declarations() -> Manifest {
         version: 1,
         name: "Delete".into(),
         operation: 5,
-        redirect: 1,
+        redirect: noxide_protocol::Redirect::Page(1),
         fields: vec![],
         layout: vec![],
         inspect: None,
@@ -93,7 +93,7 @@ fn emit(bytes: &[u8]) -> String {
         })
         .collect()
 }
-fn component() -> Vec<u8> {
+pub(crate) fn component() -> Vec<u8> {
     component_with_redirect(false)
 }
 fn component_with_redirect(forged: bool) -> Vec<u8> {

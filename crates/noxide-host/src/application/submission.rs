@@ -75,10 +75,10 @@ impl Application {
                 Ok(Ok(prepared)) => prepared,
             };
             let Some(mut tx) = tx.take() else {
-                return Ok(response);
+                return Ok(response.fallback);
             };
             match timeout_at(deadline, tx.commit()).await {
-                Ok(Ok(())) => return Ok(response),
+                Ok(Ok(())) => return Ok(self.finish_navigation(response, deadline).await),
                 Ok(Err(error)) if retryable(&error) => {
                     // SQLite busy can leave COMMIT's transaction active. A new
                     // attempt is legal only after this rollback succeeds.
@@ -128,7 +128,7 @@ impl Application {
             .await
             .map_err(|_| RequestError::Busy)?;
         let deadline = Instant::now() + self.runtime.limits().wall_time;
-        timeout_at(deadline, async {
+        let prepared = timeout_at(deadline, async {
             let a = manifest::action(&self.manifest, action)?;
             let mut tx = self.database.begin(deadline.into_std()).await?;
             self.admission(&mut tx, false).await?;
@@ -141,20 +141,22 @@ impl Application {
                 let canonical = manifest::canonical_input(&self.manifest, a, input).ok();
                 let expected = canonical.as_ref().map(|input| input_digest(a, input)).transpose()?;
 
-                let response = if expected.as_ref() == Some(digest) { self.receipt_response(&mut tx, a, target.as_ref(), outcome).await? } else {
+                let response = if expected.as_ref() == Some(digest) { self.prepare_response(&mut tx, a, target.as_ref(), outcome, &principal).await.or_else(|_| self.committed_recovery(a, submission, csrf, input))? } else {
                     let mut response = render::render(&ResponseIntent::Page(Document::new("Form already used", vec![
                         Instruction::Text("This form already committed different input. Return home to start a new form.".into()),
                         Instruction::Link { destination: RouteRef { route: self.manifest.routes.iter().find(|r| r.path == "/").expect("index route").id, target: None }, text: "Return home".into() },
                     ])), &RenderContext { presentation: &self.presentation, manifest: Some(&self.manifest), ..RenderContext::empty() })?;
-                    response.status = 409; response
+                    response.status = 409; navigation::Prepared::ready(response)
                 };
-                tx.commit().await?;
+                if tx.commit().await.is_err() {
+                    return self.committed_recovery(a, submission, csrf, input);
+                }
                 return Ok(response);
             }
             if let Some(target) = target {
-                let Some(stored) = self.authorized_target(&mut tx, a, &target, &principal, capability).await? else { return render::unavailable(&self.presentation, &self.manifest); };
+                let Some(stored) = self.authorized_target(&mut tx, a, &target, &principal, capability).await? else { return render::unavailable(&self.presentation, &self.manifest).map(navigation::Prepared::ready); };
                 if stored.revision != target.revision && !unknown {
-                    return self.conflict(a, &session, now, target, &stored, input);
+                    return self.conflict(a, &session, now, target, &stored, input).map(navigation::Prepared::ready);
                 }
             } else {
                 self.authorize_create(a, &principal)?;
@@ -162,12 +164,13 @@ impl Application {
             let credentials = FormCredentials { csrf: csrf.into(), submission: submission.into(), values: Fields::new() };
             let rendered = render::recovery(&self.presentation, &self.manifest, action, &credentials, input, render::Recovery::Retry { unknown })?;
             tx.commit().await?;
-            Ok(rendered)
-        }).await?
+            Ok(navigation::Prepared::ready(rendered))
+        }).await??;
+        Ok(self.finish_navigation(prepared, deadline).await)
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn prepare(
+    pub(super) async fn prepare(
         &self,
         cookie: &str,
         action: u32,
@@ -177,7 +180,7 @@ impl Application {
         input_hash: &str,
         capability: Option<&str>,
         budget: &mut ExecutionBudget,
-    ) -> Result<(Option<Transaction>, Rendered)> {
+    ) -> Result<(Option<Transaction>, navigation::Prepared)> {
         let deadline = budget.deadline;
         let a = manifest::action(&self.manifest, action)?;
         let mut tx = self.database.begin(deadline.into_std()).await?;
@@ -198,8 +201,9 @@ impl Application {
                 .ok_or_else(|| anyhow::anyhow!("receipt unavailable"))?;
             ensure!(digest == input_hash, RequestError::InvalidRequest);
             let response = self
-                .receipt_response(&mut tx, a, target.as_ref(), &outcome)
-                .await?;
+                .prepare_response(&mut tx, a, target.as_ref(), &outcome, &principal)
+                .await
+                .or_else(|_| self.committed_recovery(a, submission, csrf, input))?;
             return Ok((Some(tx), response));
         }
         let record = if let Some(target) = &target {
@@ -209,18 +213,28 @@ impl Application {
             else {
                 let response = render::unavailable(&self.presentation, &self.manifest)?;
                 tx.rollback().await?;
-                return Ok((None, response));
+                return Ok((None, navigation::Prepared::ready(response)));
             };
             if stored.revision != target.revision {
                 let response = self.conflict(a, &session, now, target.clone(), &stored, input)?;
                 tx.rollback().await?;
-                return Ok((None, response));
+                return Ok((None, navigation::Prepared::ready(response)));
             }
             Some(stored)
         } else {
             self.authorize_create(a, &principal)?;
             None
         };
+        if matches!(a.redirect, Redirect::Parent { .. }) {
+            budget.database_calls = budget
+                .database_calls
+                .checked_sub(8)
+                .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
+        }
+        let parent_destination = self
+            .capture_destination(&mut tx, a, record.as_ref())
+            .await?;
+        let response_principal = principal.clone();
         let inspection = a.inspect.as_ref().map(|inspect| {
             let stored = record
                 .as_ref()
@@ -309,7 +323,7 @@ impl Application {
                 },
             )?;
             effects.tx.rollback().await?;
-            return Ok((None, response));
+            return Ok((None, navigation::Prepared::ready(response)));
         }
         let public_create = manifest::is_public(manifest::operation(&self.manifest, a.operation)?)
             && manifest::operation(&self.manifest, a.operation)?.kind == OperationKind::Create;
@@ -347,8 +361,17 @@ impl Application {
         } else {
             serde_json::to_string(&outcome)?
         };
+        let receipt = if parent_destination.is_some() {
+            serde_json::to_string(&navigation::SemanticReceipt {
+                version: 1,
+                outcome: serde_json::from_str(&receipt)?,
+                destination: parent_destination,
+            })?
+        } else {
+            receipt
+        };
         let response = self
-            .receipt_response(&mut effects.tx, a, None, &receipt)
+            .prepare_response(&mut effects.tx, a, None, &receipt, &response_principal)
             .await?;
         effects
             .tx
@@ -362,7 +385,7 @@ impl Application {
     }
 }
 
-fn input_digest(action: &Action, input: &Fields) -> Result<String> {
+pub(super) fn input_digest(action: &Action, input: &Fields) -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(serde_json::to_vec(&(
         VERSION,
         action.version,
@@ -371,7 +394,7 @@ fn input_digest(action: &Action, input: &Fields) -> Result<String> {
 }
 
 impl Application {
-    async fn load_receipt(
+    pub(super) async fn load_receipt(
         &self,
         tx: &mut Transaction,
         nonce: &str,
@@ -395,14 +418,14 @@ impl Application {
 
 // One budget survives every transaction retry; admission waits and bounded
 // transaction cleanup are separate from this execution deadline.
-struct ExecutionBudget {
+pub(super) struct ExecutionBudget {
     deadline: Instant,
     fuel: u64,
     host_calls: u32,
     database_calls: u32,
 }
 impl ExecutionBudget {
-    fn new(limits: &Limits, deadline: Instant) -> Self {
+    pub(super) fn new(limits: &Limits, deadline: Instant) -> Self {
         Self {
             deadline,
             fuel: limits.fuel,

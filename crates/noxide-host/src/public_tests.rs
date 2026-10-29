@@ -859,7 +859,7 @@ async fn sqlite_initial_create_commit_is_host_owned() {
                 version: 1,
                 name: "Moderate".into(),
                 operation: 4,
-                redirect: 2,
+                redirect: Redirect::Page(2),
                 fields: vec!["published".into()],
                 layout: vec![],
                 inspect: None,

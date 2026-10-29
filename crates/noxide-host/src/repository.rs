@@ -98,21 +98,104 @@ pub(crate) async fn load(
 
 pub(crate) use crate::policy::allowed;
 
-impl Effects {
-    async fn parent_visible(&mut self, child: u32, fields: &Fields) -> Result<bool> {
-        let Some(parent) = manifest::parent_resource(&self.manifest, child)? else {
-            return Ok(true);
-        };
-        let field =
-            manifest::parent_field(manifest::resource(&self.manifest, child)?).expect("parent");
-        let id = fields
-            .get(&field.name)
-            .ok_or_else(|| anyhow::anyhow!("missing parent"))?
-            .parse()?;
-        let record = load(&mut self.tx, &self.manifest, parent.id, id).await?;
-        Ok(record.is_some_and(|r| manifest::parent_permits(field, &r.record.fields, false)))
+/// Common host read authorization and projection; no guest code is executed.
+pub(crate) async fn read_resource(
+    tx: &mut Transaction,
+    m: &Manifest,
+    principal: &Principal,
+    op: &Operation,
+    target: u64,
+) -> Result<Option<Record>> {
+    let Some(stored) = load(tx, m, op.resource, target).await? else {
+        return Ok(None);
+    };
+    if !read_allowed(m, principal, op, &stored)? {
+        return Ok(None);
     }
+    if manifest::is_public(op) {
+        if let Some(parent) = manifest::parent_resource(m, op.resource)? {
+            let field =
+                manifest::parent_field(manifest::resource(m, op.resource)?).expect("parent");
+            let id = stored
+                .record
+                .fields
+                .get(&field.name)
+                .ok_or_else(|| anyhow::anyhow!("missing parent"))?
+                .parse()?;
+            let parent = load(tx, m, parent.id, id).await?;
+            if !parent.is_some_and(|p| manifest::parent_permits(field, &p.record.fields, false)) {
+                return Ok(None);
+            }
+        }
+    }
+    let mut record = stored.record;
+    if manifest::is_public(op) {
+        let projection = op
+            .fields
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing read projection"))?;
+        record.fields.retain(|name, _| projection.contains(name));
+    }
+    Ok(Some(record))
+}
+fn read_allowed(
+    m: &Manifest,
+    principal: &Principal,
+    op: &Operation,
+    stored: &StoredRecord,
+) -> Result<bool> {
+    ensure!(
+        op.kind == OperationKind::Read && op.resource == stored.record.resource,
+        "invalid read binding"
+    );
+    manifest::validate_fields(manifest::resource(m, op.resource)?, &stored.record.fields)?;
+    if !allowed(&op.policy, principal, &stored.owner, &stored.tenant) {
+        return Ok(false);
+    }
+    if manifest::is_public(op) {
+        let visible = op
+            .visibility
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing visibility"))?;
+        ensure!(op.fields.is_some(), "missing read projection");
+        if stored.record.fields.get(&visible.field) != Some(&visible.equals) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+pub(crate) async fn authorize_page_resource(
+    tx: &mut Transaction,
+    m: &Manifest,
+    principal: &Principal,
+    route: &Route,
+    resource: u32,
+    id: u64,
+    incarnation: Option<&str>,
+) -> Result<Option<StoredRecord>> {
+    ensure!(route.resource == Some(resource), "route resource differs");
+    let Some(stored) = load(tx, m, resource, id).await? else {
+        return Ok(None);
+    };
+    if incarnation.is_some_and(|i| i != stored.incarnation) {
+        return Ok(None);
+    }
+    let mut reads = 0;
+    for operation in &route.operations {
+        let op = manifest::operation(m, *operation)?;
+        if op.kind == OperationKind::Read && op.resource == resource {
+            reads += 1;
+            if !read_allowed(m, principal, op, &stored)? {
+                return Ok(None);
+            }
+        }
+    }
+    ensure!(reads > 0, "missing resource read");
+    // Parent resources have no parent themselves in the admitted one-level model.
+    Ok(Some(stored))
+}
 
+impl Effects {
     fn visibility_clause(&self, op: &Operation, params: &mut Vec<Param>) -> Result<String> {
         if !manifest::is_public(op) {
             return Ok(String::new());
@@ -272,7 +355,7 @@ impl Effects {
                     resource: op.resource,
                     id,
                     destination: RouteRef {
-                        route: manifest::action(&self.manifest, action)?.redirect,
+                        route: manifest::action(&self.manifest, action)?.redirect.route(),
                         target: Some(id),
                     },
                 });
@@ -340,7 +423,7 @@ impl Effects {
                         resource: op.resource,
                         id: grant.id,
                         destination: RouteRef {
-                            route: a.redirect,
+                            route: a.redirect.route(),
                             target: Some(grant.id),
                         },
                     }
@@ -362,7 +445,7 @@ impl Effects {
                         resource: op.resource,
                         id: grant.id,
                         destination: RouteRef {
-                            route: a.redirect,
+                            route: a.redirect.route(),
                             target: None,
                         },
                     }
@@ -372,42 +455,9 @@ impl Effects {
                 self.outcome = Some(outcome.clone());
                 serde_json::to_vec(&outcome)?
             }
-            OperationKind::Read => {
-                ensure!(
-                    target > 0 && target <= i64::MAX as u64,
-                    "invalid resource target"
-                );
-                let mut params = vec![
-                    Param::Number(storage_resource),
-                    Param::Number(target as i64),
-                ];
-                let visibility = self.visibility_clause(&op, &mut params)?;
-                let sql = format!(
-                    "SELECT COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND id=$2{visibility}",
-                    self.tx.bounded_text("fields", 20_000)
-                );
-                let rows = self.tx.fetch::<3>(&sql, &params).await?;
-                let record = match rows.first() {
-                    Some([owner, tenant, fields])
-                        if allowed(&op.policy, &self.principal, owner, tenant) =>
-                    {
-                        let fields: Fields = serde_json::from_str(fields)?;
-                        if manifest::is_public(&op)
-                            && !self.parent_visible(op.resource, &fields).await?
-                        {
-                            return Ok(serde_json::to_vec(&Option::<Record>::None)?);
-                        }
-                        let fields = self.visible_fields(&op, fields)?;
-                        Some(Record {
-                            resource: op.resource,
-                            id: target,
-                            fields,
-                        })
-                    }
-                    _ => None,
-                };
-                serde_json::to_vec(&record)?
-            }
+            OperationKind::Read => serde_json::to_vec(
+                &read_resource(&mut self.tx, &self.manifest, &self.principal, &op, target).await?,
+            )?,
             OperationKind::List => {
                 let mut params = vec![Param::Number(storage_resource)];
                 let mut clauses = crate::policy::sql(&op.policy, &self.principal, &mut params);
