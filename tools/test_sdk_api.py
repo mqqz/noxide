@@ -6,6 +6,8 @@ identical generated metadata, compile-pass cases, and compile-fail diagnostics.
 """
 import argparse
 from build_local import run_local
+from build_recipe import emission
+from build_vm import rewrite_sdk_path
 import json
 from pathlib import Path
 import re
@@ -263,8 +265,11 @@ def scaffold_inputs(image, host_cli):
     # Generation only writes trusted source. Compilation uses the selected backend.
     with tempfile.TemporaryDirectory(prefix="noxide-starter-input-") as directory:
         project = Path(directory) / "task-board"
-        subprocess.run([str(host_cli.resolve()), "new", str(project)], check=True, timeout=10)
+        import os
+        environment = dict(os.environ, XDG_STATE_HOME=str(Path(directory) / "state"))
+        subprocess.run([str(host_cli.resolve()), "new", str(project)], env=environment, check=True, timeout=10)
         source_files(image, project, "src/examples/starter")
+        rewrite_sdk_path(image, "src/examples/starter/Cargo.toml")
 
 
 def scaffold_commands():
@@ -421,6 +426,7 @@ def main():
     for name, content, _ in cases:
         image.add(f"src/api-fixtures/{name}.rs", content.encode())
     init, build = recipe(name="task_board", metadata=True)
+    image.add("artifact-command", emission(name="task_board", metadata=True).encode())
     image.add("init", init.encode(), 0o755)
     image.add("build-command", (build + scaffold_commands() + positive_commands(passing) + contract_commands(comparisons) + fixture_commands(cases)).encode(), 0o755)
     if args.local:

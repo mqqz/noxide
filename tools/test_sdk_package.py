@@ -6,6 +6,7 @@ Both backends use versioned package directories without monorepo SDK paths.
 """
 import argparse
 from build_local import run_local
+from build_recipe import emission
 import json
 from pathlib import Path
 import subprocess
@@ -71,6 +72,7 @@ def main():
     image.add("src/examples/private-notes/Cargo.toml", manifest.encode())
     image.add("src/examples/private-notes/Cargo.lock", (source / "Cargo.lock").read_bytes())
     init, build = recipe(metadata=args.metadata)
+    image.add("artifact-command", emission(metadata=args.metadata).encode())
     image.add("init", init.encode(), 0o755)
     image.add("build-command", build.encode(), 0o755)
     if args.local:

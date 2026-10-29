@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 from build_local import run_local
+from build_recipe import emission
 from build_vm import Image, artifact, check_build_status, recipe
 
 
@@ -14,6 +15,7 @@ class LocalBuild(unittest.TestCase):
         image = Image()
         init, _ = recipe(check=check, metadata=True)
         image.add('init', init.encode())
+        image.add('artifact-command', emission(check=check, metadata=True).encode())
         image.add('src/examples/app/src/input', b'snapshot')
         image.add('build-command', ('set -eu\n' + commands).encode())
         with tempfile.TemporaryDirectory() as folder:
