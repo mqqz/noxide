@@ -226,10 +226,7 @@ impl Application {
             None
         };
         if matches!(a.redirect, Redirect::Parent { .. }) {
-            budget.database_calls = budget
-                .database_calls
-                .checked_sub(8)
-                .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
+            budget.parent_redirect_attempt()?;
         }
         let parent_destination = self
             .capture_destination(&mut tx, a, record.as_ref())
@@ -423,14 +420,34 @@ pub(super) struct ExecutionBudget {
     fuel: u64,
     host_calls: u32,
     database_calls: u32,
+    parent_navigation_reserved: bool,
 }
 impl ExecutionBudget {
+    fn parent_redirect_attempt(&mut self) -> Result<()> {
+        // Navigation runs once after the successful commit, outside all retries.
+        // Its quota covers begin/commit and one storage lookup + bounded fetch.
+        if !self.parent_navigation_reserved {
+            self.database_calls = self
+                .database_calls
+                .checked_sub(4)
+                .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
+            self.parent_navigation_reserved = true;
+        }
+        // Each attempt actually captures the parent with storage_resource + load.
+        // Charge before calling it so errors and rolled-back work stay charged.
+        self.database_calls = self
+            .database_calls
+            .checked_sub(2)
+            .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
+        Ok(())
+    }
     pub(super) fn new(limits: &Limits, deadline: Instant) -> Self {
         Self {
             deadline,
             fuel: limits.fuel,
             host_calls: limits.host_calls,
             database_calls: 16,
+            parent_navigation_reserved: false,
         }
     }
 }
@@ -453,5 +470,116 @@ impl Application {
             "policy denied"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod parent_redirect_budget_tests {
+    use super::*;
+    use crate::{parent_tests, test_support as fixture};
+
+    #[tokio::test]
+    async fn rolled_back_parent_mutations_reuse_navigation_reservation() {
+        let tmp = tempfile::tempdir().unwrap();
+        retry_case(Database::sqlite(tmp.path().join("redirect-retries.db"))).await;
+    }
+    async fn retry_case(db: Database) {
+        let (app, m) = parent_tests::redirect_app(db.clone()).await;
+        let form = app.view_page(None, 3, Some(10), None).await.unwrap();
+        let cookie = form.anonymous_cookie.unwrap();
+        let html = String::from_utf8(form.body).unwrap();
+        let submission = fixture::hidden(&html, "_submission");
+        let csrf = fixture::hidden(&html, "_csrf");
+        let input = Fields::from([
+            ("body".into(), "retried reply".into()),
+            ("published".into(), "true".into()),
+        ]);
+        let digest = input_digest(&m.actions[0], &input).unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        let mut budget = ExecutionBudget::new(app.runtime.limits(), deadline);
+        // Complete capture, mutation and response preparation on every attempt.
+        // Rollbacks deterministically reproduce two known-aborted transactions
+        // without relying on database lock timing or a provider-specific error.
+        for attempt in 0..3 {
+            let (tx, prepared) = app
+                .prepare(
+                    &cookie,
+                    1,
+                    &submission,
+                    &csrf,
+                    &input,
+                    &digest,
+                    None,
+                    &mut budget,
+                )
+                .await
+                .unwrap();
+            let mut tx = tx.unwrap();
+            assert_eq!(budget.database_calls, 16 - 4 - (attempt + 1) * 3);
+            if attempt < 2 {
+                tx.rollback().await.unwrap();
+            } else {
+                tx.commit().await.unwrap();
+                let response = app.finish_navigation(prepared, deadline).await;
+                let body = String::from_utf8(response.body).unwrap();
+                assert!(body.contains("<pre>"));
+                assert!(body.contains("href=\"/threads/10\""));
+            }
+        }
+        let mut tx = db.begin_read(deadline.into_std()).await.unwrap();
+        let storage = tx.storage_resource(&m, 1).await.unwrap();
+        assert_eq!(
+            tx.fetch::<1>(
+                "SELECT CAST(COUNT(*) AS TEXT) FROM nx_records WHERE resource=$1 AND id>12",
+                &[storage.into()]
+            )
+            .await
+            .unwrap()[0][0],
+            "1"
+        );
+        assert_eq!(
+            tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_receipts", &[])
+                .await
+                .unwrap()[0][0],
+            "1"
+        );
+        tx.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable cluster"]
+    async fn postgres_rolled_back_parent_mutations_reuse_navigation_reservation() {
+        use sqlx::Connection;
+        let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+        let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+        let name = format!(
+            "nx_redirect_retry_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sqlx::query(&format!("CREATE DATABASE {name}"))
+            .execute(&mut admin)
+            .await
+            .unwrap();
+        let mut case_url = url::Url::parse(&url).unwrap();
+        case_url.set_path(&format!("/{name}"));
+        retry_case(Database::postgres(case_url.as_str()).unwrap()).await;
+        sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+            .execute(&mut admin)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn exhausted_capture_budget_never_refreshes_on_retry() {
+        let mut budget = ExecutionBudget::new(&Limits::default(), Instant::now());
+        for _ in 0..6 {
+            budget.parent_redirect_attempt().unwrap();
+        }
+        assert_eq!(budget.database_calls, 0);
+        assert!(budget.parent_redirect_attempt().is_err());
+        assert_eq!(budget.database_calls, 0);
     }
 }
