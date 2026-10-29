@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Compile the typed SDK example and negative fixtures only inside a fresh VM.
+"""Compile typed SDK fixtures locally (--local) or inside a fresh VM.
 
-Host work is limited to snapshotting approved inputs and transporting bounded
-artifacts. Application Cargo, macros, and generated metadata execute in the VM.
+Local mode is only for trusted fixtures and dependencies. Both backends test
+identical generated metadata, compile-pass cases, and compile-fail diagnostics.
 """
 import argparse
+from build_local import run_local
 import json
 from pathlib import Path
 import re
@@ -175,7 +176,7 @@ def convenience_fixtures():
         ("notes-reordered", reordered),
         ("notes-explicit-hooks", explicit_hooks),
         ("notes-qualified-pages", notes.replace('#[page(', '#[noxide::page(')),
-        ("notes-relocated", 'include!("/src/api-fixtures/private-notes-simple.rs");\n'),
+        ("notes-relocated", 'include!("../../../api-fixtures/private-notes-simple.rs");\n'),
         ("notes-explicit-policy", notes.replace("redirect(show_note)", "redirect(show_note), allow = owner")),
         ("notes-role-policy", notes.replace("redirect(show_note)", 'redirect(show_note), allow = role("writer")')),
         ("notes-added-field", notes.replace("        body: String,", '        body: String,\n        #[field(max_bytes = 128)]\n        extra: String,')),
@@ -259,7 +260,7 @@ echo NOXIDE_{marker}_END
 
 
 def scaffold_inputs(image, host_cli):
-    # Generation only writes trusted source. Application Cargo remains in the VM.
+    # Generation only writes trusted source. Compilation uses the selected backend.
     with tempfile.TemporaryDirectory(prefix="noxide-starter-input-") as directory:
         project = Path(directory) / "task-board"
         subprocess.run([str(host_cli.resolve()), "new", str(project)], check=True, timeout=10)
@@ -379,16 +380,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host-cli", type=Path, default=ROOT / "target/debug/noxide",
                         help="trusted host CLI, built before running this test")
-    parser.add_argument("--kernel", type=Path, required=True)
-    parser.add_argument("--toolchain", type=Path, required=True)
+    parser.add_argument("--local", action="store_true", help="build trusted code on the host without VM isolation")
+    parser.add_argument("--kernel", type=Path)
+    parser.add_argument("--toolchain", type=Path)
     parser.add_argument("--cargo-home", type=Path, default=Path.home() / ".cargo")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if not args.local and (args.kernel is None or args.toolchain is None):
+        parser.error("VM builds require --kernel and --toolchain")
+    if args.toolchain is None:
+        args.toolchain = Path(subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip())
     if not args.host_cli.is_file():
         parser.error("build the trusted noxide CLI first, or pass --host-cli")
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
     image = Image()
-    toolchain(image, args.toolchain.resolve())
+    if not args.local:
+        toolchain(image, args.toolchain.resolve())
     catalog(image, args.cargo_home)
     for name in ("noxide", "noxide-protocol", "noxide-macros"):
         crate = ROOT / "crates" / name
@@ -416,11 +423,14 @@ def main():
     init, build = recipe(name="task_board", metadata=True)
     image.add("init", init.encode(), 0o755)
     image.add("build-command", (build + scaffold_commands() + positive_commands(passing) + contract_commands(comparisons) + fixture_commands(cases)).encode(), 0o755)
-    print("Building task-board and checking typed API failures in a fresh VM...", flush=True)
-    with tempfile.TemporaryDirectory(prefix="noxide-sdk-api-") as folder:
-        initrd = Path(folder) / "input.cpio.gz"
-        image.write(initrd)
-        output = run_vm(args.kernel, initrd, args.output / "build.log", DEFAULT_VM_SECONDS)
+    if args.local:
+        output = run_local(image, args.toolchain, args.output / "build.log", DEFAULT_VM_SECONDS)
+    else:
+        print("Building task-board and checking typed API failures in a fresh VM...", flush=True)
+        with tempfile.TemporaryDirectory(prefix="noxide-sdk-api-") as folder:
+            initrd = Path(folder) / "input.cpio.gz"
+            image.write(initrd)
+            output = run_vm(args.kernel, initrd, args.output / "build.log", DEFAULT_VM_SECONDS)
     check_build_status(output)
     comparisons.append("starter-generated")
     contracts = {}

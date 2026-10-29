@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Build the example against actual Cargo SDK archives in a disposable VM.
+"""Build the example against actual Cargo SDK archives.
 
-Cargo only packages the trusted framework on the host (--no-verify). Application
-resolution, binding generation and compilation take place inside the VM, with
-versioned package directories and no monorepo SDK paths available.
+Use --local for trusted fixtures; otherwise compilation runs in a disposable VM.
+Both backends use versioned package directories without monorepo SDK paths.
 """
 import argparse
+from build_local import run_local
 import json
 from pathlib import Path
 import subprocess
@@ -20,13 +20,18 @@ from build_vm import (ROOT, DEFAULT_VM_SECONDS, MAX_OUTPUT, MAX_SOURCE,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--kernel", type=Path, required=True)
-    parser.add_argument("--toolchain", type=Path, required=True)
+    parser.add_argument("--local", action="store_true", help="build trusted code on the host without VM isolation")
+    parser.add_argument("--kernel", type=Path)
+    parser.add_argument("--toolchain", type=Path)
     parser.add_argument("--cargo-home", type=Path, default=Path.home() / ".cargo")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--metadata", action="store_true",
-                        help="extract the example contract inside the VM")
+                        help="extract the example contract using the selected build backend")
     args = parser.parse_args()
+    if not args.local and (args.kernel is None or args.toolchain is None):
+        parser.error("VM builds require --kernel and --toolchain")
+    if args.toolchain is None:
+        args.toolchain = Path(subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip())
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
     packages = ("noxide-macros", "noxide-protocol", "noxide")
     command = ["cargo", "package", "--no-verify", "--allow-dirty", "--offline",
@@ -36,7 +41,8 @@ def main():
     subprocess.run(command, cwd=ROOT, check=True)
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
     image = Image()
-    toolchain(image, args.toolchain.resolve())
+    if not args.local:
+        toolchain(image, args.toolchain.resolve())
     catalog(image, args.cargo_home)
     for package in packages:
         prefix = f"{package}-{version}"
@@ -67,11 +73,14 @@ def main():
     init, build = recipe(metadata=args.metadata)
     image.add("init", init.encode(), 0o755)
     image.add("build-command", build.encode(), 0o755)
-    print("Building only from the packaged SDK in a fresh VM...", flush=True)
-    with tempfile.TemporaryDirectory(prefix="noxide-sdk-package-") as folder:
-        initrd = Path(folder) / "input.cpio.gz"
-        image.write(initrd)
-        output = run_vm(args.kernel, initrd, args.output / "build.log", DEFAULT_VM_SECONDS)
+    if args.local:
+        output = run_local(image, args.toolchain, args.output / "build.log", DEFAULT_VM_SECONDS)
+    else:
+        print("Building only from the packaged SDK in a fresh VM...", flush=True)
+        with tempfile.TemporaryDirectory(prefix="noxide-sdk-package-") as folder:
+            initrd = Path(folder) / "input.cpio.gz"
+            image.write(initrd)
+            output = run_vm(args.kernel, initrd, args.output / "build.log", DEFAULT_VM_SECONDS)
     check_build_status(output)
     wasm = artifact(output, "WASM", MAX_OUTPUT)
     assert wasm.startswith(b"\0asm\x01\0\0\0")

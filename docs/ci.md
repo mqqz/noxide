@@ -4,7 +4,7 @@
 queues, manual dispatch, and every Monday at 03:23 UTC. For branch protection,
 require `PR checks`. Publishing and deployment are outside this workflow.
 
-Pull requests run formatting, Python build-input validation, and ShellCheck.
+Pull requests run formatting, Python build-input and local-runner tests, and ShellCheck.
 They do not compile Rust, run database tests, or build applications in VMs.
 `Runtime` and `Packaged SDK and browser` run on pushes to `main`, merge queues,
 manual dispatch, and the weekly schedule. Both jobs are skipped on pull requests;
@@ -14,28 +14,27 @@ when a merge queue is not used.
 ## Checks
 
 `PR checks` runs on every workflow event using Rust 1.98.0 on Ubuntu 24.04.
-It checks workspace and example formatting, Python build-input validation, and
+It checks workspace and example formatting, Python build-input and local-runner tests, and
 ShellCheck without fetching or compiling framework dependencies.
 
 `Runtime` uses Rust 1.98.0 on Ubuntu 24.04. It checks workspace and example
 formatting, Clippy with warnings denied, documentation with warnings denied,
-ShellCheck, Python build-input validation, and the Rust tests against SQLite and
+ShellCheck, Python build-input and local-runner tests, and the Rust tests against SQLite and
 a disposable PostgreSQL 18.4 service configured for 512 connections to support
 the concurrent GET regressions. Ignored PostgreSQL tests are included
 explicitly; the internal crash subprocess and separately run browser fixture are
 excluded.
 
 `Packaged SDK and browser` packages the SDK crates, then compiles the
-private-notes example against their versioned archive directories inside a fresh
-QEMU VM. This exercises the distributed WIT contract without relying on sibling
-monorepo paths. The typed SDK VM job also compiles the notes, task-board, and
+private-notes example against their versioned archive directories locally on the runner. This exercises the distributed WIT contract without relying on sibling
+monorepo paths. The typed SDK suite also compiles the notes, task-board, and
 public-articles convenience examples and their explicit equivalents. It compares
 complete contracts and uses the trusted CLI to require matching approval hashes.
 It also builds a CLI-generated starter, tests multiple resources with tenant/role
 and anonymous/capability CRUD policies, and requires declaration reordering to
 preserve approval hashes. Policy changes require new approval hashes, and schema
 additions that omit create fields fail admission.
-The trusted CLI admits the resulting component. A separately VM-built public
+The trusted CLI admits the resulting component. A separately built public
 application is exercised through real HTTP for row visibility, projected fields,
 public cookie behavior, missing records, and escaped text. Firefox then
 exercises creation, two-tab edit conflicts, explicit resubmission, deletion, and
@@ -58,10 +57,11 @@ full commit pins. Forks use the `pull_request` event; the workflow has no
 `pull_request_target` trigger, deployment secrets, or shared application build
 caches.
 
-Only the trusted framework is compiled directly on the runner. Application
-compilation, including dependency build scripts and macros, runs inside the
-existing VM recipe with no NIC, disks, host shares, credentials, or host sockets.
-The example remains outside the root Cargo workspace. Framework dependencies are
+The framework and trusted repository examples/SDK fixtures compile directly on
+the disposable runner, including native build scripts, macros, and metadata
+collectors. Routine application checks pass `--local` and do not install QEMU or
+a kernel. Hostile fixtures remain exclusively in the weekly/manual VM job.
+Examples remain outside the root Cargo workspace. Framework dependencies are
 fetched from the lockfile before subsequent offline checks.
 
 VM jobs install QEMU and a guest kernel from Ubuntu's package repositories; they
@@ -103,14 +103,15 @@ cargo test --workspace --locked --offline -- \
 ```
 
 See [Running an application](running-applications.md) for local VM prerequisites
-and browser commands. `tools/test_sdk_package.py` accepts the same `--kernel`,
+and browser commands. Pass `--local` to `tools/test_sdk_package.py` or
+`tools/test_sdk_api.py` for trusted local checks. Without it they require the same `--kernel`,
 `--toolchain`, and new `--output` paths as the normal VM builder. Use its returned
 `private_notes.wasm` with `noxide component` before running the browser suite.
 `tools/ci/setup-vm.sh` installs packages with sudo and is intended only for the
 disposable Ubuntu CI runner.
 
-The application job also builds task-board and seven compile-fail SDK fixtures
-inside a VM. It checks typed routes, field projections, control compatibility,
+The application job also builds task-board, 28 compile-pass and 26 compile-fail SDK fixtures
+locally. It checks typed routes, field projections, control compatibility,
 and constrained templates. Both examples exercise NoJS browser flows; generated
 manifests travel with their components. PostgreSQL runs the same typed form flow
 as SQLite. Framework tests cover atomic application schema changes on both
