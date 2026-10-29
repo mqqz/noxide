@@ -1567,3 +1567,113 @@ async fn postgres_custom_presentation_hides_fixed_markers_and_preserves_credenti
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn sqlite_initial_fields_reject_clients_and_stale_contracts() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Database::sqlite(temp.path().join("initial.db"));
+    db.initialize().await.unwrap();
+    db.create_account("alice", "initial test password", "")
+        .await
+        .unwrap();
+    for public in [true, false] {
+        let mut m = declarations();
+        m.resources[0].fields[1].initial = Some("true".into());
+        m.actions[0].fields.retain(|f| f != "published");
+        if !public {
+            m.operations[2].policy.any = vec![vec![Predicate::Owner]];
+        }
+        let keys = serde_json::to_vec(&HostKeys::generate().unwrap()).unwrap();
+        let make = |m: &Manifest| {
+            Arc::new(
+                Application::new(
+                    &component(),
+                    &serde_json::to_vec(m).unwrap(),
+                    manifest::digest(m).unwrap(),
+                    db.clone(),
+                    serde_json::from_slice(&keys).unwrap(),
+                    Limits::default(),
+                )
+                .unwrap(),
+            )
+        };
+        let app = make(&m);
+        app.activate().await.unwrap();
+        let session = if public {
+            None
+        } else {
+            let challenge = app.login_challenge().await.unwrap();
+            Some(
+                app.login(
+                    &challenge.cookie,
+                    &challenge.csrf,
+                    "alice",
+                    "initial test password",
+                )
+                .await
+                .unwrap(),
+            )
+        };
+        let page = app
+            .view_page(session.as_deref(), 1, None, None)
+            .await
+            .unwrap();
+        let cookie = session.unwrap_or_else(|| page.anonymous_cookie.clone().unwrap());
+        let submission = token(&page, 1);
+        let csrf = fixture::hidden(text(&page), "_csrf");
+        assert!(!text(&page).contains("name=\"published\""));
+        let before = rows(&db).await;
+        for value in ["on", "false"] {
+            assert!(
+                app.submit(
+                    &cookie,
+                    1,
+                    &submission,
+                    &csrf,
+                    Fields::from([
+                        ("body".into(), "attempt".into()),
+                        ("published".into(), value.into()),
+                    ])
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(rows(&db).await, before);
+        }
+        let input = Fields::from([("body".into(), "approved".into())]);
+        assert!(
+            app.submit(&cookie, 1, &submission, &csrf, input.clone())
+                .await
+                .is_ok()
+        );
+        // Use an unused token, so rejection cannot be explained by receipt replay.
+        let page = app
+            .view_page(
+                if public { None } else { Some(cookie.as_str()) },
+                1,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let stale_cookie = if public {
+            page.anonymous_cookie
+                .clone()
+                .unwrap_or_else(|| cookie.clone())
+        } else {
+            cookie.clone()
+        };
+        let submission = token(&page, 1);
+        let csrf = fixture::hidden(text(&page), "_csrf");
+        let mut changed = m.clone();
+        changed.resources[0].fields[1].initial = Some("false".into());
+        let changed = make(&changed);
+        changed.activate().await.unwrap();
+        assert!(
+            changed
+                .submit(&stale_cookie, 1, &submission, &csrf, input)
+                .await
+                .is_err()
+        );
+    }
+}
