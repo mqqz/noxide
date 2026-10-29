@@ -2,6 +2,7 @@ use std::{fs, path::Path, process::Command};
 
 fn create(path: &Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_noxide"))
+        .env("XDG_STATE_HOME", path.parent().unwrap().join("state"))
         .arg("new")
         .arg(path)
         .output()

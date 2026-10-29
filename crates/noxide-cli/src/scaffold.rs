@@ -3,6 +3,7 @@ use anyhow::{Context, Result, bail, ensure};
 use std::{fs, io::Write, path::Path};
 
 const SOURCE: &str = include_str!("../templates/notes.rs");
+const TEST: &str = include_str!("../templates/contract_test.rs");
 const README: &str = include_str!("../templates/README.md");
 
 pub fn create(destination: &Path) -> Result<()> {
@@ -11,6 +12,8 @@ pub fn create(destination: &Path) -> Result<()> {
         .and_then(|name| name.to_str())
         .context("destination must end in a UTF-8 package name")?;
     validate_name(name)?;
+    let sdk = super::project::kit()?.join("crates/noxide");
+    let sdk = serde_json::to_string(&sdk)?;
     // Refuse files, directories, and dangling symlinks alike. Never merge or
     // remove an existing project, including after a partially completed write.
     fs::create_dir(destination).context("destination must be new and its parent must exist")?;
@@ -24,15 +27,21 @@ pub fn create(destination: &Path) -> Result<()> {
     };
     let result = (|| -> Result<()> {
         fs::create_dir(destination.join("src"))?;
+        fs::create_dir(destination.join("tests"))?;
         let manifest = format!(
             "[package]\nname = {name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
              [lib]\ncrate-type = [\"cdylib\", \"rlib\"]\n\n\
-             [dependencies]\nnoxide = {{ path = \"../../crates/noxide\", version = \"={}\" }}\n\n\
-             [workspace]\n\n[profile.release]\nopt-level = \"s\"\npanic = \"abort\"\nstrip = true\n",
+             [dependencies]\nnoxide = {{ path = {sdk}, version = \"={}\" }}\n\n\
+             [dev-dependencies]\nserde_json = \"1.0\"\n\n[workspace]\n\n[profile.release]\nopt-level = \"s\"\npanic = \"abort\"\nstrip = true\n",
             env!("CARGO_PKG_VERSION"),
         );
         write("Cargo.toml", manifest.as_bytes())?;
         write("src/lib.rs", SOURCE.as_bytes())?;
+        write(
+            "tests/contract.rs",
+            TEST.replace("__CRATE__", &name.replace('-', "_"))
+                .as_bytes(),
+        )?;
         write(
             "README.md",
             README
@@ -50,7 +59,7 @@ pub fn create(destination: &Path) -> Result<()> {
         )
     })?;
     println!(
-        "Created {}. Start with src/lib.rs; README.md has the check/build commands.",
+        "Created {}. Start with src/lib.rs; run noxide dev to build and open the application.",
         destination.display()
     );
     Ok(())

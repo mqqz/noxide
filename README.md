@@ -30,7 +30,25 @@ anonymity and security policies enforced by default.
 | `noxide-protocol` | Library | Constrained document and application contracts |
 | `noxide-host` | Trusted library | Wasmtime, HTTP, authentication, policy, SQLite/PostgreSQL |
 
-Run `noxide new my-notes` to create a working starter without running Cargo.
+Create and run a starter with the installed CLI:
+
+```sh
+noxide new my-notes
+cd my-notes
+noxide dev
+noxide test
+noxide build
+noxide serve
+```
+
+The CLI includes its SDK and approved offline dependency catalog. Development
+watches sources and keeps private local state; serving uses a separately approved
+contract. Local builds execute native dependency and macro code with your user
+permissions. Select `--isolated` explicitly for untrusted inputs after configuring
+a trusted VM kernel and Rust toolchain with
+`noxide setup --kernel KERNEL --toolchain TOOLCHAIN_DIRECTORY`.
+
+`new` writes the starter without running application code.
 Start with an inline `#[noxide::app]` module: declare resources, receive typed
 `List<Resource>`/`Read<Resource>` capabilities in pages, and name mutations in a
 `crud!` block. Noxide generates the existing typed declarations and reviewable

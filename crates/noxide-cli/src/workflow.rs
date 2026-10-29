@@ -7,13 +7,14 @@ use std::{
     process::Command,
 };
 
-pub fn build(command: &str, args: &[OsString]) -> Result<()> {
+pub async fn build(command: &str, args: &[OsString]) -> Result<()> {
     // Local builds trust native application code; isolation is an explicit option.
-    let mut framework = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut framework = None;
     let mut forwarded = Vec::new();
     let mut isolated = false;
     let mut output = None;
-    let mut name = "private_notes".to_string();
+    let mut name = None;
+    let mut app = PathBuf::from(".");
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         let flag = arg.to_str().context("invalid build argument")?;
@@ -37,13 +38,17 @@ pub fn build(command: &str, args: &[OsString]) -> Result<()> {
         );
         let value = iter.next().context("build option needs a value")?;
         match flag {
-            "--framework" => framework = PathBuf::from(value),
+            "--framework" => framework = Some(PathBuf::from(value)),
             "--output" => {
                 output = Some(PathBuf::from(value));
                 forwarded.extend([arg.clone(), value.clone()]);
             }
             "--name" => {
-                name = value.to_str().context("invalid crate name")?.into();
+                name = Some(value.to_str().context("invalid crate name")?.to_owned());
+                forwarded.extend([arg.clone(), value.clone()]);
+            }
+            "--app" => {
+                app = PathBuf::from(value);
                 forwarded.extend([arg.clone(), value.clone()]);
             }
             _ => forwarded.extend([arg.clone(), value.clone()]),
@@ -53,27 +58,105 @@ pub fn build(command: &str, args: &[OsString]) -> Result<()> {
         isolated || !args.iter().any(|arg| arg == "--kernel"),
         "--kernel requires --isolated; omit both only for trusted local builds"
     );
-    let output = output.context("--output is required")?;
+    let project = if args.iter().any(|arg| arg == "--app") {
+        app.canonicalize()
+            .context("application directory missing")?
+    } else {
+        super::project::discover(&app)?
+    };
+    super::project::external_state(&project)?;
+    if !args.iter().any(|arg| arg == "--app") {
+        forwarded.extend([OsString::from("--app"), project.clone().into_os_string()]);
+    }
+    let name = match name {
+        Some(name) => name,
+        None => {
+            // Parse TOML without invoking Cargo, build scripts, or macros.
+            let mut parser = Command::new("python3").args(["-I", "-c", "import sys,tomllib; p=tomllib.loads(sys.stdin.read()); print(p.get('lib',{}).get('name',p['package']['name'].replace('-','_')))"])
+                .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn()?;
+            use std::io::Write;
+            parser
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(&super::read(&project.join("Cargo.toml"), 65536)?)?;
+            let result = parser.wait_with_output()?;
+            ensure!(
+                result.status.success(),
+                "cannot discover package; supply --app and --name for workspace projects"
+            );
+            String::from_utf8(result.stdout)?.trim().to_owned()
+        }
+    };
+    if !args.iter().any(|arg| arg == "--name") {
+        forwarded.extend([OsString::from("--name"), OsString::from(&name)]);
+    }
+    let managed = output.is_none();
+    let output = output.unwrap_or_else(|| {
+        project.join("target/noxide").join(format!(
+            "build-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    });
+    if managed {
+        forwarded.extend([OsString::from("--output"), output.clone().into_os_string()]);
+    }
+    let settings = super::project::settings()?;
+    if isolated
+        && !args.iter().any(|arg| arg == "--kernel")
+        && std::env::var_os("NOXIDE_VM_KERNEL").is_none()
+        && let Some(kernel) = settings.kernel
+    {
+        forwarded.extend([OsString::from("--kernel"), kernel.into_os_string()]);
+    }
+    if !args.iter().any(|arg| arg == "--toolchain")
+        && let Some(toolchain) = settings.toolchain
+    {
+        forwarded.extend([OsString::from("--toolchain"), toolchain.into_os_string()]);
+    }
+    let framework = framework.map(Ok).unwrap_or_else(super::project::kit)?;
     let runner = framework.join("tools/build_vm.py");
     ensure!(
         runner.is_file(),
         "trusted framework builder missing; supply --framework CHECKOUT"
     );
-    let mut process = Command::new("python3");
-    process.arg(runner).args(forwarded).arg("--metadata");
+    let mut process = tokio::process::Command::new("python3");
+    process.kill_on_drop(true);
+    // Ignore Python startup paths supplied by an application or shell. Only
+    // the trusted builder directory may supply sibling builder modules.
+    process.args(["-I", "-c", "import pathlib,runpy,sys; script=sys.argv.pop(1); sys.path.insert(0,str(pathlib.Path(script).resolve().parent)); sys.argv[0]=script; runpy.run_path(script,run_name='__main__')"])
+        .arg(runner).args(forwarded).arg("--metadata");
     if !isolated {
         process.arg("--local");
+    }
+    if command == "test" {
+        process.arg("--test");
     }
     if command == "check" {
         process.arg("--check");
     }
+    let shutdown = super::shutdown_signal()?;
+    tokio::pin!(shutdown);
+    let mut child = process.spawn()?;
+    let status = tokio::select! {
+        status = child.wait() => status?,
+        _ = &mut shutdown => {
+            super::lifecycle::stop(&mut child).await?;
+            bail!("application build interrupted");
+        }
+    };
     ensure!(
-        process.status()?.success(),
-        "application build failed; inspect build.log"
+        status.success(),
+        "application build failed; inspect {}",
+        output.join("build.log").display()
     );
     let contract = manifest::parse(&super::read(&output.join("manifest.json"), 32768)?)?;
     let digest = manifest::digest(&contract)?;
-    if command == "build" {
+    if command != "check" {
         let core = super::read(&output.join(format!("{name}.wasm")), 2 * 1024 * 1024)?;
         let component = wit_component::ComponentEncoder::default()
             .module(&core)?
@@ -92,6 +175,40 @@ pub fn build(command: &str, args: &[OsString]) -> Result<()> {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
     );
     println!("Schema: {}", schema::digest(&contract.resources)?);
+    println!("Bundle: {}", output.display());
+    if command != "check" {
+        super::create(
+            &output.join("bundle.json"),
+            &serde_json::to_vec(
+                &serde_json::json!({"name":name,"backend":if isolated {"isolated"} else {"local"}}),
+            )?,
+            false,
+        )?;
+    }
+    if command == "test" {
+        let state = tempfile::tempdir()?;
+        let database = noxide_host::Database::sqlite(state.path().join("test.db"));
+        database.initialize().await?;
+        let app = noxide_host::Application::new(
+            &super::read(
+                &output.join(format!("{name}.component.wasm")),
+                2 * 1024 * 1024,
+            )?,
+            &super::read(&output.join("manifest.json"), 32768)?,
+            digest,
+            database,
+            noxide_host::HostKeys::generate()?,
+            Default::default(),
+        )?;
+        app.activate().await?;
+        println!("Runtime admission and activation passed with disposable test storage.");
+    }
+    if managed && command == "build" {
+        let directory = project.join("target/noxide");
+        let temporary = directory.join(format!("latest-{}.tmp", std::process::id()));
+        super::create(&temporary, &serde_json::to_vec(&output)?, false)?;
+        std::fs::rename(temporary, directory.join("latest.json"))?;
+    }
     Ok(())
 }
 

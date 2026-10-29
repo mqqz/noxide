@@ -433,8 +433,21 @@ anonymity or conceal data from an application authorized to read it.
 
 Trusted applications and dependencies build locally by default, with the invoking
 user's host authority. This mode provides no build containment. Use `--isolated`
-for untrusted inputs. Runtime admission and capability enforcement apply to both
-build modes.
+for untrusted inputs. Isolated builds require an operator-selected toolchain;
+application-controlled rustup overrides must never select a host executable.
+Runtime admission and capability enforcement apply to both
+build modes. The CLI ships one SDK snapshot, approved dependency catalog, and
+compilation/test recipe; the executor choice does not change the security
+contract format. Native tests and metadata extraction run through that same
+executor. Build provenance is informational and cannot approve a deployment.
+
+Project commands keep private development and serving state outside the source
+snapshot. Each deployment records operator approval of its contract digest;
+development approval does not authorize serving. Rebuilds with changed contracts
+require renewed approval, and persistent schema changes require explicit
+migration. The generated development deployment binds loopback and enables
+registration; serving defaults to closed registration. Both use the normal host
+runtime, request limits, authorization, rendering, and activation checks.
 
 The optional isolated runner is QEMU with TCG and a freshly generated initramfs. The tested
 recipe has two virtual CPUs, 6 GiB RAM, a 2 GiB scratch tmpfs, no NIC or disks, no

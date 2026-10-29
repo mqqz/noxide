@@ -11,11 +11,89 @@ Firefox 153.0.1. The browser suite covers HTTP localhost and an HTTP `.onion`
 origin through an isolated test proxy. It does not establish Tor Browser or I2P
 transport behavior.
 
-## Build the trusted framework
+## Start a project
 
-Only the framework and its reviewed dependencies belong in this host build. Do
-not run application Cargo commands, rust-analyzer project builds, build scripts,
-or procedural macros on the developer or serving host.
+Application lifecycle commands currently target Linux x86-64. Install the Noxide
+CLI, Python 3.11+, native compiler/linker tools, and Rust
+1.98.0 with `rustup target add wasm32-unknown-unknown`. Then:
+
+```sh
+noxide new my-forum
+cd my-forum
+noxide dev
+noxide test
+noxide build
+noxide serve
+```
+
+`new` writes a standalone owner-scoped notes starter, including a privacy
+regression test. It executes no application code and downloads nothing. The CLI
+ships the SDK, shared builder, and checksum-verified approved dependency archives;
+a framework checkout is unnecessary. Its generated SDK path supports local
+editor tooling. The builder remaps that path to its own snapshot for both modes.
+Applications using dependencies outside the approved catalog require a reviewed
+catalog extension; local mode does not silently resolve them over the network.
+
+`dev` builds and watches the application, asks for approval of its validated
+contract, and serves on http://localhost:8080. Register a development account
+there. Source changes trigger one rebuild at a time. Failed builds and rejected
+contracts leave the previous application running. A changed persistent schema
+requires an explicit migration; development never resets the database for you.
+
+`test` runs native application tests through the selected executor, admits the
+compiled component and contract, and checks activation against disposable SQLite
+storage. It does not approve a persistent deployment. `build` records its latest
+successful complete bundle under `target/noxide/`; failed builds do not replace
+that pointer. `serve` serves that bundle without compiling, using a separate
+serving approval, database, and keys. Serving registration defaults to closed;
+the CLI prints the configuration path and account creation command.
+
+Review the displayed contract before typing `approve`. Approval records the
+existing contract digest in operator-owned deployment configuration. In automation,
+use `noxide approve [--dev] CONTRACT_DIGEST` after reviewing that exact contract.
+Development approval does not authorize serving. Build provenance grants no
+runtime authority: both modes use identical component admission, contract
+validation, and deployment checks.
+
+Private state lives under `$XDG_STATE_HOME/noxide`, defaulting to
+`~/.local/state/noxide`, keyed by the canonical project path. Development and
+serving state are separate and remain outside source snapshots. Moving the
+project selects fresh deployment state. `serve CONFIG.json` remains available
+for explicit deployment configuration, including Unix/Tor listeners and PostgreSQL.
+Project discovery walks upward to `Cargo.toml`; ambiguous workspace roots need
+`--app PACKAGE_DIRECTORY` for check/test/build. `dev` operates on the current
+application project.
+
+## Choose the build executor
+
+Local builds are the default. Build scripts, procedural macros, native tests,
+and the metadata collector execute with the developer's host permissions.
+Offline dependency resolution is not network containment. Use local mode only
+for trusted application code and dependencies. Keep editor macro expansion and
+native builds of untrusted code inside an isolated environment too.
+
+Configure a trusted VM kernel once and select isolation explicitly:
+
+```sh
+noxide setup --kernel /path/to/trusted/vmlinuz --toolchain /path/to/trusted/rust-toolchain
+noxide dev --isolated
+noxide test --isolated
+noxide build --isolated
+```
+
+Local builds discover the active Rust toolchain automatically. Isolated builds
+require an operator-selected toolchain supplied through `setup --toolchain DIR`
+or `--toolchain DIR`; they never run rustup discovery in the application directory.
+Select a trusted installed toolchain directory independently of application
+`rust-toolchain` files and directory overrides. Per-command `--kernel` and `--toolchain`
+override saved settings. `NOXIDE_VM_KERNEL` overrides the saved kernel. Settings
+live outside the application in the private Noxide state directory. Missing VM
+prerequisites fail the build; there is no fallback to local execution. See the VM
+requirements below before selecting a kernel.
+
+## Build and package the trusted framework
+
+Build the CLI and its reviewed dependencies on the host:
 
 ```sh
 cargo fetch --locked
@@ -23,28 +101,27 @@ cargo build --workspace --locked --offline
 cargo test --workspace --locked --offline
 ```
 
-`target/debug/noxide --help` lists the host commands. Application sources remain
-outside the host workspace build; `examples/private-notes` has its own lockfile.
-
-## Create a starter
+The CLI build embeds the shared recipe, public SDK sources, and approved
+checksum-verified dependency archives. No application is compiled during this
+step. To prepare a CLI source archive, generate its build asset first:
 
 ```sh
-target/debug/noxide new my-notes
+python3 tools/package_build_kit.py
+cargo package --workspace --allow-dirty --no-verify --offline
 ```
 
-This writes a standalone notes application with owner-scoped queries, validation,
-forms, and explicit CRUD intent. Read `my-notes/README.md` for the first
-check/build command. Creating the project executes no application code and
-performs no dependency downloads or deployment approval. The generated SDK path
-refers to the builder's staged SDK layout, so the project can live outside
-the framework checkout. Use `--framework /path/to/noxide` on check/build if the CLI
-was installed separately from the trusted framework sources.
+The generated asset is included in the archive and ignored in the working tree;
+it is derived from the same authoritative sources used by repository builds.
+Repository builds always regenerate their embedded asset from source. Packaged
+CLI builds consume the included asset without requiring a framework checkout.
+`--no-verify` skips Cargo's archive build verification; release validation must
+also build the extracted archive in a clean consumer environment.
 
 ## Build a trusted application locally
 
 On Linux, install Python 3.11+, Rust 1.98.0 with the `wasm32-unknown-unknown` target,
-and native compiler/linker tools. Fetch the framework dependencies with
-`cargo fetch --locked`, then run:
+and native compiler/linker tools. The installed CLI includes its approved dependency catalog. With a source-checkout
+CLI, fetch the trusted framework dependencies before building the CLI, then run:
 
 ```sh
 target/debug/noxide build --app examples/private-notes --name private_notes \
@@ -53,7 +130,7 @@ target/debug/noxide build --app examples/private-notes --name private_notes \
 
 The CLI uses the active Rust toolchain unless `--toolchain` is supplied. `check`
 also collects and validates the contract; `build` additionally admits the component.
-Both use a fresh source snapshot and the offline dependency catalog described below.
+Both use a fresh source snapshot and the same offline dependency catalog.
 Local builds execute build scripts, procedural macros, and the metadata collector
 with your host permissions. Offline Cargo is not network containment. Use this
 mode only when you trust the app and its dependencies. Logs are raw local build
@@ -103,7 +180,7 @@ component levels. Component-valued imports and instance-export aliases are not
 admitted; host-function imports and bounded local/outer component references are
 supported. These checks also apply when loading a component with `serve`.
 
-Build output includes a sanitized log, a bounded core Wasm file, the application
+VM build output includes a sanitized log, a bounded core Wasm file, the application
 lockfile, and VM timing/memory measurements. The checked-in notes lockfile is built
 with `--locked --offline`; an initial source without a lockfile resolves only
 against the fixed catalog inside the VM and returns its lockfile for review.
