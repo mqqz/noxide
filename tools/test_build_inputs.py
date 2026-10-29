@@ -2,6 +2,8 @@
 """Host-side snapshot/transport tests; no application code is executed."""
 import base64
 import gzip
+import json
+import shutil
 import os
 from pathlib import Path
 import stat
@@ -16,6 +18,69 @@ from build_vm import Image, source_files, artifact
 
 
 class Inputs(unittest.TestCase):
+    def test_isolated_build_rejects_discovery_before_running_host_commands(self):
+        with tempfile.TemporaryDirectory() as folder:
+            arguments = ["build_vm.py", "--kernel", "/operator/kernel",
+                         "--output", str(Path(folder) / "output")]
+            with mock.patch.object(sys, "argv", arguments), \
+                    mock.patch.object(build_vm.subprocess, "check_output") as execute:
+                with self.assertRaises(SystemExit) as failure:
+                    build_vm.main()
+                self.assertEqual(failure.exception.code, 2)
+                execute.assert_not_called()
+            self.assertFalse((Path(folder) / "output").exists())
+
+    def test_explicit_isolated_toolchain_bypasses_discovery_and_local_keeps_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            selected = root / "selected"
+            (selected / "lib/rustlib/wasm32-unknown-unknown/lib").mkdir(parents=True)
+            arguments = ["build_vm.py", "--kernel", "/operator/kernel",
+                         "--toolchain", str(selected), "--output", str(root / "isolated")]
+            with mock.patch.object(sys, "argv", arguments), \
+                    mock.patch.object(build_vm.subprocess, "check_output") as discovery, \
+                    mock.patch.object(build_vm, "toolchain", side_effect=RuntimeError("staging selected toolchain")) as stage:
+                with self.assertRaisesRegex(RuntimeError, "staging selected toolchain"):
+                    build_vm.main()
+                self.assertEqual(stage.call_args.args[1], selected.resolve())
+                discovery.assert_not_called()
+            arguments = ["build_vm.py", "--local", "--output", str(root / "local")]
+            with mock.patch.object(sys, "argv", arguments), \
+                    mock.patch.object(build_vm.subprocess, "check_output", side_effect=RuntimeError("trusted local discovery")) as discovery:
+                with self.assertRaisesRegex(RuntimeError, "trusted local discovery"):
+                    build_vm.main()
+                discovery.assert_called_once_with(["rustc", "--print", "sysroot"], text=True)
+
+    def test_application_rustup_override_cannot_run_compiler_before_vm(self):
+        rustup = shutil.which("rustup")
+        if rustup is None:
+            self.skipTest("rustup is required for the override reproduction")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            app = root / "app"
+            app.mkdir()
+            compiler = app / "custom/bin/rustc"
+            compiler.parent.mkdir(parents=True)
+            marker = app / "compiler-executed"
+            # Inert compiler canary: the fixed builder must never invoke it.
+            compiler.write_text("#!/bin/sh\ntouch compiler-executed\nexit 1\n")
+            compiler.chmod(0o755)
+            (app / "rust-toolchain.toml").write_text(
+                '[toolchain]\npath = ' + json.dumps(str(app / "custom")) + '\n')
+            proxies = root / "proxies"
+            proxies.mkdir()
+            (proxies / "rustc").symlink_to(Path(rustup).resolve())
+            environment = dict(os.environ, PATH=str(proxies) + os.pathsep + os.environ['PATH'])
+            environment.pop('RUSTUP_TOOLCHAIN', None)
+            output = subprocess.run(
+                [sys.executable, str(Path(build_vm.__file__).resolve()),
+                 '--kernel', '/operator/kernel', '--output', str(root / 'output')],
+                cwd=app, env=environment, capture_output=True, timeout=10)
+            self.assertEqual(output.returncode, 2, output.stderr.decode())
+            self.assertIn(b'operator-selected --toolchain', output.stderr)
+            self.assertFalse(marker.exists())
+            self.assertFalse((root / 'output').exists())
+
     def test_build_status_is_checked_before_artifact_decoding(self):
         build_vm.check_build_status(b"NOXIDE_BUILD_STATUS=0\n")
         for output in (b"", b"NOXIDE_BUILD_STATUS=1\n",

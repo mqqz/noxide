@@ -36,9 +36,7 @@ def run_local(image, toolchain, log_path, seconds):
             '[source.approved]\ndirectory = ' + json.dumps(str(root / 'vendor')) + '\n'
             '[net]\noffline = true\n')
         build = image.files["build-command"][0].decode()
-        init = image.files["init"][0].decode()
-        # Reuse only the artifact emission tail, after the guest process exit.
-        tail = init[init.index('status=$?'):init.index('poweroff -f')]
+        tail = image.files["artifact-command"][0].decode()
         script = '(\n' + build + '\n)\n' + tail + '\nexit "$status"\n'
         script = re.sub(r'(?<![A-Za-z0-9_./-])/(src|tmp)/', lambda match: shlex.quote(str(root / match[1])) + '/', script)
         script_path = root / 'build.sh'
@@ -46,11 +44,15 @@ def run_local(image, toolchain, log_path, seconds):
         env = os.environ.copy()
         env.update(CARGO_HOME=str(cargo_home), CARGO_TARGET_DIR=str(scratch / 'target'),
                    PATH=str(toolchain.resolve() / 'bin') + os.pathsep + env['PATH'])
-        print('Building locally: app code and dependencies have host access.', flush=True)
+        print('Local build: dependency build scripts, procedural macros, tests, and the metadata collector execute native code with your user permissions. Use --isolated for untrusted inputs.', flush=True)
         with log_path.open('wb') as log:
             process = subprocess.Popen(['sh', str(script_path)], cwd=root, env=env,
                                        stdout=log, stderr=subprocess.STDOUT,
                                        start_new_session=True)
+            previous = signal.getsignal(signal.SIGTERM)
+            def interrupted(signum, frame):
+                raise InterruptedError("local build interrupted")
+            signal.signal(signal.SIGTERM, interrupted)
             try:
                 process.wait(timeout=seconds)
             finally:
@@ -60,4 +62,5 @@ def run_local(image, toolchain, log_path, seconds):
                 except ProcessLookupError:
                     pass
                 process.wait()
+                signal.signal(signal.SIGTERM, previous)
         return log_path.read_bytes()

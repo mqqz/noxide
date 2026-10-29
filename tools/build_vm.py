@@ -9,6 +9,7 @@ catalog.
 
 import argparse
 from build_local import run_local
+from build_recipe import INIT, BUILD, recipe, emission
 import base64
 import gzip
 import hashlib
@@ -18,6 +19,7 @@ from pathlib import Path
 import re
 import resource
 import selectors
+import signal
 import shutil
 import stat
 import subprocess
@@ -197,13 +199,13 @@ def catalog(image, cargo_home):
                 continue
             if package["source"] != "registry+https://github.com/rust-lang/crates.io-index":
                 raise ValueError("only the approved public crates.io catalog is supported")
-            roots = list((cargo_home / "registry/src").glob(f"*/{key[0]}-{key[1]}"))
-            if len(roots) != 1:
-                raise ValueError(f"prefetch the framework lockfile: missing {key}")
-            root = roots[0]
-            # Verify the cached .crate archive against Cargo.lock, then unpack
-            # only bounded regular files. Do not trust modified cache checkouts.
-            archive = cargo_home / "registry/cache" / root.parent.name / f"{root.name}.crate"
+            root = Path(f"{key[0]}-{key[1]}")
+            archive = ROOT / "registry" / f"{root.name}.crate"
+            if not archive.is_file():
+                archives = list((cargo_home / "registry/cache").glob(f"*/{root.name}.crate"))
+                if len(archives) != 1:
+                    raise ValueError(f"prefetch the framework lockfile: missing {key}")
+                archive = archives[0]
             with archive.open("rb") as source:
                 raw = source.read(32 * 1024 * 1024 + 1)
             if len(raw) > 32 * 1024 * 1024:
@@ -233,6 +235,21 @@ def catalog(image, cargo_home):
                     checksums[name] = hashlib.sha256(data).hexdigest()
                     image.add(f"vendor/{root.name}/{name}", data)
             image.add(f"vendor/{root.name}/.cargo-checksum.json", json.dumps({"package": package["checksum"], "files": checksums}).encode())
+
+
+def rewrite_sdk_path(image, manifest_name):
+    # The installed SDK path is for editors. Both executors compile against the
+    # same snapshotted SDK, never a host path supplied by the application.
+    data, mode = image.files[manifest_name]
+    text = data.decode()
+    declaration = tomllib.loads(text).get("dependencies", {}).get("noxide", {})
+    if isinstance(declaration, dict) and "path" in declaration:
+        pattern = r'(?m)^(noxide\s*=\s*\{[^\n]*?\bpath\s*=\s*)("(?:[^"\\]|\\.)*"|\'[^\']*\')'
+        text, count = re.subn(pattern, lambda m: m[1] + '"../../crates/noxide"', text)
+        if count != 1:
+            raise ValueError("SDK path dependency must use an inline noxide declaration")
+        image.files[manifest_name] = (text.encode(), mode)
+
 
 
 def toolchain(image, path):
@@ -269,86 +286,6 @@ def toolchain(image, path):
         path = command("gcc", f"-print-file-name={name}")
         image.trusted(path)
 
-
-INIT = r'''#!/bin/sh
-export PATH=/usr/bin
-export LD_LIBRARY_PATH=/usr/lib:/usr/lib64
-mount -t proc proc /proc -o hidepid=2
-mount -t sysfs sysfs /sys -o ro
-mount -t devtmpfs devtmpfs /dev
-mount -t tmpfs tmpfs /tmp -o size=2048m,nosuid,nodev
-chmod 1777 /tmp
-mkdir /tmp/work /tmp/cargo
-chmod 777 /tmp/work /tmp/cargo
-cat >/tmp/cargo/config.toml <<'CONFIG'
-[source.crates-io]
-replace-with = "approved"
-[source.approved]
-directory = "/vendor"
-[net]
-offline = true
-CONFIG
-chmod 644 /tmp/cargo/config.toml
-ulimit -c 0
-ulimit -n 128
-ulimit -u 128
-ulimit -f 524288
-timeout -k 2 @BUILD_SECONDS@ setpriv --reuid=65534 --regid=65534 --clear-groups --no-new-privs env -i PATH=/toolchain/bin:/usr/bin LD_LIBRARY_PATH=/usr/lib:/usr/lib64 HOME=/tmp CARGO_HOME=/tmp/cargo CARGO_TARGET_DIR=/tmp/target RUST_BACKTRACE=0 /bin/sh /build-command
-status=$?
-echo "NOXIDE_BUILD_STATUS=$status"
-if [ "$status" = 0 ]; then
-    echo NOXIDE_WASM_BEGIN
-    base64 /tmp/target/wasm32-unknown-unknown/release/private_notes.wasm
-    echo NOXIDE_WASM_END
-    echo NOXIDE_LOCK_BEGIN
-    base64 /tmp/work/examples/private-notes/Cargo.lock
-    echo NOXIDE_LOCK_END
-fi
-poweroff -f
-'''.replace('@BUILD_SECONDS@', str(GUEST_BUILD_SECONDS))
-
-BUILD = r'''#!/bin/sh
-set -eu
-cp -r /src/. /tmp/work/
-cd /tmp/work/examples/private-notes
-if [ ! -f Cargo.lock ]; then cargo generate-lockfile --offline; fi
-cargo build -vv --locked --offline --release --target wasm32-unknown-unknown -j 2
-'''
-
-
-def recipe(name="private_notes", check=False, metadata=False):
-    """Select trusted commands; never interpolate application-provided shell code."""
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name):
-        raise ValueError("artifact name must be a Rust crate identifier")
-    init = INIT.replace("/release/private_notes.wasm", f"/release/{name}.wasm")
-    build = BUILD
-    if check:
-        build = build.replace("cargo build -vv", "cargo check -vv")
-        init = init.replace(
-            "    echo NOXIDE_WASM_BEGIN\n"
-            f"    base64 /tmp/target/wasm32-unknown-unknown/release/{name}.wasm\n"
-            "    echo NOXIDE_WASM_END\n", "")
-    if metadata:
-        # The application and its generated collector execute only inside the VM.
-        # A separate bin avoids requiring a direct serde_json application dependency:
-        # application! exposes noxide_manifest() as a JSON String.
-        build += f'''cat >>Cargo.toml <<'COLLECTOR_TARGET'
-
-[[bin]]
-name = "noxide-contract"
-path = "noxide-contract.rs"
-COLLECTOR_TARGET
-cat >noxide-contract.rs <<'COLLECTOR_SOURCE'
-fn main() {{ print!("{{}}", {name}::noxide_manifest()); }}
-COLLECTOR_SOURCE
-cargo run --quiet --locked --offline --release --bin noxide-contract -j 2 > /tmp/work/noxide-contract.json
-'''
-        init = init.replace("    echo NOXIDE_LOCK_BEGIN\n",
-                            "    echo NOXIDE_CONTRACT_BEGIN\n"
-                            "    base64 /tmp/work/noxide-contract.json\n"
-                            "    echo NOXIDE_CONTRACT_END\n"
-                            "    echo NOXIDE_LOCK_BEGIN\n")
-    return init, build
 
 
 def check_build_status(output):
@@ -424,6 +361,9 @@ def artifact(output, kind, limit):
 
 
 def main():
+    def interrupted(signum, frame):
+        raise InterruptedError("build interrupted")
+    signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--local", action="store_true", help="build trusted code on the host without VM isolation")
     parser.add_argument("--kernel", type=Path)
@@ -432,16 +372,28 @@ def main():
     parser.add_argument("--source", "--app", dest="source", type=Path,
                         default=ROOT / "examples/private-notes")
     parser.add_argument("--name", default="private_notes", help="Rust library artifact name")
+    parser.add_argument("--test", action="store_true", help="run native tests using the selected executor")
     parser.add_argument("--check", action="store_true", help="type-check instead of emitting Wasm")
     parser.add_argument("--metadata", action="store_true", help="extract generated contract using the selected build backend")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seconds", type=int, default=DEFAULT_VM_SECONDS)
     options = parser.parse_args()
-    if not options.local and (options.kernel is None or options.toolchain is None):
-        parser.error("VM builds require --kernel and --toolchain")
+    if not options.local and options.kernel is None:
+        configured = os.environ.get("NOXIDE_VM_KERNEL")
+        if configured:
+            options.kernel = Path(configured)
+        else:
+            parser.error("isolated builds require --kernel or operator-set NOXIDE_VM_KERNEL; refusing local fallback")
+    if options.toolchain is None and not options.local:
+        # rustup discovery in the app directory can execute an app-selected
+        # compiler via rust-toolchain.toml. Only local builds trust that code.
+        parser.error("isolated builds require an operator-selected --toolchain; save one with noxide setup --toolchain DIRECTORY")
     if options.toolchain is None:
         options.toolchain = Path(subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip())
-    init, build = recipe(options.name, options.check, options.metadata)
+    target = options.toolchain / "lib/rustlib/wasm32-unknown-unknown/lib"
+    if not target.is_dir():
+        parser.error("selected toolchain lacks wasm32-unknown-unknown; install it with rustup target add wasm32-unknown-unknown")
+    init, build = recipe(options.name, options.check, options.metadata, options.test)
     options.output.mkdir(mode=0o700, parents=True, exist_ok=False)
     image = Image()
     if not options.local:
@@ -458,6 +410,8 @@ def main():
     image.add("src/Cargo.toml", workspace.encode())
     image.add("src/README.md", (ROOT / "README.md").read_bytes())
     source_files(image, options.source.absolute(), "src/examples/private-notes")
+    rewrite_sdk_path(image, "src/examples/private-notes/Cargo.toml")
+    image.add("artifact-command", emission(options.name, options.check, options.metadata).encode())
     image.add("init", init.encode(), 0o755)
     image.add("build-command", build.encode(), 0o755)
     if options.local:
