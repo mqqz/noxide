@@ -55,6 +55,7 @@ pub(super) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
         if parent.is_none() {
             validate_field_type(ty, false)?;
         }
+        let mut initial = None;
         let mut visible = None;
         let mut create_when = None;
         let mut field_key = None;
@@ -74,6 +75,17 @@ pub(super) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
             ));
         }
         attrs[0].parse_nested_meta(|meta| {
+            if meta.path.is_ident("initial") {
+                if initial.is_some() {
+                    return Err(meta.error("duplicate initial value"));
+                }
+                if quote!(#ty).to_string() != "bool" {
+                    return Err(meta.error("initial requires a non-optional bool field"));
+                }
+                let value: syn::LitBool = meta.value()?.parse()?;
+                initial = Some(value);
+                return Ok(());
+            }
             if meta.path.is_ident("visible") || meta.path.is_ident("create_when") {
                 let content;
                 parenthesized!(content in meta.input);
@@ -186,10 +198,20 @@ pub(super) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
         } else {
             quote!(<#ty as ::noxide::FieldValue>::kind())
         };
+        let initial = match initial {
+            Some(value) => {
+                let encoded = value.value.to_string();
+                if encoded.len() > maximum_value as usize {
+                    return Err(syn::Error::new(value.span(), "initial exceeds max_bytes"));
+                }
+                quote!(Some(#encoded.into()))
+            }
+            None => quote!(None),
+        };
         definitions.push(quote! {
             ::noxide::__private::TextField {
                 name: #field_key.into(), label: #label.into(), max_bytes: #maximum,
-                kind: { #bounds }, optional: <#ty as ::noxide::FieldValue>::OPTIONAL,
+                initial: #initial, kind: { #bounds }, optional: <#ty as ::noxide::FieldValue>::OPTIONAL,
             }
         });
         decoding.push(quote! {
