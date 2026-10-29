@@ -564,11 +564,11 @@ mod tests {
             "../../../examples/private-notes/manifest.json"
         ))
         .unwrap();
-        // Protocol v4 adds explicit initial declarations and requires renewed
-        // approval. Pin the updated contract to catch unintended drift.
+        // Explicit initial declarations and list settings require renewed
+        // approval. Pin the generated contract to catch unintended drift.
         assert_eq!(
             URL_SAFE_NO_PAD.encode(digest(&m).unwrap()),
-            "vwZWNnOweQsnJESLzHl43I13IOlAIc2hA7pzTgUB6Vo"
+            "1W3N2rgaNuZIFY6OzFQgfOLkmnxdBHJCej52XIJ8N1o"
         );
     }
 
