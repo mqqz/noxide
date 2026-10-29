@@ -120,3 +120,10 @@ providers.
 Native form-layout metadata collection runs the same host-file, socket, network,
 UID, and capability probes as build scripts. Two fresh VMs verify containment
 and scratch isolation; the native-loop fixture checks deadline enforcement.
+
+The application job also runs `tools/test_lifecycle.py` against a generated
+project with an empty Cargo cache. It covers development approval, registration,
+note persistence across rebuilds, compile failure recovery, changed-contract
+rejection, tests, builds, and separate serving approval.
+`tools/test_cli_package.py` builds the source archives outside the workspace,
+relocates those sources, and uses the detached CLI to check a new application.
