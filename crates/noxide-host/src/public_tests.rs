@@ -20,6 +20,7 @@ fn declarations() -> Manifest {
         TextField {
             kind: FieldKind::Boolean,
             optional: false,
+            initial: None,
             name: "published".into(),
             label: "Published".into(),
             max_bytes: 5,
@@ -27,6 +28,7 @@ fn declarations() -> Manifest {
         TextField {
             kind: FieldKind::Text,
             optional: false,
+            initial: None,
             name: "secret".into(),
             label: "Secret".into(),
             max_bytes: 64,
@@ -766,4 +768,131 @@ async fn postgres_public_reads_and_route_access() {
 async fn sqlite_public_choice_reads_filter_and_project_every_page() {
     let temp = tempfile::tempdir().unwrap();
     public_repository(Database::sqlite(temp.path().join("public-choice.db")), true).await;
+}
+
+#[tokio::test]
+async fn sqlite_initial_create_commit_is_host_owned() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Database::sqlite(temp.path().join("initial.db"));
+    db.initialize().await.unwrap();
+    db.create_account("alice", "initial test password", "")
+        .await
+        .unwrap();
+    for public in [false, true] {
+        let mut m = fixture::manifest();
+        m.resources[0].fields.push(TextField {
+            kind: FieldKind::Boolean,
+            optional: false,
+            initial: Some("true".into()),
+            name: "published".into(),
+            label: "Published".into(),
+            max_bytes: 5,
+        });
+        if public {
+            m.operations[2].policy.any = vec![vec![Predicate::Public]];
+            m.routes[0].access = Access::PublicOptional;
+        }
+        manifest::validate(&m).unwrap();
+        let principal = if public {
+            Principal::Anonymous
+        } else {
+            Principal::User(User {
+                id: "alice".into(),
+                tenant: "".into(),
+                roles: vec![],
+            })
+        };
+        for supplied in [Some("false"), Some("on"), None] {
+            let tx = db
+                .begin(Instant::now() + Duration::from_secs(5))
+                .await
+                .unwrap();
+            let mut tx = tx;
+            tx.bind_schema(&m).await.unwrap();
+            let mut e = effects(tx, &m, principal.clone(), 1, None);
+            e.request.kind = RequestKind::Action(1);
+            e.request
+                .input
+                .insert("body".into(), "created by custom handler".into());
+            if let Some(value) = supplied {
+                e.request.input.insert("published".into(), value.into());
+            }
+            let result = e.invoke(3, 0).await;
+            if supplied.is_some() {
+                assert!(result.is_err());
+                e.tx.commit().await.unwrap();
+                continue;
+            }
+            let record: Record = serde_json::from_slice(&result.unwrap()).unwrap();
+            assert_eq!(record.fields["published"], "true");
+            e.tx.commit().await.unwrap();
+            let mut tx = db
+                .begin_read(Instant::now() + Duration::from_secs(5))
+                .await
+                .unwrap();
+            let stored = repository::load(&mut tx, &m, 1, record.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.record.fields["published"], "true");
+            tx.commit().await.unwrap();
+            let mut updates = m.clone();
+            updates.operations.push(Operation {
+                id: 4,
+                resource: 1,
+                kind: OperationKind::Update,
+                policy: Policy {
+                    any: vec![vec![Predicate::Role {
+                        name: "moderator".into(),
+                        tenant_scoped: false,
+                    }]],
+                },
+                visibility: None,
+                fields: None,
+            });
+            updates.actions.push(Action {
+                id: 2,
+                version: 1,
+                name: "Moderate".into(),
+                operation: 4,
+                redirect: 2,
+                fields: vec!["published".into()],
+                layout: vec![],
+                inspect: None,
+            });
+            updates.routes[1].forms.push(2);
+            manifest::validate(&updates).unwrap();
+            let tx = db
+                .begin(Instant::now() + Duration::from_secs(5))
+                .await
+                .unwrap();
+            let moderator = Principal::User(User {
+                id: "alice".into(),
+                tenant: "".into(),
+                roles: vec![("moderator".into(), "".into())],
+            });
+            let mut e = effects(tx, &updates, moderator, 2, Some(record.id));
+            e.request.kind = RequestKind::Action(2);
+            e.request.input.insert("published".into(), "false".into());
+            e.grant = Some(crate::security::RecordTarget {
+                resource: 1,
+                id: record.id,
+                route: 2,
+                incarnation: stored.incarnation.clone(),
+                revision: stored.revision,
+            });
+            e.record = Some(stored);
+            e.invoke(4, 0).await.unwrap();
+            e.tx.commit().await.unwrap();
+            updates.actions[1].fields = vec!["body".into()];
+            assert!(
+                manifest::canonical_input(
+                    &updates,
+                    &updates.actions[1],
+                    &Fields::from([("published".into(), "true".into())])
+                )
+                .is_err()
+            );
+        }
+    }
 }

@@ -4,8 +4,8 @@ pub fn declarations() -> Manifest {
     serde_json::from_value(serde_json::json!({
         "version": VERSION,
         "resources": [{"id":1,"name":"notes","fields":[
-            {"kind":"text","optional":false,"name":"body","label":"Note","max_bytes":4096},
-            {"kind":"text","optional":false,"name":"tag","label":"Tag","max_bytes":128}]}],
+            {"kind":"text","optional":false,"initial":null,"name":"body","label":"Note","max_bytes":4096},
+            {"kind":"text","optional":false,"initial":null,"name":"tag","label":"Tag","max_bytes":128}]}],
         "operations": [
             {"id":2,"resource":1,"kind":"read","policy":{"any":[["owner"]]}},
             {"id":4,"resource":1,"kind":"update","policy":{"any":[["owner",{"role":{"name":"writer","tenant_scoped":false}}]]}},

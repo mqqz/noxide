@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "resources": [
     {
       "id": 2206293706,
@@ -10,7 +10,8 @@
           "optional": false,
           "name": "body",
           "label": "Note",
-          "max_bytes": 4096
+          "max_bytes": 4096,
+          "initial": null
         }
       ]
     }

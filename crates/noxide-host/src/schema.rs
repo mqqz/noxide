@@ -81,6 +81,7 @@ pub fn normalized(resources: &[Resource]) -> Vec<Resource> {
         resource.id = 0;
         for field in &mut resource.fields {
             field.label = field.name.clone();
+            field.initial = None;
             if let FieldKind::Choice { variants } = &mut field.kind {
                 for variant in variants.iter_mut() {
                     variant.label = variant.key.clone();

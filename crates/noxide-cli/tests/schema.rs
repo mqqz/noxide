@@ -43,6 +43,7 @@ async fn schema_drafts_require_backfills_and_apply_the_approved_target() {
         max_bytes: 8,
         kind: FieldKind::Boolean,
         optional: false,
+        initial: None,
     });
     target.actions[0].fields.push("completed".into());
     let old = root.join("old.json");

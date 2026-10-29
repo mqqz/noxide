@@ -42,6 +42,19 @@ pub fn validate(m: &Manifest) -> Result<()> {
     unique(m.actions.iter().map(|x| x.id))?;
     let mut resource_keys = BTreeSet::new();
     for r in &m.resources {
+        for field in &r.fields {
+            if let Some(value) = &field.initial {
+                ensure!(
+                    !field.optional
+                        && matches!(field.kind, FieldKind::Boolean | FieldKind::Choice { .. }),
+                    "initial requires a non-optional boolean or choice"
+                );
+                ensure!(
+                    field.canonical(value).as_ref().ok() == Some(value),
+                    "invalid initial value"
+                );
+            }
+        }
         ensure!(
             identifier(&r.name)
                 && resource_keys.insert(&r.name)
@@ -312,11 +325,24 @@ pub fn validate(m: &Manifest) -> Result<()> {
             "parent is host-bound and immutable"
         );
         match op.kind {
-            OperationKind::Create => ensure!(
-                fields.len() + usize::from(parent_resource(m, op.resource)?.is_some())
-                    == resource(m, op.resource)?.fields.len(),
-                "creation requires every field"
-            ),
+            OperationKind::Create => {
+                ensure!(!fields.is_empty(), "create requires writable fields");
+                ensure!(
+                    fields.iter().all(|f| f.initial.is_none()),
+                    "initial value is host-applied"
+                );
+                ensure!(
+                    fields.len()
+                        + resource(m, op.resource)?
+                            .fields
+                            .iter()
+                            .filter(|f| f.initial.is_some())
+                            .count()
+                        + usize::from(parent_resource(m, op.resource)?.is_some())
+                        == resource(m, op.resource)?.fields.len(),
+                    "creation requires every writable field"
+                );
+            }
             OperationKind::Update => {
                 ensure!(!fields.is_empty(), "update requires writable fields")
             }
@@ -518,11 +544,11 @@ mod tests {
             "../../../examples/private-notes/manifest.json"
         ))
         .unwrap();
-        // The inline app module intentionally changes declaration IDs and requires
-        // renewed approval. Pin its updated contract to catch unintended drift.
+        // Protocol v4 adds explicit initial declarations and requires renewed
+        // approval. Pin the updated contract to catch unintended drift.
         assert_eq!(
             URL_SAFE_NO_PAD.encode(digest(&m).unwrap()),
-            "j0xMewW3Rx5FfJpfV7BXbTNh4mhJD3tUwuXFb7_-g8Q"
+            "vwZWNnOweQsnJESLzHl43I13IOlAIc2hA7pzTgUB6Vo"
         );
     }
 
@@ -535,6 +561,7 @@ mod tests {
             max_bytes: 200,
             kind,
             optional,
+            initial: None,
         }
     }
 
@@ -800,5 +827,121 @@ mod tests {
         manifest.routes.push(reserved);
         validate(&manifest).unwrap();
         assert!(crate::Presentation::default().validate(&manifest).is_err());
+    }
+}
+
+#[cfg(test)]
+mod initial_tests {
+    use super::*;
+    fn declarations() -> Manifest {
+        let mut m = crate::test_support::manifest();
+        m.resources[0].fields.push(TextField {
+            name: "published".into(),
+            label: "Published".into(),
+            kind: FieldKind::Boolean,
+            optional: false,
+            initial: Some("true".into()),
+            max_bytes: 5,
+        });
+        m
+    }
+    #[test]
+    fn initial_admission_and_digest_boundaries() {
+        let m = declarations();
+        validate(&m).unwrap();
+        for value in ["on", "TRUE", "", "false "] {
+            let mut bad = m.clone();
+            bad.resources[0].fields[1].initial = Some(value.into());
+            assert!(validate(&bad).is_err(), "{value}");
+        }
+        for kind in [
+            FieldKind::Text,
+            FieldKind::Integer {
+                min: Some(0),
+                max: Some(10),
+            },
+            FieldKind::Choice { variants: vec![] },
+        ] {
+            let mut bad = m.clone();
+            bad.resources[0].fields[1].kind = kind;
+            assert!(validate(&bad).is_err());
+        }
+        let mut choice = m.clone();
+        choice.resources[0].fields[1].kind = FieldKind::Choice {
+            variants: vec![
+                ChoiceVariant {
+                    key: "draft".into(),
+                    label: "Draft".into(),
+                },
+                ChoiceVariant {
+                    key: "live".into(),
+                    label: "Live".into(),
+                },
+            ],
+        };
+        assert!(validate(&choice).is_err());
+        choice.resources[0].fields[1].initial = Some("draft".into());
+        validate(&choice).unwrap();
+        let mut parent = m.clone();
+        parent.resources[0].fields[1].kind = FieldKind::Parent {
+            resource: "notes".into(),
+            visible: Visibility {
+                field: "published".into(),
+                equals: "true".into(),
+            },
+            create_when: Visibility {
+                field: "published".into(),
+                equals: "true".into(),
+            },
+        };
+        assert!(
+            validate(&parent)
+                .unwrap_err()
+                .to_string()
+                .contains("initial requires")
+        );
+        let mut bad = m.clone();
+        bad.resources[0].fields[1].optional = true;
+        assert!(validate(&bad).is_err());
+        bad = m.clone();
+        bad.resources[0].fields[1].max_bytes = 3;
+        assert!(validate(&bad).is_err());
+        bad = m.clone();
+        bad.actions[0].fields.push("published".into());
+        assert!(
+            validate(&bad)
+                .unwrap_err()
+                .to_string()
+                .contains("initial value is host-applied")
+        );
+        bad = m.clone();
+        bad.actions[0].fields.clear();
+        bad.resources[0].fields.remove(0);
+        assert!(
+            validate(&bad)
+                .unwrap_err()
+                .to_string()
+                .contains("create requires writable fields")
+        );
+        for value in ["on", "false"] {
+            assert!(
+                canonical_input(
+                    &m,
+                    &m.actions[0],
+                    &Fields::from([
+                        ("body".into(), "hello".into()),
+                        ("published".into(), value.into())
+                    ])
+                )
+                .is_err()
+            );
+        }
+        let mut changed = m.clone();
+        changed.resources[0].fields[1].initial = Some("false".into());
+        assert_ne!(digest(&m).unwrap(), digest(&changed).unwrap());
+        assert_eq!(
+            crate::schema::digest(&m.resources).unwrap(),
+            crate::schema::digest(&changed.resources).unwrap()
+        );
     }
 }

@@ -14,6 +14,7 @@ fn boolean(name: &str) -> TextField {
         label: name.into(),
         kind: FieldKind::Boolean,
         optional: false,
+        initial: None,
         max_bytes: 5,
     }
 }
@@ -26,6 +27,7 @@ fn declarations() -> Manifest {
             label: "Thread".into(),
             max_bytes: 20,
             optional: false,
+            initial: None,
             kind: FieldKind::Parent {
                 resource: "threads".into(),
                 visible: Visibility {
@@ -734,6 +736,7 @@ async fn index_scope_case(db: Database, sqlite: bool) {
             .map(|name| TextField {
                 kind: FieldKind::Text,
                 optional: false,
+                initial: None,
                 name: name.into(),
                 label: name.into(),
                 max_bytes: 4096,
