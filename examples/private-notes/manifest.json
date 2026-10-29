@@ -30,6 +30,10 @@
       }
     },
     {
+      "list": {
+        "order": "created_asc",
+        "page_size": 3
+      },
       "id": 1175018442,
       "resource": 2206293706,
       "kind": "list",
