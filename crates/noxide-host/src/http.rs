@@ -1139,3 +1139,125 @@ mod cursor_recovery_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod parent_redirect_disconnect_tests {
+    use super::*;
+    use crate::{Database, parent_tests, test_support as fixture};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn committed_anonymous_create_recovers_original_secret_after_disconnect() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::sqlite(temp.path().join("disconnect.db"));
+        let (app, m) = parent_tests::redirect_app(db.clone()).await;
+        let app = Arc::new(app);
+        let listener = Listener::loopback("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let address = match &listener.0 {
+            ListenerKind::Tcp(tcp) => tcp.local_addr().unwrap(),
+            #[cfg(unix)]
+            _ => unreachable!(),
+        };
+        let origin = format!("http://{address}");
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(serve(
+            listener,
+            app.clone(),
+            Origin::parse(&origin).unwrap(),
+            async {
+                let _ = stopped.await;
+            },
+        ));
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        socket
+            .write_all(
+                format!("GET /threads/10 HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut received = String::new();
+        socket.read_to_string(&mut received).await.unwrap();
+        let cookie = received
+            .split_once("set-cookie: noxide_anon=")
+            .unwrap()
+            .1
+            .split(';')
+            .next()
+            .unwrap();
+        let submission = fixture::hidden(&received, "_submission");
+        let csrf = fixture::hidden(&received, "_csrf");
+        let form: String = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("_submission", &submission)
+            .append_pair("_csrf", &csrf)
+            .append_pair("body", "disconnect reply")
+            .append_pair("published", "true")
+            .finish();
+        let request = format!(
+            "POST /actions/1 HTTP/1.1\r\nHost: {address}\r\nOrigin: {origin}\r\nCookie: noxide_anon={cookie}\r\nConnection: close\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{form}",
+            form.len()
+        );
+        let committed = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        *app.postcommit_barrier.lock().unwrap() = Some((committed.clone(), resume.clone()));
+        let mut lost = tokio::net::TcpStream::connect(address).await.unwrap();
+        lost.write_all(request.as_bytes()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), committed.notified())
+            .await
+            .unwrap();
+        // No response can have been emitted: the handler is paused after commit.
+        drop(lost);
+        let mut tx = db
+            .begin_read((tokio::time::Instant::now() + Duration::from_secs(5)).into_std())
+            .await
+            .unwrap();
+        let storage = tx.storage_resource(&m, 1).await.unwrap();
+        let row = tx
+            .fetch::<1>("SELECT outcome FROM nx_receipts WHERE outcome<>''", &[])
+            .await
+            .unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(&row[0][0]).unwrap();
+        let outcome: serde_json::Value = receipt["outcome"].clone();
+        let original = app
+            .keys
+            .edit_secret(
+                outcome["key_id"].as_u64().unwrap() as u32,
+                storage as u32,
+                outcome["id"].as_u64().unwrap(),
+                outcome["cap_version"].as_u64().unwrap(),
+            )
+            .unwrap();
+        tx.commit().await.unwrap();
+        resume.notify_one();
+        let mut replay = tokio::net::TcpStream::connect(address).await.unwrap();
+        replay.write_all(request.as_bytes()).await.unwrap();
+        let mut recovered = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            replay.read_to_string(&mut recovered),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(recovered.starts_with("HTTP/1.1 200"), "{recovered}");
+        assert!(recovered.contains(&format!("<pre>{original}</pre>")));
+        let mut tx = db
+            .begin_read((tokio::time::Instant::now() + Duration::from_secs(5)).into_std())
+            .await
+            .unwrap();
+        assert_eq!(
+            tx.fetch::<1>(
+                "SELECT CAST(COUNT(*) AS TEXT) FROM nx_records WHERE resource=$1 AND id>12",
+                &[storage.into()]
+            )
+            .await
+            .unwrap()[0][0],
+            "1"
+        );
+        tx.commit().await.unwrap();
+        stop.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
+}

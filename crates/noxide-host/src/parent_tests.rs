@@ -18,7 +18,7 @@ fn boolean(name: &str) -> TextField {
         max_bytes: 5,
     }
 }
-fn declarations() -> Manifest {
+pub(crate) fn declarations() -> Manifest {
     let mut m = fixture::manifest();
     m.resources[0].fields.extend([
         boolean("published"),
@@ -85,7 +85,7 @@ fn declarations() -> Manifest {
     m.actions[0].fields.push("published".into());
     m
 }
-async fn seed(db: &Database, m: &Manifest) {
+pub(crate) async fn seed(db: &Database, m: &Manifest) {
     let mut tx = db
         .begin(Instant::now() + Duration::from_secs(5))
         .await
@@ -136,7 +136,7 @@ async fn effects(db: &Database, m: &Manifest, route: u32, target: u64) -> Effect
         more: None,
     }
 }
-async fn set_parent(db: &Database, m: &Manifest, published: bool, locked: bool) {
+pub(crate) async fn set_parent(db: &Database, m: &Manifest, published: bool, locked: bool) {
     let mut tx = db
         .begin(Instant::now() + Duration::from_secs(5))
         .await
@@ -209,7 +209,7 @@ async fn mutation_case(db: Database) {
         version: 1,
         name: "Edit reply".into(),
         operation: 5,
-        redirect: 2,
+        redirect: Redirect::Page(2),
         fields: vec!["body".into()],
         inspect: None,
         layout: vec![],
@@ -553,7 +553,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         version: 1,
         name: "Delete thread".into(),
         operation: 5,
-        redirect: 1,
+        redirect: Redirect::Page(1),
         fields: vec![],
         inspect: None,
         layout: vec![],
@@ -662,6 +662,7 @@ async fn postgres_relationships_pagination_forms_and_migrations() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     for case in [
+        "redirect",
         "prefix",
         "parents",
         "forms",
@@ -686,6 +687,7 @@ async fn postgres_relationships_pagination_forms_and_migrations() {
         let db = Database::postgres(case_url.as_str()).unwrap();
         match case {
             "prefix" => chronological_prefix_case(db).await,
+            "redirect" => redirect_case(db).await,
             "parents" => parents_case(db, false).await,
             "forms" => forms_case(db, false).await,
             "integrity" => integrity_case(db, false).await,
@@ -1272,4 +1274,196 @@ async fn postgres_full_creation_benchmark() {
     let mut url = url::Url::parse(&url).unwrap();
     url.set_path(&name);
     full_creation_benchmark(Database::postgres(url.as_str()).unwrap()).await;
+}
+
+pub(crate) async fn redirect_app(db: Database) -> (Application, Manifest) {
+    db.initialize().await.unwrap();
+    let mut m = declarations();
+    m.actions[0].redirect = Redirect::Parent { parent: 3 };
+    manifest::validate(&m).unwrap();
+    let app = Application::new(
+        &fixture::component(None),
+        &serde_json::to_vec(&m).unwrap(),
+        manifest::digest(&m).unwrap(),
+        db.clone(),
+        HostKeys::generate().unwrap(),
+        Limits::default(),
+    )
+    .unwrap();
+    app.activate().await.unwrap();
+    seed(&db, &m).await;
+    (app, m)
+}
+async fn redirect_case(db: Database) {
+    let (app, m) = redirect_app(db.clone()).await;
+    let input = Fields::from([
+        ("body".into(), "redirect reply".into()),
+        ("published".into(), "true".into()),
+    ]);
+    let page = app.view_page(None, 3, Some(10), None).await.unwrap();
+    let cookie = page.anonymous_cookie.unwrap();
+    let body = String::from_utf8(page.body).unwrap();
+    let token = fixture::hidden(&body, "_submission");
+    let csrf = fixture::hidden(&body, "_csrf");
+    let saved = app
+        .submit(&cookie, 1, &token, &csrf, input.clone())
+        .await
+        .unwrap();
+    let body = String::from_utf8(saved.body).unwrap();
+    assert!(body.contains("<pre>"));
+    assert!(body.contains("href=\"/threads/10\""));
+    assert!(saved.location.is_none());
+    let secret = body
+        .split("<pre>")
+        .nth(1)
+        .unwrap()
+        .split("</pre>")
+        .next()
+        .unwrap()
+        .to_string();
+    // Treat the first response as lost. The original submission recovers the
+    // exact credential without requiring the original response or child ID.
+    let replay = app
+        .submit(&cookie, 1, &token, &csrf, input.clone())
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&replay.body).contains(&secret));
+    set_parent(&db, &m, false, false).await;
+    let denied = app
+        .submit(&cookie, 1, &token, &csrf, input.clone())
+        .await
+        .unwrap();
+    let denied = String::from_utf8(denied.body).unwrap();
+    assert!(denied.contains(&secret));
+    assert!(!denied.contains("/threads/10"));
+    set_parent(&db, &m, true, false).await;
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    let parent = tx.storage_resource(&m, 2).await.unwrap();
+    tx.execute(
+        "UPDATE nx_records SET incarnation='replacement' WHERE resource=$1 AND id=10",
+        &[parent.into()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let replaced = app.submit(&cookie, 1, &token, &csrf, input).await.unwrap();
+    assert!(!String::from_utf8_lossy(&replaced.body).contains("/threads/10"));
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    let child = tx.storage_resource(&m, 1).await.unwrap();
+    assert_eq!(
+        tx.fetch::<1>(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM nx_records WHERE resource=$1 AND id>12",
+            &[child.into()]
+        )
+        .await
+        .unwrap()[0][0],
+        "1"
+    );
+    tx.rollback().await.unwrap();
+}
+#[tokio::test]
+async fn sqlite_parent_redirect_handover_replay_and_visibility() {
+    let tmp = tempfile::tempdir().unwrap();
+    redirect_case(Database::sqlite(tmp.path().join("redirect.db"))).await;
+}
+
+#[test]
+fn parent_redirect_admission_and_contract_identity() {
+    let ordinary = declarations();
+    let mut parent = ordinary.clone();
+    parent.actions[0].redirect = Redirect::Parent { parent: 3 };
+    manifest::validate(&parent).unwrap();
+    assert_ne!(
+        manifest::digest(&ordinary).unwrap(),
+        manifest::digest(&parent).unwrap()
+    );
+    for route in [1, 2, 999] {
+        parent.actions[0].redirect = Redirect::Parent { parent: route };
+        assert!(manifest::validate(&parent).is_err());
+    }
+    parent.actions[0].redirect = Redirect::Parent { parent: 3 };
+    let mut additional = parent.operations[3].clone();
+    additional.id = 99;
+    parent.operations.push(additional);
+    parent.routes[2].operations.push(99);
+    assert!(manifest::validate(&parent).is_err());
+}
+
+#[tokio::test]
+async fn parent_read_authority_matches_normal_get_and_excludes_list_authority() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = Database::sqlite(tmp.path().join("read.db"));
+    db.initialize().await.unwrap();
+    let mut m = declarations();
+    let read = &mut m.operations[3];
+    read.policy = Policy {
+        any: vec![vec![Predicate::Owner]],
+    };
+    read.visibility = None;
+    read.fields = None;
+    m.routes[2].access = Access::Authenticated;
+    seed(&db, &m).await;
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    let storage = tx.storage_resource(&m, 2).await.unwrap();
+    tx.execute(
+        "INSERT INTO nx_accounts(id,password,tenant,epoch) VALUES('alice','unused','one',1)",
+        &[],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        "UPDATE nx_records SET owner='alice',tenant='one' WHERE resource=$1",
+        &[storage.into()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    for principal in [
+        Principal::Anonymous,
+        Principal::User(crate::auth::User {
+            id: "alice".into(),
+            tenant: "one".into(),
+            roles: vec![],
+        }),
+        Principal::User(crate::auth::User {
+            id: "bob".into(),
+            tenant: "one".into(),
+            roles: vec![],
+        }),
+    ] {
+        let mut tx = db
+            .begin_read(Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+        let normal =
+            crate::repository::read_resource(&mut tx, &m, &principal, &m.operations[3], 10)
+                .await
+                .unwrap();
+        let redirect = crate::repository::authorize_page_resource(
+            &mut tx,
+            &m,
+            &principal,
+            &m.routes[2],
+            2,
+            10,
+            Some("parent"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(normal.is_some(), redirect.is_some());
+        assert_eq!(
+            redirect.is_some(),
+            matches!(&principal, Principal::User(user) if user.id == "alice")
+        );
+        tx.commit().await.unwrap();
+    }
 }
