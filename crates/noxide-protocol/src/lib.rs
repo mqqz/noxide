@@ -352,6 +352,16 @@ impl TextField {
     }
 }
 
+/// Stable contract identifier grammar, shared by producers and the host.
+pub fn identifier(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name.as_bytes()[0].is_ascii_lowercase()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
