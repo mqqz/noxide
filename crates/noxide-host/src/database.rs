@@ -25,7 +25,13 @@ pub(crate) enum Backend {
     Sqlite(sqlx::SqliteConnection),
     Postgres(sqlx::PgConnection),
 }
+#[cfg(test)]
+pub(crate) static CREATION_HOLD_MAX: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 pub(crate) struct Transaction {
+    #[cfg(test)]
+    creation_acquired: Option<Instant>,
     backend: Backend,
     active: bool,
     read_only: bool,
@@ -208,6 +214,8 @@ impl Database {
             }
         };
         Ok(Transaction {
+            #[cfg(test)]
+            creation_acquired: None,
             backend,
             active: true,
             read_only,
@@ -310,6 +318,34 @@ impl Transaction {
             tables.push((table.into(), rows));
         }
         Ok(tables)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn explain(&mut self, query: &str) -> Result<Vec<String>> {
+        match &mut self.backend {
+            Backend::Sqlite(cx) => Ok(sqlx::query(&format!("EXPLAIN QUERY PLAN {query}"))
+                .fetch_all(cx)
+                .await?
+                .iter()
+                .map(|r| r.try_get::<String, _>(3))
+                .collect::<std::result::Result<Vec<_>, _>>()?),
+            Backend::Postgres(cx) => Ok(sqlx::query(&format!("EXPLAIN {query}"))
+                .fetch_all(cx)
+                .await?
+                .iter()
+                .map(|r| r.try_get::<String, _>(0))
+                .collect::<std::result::Result<Vec<_>, _>>()?),
+        }
+    }
+
+    pub(crate) async fn allocate_creation(&mut self) -> Result<i64> {
+        let rows=self.fetch::<1>("UPDATE nx_creation_counter SET value=value+1 WHERE singleton=1 AND value<9223372036854775807 RETURNING CAST(value AS TEXT)", &[]).await?;
+        ensure!(rows.len() == 1, "creation sequence exhausted");
+        #[cfg(test)]
+        {
+            self.creation_acquired = Some(Instant::now());
+        }
+        Ok(rows[0][0].parse()?)
     }
 
     pub(crate) async fn check_storage(&mut self) -> Result<()> {
@@ -530,6 +566,13 @@ impl Transaction {
     }
     pub(crate) async fn commit(&mut self) -> Result<()> {
         self.execute_internal("COMMIT", &[]).await?;
+        #[cfg(test)]
+        if let Some(started) = self.creation_acquired.take() {
+            CREATION_HOLD_MAX.fetch_max(
+                started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                Ordering::Relaxed,
+            );
+        }
         self.active = false;
         self.release_gate().await?;
         #[cfg(test)]
@@ -577,7 +620,7 @@ pub(crate) fn retryable(error: &anyhow::Error) -> bool {
     )
 }
 
-const STORAGE_VERSION: i64 = 5;
+const STORAGE_VERSION: i64 = 6;
 const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
     (
         "nx_resource_catalog",
@@ -634,6 +677,7 @@ const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
             ("incarnation", "TEXT"),
             ("revision", "BIGINT"),
             ("cap_version", "BIGINT"),
+            ("created_seq", "BIGINT"),
         ],
     ),
     (
@@ -647,6 +691,10 @@ const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
             ("outcome", "TEXT"),
             ("expires", "BIGINT"),
         ],
+    ),
+    (
+        "nx_creation_counter",
+        &[("singleton", "BIGINT"), ("value", "BIGINT")],
     ),
     (
         "nx_clock",
@@ -669,16 +717,19 @@ const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
 
 const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS nx_storage (singleton BIGINT PRIMARY KEY CHECK(singleton=1), version BIGINT NOT NULL)",
-    "INSERT INTO nx_storage(singleton,version) VALUES(1,5)",
+    "INSERT INTO nx_storage(singleton,version) VALUES(1,6)",
     "CREATE TABLE IF NOT EXISTS nx_resource_catalog (storage_id BIGINT PRIMARY KEY, resource_key TEXT NOT NULL UNIQUE)",
     "CREATE TABLE IF NOT EXISTS nx_schema_definition (singleton BIGINT PRIMARY KEY CHECK(singleton=1), definition TEXT NOT NULL, history TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS nx_accounts (id TEXT PRIMARY KEY, password TEXT NOT NULL, tenant TEXT NOT NULL, epoch BIGINT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS nx_invites (code_hash TEXT PRIMARY KEY, issuer TEXT NOT NULL, expires BIGINT NOT NULL, redeemed_at BIGINT NULL, redeemed_by TEXT NULL REFERENCES nx_accounts(id))",
     "CREATE TABLE IF NOT EXISTS nx_roles (principal TEXT NOT NULL REFERENCES nx_accounts(id), name TEXT NOT NULL, tenant TEXT NOT NULL, PRIMARY KEY(principal,name,tenant))",
     "CREATE TABLE IF NOT EXISTS nx_sessions (id TEXT PRIMARY KEY, principal TEXT NOT NULL REFERENCES nx_accounts(id), epoch BIGINT NOT NULL, expires BIGINT NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS nx_records (resource BIGINT NOT NULL, id BIGINT NOT NULL, owner TEXT NULL REFERENCES nx_accounts(id), tenant TEXT NOT NULL, fields TEXT NOT NULL, incarnation TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>=1), cap_version BIGINT NULL, PRIMARY KEY(resource,id))",
-    "CREATE INDEX IF NOT EXISTS nx_records_owner ON nx_records(resource,owner,id)",
-    "CREATE INDEX IF NOT EXISTS nx_records_tenant ON nx_records(resource,tenant,id)",
+    "CREATE TABLE IF NOT EXISTS nx_records (resource BIGINT NOT NULL, id BIGINT NOT NULL, owner TEXT NULL REFERENCES nx_accounts(id), tenant TEXT NOT NULL, fields TEXT NOT NULL, incarnation TEXT NOT NULL, revision BIGINT NOT NULL CHECK(revision>=1), cap_version BIGINT NULL, created_seq BIGINT NOT NULL UNIQUE CHECK(created_seq>0), PRIMARY KEY(resource,id))",
+    "CREATE TABLE nx_creation_counter (singleton BIGINT PRIMARY KEY CHECK(singleton=1), value BIGINT NOT NULL CHECK(value>=0))",
+    "INSERT INTO nx_creation_counter(singleton,value) VALUES(1,0)",
+    "CREATE INDEX nx_records_created ON nx_records(resource,created_seq)",
+    "CREATE INDEX IF NOT EXISTS nx_records_owner ON nx_records(resource,owner,created_seq)",
+    "CREATE INDEX IF NOT EXISTS nx_records_tenant ON nx_records(resource,tenant,created_seq)",
     "CREATE TABLE IF NOT EXISTS nx_receipts (nonce TEXT PRIMARY KEY, subject TEXT NOT NULL, contract TEXT NOT NULL, action BIGINT NOT NULL, input TEXT NOT NULL, outcome TEXT NOT NULL, expires BIGINT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS nx_clock (singleton BIGINT PRIMARY KEY, observed BIGINT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS nx_deployment (singleton BIGINT PRIMARY KEY, contract TEXT NOT NULL, incarnation TEXT NOT NULL, generation TEXT NOT NULL)",
@@ -752,7 +803,8 @@ mod storage_tests {
             .await
             .unwrap();
         tx.check_layout().await.unwrap();
-        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version) VALUES(1,1,NULL,'','{}','layout-test',1,1)", &[]).await.unwrap();
+        tx.allocate_creation().await.unwrap();
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version,created_seq) VALUES(1,1,NULL,'','{}','layout-test',1,1,(SELECT value FROM nx_creation_counter WHERE singleton=1))", &[]).await.unwrap();
         assert_eq!(tx.fetch::<1>("SELECT CASE WHEN owner IS NULL AND cap_version=1 THEN 'yes' ELSE 'no' END FROM nx_records", &[]).await.unwrap()[0][0], "yes");
         tx.execute("UPDATE nx_storage SET version=3", &[])
             .await
@@ -885,7 +937,8 @@ mod application_schema_tests {
         for (id, body) in [(1, "42"), (2, "invalid")] {
             let fields =
                 serde_json::to_string(&Fields::from([("body".into(), body.into())])).unwrap();
-            tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES(1,$1,'alice','team',$2,$3,7)",&[id.into(),fields.into(),format!("record-{id}").into()]).await.unwrap();
+            tx.allocate_creation().await.unwrap();
+            tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,$1,'alice','team',$2,$3,7,(SELECT value FROM nx_creation_counter WHERE singleton=1))",&[id.into(),fields.into(),format!("record-{id}").into()]).await.unwrap();
         }
         tx.commit().await.unwrap();
     }
@@ -1011,5 +1064,167 @@ mod application_schema_tests {
             .execute(&mut admin)
             .await
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod creation_tests {
+    use super::*;
+    async fn fresh_postgres() -> Database {
+        let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+        let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+        let name = format!(
+            "nx_sequence_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sqlx::query(&format!("CREATE DATABASE {name}"))
+            .execute(&mut admin)
+            .await
+            .unwrap();
+        let mut url = url::Url::parse(&url).unwrap();
+        url.set_path(&name);
+        Database::postgres(url.as_str()).unwrap()
+    }
+    async fn rollback_case(db: Database) {
+        db.initialize().await.unwrap();
+        let mut tx = db
+            .begin(Instant::now() + Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert_eq!(tx.allocate_creation().await.unwrap(), 1);
+        tx.rollback().await.unwrap();
+        let mut tx = db
+            .begin(Instant::now() + Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert_eq!(tx.allocate_creation().await.unwrap(), 1);
+        tx.commit().await.unwrap();
+        let mut tx = db
+            .begin(Instant::now() + Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert_eq!(tx.allocate_creation().await.unwrap(), 2);
+        tx.execute(
+            "UPDATE nx_creation_counter SET value=9223372036854775807",
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(tx.allocate_creation().await.is_err());
+        tx.rollback().await.unwrap();
+        db.initialize().await.unwrap();
+        let mut tx = db
+            .begin(Instant::now() + Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert_eq!(tx.allocate_creation().await.unwrap(), 2);
+        tx.rollback().await.unwrap();
+    }
+    #[tokio::test]
+    async fn sqlite_creation_counter_rolls_back_and_survives_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        rollback_case(Database::sqlite(tmp.path().join("counter.db"))).await;
+    }
+    #[tokio::test]
+    #[ignore = "requires NOXIDE_TEST_POSTGRES"]
+    async fn postgres_creation_counter_rollback_serialization_and_lock_timeout() {
+        rollback_case(fresh_postgres().await).await;
+        let db = fresh_postgres().await;
+        db.initialize().await.unwrap();
+        let mut first = db
+            .begin(Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(first.allocate_creation().await.unwrap(), 1);
+        let mut second = db
+            .begin(Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(
+            second
+                .fetch::<1>("SELECT CAST(value AS TEXT) FROM nx_creation_counter", &[])
+                .await
+                .unwrap()[0][0],
+            "0"
+        );
+        // A conflicting writer cannot pass the held counter lock.
+        let error = second.allocate_creation().await.unwrap_err();
+        assert!(format!("{error:#}").contains("lock timeout"), "{error:#}");
+        second.rollback().await.unwrap();
+        let mut stale = db
+            .begin(Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+        stale
+            .fetch::<1>("SELECT CAST(value AS TEXT) FROM nx_creation_counter", &[])
+            .await
+            .unwrap();
+        first.commit().await.unwrap();
+        let error = stale.allocate_creation().await.unwrap_err();
+        assert!(format!("{error:#}").contains("serialize"), "{error:#}");
+        stale.rollback().await.unwrap();
+        let mut retry = db
+            .begin(Instant::now() + Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert_eq!(retry.allocate_creation().await.unwrap(), 2);
+        retry.commit().await.unwrap();
+    }
+    // Manual evidence collection, not a latency-sensitive CI assertion. Includes
+    // transaction setup, allocation, insertion across two resources, and commit.
+    async fn benchmark(db: Database) {
+        db.initialize().await.unwrap();
+        for concurrency in [1usize, 4, 16] {
+            let start = Instant::now();
+            let mut tasks = tokio::task::JoinSet::new();
+            for worker in 0..concurrency {
+                let db = db.clone();
+                tasks.spawn(async move {
+                let mut samples=Vec::new();let mut failures=0;
+                for index in 0..20 {let started=Instant::now();let result=async {
+                    let mut tx=db.begin(Instant::now()+Duration::from_secs(3)).await?;
+                    let lock=Instant::now();let sequence=tx.allocate_creation().await?;
+                    let acquired=Instant::now();
+                    tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,NULL,'','{}','benchmark',1,$3)",&[((worker%2+1) as i64).into(),((worker*20+index+1+concurrency*1000) as i64).into(),sequence.into()]).await?;
+                    tx.commit().await?;
+                    anyhow::Ok((started.elapsed(),lock.elapsed(),acquired.elapsed()))
+                }.await;match result {Ok(sample)=>samples.push(sample),Err(_)=>failures+=1};}
+                (samples,failures)
+            });
+            }
+            let mut samples = Vec::new();
+            let mut failures = 0;
+            while let Some(result) = tasks.join_next().await {
+                let (batch, failed) = result.unwrap();
+                samples.extend(batch);
+                failures += failed;
+            }
+            samples.sort_by_key(|x| x.0);
+            let n = samples.len();
+            assert!(n > 0);
+            eprintln!(
+                "creation concurrency={concurrency} committed={n} failures={failures} throughput={:.1}/s p50={:?} p95={:?} p99={:?} max_counter_wait_and_hold={:?} max_hold={:?}",
+                n as f64 / start.elapsed().as_secs_f64(),
+                samples[n / 2].0,
+                samples[(n - 1) * 95 / 100].0,
+                samples[(n - 1) * 99 / 100].0,
+                samples.iter().map(|x| x.1).max(),
+                samples.iter().map(|x| x.2).max()
+            );
+        }
+    }
+    #[tokio::test]
+    #[ignore = "manual contention benchmark"]
+    async fn sqlite_creation_contention_benchmark() {
+        let tmp = tempfile::tempdir().unwrap();
+        benchmark(Database::sqlite(tmp.path().join("bench.db"))).await;
+    }
+    #[tokio::test]
+    #[ignore = "manual contention benchmark; requires NOXIDE_TEST_POSTGRES"]
+    async fn postgres_creation_contention_benchmark() {
+        benchmark(fresh_postgres().await).await;
     }
 }

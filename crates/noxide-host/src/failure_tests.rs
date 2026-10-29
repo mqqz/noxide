@@ -161,8 +161,8 @@ async fn stored_bounds(db: &Database) {
         .unwrap();
     tx.bind_schema(&m).await.unwrap();
     for id in [2_i64, 9, 10, 99, 100, 101] {
-        tx.execute(
-            "INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES(1,$1,'alice','',$2,'fixture-incarnation',1)",
+        tx.allocate_creation().await.unwrap();
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,$1,'alice','',$2,'fixture-incarnation',1,(SELECT value FROM nx_creation_counter WHERE singleton=1))",
             &[id.into(), serde_json::to_string(&fields).unwrap().into()],
         )
         .await
@@ -198,17 +198,17 @@ async fn stored_bounds(db: &Database) {
     let records: Vec<Record> = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
         records.iter().map(|r| r.id).collect::<Vec<_>>(),
-        [101, 100, 99],
-        "record IDs must sort numerically across digit widths"
+        [2, 9, 10],
+        "records follow creation order independently of ID width"
     );
     assert!(records.iter().all(|r| r.fields == fields));
-    assert_eq!(effects.more, Some(99));
+    assert_eq!(effects.more, Some(3));
     effects.cursor = effects.more.take();
     let records: Vec<Record> =
         serde_json::from_slice(&effects.invoke(1, 0).await.unwrap()).unwrap();
     assert_eq!(
         records.iter().map(|r| r.id).collect::<Vec<_>>(),
-        [10, 9, 2],
+        [99, 100, 101],
         "cursor continuation must neither skip nor repeat records"
     );
     assert!(
@@ -236,10 +236,7 @@ async fn stored_bounds(db: &Database) {
     ] {
         effects
             .tx
-            .execute(
-                "UPDATE nx_records SET fields=$1 WHERE id=101",
-                &[bad.into()],
-            )
+            .execute("UPDATE nx_records SET fields=$1 WHERE id=2", &[bad.into()])
             .await
             .unwrap();
         assert!(
@@ -247,8 +244,8 @@ async fn stored_bounds(db: &Database) {
             "stored values must be validated before disclosure"
         );
         effects.request.kind = RequestKind::Route(2);
-        effects.request.target = Some(101);
-        assert!(effects.invoke(2, 101).await.is_err());
+        effects.request.target = Some(2);
+        assert!(effects.invoke(2, 2).await.is_err());
         effects.request.kind = RequestKind::Route(1);
         effects.request.target = None;
     }
@@ -604,8 +601,8 @@ async fn record_mutation_failures(db: Database) {
             tx.execute("DELETE FROM nx_records", &[]).await.unwrap();
             tx.execute("DELETE FROM nx_receipts", &[]).await.unwrap();
             let incarnation = format!("fault-{action}-{case}");
-            tx.execute(
-                "INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES(1,42,'alice','','{\"body\":\"original\",\"tag\":\"protected tag\"}',$1,1)",
+            tx.allocate_creation().await.unwrap();
+            tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,42,'alice','','{\"body\":\"original\",\"tag\":\"protected tag\"}',$1,1,(SELECT value FROM nx_creation_counter WHERE singleton=1))",
                 &[incarnation.clone().into()],
             )
             .await

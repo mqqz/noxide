@@ -53,6 +53,12 @@ pub(super) fn expand_query(
     } else {
         quote!(::noxide::ReadQuery)
     };
+    let page_size = declaration.page_size.unwrap_or(3);
+    let list = if declaration.kind == "list" {
+        quote!(Some(::noxide::__private::ListSettings { order: ::noxide::__private::ListOrder::CreatedAsc, page_size: #page_size }))
+    } else {
+        quote!(None)
+    };
     let name = &item.ident;
     let resource = &declaration.resource;
     let policy = policy_tokens(&declaration.policy);
@@ -111,7 +117,7 @@ pub(super) fn expand_query(
             fn from_record(record: ::noxide::__private::Record) -> Self::Output { #decode }
             fn operation() -> ::noxide::__private::Operation {
                 ::noxide::__private::Operation {
-                    visibility: #visibility, fields: #fields,
+                    list: #list, visibility: #visibility, fields: #fields,
                     id: ::noxide::stable_id(concat!("query:", module_path!(), "::", stringify!(#name))),
                     resource: <#resource as ::noxide::ResourceType>::definition().id,
                     kind: #kind, policy: #policy,

@@ -22,6 +22,20 @@ pub(crate) struct Effects {
     pub more: Option<u64>,
 }
 
+// Measure the exact cross-boundary representation, including array framing.
+fn append_prefix(records: &mut Vec<Record>, record: Record) -> Result<bool> {
+    records.push(record);
+    if serde_json::to_vec(records)?.len() <= MAX_RESULT_BYTES {
+        return Ok(true);
+    }
+    records.pop();
+    ensure!(
+        !records.is_empty(),
+        "record exceeds repository result budget"
+    );
+    Ok(false)
+}
+
 pub(crate) struct StoredRecord {
     pub record: Record,
     pub owner: String,
@@ -232,12 +246,13 @@ impl Effects {
                     id,
                     fields: input,
                 };
+                let created_seq = self.tx.allocate_creation().await?;
                 if public {
-                    self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version) VALUES($1,$2,NULL,'',$3,$4,1,1)", &[storage_resource.into(), (id as i64).into(), serde_json::to_string(&record.fields)?.into(), crate::security::random_id()?.into()]).await?;
+                    self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version,created_seq) VALUES($1,$2,NULL,'',$3,$4,1,1,$5)", &[storage_resource.into(), (id as i64).into(), serde_json::to_string(&record.fields)?.into(), crate::security::random_id()?.into(),created_seq.into()]).await?;
                 } else {
                     let user = user.expect("private creation requires user");
-                    self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision) VALUES($1,$2,$3,$4,$5,$6,1)",&[
-                    Param::Number(storage_resource),Param::Number(id as i64),user.id.clone().into(),user.tenant.clone().into(),serde_json::to_string(&record.fields)?.into(), crate::security::random_id()?.into()
+                    self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,$3,$4,$5,$6,1,$7)",&[
+                    Param::Number(storage_resource),Param::Number(id as i64),user.id.clone().into(),user.tenant.clone().into(),serde_json::to_string(&record.fields)?.into(), crate::security::random_id()?.into(),created_seq.into()
                 ]).await?;
                 }
                 #[cfg(test)]
@@ -420,36 +435,47 @@ impl Effects {
                         params.len()
                     );
                 }
-                params.push(Param::Number(self.cursor.unwrap_or(i64::MAX as u64) as i64));
-                let comparison = if self.cursor.is_some() { "<" } else { "<=" };
-                let sql = format!(
-                    "SELECT CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND ({}){parent_clause} AND id{comparison}${} ORDER BY nx_records.id DESC LIMIT 3",
-                    self.tx.bounded_text("fields", 20_000),
-                    clauses.join(" OR "),
-                    params.len()
-                );
-                let rows = self.tx.fetch::<4>(&sql, &params).await?;
+                let size = op.list.as_ref().map_or(3, |s| s.page_size) as usize;
+                params.push(Param::Number(self.cursor.unwrap_or(0) as i64));
                 let mut records = Vec::new();
-                for [id, owner, tenant, fields] in rows {
-                    ensure!(
-                        allowed(&op.policy, &self.principal, &owner, &tenant),
-                        "policy invariant"
-                    );
-                    let fields = self.visible_fields(&op, serde_json::from_str(&fields)?)?;
-                    records.push(Record {
-                        resource: op.resource,
-                        id: id.parse()?,
-                        fields,
-                    });
-                }
+                let mut last = self.cursor.unwrap_or(0);
                 self.more = None;
-                if records.len() == 3 {
-                    let last = records.last().expect("full page").id;
+                // At most three bounded stored rows per database transfer. The
+                // approved page size bounds both iterations and total row work.
+                'page: while records.len() < size {
+                    let batch = (size - records.len()).min(3);
                     *params.last_mut().expect("cursor") = Param::Number(last as i64);
-                    let next = self.tx.fetch::<1>(&format!(
-                        "SELECT CAST(id AS TEXT) FROM nx_records WHERE resource=$1 AND ({}){parent_clause} AND id<${} ORDER BY id DESC LIMIT 1",
-                        clauses.join(" OR "), params.len()
-                    ), &params).await?;
+                    let sql = format!(
+                        "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND ({}){parent_clause} AND created_seq>${} ORDER BY nx_records.created_seq ASC LIMIT {batch}",
+                        self.tx.bounded_text("fields", 20_000),
+                        clauses.join(" OR "),
+                        params.len()
+                    );
+                    let rows = self.tx.fetch::<5>(&sql, &params).await?;
+                    let count = rows.len();
+                    for [seq, id, owner, tenant, fields] in rows {
+                        ensure!(
+                            allowed(&op.policy, &self.principal, &owner, &tenant),
+                            "policy invariant"
+                        );
+                        let record = Record {
+                            resource: op.resource,
+                            id: id.parse()?,
+                            fields: self.visible_fields(&op, serde_json::from_str(&fields)?)?,
+                        };
+                        if !append_prefix(&mut records, record)? {
+                            self.more = Some(last);
+                            break 'page;
+                        }
+                        last = seq.parse()?;
+                    }
+                    if count < batch {
+                        break;
+                    }
+                }
+                if self.more.is_none() && records.len() == size {
+                    *params.last_mut().expect("cursor") = Param::Number(last as i64);
+                    let next=self.tx.fetch::<1>(&format!("SELECT CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND ({}){parent_clause} AND created_seq>${} ORDER BY nx_records.created_seq ASC LIMIT 1",clauses.join(" OR "),params.len()),&params).await?;
                     if !next.is_empty() {
                         self.more = Some(last);
                     }
@@ -465,6 +491,30 @@ impl Effects {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn byte_prefix_counts_protocol_framing_and_fails_on_first_row_overflow() {
+        let mut record = Record {
+            resource: 1,
+            id: 42,
+            fields: Fields::from([("body".into(), String::new())]),
+        };
+        let overhead = serde_json::to_vec(&vec![record.clone()]).unwrap().len();
+        record
+            .fields
+            .insert("body".into(), "x".repeat(MAX_RESULT_BYTES - overhead));
+        let mut rows = Vec::new();
+        assert!(append_prefix(&mut rows, record.clone()).unwrap());
+        assert_eq!(serde_json::to_vec(&rows).unwrap().len(), MAX_RESULT_BYTES);
+        assert!(!append_prefix(&mut rows, record.clone()).unwrap());
+        assert_eq!(rows.len(), 1);
+        record
+            .fields
+            .insert("body".into(), "\\".repeat(MAX_RESULT_BYTES));
+        let mut empty = Vec::new();
+        assert!(append_prefix(&mut empty, record).is_err());
+        assert!(empty.is_empty());
+    }
+
     #[test]
     fn policy_is_scoped_and_empty_rules_deny() {
         let alice = Principal::User(crate::auth::User {

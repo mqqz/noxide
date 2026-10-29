@@ -139,6 +139,12 @@ pub fn validate(m: &Manifest) -> Result<()> {
     }
     for op in &m.operations {
         ensure!(
+            op.list
+                .as_ref()
+                .is_none_or(|s| op.kind == OperationKind::List && (1..=20).contains(&s.page_size)),
+            "invalid list settings"
+        );
+        ensure!(
             m.resources.iter().any(|r| r.id == op.resource),
             "unknown resource"
         );
@@ -800,5 +806,32 @@ mod tests {
         manifest.routes.push(reserved);
         validate(&manifest).unwrap();
         assert!(crate::Presentation::default().validate(&manifest).is_err());
+    }
+}
+
+#[cfg(test)]
+mod pagination_tests {
+    use super::*;
+    #[test]
+    fn host_rejects_forged_list_settings_and_contract_binds_page_size() {
+        let mut m = crate::test_support::manifest();
+        m.operations[0].list = Some(ListSettings {
+            order: ListOrder::CreatedAsc,
+            page_size: 20,
+        });
+        validate(&m).unwrap();
+        let original = digest(&m).unwrap();
+        m.operations[0].list.as_mut().unwrap().page_size = 3;
+        assert_ne!(digest(&m).unwrap(), original);
+        for size in [0, 21, 255] {
+            m.operations[0].list.as_mut().unwrap().page_size = size;
+            assert!(validate(&m).is_err());
+        }
+        m.operations[0].list = None;
+        m.operations[1].list = Some(ListSettings {
+            order: ListOrder::CreatedAsc,
+            page_size: 3,
+        });
+        assert!(validate(&m).is_err());
     }
 }
