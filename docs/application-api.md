@@ -11,6 +11,19 @@ values, checkboxes, and custom form layouts.
 Use `noxide::prelude::*` for the common declarations and rendering types, or
 import individual names as the examples do.
 
+## Security requirements for application APIs
+
+The [security contract](architecture/runtime.md#security-contract) governs all
+application APIs. Declarations request narrowly scoped capabilities; the host
+approves and checks them. Guests cannot override identity or grants, access host
+secrets, or obtain ambient filesystem, network, or process access. Use typed
+queries/actions and Document IR so authentication, authorization, escaping,
+headers, and CSRF stay under host control.
+
+Keep inputs, stored fields, query results, and documents bounded. Do not depend on
+external requests, third-party browser resources, or sensitive logging: these are
+unavailable by default. Adding a capability must preserve host checks and budgets.
+
 ## Resources and capabilities
 
 ```rust

@@ -47,6 +47,30 @@ application example has its own lockfile and is excluded from host workspace bui
 [Continuous integration](docs/ci.md) covers both databases, packaged SDK builds,
 NoJS browser acceptance, and scheduled hostile-build checks.
 
+## Security principles
+
+These five requirements govern Noxide's APIs, runtime, and defaults. They are
+review criteria for every change, not a claim of audited security. The
+[runtime security contract](docs/architecture/runtime.md#security-contract)
+explains the enforcement boundaries and limitations.
+
+1. **Contain application compromise.** Guest code cannot access the filesystem,
+   network, processes, or host secrets without an explicit, narrowly scoped
+   capability approved and enforced by the host. Application compromise must not
+   trivially become host compromise.
+2. **Keep authentication and authorization authoritative in the host.**
+   Applications cannot bypass either; security-sensitive operations pass through
+   host-enforced checks. Guest logic can restrict authority, never expand it.
+3. **Make browser output safe by default.** Noxide owns escaping, security
+   headers, CSRF protection, and validated document rendering. Applications
+   describe intent through Document IR rather than constructing raw responses.
+4. **Bound every request's resource consumption.** Enforce memory, CPU/fuel,
+   execution-time, input-size, and output-size limits, including host operations
+   and retries. Bound concurrency and queues as well as individual requests.
+5. **Preserve anonymity by default.** No external requests, third-party
+   resources, sensitive logs, or unexpected network access. Any additional
+   network authority requires explicit approval and host-enforced scope.
+
 ## Design principles
 
 These principles guide development for both small and large applications. Keep
@@ -56,9 +80,9 @@ latency when designing APIs and page flows.
 1. Enforce security by default.
 
     Handle escaping, CSRF protection, hardened cookies, CSP, request limits,
-    redirects, local assets, and URL validation in the framework. Any exception
-    that weakens a security invariant must be explicit, through an API such as
-    `unsafe_*` or `dangerous::*`, or a capability declaration.
+    redirects, local assets, and URL validation in the framework. Any additional
+    authority must be explicit, narrowly scoped, operator-approved, and checked
+    by the host. An API name or capability declaration alone grants no authority.
 
 2. Design for anonymity networks.
 
