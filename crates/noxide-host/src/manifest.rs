@@ -534,6 +534,21 @@ pub(crate) fn anonymous_action(op: &Operation) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn private_notes_approval_digest_is_unchanged() {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let m = parse(include_bytes!(
+            "../../../examples/private-notes/manifest.json"
+        ))
+        .unwrap();
+        // The inline app module intentionally changes declaration IDs and requires
+        // renewed approval. Pin its updated contract to catch unintended drift.
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(digest(&m).unwrap()),
+            "j0xMewW3Rx5FfJpfV7BXbTNh4mhJD3tUwuXFb7_-g8Q"
+        );
+    }
+
     use super::*;
 
     fn field(name: &str, kind: FieldKind, optional: bool) -> TextField {

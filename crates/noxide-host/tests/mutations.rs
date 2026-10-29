@@ -6,9 +6,7 @@ use noxide_protocol::{Fields, Manifest, RequestKind, RequestView};
 use sqlx::{Connection, Row};
 use std::sync::Arc;
 
-#[path = "support/record_actions.rs"]
-mod record_actions;
-use record_actions::{component, declarations};
+use support::record_actions::{component, declarations};
 
 async fn application(db: &Database, keys: &[u8], mode: &str) -> Arc<Application> {
     application_with(db, keys, mode, declarations()).await

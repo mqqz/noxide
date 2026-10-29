@@ -786,7 +786,7 @@ async fn anonymous_http_csrf_cookie_flags_rotation_and_write_limits() {
     );
 }
 
-use crate::failure_tests::record_actions as snapshot_guest;
+use crate::test_support::record_actions as snapshot_guest;
 
 #[tokio::test]
 async fn capability_never_reaches_guest_or_widens_inspection_or_repository_authority() {

@@ -13,8 +13,7 @@ use std::{
     time::Duration,
 };
 
-#[path = "../tests/support/record_actions.rs"]
-pub(crate) mod record_actions;
+use crate::test_support::record_actions;
 
 #[derive(Debug)]
 pub(crate) struct Aborted;
