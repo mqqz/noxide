@@ -575,3 +575,27 @@ The implementation has not undergone an external security audit or hardware
 power-loss certification.
 
 Primary sources above were checked on 2026-09-19.
+
+
+### Validation ownership and request budgets
+
+The host form-layout validator owns the static form grammar, field coverage, and
+control compatibility. Admission and rendering both call it: direct rendering
+must not assume that its caller admitted a manifest. Rendering still owns
+escaping and the final output byte limit. Routing has a separate parser shared
+by admission, matching, and link resolution.
+
+Policy predicates bind a principal to concrete row conditions in one host
+module. Both SQL filtering and row authorization use those conditions. Returned
+rows are still checked, and capability mutations still require their dedicated
+host-verified grant. Macro diagnostics are not an authorization boundary; only
+small portable rules such as identifier grammar are shared with producers.
+
+Admission waits have their own bounded queues and timeouts. Execution starts
+after admission and shares one deadline, fuel allowance, host-call allowance,
+and database-call allowance across mutation retries. Recovery is a separate,
+bounded transaction so an uncertain mutation can still have its receipt checked
+after its execution deadline expires. Cleanup retains its bounded allowance
+after execution expires. Consequently runtime wall time is an execution budget,
+not a single end-to-end HTTP latency promise. The application WASM gate bounds
+waiting; the runtime semaphore independently protects direct runtime calls.
