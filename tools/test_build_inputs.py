@@ -20,7 +20,7 @@ class Inputs(unittest.TestCase):
         build_vm.check_build_status(b"NOXIDE_BUILD_STATUS=0\n")
         for output in (b"", b"NOXIDE_BUILD_STATUS=1\n",
                        b"NOXIDE_BUILD_STATUS=0\nNOXIDE_BUILD_STATUS=0\n"):
-            with self.assertRaisesRegex(ValueError, "VM build failed"):
+            with self.assertRaisesRegex(ValueError, "application build failed"):
                 build_vm.check_build_status(output)
         with self.assertRaisesRegex(ValueError, "deadline exceeded"):
             build_vm.check_build_status(b"NOXIDE_BUILD_STATUS=124\n")

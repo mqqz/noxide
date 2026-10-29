@@ -47,8 +47,9 @@ Raw HTML, arbitrary URLs/headers, WASI, and generic SQL/network access are
 unavailable. The SDK provides typed declarations, route handles, form layouts, and template macros that emit Document IR.
 
 Follow [Running an application](docs/running-applications.md) to build the example
-inside a disposable VM, approve its declarative permissions, provision accounts,
-and run it. Application build scripts and macros must execute inside that VM.
+locally, approve its declarative permissions, provision accounts, and run it.
+Local builds trust app code and dependencies with host access. Use `--isolated`
+for untrusted code to build inside a disposable VM.
 
 Build and check the trusted framework from the repository root with Rust 1.98.0:
 
@@ -61,7 +62,7 @@ cargo run -p noxide-cli --bin noxide --locked
 ```
 
 Shared package metadata and local dependencies are defined in the root `Cargo.toml`.
-Workspace crates share the root `Cargo.lock` and `target/` directory. The isolated
+Workspace crates share the root `Cargo.lock` and `target/` directory. The standalone
 application example has its own lockfile and is excluded from host workspace builds.
 
 [Continuous integration](docs/ci.md) covers both databases, packaged SDK builds,

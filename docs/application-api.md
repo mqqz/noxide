@@ -1,7 +1,7 @@
 # Application API
 
 Noxide applications declare resources and permissions in Rust, render Document IR,
-and compile inside the disconnected build VM. The host owns authentication,
+and compile locally for trusted code or in an optional disconnected build VM. The host owns authentication,
 authorization, form validation, HTML serialization, and transaction commitment.
 
 Start with [private-notes](../examples/private-notes/src/lib.rs) for text CRUD, or
@@ -20,7 +20,7 @@ noxide new my-notes
 ```
 
 The destination must be new and its parent must exist. The command writes a
-standalone notes application and a README with isolated check/build commands.
+standalone notes application and a README with check/build commands.
 It does not run Cargo, fetch dependencies, or approve deployment. Existing files
 are never overwritten. Package names use lowercase ASCII letters, digits,
 underscores, or hyphens and start with a letter.
@@ -347,7 +347,7 @@ Controls include `text_input()`, `textarea().rows(12)`, `checkbox()`, and
 incompatible controls. Admission independently checks the complete projection,
 control compatibility, nesting, and one submit button.
 
-Layout functions run during isolated metadata collection. They describe a static
+Layout functions run during metadata collection. They describe a static
 blueprint: no request data, tokens, or credentials enter the function. The host
 fills values and errors and uses the same blueprint after invalid input or a
 conflict. Its recovery explanations always remain present. Policy-disabled forms
@@ -362,15 +362,13 @@ whitespace-only notes belong in custom action handlers.
 
 ## Isolated checks and builds
 
-The trusted CLI uses the framework's VM runner:
+The CLI builds trusted applications locally by default:
 
 ```sh
 noxide check --app examples/task-board --name task_board \
-  --kernel /path/to/kernel --toolchain /path/to/rust-toolchain \
   --output /tmp/task-check
 
 noxide build --app examples/task-board --name task_board \
-  --kernel /path/to/kernel --toolchain /path/to/rust-toolchain \
   --output /tmp/task-build
 ```
 
@@ -381,7 +379,9 @@ trusted Cargo cache. `--cargo-home` selects that cache. An installed CLI can use
 dependency catalog.
 
 Application compilation, build scripts, procedural macros, and the native
-metadata collector execute only inside the disposable VM. `check` validates the
+metadata collector execute on the host with your user permissions by default.
+For untrusted apps or dependencies, add `--isolated --kernel /path/to/kernel
+--toolchain /path/to/rust-toolchain`; these operations then run in a disposable VM. `check` validates the
 generated contract; `build` also produces a component admitted under runtime
 limits. Neither command approves a deployment automatically. Keep the emitted
 `manifest.json` and component together and approve their deployment contract.

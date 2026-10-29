@@ -8,14 +8,19 @@ use std::{
 };
 
 pub fn build(command: &str, args: &[OsString]) -> Result<()> {
-    // The builder is trusted operator tooling; application Cargo never runs here.
+    // Local builds trust native application code; isolation is an explicit option.
     let mut framework = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut forwarded = Vec::new();
+    let mut isolated = false;
     let mut output = None;
     let mut name = "private_notes".to_string();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         let flag = arg.to_str().context("invalid build argument")?;
+        if flag == "--isolated" {
+            isolated = true;
+            continue;
+        }
         ensure!(
             matches!(
                 flag,
@@ -44,6 +49,10 @@ pub fn build(command: &str, args: &[OsString]) -> Result<()> {
             _ => forwarded.extend([arg.clone(), value.clone()]),
         }
     }
+    ensure!(
+        isolated || !args.iter().any(|arg| arg == "--kernel"),
+        "--kernel requires --isolated; omit both only for trusted local builds"
+    );
     let output = output.context("--output is required")?;
     let runner = framework.join("tools/build_vm.py");
     ensure!(
@@ -52,12 +61,15 @@ pub fn build(command: &str, args: &[OsString]) -> Result<()> {
     );
     let mut process = Command::new("python3");
     process.arg(runner).args(forwarded).arg("--metadata");
+    if !isolated {
+        process.arg("--local");
+    }
     if command == "check" {
         process.arg("--check");
     }
     ensure!(
         process.status()?.success(),
-        "isolated application build failed; inspect its sanitized log"
+        "application build failed; inspect build.log"
     );
     let contract = manifest::parse(&super::read(&output.join("manifest.json"), 32768)?)?;
     let digest = manifest::digest(&contract)?;
