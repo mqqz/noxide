@@ -1,6 +1,11 @@
-use super::*;
+use crate::declaration::policy::{PolicyAtom, policy_tokens};
+use crate::declaration::{OperationDeclaration, marker};
+use crate::syntax::stable_id;
+use proc_macro2::TokenStream as Tokens;
+use quote::{format_ident, quote};
+use syn::{LitStr, spanned::Spanned};
 
-pub(super) fn action_label(identifier: &str) -> String {
+pub(crate) fn action_label(identifier: &str) -> String {
     let characters: Vec<_> = identifier.chars().collect();
     let mut words = Vec::new();
     let mut word = String::new();
@@ -46,7 +51,7 @@ pub(super) fn action_label(identifier: &str) -> String {
         .join(" ")
 }
 
-pub(super) fn expand_action(
+pub(crate) fn expand_action(
     declaration: OperationDeclaration,
     item: syn::ItemStruct,
 ) -> syn::Result<Tokens> {

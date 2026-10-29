@@ -1,6 +1,10 @@
-use super::*;
+use crate::syntax::{key, reject_generics};
+use proc_macro2::TokenStream as Tokens;
+use quote::quote;
+use std::collections::BTreeSet;
+use syn::{Data, DeriveInput, Fields, LitStr, spanned::Spanned};
 
-pub(super) fn expand_choice(input: DeriveInput) -> syn::Result<Tokens> {
+pub(crate) fn expand_choice(input: DeriveInput) -> syn::Result<Tokens> {
     reject_generics(&input)?;
     let Data::Enum(data) = &input.data else {
         return Err(syn::Error::new(input.span(), "Choice requires an enum"));

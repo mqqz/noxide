@@ -102,3 +102,22 @@ SQLite/PostgreSQL coverage includes fresh role authorization, quota races, and
 receipt recovery; the SDK suite compares complete contracts and approval hashes.
 Browser smoke tests and remote CI are separate checks. These reviews and local
 checks do not constitute an independent security audit.
+
+## Implementation modules and frozen baselines
+
+See [architecture layers](architecture/layers.md) for enforcement ownership.
+`noxide-macros/src/lib.rs` contains entry points and result conversion;
+`syntax.rs` holds shared type and key checks, and `registration.rs` assembles the
+application. `declaration/` owns operation parsing and explicit resource, query,
+action, policy, page, choice and template expansion. `convenience/app.rs` discovers
+immediate declarations and associates hooks; `crud.rs` lowers each named action
+independently and `inferred_queries.rs` rewrites supported read arguments through
+the explicit query expander. No declaration module depends on convenience code.
+
+The SDK harness compares complete JSON and approval digests against immutable
+fixtures in `tools/fixtures/sdk/baseline`, captured at PR #15 merge
+`dca07b5015b6d24bc391c7e45cacc67ea0e7f767` before production moves. Notes,
+task board, public articles, repeated actions and both forum contracts retain all
+identities, projections, policies, ordering and layouts. The laid-out forum has a
+separate explicit counterpart; the pre-layout conversion pair remains unchanged.
+Do not regenerate baselines to accommodate refactor drift.

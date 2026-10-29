@@ -1,3 +1,12 @@
+//! Mutation response preparation and bounded post-commit navigation.
+//!
+//! Submission owns canonicalization, authorization, mutation and atomic receipt
+//! persistence. `prepare_response` may prepare recovery/handover data before
+//! commitment; callers deliver it only after commit confirmation or a verified
+//! committed receipt. An unknown commit outcome stays in receipt recovery.
+//! `finish_navigation` resolves presentation after commitment and cannot undo the write.
+//! Parent destination checks use fresh read authority and the captured incarnation;
+//! a child edit credential never grants parent read authority.
 use super::*;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -235,6 +244,47 @@ mod tests {
     use super::*;
     use crate::{parent_tests, test_support as fixture};
     use std::time::Duration;
+
+    #[test]
+    fn frozen_receipt_wire_formats_round_trip() {
+        // Existing receipt representations, including the ordinary pre-envelope
+        // mutation format, remain decodable. Keys and identifiers are test data.
+        for raw in [
+            r#"{"version":1,"outcome":{"resource":7,"id":9,"cap_version":2,"key_id":3},"destination":null}"#,
+            r#"{"version":1,"outcome":{"created":{"resource":7,"id":9,"destination":{"route":4,"target":9}}},"destination":{"route":5,"resource":6,"id":8,"incarnation":"test-incarnation"}}"#,
+            r#"{"version":1,"outcome":{"deleted":{"resource":7,"id":9,"destination":{"route":4,"target":null}}},"destination":null}"#,
+        ] {
+            let receipt: SemanticReceipt = serde_json::from_str(raw).unwrap();
+            assert_eq!(
+                serde_json::to_value(receipt).unwrap(),
+                serde_json::from_str::<serde_json::Value>(raw).unwrap()
+            );
+        }
+        for raw in [
+            r#"{"updated":{"resource":7,"id":9,"destination":{"route":4,"target":9}}}"#,
+            r#"{"deleted":{"resource":7,"id":9,"destination":{"route":4,"target":null}}}"#,
+        ] {
+            let outcome: SemanticOutcome = serde_json::from_str(raw).unwrap();
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                serde_json::from_str::<serde_json::Value>(raw).unwrap()
+            );
+        }
+        assert!(
+            serde_json::from_str::<SemanticReceipt>(
+                r#"{"version":1,"outcome":{},"destination":null,"extra":true}"#
+            )
+            .is_err()
+        );
+        for raw in ["4", r#"{"parent":5}"#] {
+            let redirect: Redirect = serde_json::from_str(raw).unwrap();
+            assert_eq!(
+                serde_json::to_value(redirect).unwrap(),
+                serde_json::from_str::<serde_json::Value>(raw).unwrap()
+            );
+        }
+        assert!(serde_json::from_str::<Redirect>(r#"{"parent":5,"extra":true}"#).is_err());
+    }
 
     #[tokio::test]
     async fn private_parent_navigation_matches_owner_and_moderator_reads() {

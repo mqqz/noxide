@@ -156,6 +156,11 @@ def convenience_fixtures():
             name = app + "-" + variant
             passing.append((name, path.read_text()))
             comparisons.append(name)
+    for variant, path in (("simple", ROOT / "examples/forum/src/lib.rs"),
+                          ("explicit", ROOT / "tools/fixtures/sdk/forum-layout-explicit.rs")):
+        name = "forum-layout-" + variant
+        passing.append((name, path.read_text()))
+        comparisons.append(name)
     notes = passing[0][1]
     start = notes.index('    #[page("/")]')
     middle = notes.index('    #[page("/notes/{note}")]')
@@ -327,6 +332,13 @@ cd /tmp/work/examples/private-notes
 
 
 def validate_contracts(contracts, comparisons, output_dir, host_cli):
+    # Captured from the unmodified PR #15 merge, before implementation moves.
+    assert contracts["forum-layout-simple"] == contracts["forum-layout-explicit"], "laid-out forum mismatch"
+    frozen = ROOT / "tools/fixtures/sdk/baseline"
+    for path in sorted(frozen.glob("*.json")):
+        if path.name == "approval-hashes.json":
+            continue
+        assert contracts[path.stem + "-simple"] == json.loads(path.read_text()), path.stem + " frozen contract drift"
     for app in EQUIVALENT_APPS:
         assert contracts[app + "-simple"] == contracts[app + "-explicit"], app + " contract mismatch"
     assert contracts["repeated-simple"] == contracts["repeated-reordered"], "repeated entry/block order changed contract"
@@ -395,6 +407,8 @@ def validate_contracts(contracts, comparisons, output_dir, host_cli):
         else:
             assert result.returncode == 0, name + ": " + result.stderr.decode(errors="replace")
             hashes[name] = result.stdout.strip().decode("ascii")
+    for name, expected in json.loads((frozen / "approval-hashes.json").read_text()).items():
+        assert hashes[name + "-simple"] == expected, name + " frozen approval digest drift"
     for app in EQUIVALENT_APPS:
         assert hashes[app + "-simple"] == hashes[app + "-explicit"], app + " approval digest differs"
     assert hashes["repeated-simple"] == hashes["repeated-reordered"], "repeated entry/block order changed digest"

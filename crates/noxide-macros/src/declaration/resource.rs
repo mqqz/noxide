@@ -1,6 +1,15 @@
-use super::*;
+use crate::declaration::page::generic_argument;
+use crate::syntax::{
+    key, reject_generics, required_key, stable_id, text_type, validate_field_type,
+};
+use proc_macro2::TokenStream as Tokens;
+use quote::quote;
+use std::collections::BTreeSet;
+use syn::{
+    Data, DeriveInput, Expr, Fields, Ident, LitInt, LitStr, Token, parenthesized, spanned::Spanned,
+};
 
-pub(super) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
+pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
     reject_generics(&input)?;
     let persistent_key = required_key(&input.attrs, "resource")?;
     let Data::Struct(data) = &input.data else {
