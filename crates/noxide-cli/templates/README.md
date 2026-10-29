@@ -1,32 +1,60 @@
 # __NAME__
 
-A private notes application. Each signed-in user can create, edit, and delete
-only their own notes. Start in `src/lib.rs`: the app module contains the resource,
-pages, validation, and enabled mutations.
+A private notes application. Signed-in users can create, edit, and delete their
+own notes. Start in `src/lib.rs`; the privacy regression is in `tests/contract.rs`.
 
-From this directory, check the application using your installed Noxide CLI and
-Rust toolchain with the wasm32-unknown-unknown target:
+On Linux x86-64, with the Noxide CLI, Python 3.11+, native compiler/linker tools, and a Rust
+toolchain with `wasm32-unknown-unknown` installed:
 
 ```sh
-noxide check --app . --name __CRATE__ \
-  --output /tmp/__NAME__-check
+noxide dev
+noxide test
+noxide build
+noxide serve
 ```
 
-If the CLI was installed separately, add `--framework /path/to/noxide` to select
-the trusted framework checkout.
+`dev` builds and watches your sources. Review and approve its contract on first
+start, then open http://localhost:8080 and register a development account.
+Failed rebuilds keep the previous application running. Changed contracts require
+approval again; persistent schema changes require an explicit migration.
 
-Use `noxide build` with a new output directory when you need the application
-bundle. Every output directory must be new. Builds run locally by default and
-trust the application and its dependencies, including build scripts, macros, and
-the native metadata collector. The builder stages the SDK at the dependency path
-in `Cargo.toml`.
+`test` runs native application tests and validates runtime activation with a
+fresh disposable database. `build` prints the completed bundle path under
+`target/noxide/`. `serve` starts the latest successful build and asks for a
+separate serving approval. Serving registration is closed by default; its output
+shows the configuration path and the command for creating an account.
 
-For untrusted apps or dependencies, add `--isolated --kernel /path/to/vmlinuz
---toolchain /path/to/rust-toolchain` to run in a disposable VM. Keep editor macro
-expansion and other native builds of untrusted code inside that boundary too.
+Local builds are the default. Dependency build scripts, procedural macros,
+tests, and the native metadata collector execute with your user permissions.
+Use isolated mode for untrusted applications or dependencies, and keep editor
+macro expansion and other native builds inside that boundary too:
 
-The build produces a reviewable contract. An operator must approve it before
-serving the application; generated code does not grant authority by itself.
+```sh
+noxide setup --kernel /path/to/trusted/vmlinuz --toolchain /path/to/trusted/rust-toolchain
+noxide dev --isolated
+noxide test --isolated
+noxide build --isolated
+```
+
+Setup records operator-selected prerequisites. Select the toolchain directory
+independently of application-controlled rustup overrides; isolated builds require
+this saved selection or an explicit `--toolchain DIRECTORY`. Isolated builds require Linux
+x86-64 and QEMU; they never fall back to local execution. Both build modes use
+the same SDK, compilation recipe, contract format, and runtime admission checks.
+
+SDK sources and approved dependency archives ship with the CLI. Builds run
+offline and need no framework checkout or manually selected output directory.
+The generated SDK dependency also works with local Rust editor tooling. Advanced
+build selection supports `--app . --name __CRATE__`; workspace projects must
+select the application package directory explicitly.
+
+Keys, databases, and approvals live outside the project under
+`$XDG_STATE_HOME/noxide` (default `~/.local/state/noxide`), separately for development
+and serving. Moving the project selects new deployment state. Build outputs
+cannot approve themselves. In automation, explicitly approve a reviewed digest
+with `noxide approve [--dev] CONTRACT_DIGEST` before starting the deployment.
+
 See the [running guide](https://github.com/mqqz/noxide/blob/main/docs/running-applications.md)
-for deployment and account setup, and the [API guide](https://github.com/mqqz/noxide/blob/main/docs/application-api.md)
-for public queries, custom policies, and forms.
+for custom deployment configuration and migrations, and the
+[API guide](https://github.com/mqqz/noxide/blob/main/docs/application-api.md)
+for queries, policies, and forms.

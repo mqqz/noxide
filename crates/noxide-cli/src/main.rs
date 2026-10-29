@@ -1,3 +1,5 @@
+mod lifecycle;
+mod project;
 mod scaffold;
 mod workflow;
 use anyhow::{Context, Result, bail, ensure};
@@ -136,7 +138,23 @@ async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let command = args.first().and_then(|s| s.to_str()).unwrap_or("help");
     match command {
-        "build" | "check" => workflow::build(command, &args[1..])?,
+        "build" | "check" | "test" => workflow::build(command, &args[1..]).await?,
+        "setup" => project::setup(&args[1..])?,
+        "dev" => lifecycle::dev(&args[1..]).await?,
+        "approve" => {
+            let development = args.get(1).is_some_and(|arg| arg == "--dev");
+            ensure!(
+                args.len() == if development { 3 } else { 2 },
+                "usage: noxide approve [--dev] CONTRACT_DIGEST"
+            );
+            let digest = args
+                .last()
+                .and_then(|arg| arg.to_str())
+                .context("invalid digest")?;
+            let root = project::discover(&std::env::current_dir()?)?;
+            let _lock = project::lock(&project::state(&root, development)?)?;
+            lifecycle::prepare(&root, development, Some(digest)).await?;
+        }
         "schema" => workflow::schema(&args[1..]).await?,
         "new" => {
             ensure!(args.len() == 2, "usage: noxide new NEW_DIRECTORY");
@@ -144,7 +162,7 @@ async fn main() -> Result<()> {
         }
         "help" | "--help" | "-h" => {
             println!(
-                "Noxide {}\n\nCommands:\n  new NEW_DIRECTORY\n  check|build --app APP --name CRATE --output NEW_DIR [--isolated --kernel KERNEL --toolchain TOOLCHAIN] [--framework CHECKOUT]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  init CONFIG.json\n  account CONFIG.json USER PASSWORD_FILE [TENANT]\n  contract-hash MANIFEST.json\n  component CORE.wasm COMPONENT.wasm\n  serve CONFIG.json\n  maintain CONFIG.json\n  recover-clock CONFIG.json (stop serving first; configure a fresh host key)\n  keygen NEW_KEYS.json\n  edit-key-rotate KEYS.json\n  invite CONFIG.json [--expires-days N]\n\nApplication builds run locally with host access. Use --isolated for untrusted apps or dependencies. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
+                "Noxide {}\n\nCommands:\n  new NEW_DIRECTORY\n  setup [--kernel FILE] [--toolchain DIRECTORY]\n  dev [BUILD_OPTIONS]\n  approve [--dev] CONTRACT_DIGEST\n  check|test|build [--app APP] [--name CRATE] [--output NEW_DIR] [--isolated --kernel KERNEL --toolchain TOOLCHAIN] [--framework CHECKOUT]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  init CONFIG.json\n  account CONFIG.json USER PASSWORD_FILE [TENANT]\n  contract-hash MANIFEST.json\n  component CORE.wasm COMPONENT.wasm\n  serve [CONFIG.json]\n  maintain CONFIG.json\n  recover-clock CONFIG.json (stop serving first; configure a fresh host key)\n  keygen NEW_KEYS.json\n  edit-key-rotate KEYS.json\n  invite CONFIG.json [--expires-days N]\n\nApplication builds run locally with host access. Use --isolated for untrusted apps or dependencies. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
                 env!("CARGO_PKG_VERSION")
             );
         }
@@ -266,9 +284,23 @@ async fn main() -> Result<()> {
                 .await?;
             println!("Account created.");
         }
-        "serve" => {
-            ensure!(args.len() == 2, "usage: noxide serve CONFIG.json");
-            let (config, base) = config(Path::new(&args[1]))?;
+        "serve" | "validate" => {
+            ensure!(args.len() <= 2, "usage: noxide serve [CONFIG.json]");
+            let _lock = if args.len() == 1 {
+                Some(project::lock(&project::state(
+                    &project::discover(&std::env::current_dir()?)?,
+                    false,
+                )?)?)
+            } else {
+                None
+            };
+            let path = if args.len() == 2 {
+                PathBuf::from(&args[1])
+            } else {
+                lifecycle::prepare(&project::discover(&std::env::current_dir()?)?, false, None)
+                    .await?
+            };
+            let (config, base) = config(&path)?;
             let keys = host_keys(&base.join(&config.keys))?;
             let approved: [u8; 32] = URL_SAFE_NO_PAD
                 .decode(&config.approved_contract)?
@@ -287,6 +319,10 @@ async fn main() -> Result<()> {
                 .with_signed_in_reserve(config.signed_in_reserve)?
                 .with_registration(config.registration),
             );
+            if command == "validate" {
+                app.activate().await?;
+                return Ok(());
+            }
             let origin = Origin::parse(&config.origin)?;
             let shutdown = shutdown_signal()?;
             let listener = match config.listen {
