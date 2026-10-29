@@ -1,4 +1,5 @@
 mod capabilities;
+mod navigation;
 mod submission;
 use crate::{
     Database, HostKeys, auth,
@@ -76,6 +77,9 @@ pub struct Application {
     clock: AtomicI64,
     checkpointed: AtomicI64,
     pub(crate) admission_limits: AdmissionLimits,
+    #[cfg(test)]
+    pub(crate) postcommit_barrier:
+        std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -405,6 +409,8 @@ impl Application {
             clock: AtomicI64::new(0),
             checkpointed: AtomicI64::new(0),
             admission_limits,
+            #[cfg(test)]
+            postcommit_barrier: std::sync::Mutex::new(None),
         })
     }
 
@@ -672,7 +678,7 @@ impl Application {
         &self,
         tx: &mut Transaction,
         receipt: &EditReceipt,
-        route: u32,
+        route: Option<u32>,
     ) -> Result<Rendered> {
         let record = repository::load(tx, &self.manifest, receipt.resource, receipt.id).await?;
         if receipt.cap_version == 0
@@ -694,14 +700,18 @@ impl Application {
         else {
             return render::capability_handover(None, None);
         };
-        let link = render::resolve(
-            &self.manifest,
-            &RouteRef {
-                route,
-                target: Some(receipt.id),
-            },
-        )?;
-        render::capability_handover(Some(&secret), Some(&link))
+        let link = route
+            .map(|route| {
+                render::resolve(
+                    &self.manifest,
+                    &RouteRef {
+                        route,
+                        target: Some(receipt.id),
+                    },
+                )
+            })
+            .transpose()?;
+        render::capability_handover(Some(&secret), link.as_deref())
     }
     async fn receipt_response(
         &self,
@@ -714,7 +724,8 @@ impl Application {
         if manifest::is_public(op) && op.kind == OperationKind::Create {
             let receipt: EditReceipt = serde_json::from_str(outcome)?;
             ensure!(receipt.resource == op.resource, "receipt resource differs");
-            self.edit_handover(tx, &receipt, action.redirect).await
+            self.edit_handover(tx, &receipt, Some(action.redirect.route()))
+                .await
         } else {
             self.receipt(action, target, outcome)
         }
@@ -1044,7 +1055,7 @@ impl Application {
                 && resource == op.resource
                 && id > 0
                 && id <= i64::MAX as u64
-                && destination.route == action.redirect,
+                && destination.route == action.redirect.route(),
             "receipt outcome differs"
         );
         ensure!(
@@ -1060,6 +1071,9 @@ impl Application {
             && kind != OperationKind::Create
         {
             ensure!(id == target.id, "receipt target differs");
+        }
+        if matches!(action.redirect, Redirect::Parent { .. }) {
+            return Ok(navigation::success());
         }
         render::render(
             &intent,

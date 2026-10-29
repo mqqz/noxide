@@ -223,7 +223,9 @@ impl Application {
                 receipt.resource == resource && receipt.id == id,
                 RequestError::InvalidRequest
             );
-            let page = self.edit_handover(&mut tx, &receipt, target.route).await?;
+            let page = self
+                .edit_handover(&mut tx, &receipt, Some(target.route))
+                .await?;
             return Ok((tx, page));
         }
         let stored = repository::load(&mut tx, &self.manifest, resource, id)
@@ -251,7 +253,9 @@ impl Application {
             &[serde_json::to_string(&receipt)?.into(), token.nonce.into()],
         )
         .await?;
-        let page = self.edit_handover(&mut tx, &receipt, target.route).await?;
+        let page = self
+            .edit_handover(&mut tx, &receipt, Some(target.route))
+            .await?;
         Ok((tx, page))
     }
 }

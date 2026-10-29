@@ -75,7 +75,7 @@ pub fn manifest() -> Manifest {
             version: 1,
             name: "Save note".into(),
             operation: 3,
-            redirect: 2,
+            redirect: noxide_protocol::Redirect::Page(2),
             fields: vec!["body".into()],
             inspect: None,
         }],
