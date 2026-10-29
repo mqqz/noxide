@@ -29,11 +29,11 @@ pub mod forum {
         #[field()]
         published: bool,
     }
-    #[query(list(Reply), allow = public, visible(published = true), fields(body))]
+    #[query(list(Reply), order = created_asc, page_size = 20, allow = public, visible(published = true), fields(body))]
     struct PublicReplies;
     #[query(read(Reply), allow = public, visible(published = true), fields(thread, body))]
     struct PublicReply;
-    #[query(list(Reply), allow = role("moderator"))]
+    #[query(list(Reply), order = created_asc, page_size = 20, allow = role("moderator"))]
     struct ReviewReplies;
     #[query(read(Reply), allow = role("moderator"))]
     struct ReviewReply;
