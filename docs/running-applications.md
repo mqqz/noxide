@@ -334,8 +334,11 @@ and select **Save these changes** to submit against the current revision. The
 round trip or trash view.
 
 Declarations use protocol version 4. A record route declares its generated resource ID;
-list routes use `null`. Every action declares a `fields` list: all resource fields
-for creation, a nonempty subset for updates, and an empty list for deletion.
+list routes use `null`. Every action declares a `fields` list: all writable resource fields
+for creation (excluding host-bound parent fields and fields with `initial` values),
+a nonempty subset for updates, and an empty list for deletion.
+Create actions must have at least one writable field; parent-only child resources
+cannot declare a create action.
 The host rejects extra fields and missing required values, supplies false/None
 for omitted checkboxes/optional fields, and preserves fields outside an update's
 projection. Generated action handlers return the host's outcome for the bound

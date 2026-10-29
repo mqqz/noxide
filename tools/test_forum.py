@@ -111,22 +111,33 @@ def main():
             assert status in (302, 303), status
             _, _, html = user.request("GET", "/login")
             assert user.submit(html, "/login", username="alice", password="Forum integration password")[0] in (302, 303)
+            outsider = Client(port)
+            _, _, html = outsider.request("GET", "/register")
+            assert outsider.submit(html, "/register", username="bob", password="Forum outsider password")[0] in (302, 303)
+            _, _, html = outsider.request("GET", "/login")
+            assert outsider.submit(html, "/login", username="bob", password="Forum outsider password")[0] in (302, 303)
             # Operator grants moderation authority; creates still cannot choose visibility.
             with sqlite3.connect(args.output / "forum.db") as db:
-                db.execute("INSERT INTO nx_roles(principal,name,tenant) VALUES('alice','moderator','')")
+                db.execute("INSERT INTO nx_roles(principal,name,tenant) VALUES('bob','moderator','')")
             moderator = {"role": {"name": "moderator", "tenant_scoped": False}}
             def publish(path, resource):
                 review = path.replace("/threads/", "/moderation/").replace("/replies/", "/reply_review/")
-                _, _, form = user.request("GET", review)
+                _, _, form = outsider.request("GET", review)
                 values = {"published": "true"}
                 if resource == "threads":
                     values["locked"] = "false"
-                assert user.submit(form, action(resource, "update", moderator), **values)[0] == 303
+                assert outsider.submit(form, action(resource, "update", moderator), **values)[0] == 303
             _, _, html = user.request("GET", "/")
             status, headers, _ = user.submit(html, action("threads", "create", "owner"), title="First thread", body="Opening message")
             assert status == 303, status
             first = headers["location"]
             assert anonymous.request("GET", first)[0] == 404
+            status, _, pending = user.request("GET", first)
+            assert status == 200 and "Opening message" in pending
+            assert user.submit(pending, action("threads", "update", "owner"), title="First thread", body="Edited pending thread")[0] == 303
+            assert "Edited pending thread" in user.request("GET", first)[2]
+            assert anonymous.request("GET", first)[0] == 404
+            assert outsider.request("GET", first)[0] == 404
             publish(first, "threads")
             _, _, html = user.request("GET", "/")
             status, headers, _ = user.submit(html, action("threads", "create", "owner"), title="Second thread", body="Other conversation")
@@ -140,7 +151,16 @@ def main():
                 status, headers, _ = user.submit(html, action("replies", "create", "owner"), body=f"Reply number {i}")
                 assert status == 303, status
                 reply_urls.append(headers["location"])
-                publish(headers["location"], "replies")
+                path = headers["location"]
+                assert anonymous.request("GET", path)[0] == 404
+                status, _, pending = user.request("GET", path)
+                assert status == 200 and f"Reply number {i}" in pending
+                if i == 0:
+                    assert user.submit(pending, action("replies", "update", "owner"), body="Edited pending reply")[0] == 303
+                    assert "Edited pending reply" in user.request("GET", path)[2]
+                assert anonymous.request("GET", path)[0] == 404
+                assert outsider.request("GET", path)[0] == 404
+                publish(path, "replies")
             _, _, html = user.request("GET", reply_urls[0])
             assert user.submit(html, action("replies", "update", "owner"), body="Tampered", published="false")[0] != 303
             _, _, html = user.request("GET", reply_urls[0])
@@ -220,26 +240,30 @@ def main():
             assert status == 303, status
             # Exercise actual moderation forms.
             reply_review = reply_urls[0].replace("/replies/", "/reply_review/")
-            _, _, html = user.request("GET", reply_review)
-            assert user.submit(html, action("replies", "update", moderator), published="false")[0] == 303
+            _, _, html = outsider.request("GET", reply_review)
+            assert outsider.submit(html, action("replies", "update", moderator), published="false")[0] == 303
             assert anonymous.request("GET", reply_urls[0])[0] == 404
-            _, _, html = user.request("GET", reply_review)
-            assert user.submit(html, action("replies", "update", moderator), published="true")[0] == 303
+            _, _, html = outsider.request("GET", reply_review)
+            assert outsider.submit(html, action("replies", "update", moderator), published="true")[0] == 303
             assert anonymous.request("GET", reply_urls[0])[0] == 200
             review = first.replace("/threads/", "/moderation/")
             _, _, stale = anonymous.request("GET", first)
-            _, _, html = user.request("GET", review)
-            assert user.submit(html, action("threads", "update", moderator), published="true", locked="true")[0] == 303
+            _, _, html = outsider.request("GET", review)
+            assert outsider.submit(html, action("threads", "update", moderator), published="true", locked="true")[0] == 303
             status, _, html = anonymous.submit(stale, action("replies", "create", "public"), body="Late reply")
             assert "<pre>" not in html, (status, html)
-            _, _, html = user.request("GET", review)
-            assert user.submit(html, action("threads", "update", moderator), published="false", locked="true")[0] == 303
+            _, _, html = outsider.request("GET", review)
+            assert outsider.submit(html, action("threads", "update", moderator), published="false", locked="true")[0] == 303
             assert anonymous.request("GET", first)[0] == 404
+            assert user.request("GET", first)[0] == 200
+            status, _, hidden_reply = user.request("GET", reply_urls[0])
+            assert status == 200
+            assert user.submit(hidden_reply, action("replies", "update", "owner"), body="Owner edit under hidden parent")[0] == 303
             assert anonymous.request("GET", reply_urls[0])[0] == 404
             assert anonymous.request("GET", reply_path)[0] == 404
             assert anonymous.request("GET", second)[0] == 200
-            _, _, html = user.request("GET", review)
-            assert user.submit(html, action("threads", "update", moderator), published="true", locked="false")[0] == 303
+            _, _, html = outsider.request("GET", review)
+            assert outsider.submit(html, action("threads", "update", moderator), published="true", locked="false")[0] == 303
             assert anonymous.request("GET", reply_path)[0] == 200
             (args.output / "results.json").write_text(json.dumps({"registration": True, "authenticated_replies": True,
                 "anonymous_editing": True, "scoped_pagination": True, "maximum_document_pagination": True, "moderation": True, "stale_form_lock": True}, indent=2))
