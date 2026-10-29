@@ -33,6 +33,8 @@ pub mod forum {
     struct PublicReplies;
     #[query(read(Reply), allow = public, visible(published = true), fields(thread, body))]
     struct PublicReply;
+    #[query(read(Reply), allow = owner)]
+    struct OwnReply;
     #[query(list(Reply), order = created_asc, page_size = 20, allow = role("moderator"))]
     struct ReviewReplies;
     #[query(read(Reply), allow = role("moderator"))]
@@ -42,6 +44,8 @@ pub mod forum {
     struct PublicThreads;
     #[query(read(Thread), allow = public, visible(published = true), fields(title, body, locked))]
     struct PublicThread;
+    #[query(read(Thread), allow = owner)]
+    struct OwnThread;
     #[query(list(Thread), allow = role("moderator"))]
     struct ModerationQueue;
     #[query(read(Thread), allow = role("moderator"))]
@@ -76,24 +80,29 @@ pub mod forum {
     fn thread(
         thread: Id<Thread>,
         mut read: Query<PublicThread>,
+        mut own: Query<OwnThread>,
         edit: Form<EditThread>,
         secret_edit: Form<EditWithSecret>,
         mut replies: Query<PublicReplies>,
         reply: Form<CreateReply>,
         anonymous_reply: Form<CreateAnonymousReply>,
     ) -> PageResult {
-        let thread = read.get(thread).ok_or(NotFound)?;
+        let (title, body, locked) = own
+            .get(thread)
+            .map(|t| (t.title, t.body, t.locked))
+            .or_else(|| read.get(thread).map(|t| (t.title, t.body, t.locked)))
+            .ok_or(NotFound)?;
         Ok(Page::new(
             "Thread",
             html! { main {
                 nav { a href=(routes::index()) { "All threads" } }
-                h1 { (&thread.title) } pre { (&thread.body) }
+                h1 { (&title) } pre { (&body) }
                 h2 { "Replies" }
                 @for reply in replies.fetch() { article {
                     pre { (&reply.body) }
                     a href=(routes::show_reply(reply.id())) { "View or edit reply" }
                 } }
-                @if thread.locked { p { "This thread is closed to new replies." } }
+                @if locked { p { "This thread is closed to new replies." } }
                 @if reply.is_available() { section { h2 { "Reply with your account" } (reply) } }
                 @if anonymous_reply.is_available() { section { h2 { "Reply with an edit secret" } (anonymous_reply) } }
                 @if edit.is_available() { section { h2 { "Edit your thread" } (edit) } }
@@ -139,15 +148,20 @@ pub mod forum {
     fn show_reply(
         reply: Id<Reply>,
         mut read: Query<PublicReply>,
+        mut own: Query<OwnReply>,
         edit: Form<EditReply>,
         secret: Form<EditReplyWithSecret>,
     ) -> PageResult {
-        let reply = read.get(reply).ok_or(NotFound)?;
+        let (thread, body) = own
+            .get(reply)
+            .map(|r| (r.thread, r.body))
+            .or_else(|| read.get(reply).map(|r| (r.thread, r.body)))
+            .ok_or(NotFound)?;
         Ok(Page::new(
             "Reply",
             html! { main {
-                a href=(routes::thread(reply.thread)) { "Back to thread" }
-                h1 { "Reply" } pre { (&reply.body) }
+                a href=(routes::thread(thread)) { "Back to thread" }
+                h1 { "Reply" } pre { (&body) }
                 (edit) (secret)
             } },
         ))
