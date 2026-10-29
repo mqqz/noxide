@@ -112,20 +112,19 @@ pub(crate) async fn read_resource(
     if !read_allowed(m, principal, op, &stored)? {
         return Ok(None);
     }
-    if manifest::is_public(op) {
-        if let Some(parent) = manifest::parent_resource(m, op.resource)? {
-            let field =
-                manifest::parent_field(manifest::resource(m, op.resource)?).expect("parent");
-            let id = stored
-                .record
-                .fields
-                .get(&field.name)
-                .ok_or_else(|| anyhow::anyhow!("missing parent"))?
-                .parse()?;
-            let parent = load(tx, m, parent.id, id).await?;
-            if !parent.is_some_and(|p| manifest::parent_permits(field, &p.record.fields, false)) {
-                return Ok(None);
-            }
+    if manifest::is_public(op)
+        && let Some(parent) = manifest::parent_resource(m, op.resource)?
+    {
+        let field = manifest::parent_field(manifest::resource(m, op.resource)?).expect("parent");
+        let id = stored
+            .record
+            .fields
+            .get(&field.name)
+            .ok_or_else(|| anyhow::anyhow!("missing parent"))?
+            .parse()?;
+        let parent = load(tx, m, parent.id, id).await?;
+        if !parent.is_some_and(|p| manifest::parent_permits(field, &p.record.fields, false)) {
+            return Ok(None);
         }
     }
     let mut record = stored.record;
