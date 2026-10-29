@@ -82,6 +82,17 @@ pub trait FieldValue: Sized {
     fn encode(&self) -> String;
     fn decode(value: &str) -> Self;
 }
+impl<R: ResourceType> FieldValue for Id<R> {
+    fn kind() -> FieldKind {
+        panic!("parent fields require visible and create_when predicates")
+    }
+    fn encode(&self) -> String {
+        self.value.to_string()
+    }
+    fn decode(value: &str) -> Self {
+        Self::new(value.parse().expect("host parent ID"))
+    }
+}
 impl FieldValue for String {
     fn kind() -> FieldKind {
         FieldKind::Text

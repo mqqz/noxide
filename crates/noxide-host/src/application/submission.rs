@@ -413,7 +413,11 @@ impl ExecutionBudget {
 }
 
 impl Application {
-    fn authorize_create(&self, action: &Action, principal: &auth::Principal) -> Result<()> {
+    pub(super) fn authorize_create(
+        &self,
+        action: &Action,
+        principal: &auth::Principal,
+    ) -> Result<()> {
         let op = manifest::operation(&self.manifest, action.operation)?;
         ensure!(
             manifest::is_public(op)

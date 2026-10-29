@@ -772,7 +772,28 @@ impl Application {
         );
         let op = manifest::operation(&self.manifest, action.operation)?;
         match (&op.kind, target) {
-            (OperationKind::Create, None) => {}
+            (OperationKind::Create, None) => {
+                ensure!(
+                    manifest::parent_resource(&self.manifest, op.resource)?.is_none(),
+                    RequestError::InvalidRequest
+                );
+            }
+            (OperationKind::Create, Some(target)) => {
+                let parent = manifest::parent_resource(&self.manifest, op.resource)?
+                    .ok_or(RequestError::InvalidRequest)?;
+                let route = manifest::route(&self.manifest, target.route)?;
+                ensure!(
+                    target.resource == parent.id
+                        && target.id > 0
+                        && target.id <= i64::MAX as u64
+                        && target.revision > 0
+                        && !target.incarnation.is_empty()
+                        && target.incarnation.len() <= 64
+                        && route.resource == Some(parent.id)
+                        && route.forms.contains(&action.id),
+                    RequestError::InvalidRequest
+                );
+            }
             (OperationKind::Update | OperationKind::Delete, Some(target)) => {
                 let route = manifest::route(&self.manifest, target.route)?;
                 ensure!(
@@ -829,6 +850,19 @@ impl Application {
         principal: &auth::Principal,
     ) -> Result<Option<StoredRecord>> {
         let stored = repository::load(tx, &self.manifest, target.resource, target.id).await?;
+        let op = manifest::operation(&self.manifest, action.operation)?;
+        if op.kind == OperationKind::Create {
+            self.authorize_create(action, principal)?;
+            let parent = manifest::parent_resource(&self.manifest, op.resource)?
+                .ok_or_else(|| anyhow::anyhow!("missing parent"))?;
+            let field = manifest::parent_field(manifest::resource(&self.manifest, op.resource)?)
+                .expect("parent");
+            return Ok(stored.filter(|r| {
+                r.record.resource == parent.id
+                    && r.incarnation == target.incarnation
+                    && manifest::parent_permits(field, &r.record.fields, true)
+            }));
+        }
         match stored {
             Some(stored)
                 if stored.incarnation == target.incarnation
@@ -877,7 +911,35 @@ impl Application {
                         repository::allowed(&op.policy, principal, &user.id, &user.tenant)
                     })
                 {
-                    Some(self.credentials(action, subject, now, None, Fields::new())?)
+                    if let Some(parent) = manifest::parent_resource(&self.manifest, op.resource)? {
+                        let field = manifest::parent_field(manifest::resource(
+                            &self.manifest,
+                            op.resource,
+                        )?)
+                        .expect("parent");
+                        if let Some(record) = &stored
+                            && record.record.resource == parent.id
+                            && manifest::parent_permits(field, &record.record.fields, true)
+                        {
+                            Some(self.credentials(
+                                action,
+                                subject,
+                                now,
+                                Some(RecordTarget {
+                                    resource: parent.id,
+                                    id: record.record.id,
+                                    incarnation: record.incarnation.clone(),
+                                    revision: record.revision,
+                                    route,
+                                }),
+                                Fields::new(),
+                            )?)
+                        } else {
+                            None
+                        }
+                    } else {
+                        Some(self.credentials(action, subject, now, None, Fields::new())?)
+                    }
                 } else {
                     None
                 }
@@ -926,17 +988,18 @@ impl Application {
         let credentials = self.credentials(action, session, now, Some(target), Fields::new())?;
         let operation = manifest::operation(&self.manifest, action.operation)?;
         // An edit capability grants mutation authority, never a read projection.
-        let current = if manifest::is_capability(operation) {
-            Fields::new()
-        } else if operation.kind == OperationKind::Delete {
-            stored.record.fields.clone()
-        } else {
-            action
-                .fields
-                .iter()
-                .map(|name| (name.clone(), stored.record.fields[name].clone()))
-                .collect()
-        };
+        let current =
+            if manifest::is_capability(operation) || operation.kind == OperationKind::Create {
+                Fields::new()
+            } else if operation.kind == OperationKind::Delete {
+                stored.record.fields.clone()
+            } else {
+                action
+                    .fields
+                    .iter()
+                    .map(|name| (name.clone(), stored.record.fields[name].clone()))
+                    .collect()
+            };
         render::recovery(
             &self.presentation,
             &self.manifest,
@@ -990,7 +1053,9 @@ impl Application {
                 },
             "receipt destination differs"
         );
-        if let Some(target) = target {
+        if let Some(target) = target
+            && kind != OperationKind::Create
+        {
             ensure!(id == target.id, "receipt target differs");
         }
         render::render(
@@ -1042,7 +1107,7 @@ impl Application {
             .acquire()
             .await
             .map_err(|_| RequestError::Busy)?;
-        if cursor.is_some_and(|c| c == 0 || c > i64::MAX as u64 || target.is_some()) {
+        if cursor.is_some_and(|c| c == 0 || c > i64::MAX as u64) {
             return Err(RequestError::InvalidRequest);
         }
         let reference = RouteRef { route, target };
@@ -1128,9 +1193,7 @@ impl Application {
             let next_page = effects.more.map(|id| {
                 format!(
                     "{}?before={id}",
-                    manifest::route(&self.manifest, route)
-                        .expect("validated route")
-                        .path
+                    crate::routing::resolve(&self.manifest, &reference).expect("validated route")
                 )
             });
             let mut rendered = render::render(

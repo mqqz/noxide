@@ -35,3 +35,6 @@ mod registration_tests;
 mod form_layout;
 mod policy;
 mod routing;
+
+#[cfg(test)]
+mod parent_tests;

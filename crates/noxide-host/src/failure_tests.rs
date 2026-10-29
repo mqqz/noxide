@@ -211,12 +211,10 @@ async fn stored_bounds(db: &Database) {
         [10, 9, 2],
         "cursor continuation must neither skip nor repeat records"
     );
-    assert_eq!(effects.more, Some(2));
-    effects.cursor = effects.more.take();
-    let records: Vec<Record> =
-        serde_json::from_slice(&effects.invoke(1, 0).await.unwrap()).unwrap();
-    assert!(records.is_empty());
-    assert!(effects.more.is_none());
+    assert!(
+        effects.more.is_none(),
+        "full last page must not link to an empty page"
+    );
     effects.cursor = None;
     effects.request.kind = RequestKind::Action(1);
     assert!(

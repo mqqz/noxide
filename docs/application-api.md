@@ -77,7 +77,7 @@ An unmarked resource receives no inferred access policy.
 CRUD entries name each enabled mutation. Create and update require separate
 `fields(...)` lists, and every entry requires `redirect(page_name)`. Omitted
 operations generate nothing. Existing host rules require create to name every
-stored field and create/update redirects to target a record page. Adding a field
+ordinary stored field (parent references are host-bound) and create/update redirects to target a record page. Adding a field
 therefore requires updating create explicitly before admission succeeds. An optional `allow = ...` forwards to the existing
 policy parser; otherwise the resource must be marked `owner`. For example:
 
@@ -166,7 +166,7 @@ Rust declarations. Declaration order, Rust module names, labels, and enum displa
 labels do not change the stored schema. Changing a persistent key requires an
 explicit migration.
 
-Supported values are bounded `String`, `bool`, `i64`, unit enums deriving `Choice`,
+Supported values are bounded `String`, `bool`, `i64`, parent references using `Id<T>`, unit enums deriving `Choice`,
 and one layer of `Option<T>`. Enum variants require stable `#[choice(key = "…",
 label = "…")]` declarations. Strings require `max_bytes`; integers may declare
 `min` and `max`. Every resource has exactly one `#[id] Id<Self>` field. IDs convey
@@ -481,3 +481,63 @@ been replaced displays a revoked message. Deleting the record also revokes its
 secret. A secret belongs in the password input, never a link or URL. Edit secrets bind
 to persistent resource identity, so an approved resource rename or bundle-ID
 change preserves access.
+
+## Parent relationships and scoped pagination
+
+A child resource can declare one required, immutable parent ID:
+
+```rust
+#[derive(Resource)]
+#[resource(key = "replies", owner)]
+struct Reply {
+    #[id]
+    id: Id<Self>,
+    #[field(visible(published = true), create_when(locked = false))]
+    thread: Id<Thread>,
+    #[field(max_bytes = 4096)]
+    body: String,
+    #[field()]
+    published: bool,
+}
+
+#[query(list(Reply), allow = public, visible(published = true), fields(body))]
+struct ThreadReplies;
+
+#[action(create(Reply), fields(body, published), allow = owner, redirect = show_reply)]
+struct CreateReply;
+```
+
+`Thread` must declare the referenced boolean or choice fields. Both parent
+predicates are explicit, operator-approved authority: `visible(...)` gates public
+child reads and lists; `create_when(...)` additionally gates child creation.
+These predicates do not replace the child operation's policy or public visibility
+predicate. Private child queries retain their declared policies, so a moderator
+can inspect replies beneath a hidden thread. Locking a thread prevents new replies;
+it does not revoke existing reply-edit authority.
+
+Put `Query<ThreadReplies>` and `Form<CreateReply>` on a record page whose target
+is `Id<Thread>`, alongside a read query for that thread. `fetch()` then lists only
+that thread's replies. The host binds the parent from the page into the signed
+submission token. Omit `thread` from every action's writable fields; client or guest
+attempts to supply or change it are rejected. Creation rechecks the parent,
+visibility, and creation predicate in the write transaction. A changed parent
+revision requires form recovery; a hidden, locked, missing, or replaced parent
+cannot accept the stale submission.
+
+A record page may contain one list query, scoped to its parent target. The host
+applies policy, visibility, and parent filtering before the page limit, and emits
+next-page links retaining the concrete record URL. Pages contain up to three
+records; an ID-only lookahead avoids links to empty final pages without increasing
+the record output budget. Cursors use descending numeric record IDs. IDs are
+random, so this is deterministic navigation through existing rows, **not creation
+order**. Concurrent inserts are not a snapshot: reload the initial page to start
+a fresh traversal.
+
+The initial relationship model has one level: a parent cannot itself have a
+parent. Child collection queries require their parent route; global child lists,
+joins, arbitrary filters, and multiple independent cursors are not exposed.
+The host creates a parent lookup index for SQLite and PostgreSQL. Deleting a
+parent with children is rejected. Schema changes rebuild the relationship indexes
+and validate all references within the bounded migration transaction; an orphaned
+reference rolls the migration back. Renaming a parent resource also requires
+updating the child's declared parent resource through the schema workflow.
