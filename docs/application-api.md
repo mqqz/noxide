@@ -78,7 +78,8 @@ An unmarked resource receives no inferred access policy.
 CRUD entries name each enabled mutation. Create and update require separate
 `fields(...)` lists, and every entry requires `redirect(page_name)`. Omitted
 operations generate nothing. Existing host rules require create to name every writable
-ordinary stored field (parent references are host-bound) and create/update redirects to target a record page. Adding a field
+ordinary stored field (parent references are host-bound) and ordinary create/update
+redirects to target a record page. Adding a writable field
 therefore requires updating create explicitly before admission succeeds. An optional `allow = ...` forwards to the existing
 policy parser; otherwise the resource must be marked `owner`. For example:
 
@@ -607,3 +608,34 @@ affect the schema digest. They apply to new rows; migration `AddField.value`
 remains a separate operator-selected backfill for existing rows.
 
 Contract review follow-up: the CLI currently prints approval and schema hashes, without a human-readable policy summary. A future summary should list each initial field and value together with every update action that can write it and that action’s policy. Until then, inspect the full approved manifest.
+
+### Redirecting to a parent
+
+A child mutation can declare a parent page as its destination:
+
+```rust
+create PostReply { fields(body), redirect(parent(thread)) }
+```
+
+The same destination syntax works for update and delete. The named page must
+address the child's declared parent resource and provide its applicable read
+operation. The host captures the immutable parent identity, including its
+incarnation, from the validated relationship. Submitted identifiers and guest
+URLs cannot select the destination.
+
+The host commits the mutation and its recovery receipt before resolving parent
+navigation. It applies the destination's normal resource read authorization to
+the current principal without executing the destination page handler. A child's
+edit secret does not confer access to a private parent. Missing, replaced, or
+unreadable parents, navigation timeouts, and post-commit lookup failures produce
+a generic mutation-success response. They do not undo the mutation or invite a
+new submission. Link presence can reveal whether navigation is currently allowed;
+the fallback does not identify the parent or explain why access is unavailable.
+
+Anonymous creation first displays the original edit secret, with an optional
+“Continue to thread” link. Save the secret before continuing. The host never
+automatically redirects past this handover. If delivery is interrupted, retain
+the original form's recovery information and replay that submission to recover
+the same receipt and secret; replay does not create another record or generate
+a replacement secret. Each replay evaluates parent visibility again, including
+after the child has been deleted.
