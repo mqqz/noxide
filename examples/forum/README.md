@@ -1,94 +1,193 @@
 # Forum development example
 
-A text forum using the public SDK: public threads, replies scoped to each thread,
-account-owned and anonymous posting, owner/edit-secret editing, and moderator
-hide/restore and thread locking. Registration and pagination are host-owned.
+A text forum with account-owned and anonymous posts, owner/edit-secret editing,
+and moderator publication and thread locking. Named actions use two `crud!`
+blocks. Typed layouts provide text inputs, eight-row textareas, and moderation
+checkboxes; the host supplies credentials, CSRF, recovery, and pagination.
 
-## Build and run
+## Disposable development setup
 
-From the repository root, with the trusted toolchain and cached dependencies:
-
-```sh
-cargo run -p noxide-cli -- build --framework "$PWD" \
-  --app examples/forum --name forum --output /tmp/forum-build
-```
-
-Use a fresh output directory. Follow [running applications](../../docs/running-applications.md)
-for approval, database initialization, accounts, and serving the generated
-`forum.component.wasm` and `manifest.json`. Enable host registration with
-`"registration": "open"` or `"invite"`. Registration never grants roles. The CLI currently has no role-management command;
-a trusted operator can grant the role directly in the deployment database after
-creating the account (replace `alice` with that account's ID):
-
-```sql
-INSERT INTO nx_roles(principal, name, tenant) VALUES ('alice', 'moderator', '');
-```
-If the default state directory is unavailable, set `XDG_STATE_HOME` to a writable
-absolute directory outside the application source.
-
-Run the repeatable integration check against a disposable SQLite database and
-localhost server:
+Use the following Bash flow from the trusted repository checkout. It uses one
+explicit configuration throughout; development-state approval commands are not
+part of this example. Install the trusted CLI, Python 3.11+, and a trusted Rust
+toolchain with `wasm32-unknown-unknown` first. The selected catalog's archives
+must already be cached. Local processing requires trusted application code and
+dependencies; for untrusted inputs add `--isolated --kernel /path/to/trusted/kernel`
+to each dependency/build command below, retaining the selected toolchain.
 
 ```sh
-python3 tools/test_forum.py --bundle /tmp/forum-build --output /tmp/forum-http
+# Build the trusted host CLI from this checkout and its cached dependencies.
+cargo build -p noxide-cli --locked --offline
+export FRAMEWORK="$PWD"
+export HOST_CLI="$FRAMEWORK/target/debug/noxide"
+export TOOLCHAIN="$(rustc --print sysroot)"
+umask 077
+export FORUM_RUN="$(mktemp -d /tmp/noxide-forum.XXXXXX)"
+export XDG_STATE_HOME="$FORUM_RUN/state"
+
+"$HOST_CLI" deps resolve --app "$FRAMEWORK/examples/forum" \
+  --framework "$FRAMEWORK" --toolchain "$TOOLCHAIN" \
+  --output "$FORUM_RUN/lock-candidate"
+diff -u examples/forum/Cargo.lock "$FORUM_RUN/lock-candidate/Cargo.lock"
 ```
 
-It exercises registration/login, two threads with interleaved replies, owner
-editing, anonymous creation and edit secrets, actual pagination links, thread
-lock races, hiding/restoring threads, and direct reply URLs under hidden parents.
-The moderator role is granted through operator-controlled test SQL. This check
-uses HTTP, not browser automation, and leaves results and server logs in the
-output directory.
+Review the candidate and confirm that the application manifest and trusted
+catalog have not changed. A nonzero `diff` means there are differences to review.
+Resolution alone does not compile or approve the application. Install the
+reviewed candidate explicitly, then use the same catalog and toolchain:
+
+```sh
+cp -- "$FORUM_RUN/lock-candidate/Cargo.lock" "$FRAMEWORK/examples/forum/Cargo.lock"
+"$HOST_CLI" deps check --app "$FRAMEWORK/examples/forum" \
+  --framework "$FRAMEWORK" --toolchain "$TOOLCHAIN"
+"$HOST_CLI" check --app "$FRAMEWORK/examples/forum" \
+  --framework "$FRAMEWORK" --toolchain "$TOOLCHAIN" --output "$FORUM_RUN/check"
+"$HOST_CLI" build --app "$FRAMEWORK/examples/forum" \
+  --framework "$FRAMEWORK" --toolchain "$TOOLCHAIN" --output "$FORUM_RUN/bundle"
+python3 -m json.tool "$FORUM_RUN/bundle/manifest.json"
+"$HOST_CLI" contract-hash "$FORUM_RUN/bundle/manifest.json"
+```
+
+Review this emitted manifest: authors write title/body only, new posts are
+unpublished, and only global `moderator` actions write publication/lock fields.
+The two CRUD blocks preserve the original action identities and permissions.
+Custom layouts change the contract digest and require ordinary contract approval.
+Enter the displayed digest only after reviewing that exact bundle:
+
+```sh
+read -r -p 'Reviewed contract digest: ' APPROVED_DIGEST
+export APPROVED_DIGEST
+python3 - <<'PY'
+import json, os, pathlib, subprocess
+run = pathlib.Path(os.environ['FORUM_RUN'])
+manifest = run / 'bundle/manifest.json'
+approved = os.environ['APPROVED_DIGEST']
+actual = subprocess.check_output(
+    [os.environ['HOST_CLI'], 'contract-hash', manifest], text=True).strip()
+if approved != actual:
+    raise SystemExit('Reviewed digest does not match the emitted manifest')
+config = {
+    'database': {'sqlite': 'forum.db'},
+    'keys': 'host-keys.json',
+    'component': 'bundle/forum.component.wasm',
+    'manifest': 'bundle/manifest.json',
+    'approved_contract': approved,
+    'origin': 'http://localhost:8080',
+    'listen': {'tcp': '127.0.0.1:8080'},
+    'registration': 'open',
+}
+with (run / 'runtime.json').open('x') as file:
+    json.dump(config, file, indent=2)
+PY
+"$HOST_CLI" init "$FORUM_RUN/runtime.json"
+python3 - <<'PY'
+import getpass, os, pathlib
+password = pathlib.Path(os.environ['FORUM_RUN']) / 'moderator-password'
+with password.open('x') as file:
+    file.write(getpass.getpass('Moderator password (12–256 bytes): '))
+password.chmod(0o600)
+PY
+"$HOST_CLI" account "$FORUM_RUN/runtime.json" moderator "$FORUM_RUN/moderator-password"
+rm -- "$FORUM_RUN/moderator-password"
+"$HOST_CLI" role grant "$FORUM_RUN/runtime.json" moderator moderator --global
+"$HOST_CLI" role list "$FORUM_RUN/runtime.json" moderator
+"$HOST_CLI" serve "$FORUM_RUN/runtime.json"
+```
+
+All configured paths are relative to this `runtime.json`. Role grants verify
+`bundle/manifest.json` against its `approved_contract`; serving uses that same
+manifest, component, database, and fresh keys. No prior deployment activation is
+needed for the grant. This run uses a fresh storage-version-6 database. Keep its
+private directory outside application sources; do not reuse production keys.
+
+Visit `http://localhost:8080`, register an ordinary account, and submit a thread.
+Its owner can follow the record URL immediately, but it remains absent from the
+public list. In a separate session sign in as `moderator`, open `/moderation`,
+select the thread, check **Published**, and save. Verify the thread in a signed-out
+session. Replies follow the same publication process. Registration never grants
+roles. Whitespace-only titles/messages are rejected with the typed layout,
+entered values, field errors, and host recovery controls preserved. Valid content
+is stored without trimming.
+
+To revoke authority, use another terminal with the same `FORUM_RUN` and `HOST_CLI`:
+
+```sh
+"$HOST_CLI" role revoke "$FORUM_RUN/runtime.json" moderator moderator --global
+"$HOST_CLI" role list "$FORUM_RUN/runtime.json" moderator
+```
+
+Existing sessions observe the revocation on subsequent authorization transactions.
+An unused moderator form cannot perform a new mutation afterward. Recovery of an
+already committed submission does not perform a second write. In-flight
+transactions retain their existing isolation behavior. Changed/unchanged command
+receipts are not a durable audit trail; reconcile state before retrying an
+indeterminate error when another operator may have changed the assignment.
+
+Stop the foreground server with Ctrl-C when finished. This example uses HTTP on
+loopback for disposable development; it is not an anonymity or production
+transport deployment procedure.
+
+## Repeatable HTTP acceptance
+
+After the build, run against another new disposable database and loopback port:
+
+```sh
+python3 tools/test_forum.py --host-cli "$HOST_CLI" \
+  --bundle "$FORUM_RUN/bundle" --output "$FORUM_RUN/http-check"
+```
+
+`--host-cli` also accepts an installed binary outside the checkout. The test
+covers registration, CLI moderator provisioning/revocation, existing-session role
+freshness, stale forms and committed replay, pending owner access, anonymous
+handover/editing, typed recovery layouts, escaped content, locking, hidden parents,
+and returned pagination links. Maximum-size ASCII and quote-filled fixtures
+retain the existing creation-sequence invariants and rendering budgets. Only
+fixture records use SQL; role provisioning needs none. Results and server logs
+remain in the test output directory. These are HTTP assertions, not browser
+verification; the separate NoJS browser suites require Firefox and geckodriver.
 
 ## Pages and behavior
 
-- `/`: public threads and account/anonymous creation forms.
-- `/threads/{thread}`: opening message, paginated replies, reply creation and
-  thread editing. Locked threads retain existing content and reject new replies.
-- `/replies/{reply}`: a reply with owner and edit-secret editing.
-- `/moderation` and `/moderation/{thread}`: moderator review, visibility, locks,
-  and links to individual reply moderation.
-- `/reply_review/{reply}`: moderator hide/restore for a reply.
+- `/`: public threads and available account/anonymous creation forms.
+- `/threads/{thread}`: opening message, paginated replies, and available editing
+  and reply forms. Locked threads show existing content and reject new replies.
+- `/replies/{reply}`: a reply with available owner/edit-secret editing.
+- `/moderation` and `/moderation/{thread}`: moderator review, publication, locks,
+  and links to reply moderation.
+- `/reply_review/{reply}`: moderator publication for one reply.
 
-New threads and replies start unpublished and await moderator approval. Save the anonymous edit secret
-on the host's handover page. Authors edit content only; moderator visibility and
-lock state cannot be changed by owner or edit-secret updates. Hiding a thread
-removes its replies from public access, including direct reply URLs. Moderators
-can still review hidden content. A lock prevents new replies; existing replies
-remain editable.
+New threads and replies start unpublished; threads start unlocked. Only moderator
+actions change these values. Signed-in owners can read/edit pending posts on the
+usual record URLs, including their own replies beneath hidden threads. Anonymous
+and unrelated readers remain denied until publication. Reply creation/editing
+redirects to the reply page, and moderation redirects to reply review; this example
+does not adopt the framework's optional parent redirects.
 
-`Reply.thread: Id<Thread>` is assigned by the host from the thread page and cannot
-be submitted or changed. Parent visibility and lock conditions are checked again
-inside the reply's write transaction. See the [relationship API](../../docs/application-api.md#parent-relationships-and-scoped-pagination).
+Save the anonymous edit secret on the host's handover page before continuing.
+The secret never appears in a URL. It grants mutation authority, not read access:
+anonymous authors cannot read/edit pending posts through these pages until
+approval. A secret read/unlock flow remains deferred. Hiding a thread hides its
+replies from public readers, including direct reply URLs. Moderators can still
+review them; owners retain their own record access.
 
-## Remaining development findings
+`Reply.thread: Id<Thread>` is host-bound and cannot be submitted or changed.
+The host rechecks parent visibility and locking inside the write transaction.
+See the [relationship API](../../docs/application-api.md#parent-relationships-and-scoped-pagination).
 
-- Public reply lists request up to six records in host-controlled creation order.
-  This reserves Document IR space for the parent, forms, and markup even when
-  maximum-length text requires JSON escaping. Moderator lists request up to 20
-  replies and render links only. Serialized byte limits may shorten a page.
-  Opaque cursors expire after 15 minutes; restart pagination after expiry or
-  redeployment. Traversal is live:
-  publishing an older reply behind the cursor requires restarting to see it.
-- Multiple create/update actions require explicit `#[action]` declarations;
-  `crud!` permits one declaration per operation kind.
-- Text is bounded to 4096 bytes per field and rendered as escaped plain text.
-- Moderator role administration currently requires operator database access.
-- Search, public author profiles, and multi-resource write workflows are not
-  implemented. Attachments remain deferred.
+Public replies request up to six records in immutable creation order; moderator
+reply lists request up to twenty and render links only. Other lists retain three
+records. Serialized byte limits may shorten pages. Follow the opaque `?cursor=`
+links returned by the host. Cursors expire after 15 minutes; restart after expiry
+or redeployment. Traversal is live, so publishing an older reply behind the cursor
+requires restarting to see it. The document title stays **Thread**; the actual
+title appears in the page heading. Titles are bounded to 200 bytes and bodies to
+4096 bytes, rendered as escaped plain text.
 
-Signed-in owners can read and edit their pending threads and replies on the usual
-record URLs, including their own replies beneath hidden threads. Other readers
-still receive a 404 until publication.
+## Remaining limitations
 
-- Edit secrets grant updates/deletes, not read access. Anonymous authors cannot
-  view or edit pending posts through these pages until approval. Save the secret
-  at handover. A host-authorized secret read/unlock flow remains deferred.
-- Moderation gates initial publication only. Owner and edit-secret changes to
-  approved content become public immediately. Keeping approved content visible
-  while edits await approval needs separate pending revisions and host-enforced,
-  atomic approval of the exact reviewed revision; this remains deferred.
-- Choice-enum `initial` syntax in the macro remains deferred; the host already
-  validates choice initial values.
-- A readable operator approval summary listing which update actions can write
-  each initial field remains deferred.
+Edits to approved content become public immediately; pending revisions and
+reapproval are deferred. Search, public author profiles, attachments, and
+multi-resource write workflows are not implemented. Choice-enum `initial` macro
+syntax and an operator summary of actions that can write each initial field also
+remain deferred. The security requirements are not proof of an independent audit
+or transport anonymity.
