@@ -370,7 +370,7 @@ The selected defaults are:
 | Canonical input / serialized request including inspection | 32 KiB / 64 KiB |
 | Repository result / IR | 64 KiB / 64 KiB |
 | Document | 1,024 nodes, depth 32, eight forms, 256 KiB serialized output |
-| Repository list | Three records, cursor bound to the request; stored fields guarded at 20,000 bytes before transfer |
+| Repository list | Approved limit of 1–20 records (default three), strict serialized-byte prefix; authenticated cursor bound to query and request context; stored fields guarded at 20,000 bytes before transfer |
 | Persistent records | 10,000 per resource and owner |
 | HTTP admission | 64 connections; 16 active application requests; two password workers |
 | HTTP parsing and transfer | 64 headers, 32 KiB header buffer, 64 KiB encoded form body, 30-second header/body phases, 60-second connection lifetime |

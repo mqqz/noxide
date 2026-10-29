@@ -166,7 +166,10 @@ impl Transaction {
             if let Some(field) = crate::manifest::parent_field(resource) {
                 let storage = self.storage_key(&resource.name).await?;
                 let expression = self.parent_expression(&field.name)?;
-                self.execute(&format!("CREATE INDEX nx_parent_{storage} ON nx_records(resource, ({expression}), id) WHERE resource={storage}"), &[]).await?;
+                self.execute(&format!("CREATE INDEX nx_parent_{storage} ON nx_records(resource, ({expression}), created_seq) WHERE resource={storage}"), &[]).await?;
+                for column in ["owner", "tenant"] {
+                    self.execute(&format!("CREATE INDEX nx_parent_{storage}_{column} ON nx_records(resource, ({expression}), {column}, created_seq) WHERE resource={storage}"),&[]).await?;
+                }
             }
         }
         Ok(())
@@ -287,6 +290,10 @@ impl Transaction {
         for resource in &source {
             if crate::manifest::parent_field(resource).is_some() {
                 let storage = self.storage_key(&resource.name).await?;
+                for column in ["owner", "tenant"] {
+                    self.execute(&format!("DROP INDEX nx_parent_{storage}_{column}"), &[])
+                        .await?;
+                }
                 self.execute(&format!("DROP INDEX nx_parent_{storage}"), &[])
                     .await?;
             }

@@ -541,14 +541,35 @@ against SQLite, with the same cases available in the opt-in PostgreSQL suite.
 Keep these predicates restricted to the declared boolean or choice equality
 checks; this API does not provide arbitrary predicates or graph authorization.
 
-A record page may contain one list query, scoped to its parent target. The host
-applies policy, visibility, and parent filtering before the page limit, and emits
-next-page links retaining the concrete record URL. Pages contain up to three
-records; an ID-only lookahead avoids links to empty final pages without increasing
-the record output budget. Cursors use descending numeric record IDs. IDs are
-random, so this is deterministic navigation through existing rows, **not creation
-order**. Concurrent inserts are not a snapshot: reload the initial page to start
-a fresh traversal.
+A record page may contain one list query, scoped to its parent target. Declare
+`order = created_asc, page_size = 20` on a list query to request up to 20 records.
+Defaults are ascending creation order and three records; approved page sizes are
+1 through 20. The host applies policy, visibility, and parent filtering first.
+
+Creation order uses a globally unique, immutable host sequence, separate from
+application fields and random record IDs. A transactional counter prevents a later
+allocation from committing ahead of an earlier allocation still holding its lock.
+Rollback restores the counter. The global counter serializes creations across
+resources; transaction deadlines still apply under contention.
+
+Pages return a strict prefix fitting the actual serialized result budget. A byte
+limit can shorten a page; the next page resumes after its last returned record.
+Rows are never skipped to fit later rows. A first record that cannot fit produces
+a controlled failure. Host-generated next links retain the concrete record URL.
+
+Opaque authenticated cursors expire after 15 minutes and are bound to the approved
+query, deployment, caller context, and parent scope. They grant no authority;
+every page rechecks current authorization and visibility. Invalid or expired
+cursors produce a restart link, including after deployment changes.
+
+Traversal is live, not a snapshot. Later creations may appear on subsequent
+pages; deleted and hidden records disappear. Publishing an older record behind
+the cursor does not add it to the remaining traversal: restart to see it.
+This experimental storage layout requires fresh databases; existing layouts are
+rejected rather than assigned an invented historical order.
+
+See [pagination validation](pagination-validation.md) for regression coverage,
+query-plan checks, and local contention measurements.
 
 The initial relationship model has one level: a parent cannot itself have a
 parent. Child collection queries require their parent route; global child lists,

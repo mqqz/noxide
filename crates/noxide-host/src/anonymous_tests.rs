@@ -37,6 +37,7 @@ fn declarations() -> Manifest {
     }
     for (id, kind) in [(4, OperationKind::Update), (5, OperationKind::Delete)] {
         m.operations.push(Operation {
+            list: None,
             id,
             resource: 1,
             kind,
@@ -797,6 +798,7 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
         let mut m = declarations();
         if inspect {
             m.operations.push(Operation {
+                list: None,
                 id: 6,
                 resource: 1,
                 kind: OperationKind::Read,
@@ -836,7 +838,8 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
             ("published".into(), "true".into()),
             ("private".into(), "not publicly visible".into()),
         ]);
-        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version) VALUES($1,42,NULL,'',$2,'test-record',1,1)",&[storage.into(),serde_json::to_string(&fields).unwrap().into()]).await.unwrap();
+        tx.allocate_creation().await.unwrap();
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version,created_seq) VALUES($1,42,NULL,'',$2,'test-record',1,1,(SELECT value FROM nx_creation_counter WHERE singleton=1))",&[storage.into(),serde_json::to_string(&fields).unwrap().into()]).await.unwrap();
         tx.commit().await.unwrap();
         let page = app.view_page(None, 2, Some(42), None).await.unwrap();
         assert!(!text(&page).contains("not publicly visible"));
