@@ -17,6 +17,13 @@ anonymity and security policies enforced by default.
 | `noxide-protocol` | Library | Constrained document and application contracts |
 | `noxide-host` | Trusted library | Wasmtime, HTTP, authentication, policy, SQLite/PostgreSQL |
 
+Run `noxide new my-notes` to create a working starter without running Cargo.
+Start with an inline `#[noxide::app]` module: declare resources, receive typed
+`List<Resource>`/`Read<Resource>` capabilities in pages, and name mutations in a
+`crud!` block. Noxide generates the existing typed declarations and reviewable
+contract. Ownership is explicit, and public reads retain explicit visibility and
+field projections. See the [application API](docs/application-api.md).
+
 The private-notes example supports creation, editing and deletion through
 host-owned forms. Each request runs in a fresh guest instance, with authorization
 and transactional replay protection on SQLite and PostgreSQL. Stale edits preserve

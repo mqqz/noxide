@@ -26,6 +26,20 @@ cargo test --workspace --locked --offline
 `target/debug/noxide --help` lists the host commands. Application sources remain
 outside the host workspace build; `examples/private-notes` has its own lockfile.
 
+## Create a starter
+
+```sh
+target/debug/noxide new my-notes
+```
+
+This writes a standalone notes application with owner-scoped queries, validation,
+forms, and explicit CRUD intent. Read `my-notes/README.md` for the first isolated
+check/build command. Creating the project executes no application code and
+performs no dependency downloads or deployment approval. The generated SDK path
+refers to the disposable builder's fixed layout, so the project can live outside
+the framework checkout. Use `--framework /path/to/noxide` on check/build if the CLI
+was installed separately from the trusted framework sources.
+
 ## Build the application in a disposable VM
 
 Install a trusted Linux x86-64 kernel with built-in initramfs, devtmpfs, procfs,
