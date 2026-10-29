@@ -35,12 +35,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Rust formatter
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt
+      - name: Install Rust checks
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
       - name: Check formatting
         run: |
           cargo fmt --all --check
           rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs
+      - name: Fetch locked framework dependencies
+        run: cargo fetch --locked
+      - name: Build workspace
+        run: cargo build --workspace --locked --offline
+      - name: Lint all framework targets
+        run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
       - name: Test build input validation
         run: |
           python3 tools/test_build_inputs.py
