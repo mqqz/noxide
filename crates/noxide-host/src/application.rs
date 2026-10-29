@@ -867,7 +867,10 @@ impl Application {
             } else {
                 session
             };
-            let Some(subject) = subject else { continue };
+            let Some(subject) = subject else {
+                forms.insert(*id, None);
+                continue;
+            };
             let credentials = if op.kind == OperationKind::Create {
                 if manifest::is_public(op)
                     || principal.user().is_ok_and(|user| {

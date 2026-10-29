@@ -698,12 +698,13 @@ async fn public_request_flows(db: Database) {
     create_action(&mut m);
     m.routes[0].forms = vec![1];
     let forms = application(&db, &m, vec![Instruction::Form { action: 1 }], None).await;
+    let anonymous_page = forms.view_page(None, 1, None, None).await.unwrap();
+    let anonymous_html = std::str::from_utf8(&anonymous_page.body).unwrap();
+    assert_eq!(anonymous_page.status, 200);
     assert!(
-        matches!(
-            forms.view_page(None, 1, None, None).await,
-            Err(RequestError::Rejected)
-        ),
-        "guest cannot grant an anonymous form"
+        !anonymous_html.contains("action=\"/actions/1\"")
+            && !anonymous_html.contains("name=\"_submission\""),
+        "declared unavailable forms are omitted without granting anonymous mutation credentials"
     );
     let challenge = forms.login_challenge().await.unwrap();
     let session = forms
