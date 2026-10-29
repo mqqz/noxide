@@ -99,9 +99,12 @@ jobs:
       - name: Test SQLite and PostgreSQL
         # Include ignored provider tests. The crash worker is invoked by its
         # parent test; the browser fixture runs in the application job below.
+        # Avoid overlapping CPU-heavy provider stress tests with tests that
+        # exercise short production deadlines on shared CI runners. Each
+        # concurrency test still creates its own concurrent requests.
         run: >-
           cargo test --workspace --locked --offline --
-          --include-ignored
+          --include-ignored --test-threads=1
           --skip failure_tests::crash_worker
           --skip postgres_nojs_browser_flow
           --skip postgres_typed_forms_browser_flow
