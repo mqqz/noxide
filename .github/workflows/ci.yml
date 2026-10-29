@@ -42,7 +42,9 @@ jobs:
           cargo fmt --all --check
           rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs
       - name: Test build input validation
-        run: python3 tools/test_build_inputs.py
+        run: |
+          python3 tools/test_build_inputs.py
+          python3 tools/test_build_local.py
       - name: Lint CI bootstrap
         run: shellcheck tools/ci/setup-vm.sh
 
@@ -97,7 +99,9 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --locked --offline
       - name: Test build input validation
-        run: python3 tools/test_build_inputs.py
+        run: |
+          python3 tools/test_build_inputs.py
+          python3 tools/test_build_local.py
       - name: Lint CI bootstrap
         run: shellcheck tools/ci/setup-vm.sh
 
@@ -128,8 +132,6 @@ jobs:
           persist-credentials: false
       - name: Install Rust and Wasm standard library
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown
-      - name: Install VM prerequisites
-        run: bash tools/ci/setup-vm.sh
       - name: Locate browser tools
         run: |
           driver="$(command -v geckodriver || true)"
@@ -148,10 +150,10 @@ jobs:
           python3 tools/test_render_browser.py \
             --geckodriver "$NOXIDE_GECKODRIVER" \
             --output "$RUNNER_TEMP/noxide-ci/render"
-      - name: Build application from SDK archives inside a VM
+      - name: Build application from SDK archives locally
         run: |
           python3 tools/test_sdk_package.py \
-            --kernel "$NOXIDE_CI_KERNEL" \
+            --local \
             --toolchain "$(rustc --print sysroot)" \
             --cargo-home "${CARGO_HOME:-$HOME/.cargo}" \
             --metadata \
@@ -161,10 +163,10 @@ jobs:
             "$RUNNER_TEMP/noxide-ci/sdk/private_notes.component.wasm"
           echo "NOXIDE_TEST_COMPONENT=$RUNNER_TEMP/noxide-ci/sdk/private_notes.component.wasm" >> "$GITHUB_ENV"
           echo "NOXIDE_TEST_MANIFEST=$RUNNER_TEMP/noxide-ci/sdk/manifest.json" >> "$GITHUB_ENV"
-      - name: Test typed SDK and compile failures inside a VM
+      - name: Test typed SDK and compile failures locally
         run: |
           python3 tools/test_sdk_api.py \
-            --kernel "$NOXIDE_CI_KERNEL" \
+            --local \
             --toolchain "$(rustc --print sysroot)" \
             --cargo-home "${CARGO_HOME:-$HOME/.cargo}" \
             --output "$RUNNER_TEMP/noxide-ci/task-api"
@@ -181,7 +183,7 @@ jobs:
       - name: Build and test the public application
         run: |
           python3 tools/build_vm.py \
-            --kernel "$NOXIDE_CI_KERNEL" \
+            --local \
             --toolchain "$(rustc --print sysroot)" \
             --source examples/public-articles --name public_articles --metadata \
             --output "$RUNNER_TEMP/noxide-ci/public"

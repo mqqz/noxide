@@ -28,7 +28,7 @@ the comparison and identifiers are not normalized away.
 4. Lower named CRUD entries to existing action expansions. Preserve explicit
    field projections, policies, redirects, and optional hooks.
 5. Collect pages, actions, and layouts in canonical order and invoke existing
-   application expansion. Expose `noxide_manifest()` at crate root for isolated
+   application expansion. Expose `noxide_manifest()` at crate root for build-time
    metadata extraction and emit the existing component export.
 
 Queries have one deterministic name per operation/resource within the module.
@@ -53,8 +53,8 @@ changes and require the existing explicit schema-change workflow.
 ## Validation
 
 `tools/test_sdk_api.py` compiles the examples, explicit equivalents, and negative
-fixtures inside a disconnected disposable VM. It compares complete generated
-contracts, verifies independent item reordering, checks explicit versus default
+fixtures locally in routine CI, with an optional disposable VM backend. It compares
+complete generated contracts, verifies independent item reordering, checks explicit versus default
 owner policy, and ensures adding fields does not widen action projections.
 The same job checks public field exclusion, missing visibility/projection,
 conditional declarations/hooks, and invalid shorthand. Its multi-resource policy
@@ -65,8 +65,8 @@ Adding a query must retain every existing operation and policy; removing a form
 must change only its route binding. Cross-resource mutation forms and forms on
 strictly public routes must fail host admission.
 
-The CLI-generated starter is also snapshotted and built in this VM, including
-its generated Cargo manifest and native contract collector. Its complete contract
+The CLI-generated starter is also snapshotted and built with the selected backend,
+including its generated Cargo manifest and native contract collector. Its complete contract
 and approval hash must match the independently reviewed notes example. CLI tests
 verify destination protection and reject invalid names and symlinks. The snapshot
 ignores a regular `.gitignore` without reading it; other hidden source inputs
@@ -75,7 +75,7 @@ remain rejected.
 The usual packaged SDK job builds private notes from Cargo archives, and the
 host security suite exercises admission, ownership, anonymous projections, CSRF,
 replay, transaction rollback, escaping, and runtime budgets. The public example
-also receives its own VM build, component admission, and HTTP acceptance test
+also receives its own build, component admission, and HTTP acceptance test
 through `tools/test_public_app.py`, including seeded published/unpublished records
 and a private field excluded from both queries. These checks are
 local evidence, not a claim of an independent security audit.
