@@ -193,6 +193,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn initial_create_typed_surface_uses_only_action_projection() {
+        let declaration =
+            syn::parse_str("create(Article), fields(title), allow = owner, redirect = show")
+                .unwrap();
+        let tokens = expand_action(
+            declaration,
+            syn::parse_quote!(
+                pub struct CreateArticle;
+            ),
+        )
+        .unwrap()
+        .to_string();
+        assert!(tokens.contains("pub title"));
+        assert!(!tokens.contains("published"));
+    }
+    #[test]
+    fn initial_accepts_only_bounded_boolean_literals() {
+        for attrs in [quote!(initial = false), quote!(initial = true)] {
+            let input = syn::parse_quote! {
+                #[resource(key = "notes")]
+                struct Note { #[id] id: Id<Self>, #[field(#attrs)] flag: bool }
+            };
+            assert!(
+                expand_resource(input)
+                    .unwrap()
+                    .to_string()
+                    .contains("initial")
+            );
+        }
+        for (ty, attrs) in [
+            (quote!(bool), quote!(initial = false, initial = true)),
+            (quote!(bool), quote!(initial = make_value())),
+            (quote!(bool), quote!(initial = "false")),
+            (quote!(bool), quote!(initial = false, max_bytes = 4)),
+            (quote!(Option<bool>), quote!(initial = false)),
+            (quote!(String), quote!(initial = false, max_bytes = 20)),
+            (quote!(i64), quote!(initial = 0)),
+            (quote!(Id<Parent>), quote!(initial = false)),
+        ] {
+            let input = syn::parse_quote! {
+                #[resource(key = "notes")]
+                struct Note { #[id] id: Id<Self>, #[field(#attrs)] flag: #ty }
+            };
+            assert!(expand_resource(input).is_err(), "{ty} {attrs}");
+        }
+        assert!(
+            expand_resource(syn::parse_quote! {
+                #[resource(key = "notes")]
+                struct Note { #[id] #[field(initial = false)] id: Id<Self>, #[field()] flag: bool }
+            })
+            .is_err()
+        );
+    }
+    #[test]
     fn resource_requires_stable_keys_and_text_bounds() {
         let input = syn::parse_quote! {
             #[resource(key = "notes")]
