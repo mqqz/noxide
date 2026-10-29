@@ -26,8 +26,6 @@ pub(crate) enum Peer {
     Circuit(u32),
 }
 
-pub(crate) const REGISTRATION_PATH: &str = "/register";
-
 const BUSY_HTML: &str = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Service busy</title></head><body><main><h1>Service busy</h1><p>The service is busy. Retry this request.</p></main></body></html>";
 fn busy() -> Response {
     (
@@ -147,7 +145,7 @@ fn finish(mut response: Response) -> Response {
     response
 }
 
-fn rendered(value: Rendered, secure: bool) -> Response {
+fn rendered(value: Rendered, secure: bool, presentation: &crate::Presentation) -> Response {
     let mut response = (
         StatusCode::from_u16(value.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -158,7 +156,7 @@ fn rendered(value: Rendered, secure: bool) -> Response {
         response.headers_mut().append(
             header::SET_COOKIE,
             set_cookie(
-                crate::security::ANONYMOUS_COOKIE,
+                &presentation.anonymous_cookie,
                 &cookie,
                 secure,
                 crate::security::ANONYMOUS_TTL as u32,
@@ -247,19 +245,22 @@ fn decode_form(bytes: &[u8]) -> Result<BTreeMap<String, String>> {
     Ok(result)
 }
 
-fn capability_path(path: &str) -> Option<(u32, u64)> {
-    let (resource, id) = path.strip_prefix("/_noxide/capability/")?.split_once('/')?;
+fn capability_path(path: &str, presentation: &crate::Presentation) -> Option<(u32, u64)> {
+    let (resource, id) = path
+        .strip_prefix(&format!("{}/", presentation.capability_path))?
+        .split_once('/')?;
     let r: u32 = resource.parse().ok()?;
     let n: u64 = id.parse().ok()?;
     (r > 0 && n > 0 && n <= i64::MAX as u64 && r.to_string() == resource && n.to_string() == id)
         .then_some((r, n))
 }
 
-fn registration_failed() -> Response {
-    (StatusCode::UNPROCESSABLE_ENTITY, [(header::CONTENT_TYPE,"text/html; charset=utf-8")], "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Registration failed</title></head><body><main><h1>Registration failed</h1><p>Registration failed. Return to registration and try again.</p><a href=\"/register\">Return to registration</a></main></body></html>").into_response()
+fn registration_failed(presentation: &crate::Presentation) -> Response {
+    (StatusCode::UNPROCESSABLE_ENTITY, [(header::CONTENT_TYPE,"text/html; charset=utf-8")], format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Registration failed</title></head><body><main><h1>Registration failed</h1><p>Registration failed. Return to registration and try again.</p><a href=\"{}\">Return to registration</a></main></body></html>", presentation.registration_path)).into_response()
 }
 
 async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Response {
+    let presentation = &gateway.app.presentation;
     use crate::runtime::limiter::{AdmissionContext, AdmissionIdentity, RequestClass};
     let app = gateway.app.clone();
     let peer = request
@@ -270,9 +271,9 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
     let path = request.uri().path();
     let class = if request.method() == axum::http::Method::GET {
         RequestClass::Get
-    } else if path == app.presentation.login_path || path == REGISTRATION_PATH {
+    } else if path == app.presentation.login_path || path == presentation.registration_path {
         RequestClass::PasswordHash
-    } else if capability_path(path).is_some()
+    } else if capability_path(path, &app.presentation).is_some()
         || path
             .strip_prefix(&format!("{}/", app.presentation.action_path))
             .and_then(|s| s.parse().ok())
@@ -295,7 +296,8 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
     {
         return finish(busy());
     }
-    let public = (path == REGISTRATION_PATH && app.registration == crate::Registration::Closed)
+    let public = (path == presentation.registration_path
+        && app.registration == crate::Registration::Closed)
         || app
             .manifest
             .routes
@@ -359,11 +361,13 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
         },
     };
     let path = request.uri().path().to_owned();
-    if path == REGISTRATION_PATH && gateway.app.registration == crate::Registration::Closed {
+    if path == presentation.registration_path
+        && gateway.app.registration == crate::Registration::Closed
+    {
         return StatusCode::NOT_FOUND.into_response();
     }
     if request.method() == axum::http::Method::GET {
-        if path == REGISTRATION_PATH {
+        if path == presentation.registration_path {
             return match gateway.app.login_challenge().await {
                 Err(e) => error(e, &presentation.login_path),
                 Ok(challenge) => {
@@ -373,8 +377,8 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                         ""
                     };
                     let html = format!(
-                        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Create account</title></head><body><main><h1>Create account</h1><form method=\"post\" action=\"/register\"><input type=\"hidden\" name=\"_csrf\" value=\"{}\"><label>Username<input name=\"username\" autocomplete=\"username\" maxlength=\"32\" required></label><label>Password<input type=\"password\" name=\"password\" autocomplete=\"new-password\" maxlength=\"256\" required></label>{invite}<button>Create account</button></form></main></body></html>",
-                        challenge.csrf
+                        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Create account</title></head><body><main><h1>Create account</h1><form method=\"post\" action=\"{}\"><input type=\"hidden\" name=\"{}\" value=\"{}\"><label>Username<input name=\"username\" autocomplete=\"username\" maxlength=\"32\" required></label><label>Password<input type=\"password\" name=\"password\" autocomplete=\"new-password\" maxlength=\"256\" required></label>{invite}<button>Create account</button></form></main></body></html>",
+                        presentation.registration_path, presentation.csrf_field, challenge.csrf
                     );
                     let mut response = ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
                         .into_response();
@@ -405,7 +409,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                 Err(e) => error(e, &presentation.login_path),
                 Ok(challenge) => {
                     let html = format!(
-                        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Sign in</title>{}</head><body><main><h1>Sign in</h1><form method=\"post\" action=\"{}\"><input type=\"hidden\" name=\"_csrf\" value=\"{}\"><label>Username<input name=\"username\" autocomplete=\"username\" maxlength=\"32\" required></label><label>Password<input type=\"password\" name=\"password\" autocomplete=\"current-password\" maxlength=\"256\" required></label><button>Sign in</button></form></main></body></html>",
+                        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Sign in</title>{}</head><body><main><h1>Sign in</h1><form method=\"post\" action=\"{}\"><input type=\"hidden\" name=\"{}\" value=\"{}\"><label>Username<input name=\"username\" autocomplete=\"username\" maxlength=\"32\" required></label><label>Password<input type=\"password\" name=\"password\" autocomplete=\"current-password\" maxlength=\"256\" required></label><button>Sign in</button></form></main></body></html>",
                         if presentation.stylesheet.is_some() {
                             format!(
                                 "<link rel=\"stylesheet\" href=\"{}\">",
@@ -415,6 +419,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                             String::new()
                         },
                         presentation.login_path,
+                        presentation.csrf_field,
                         challenge.csrf
                     );
                     let mut response = ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
@@ -432,19 +437,19 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                 }
             };
         }
-        if let Some((resource, id)) = capability_path(&path) {
+        if let Some((resource, id)) = capability_path(&path, presentation) {
             return match gateway
                 .app
                 .capability_page(
                     resource,
                     id,
-                    cookie(headers, crate::security::ANONYMOUS_COOKIE)
+                    cookie(headers, &presentation.anonymous_cookie)
                         .ok()
                         .as_deref(),
                 )
                 .await
             {
-                Ok(page) => rendered(page, gateway.origin.secure),
+                Ok(page) => rendered(page, gateway.origin.secure, presentation),
                 Err(e) => error(e, &presentation.login_path),
             };
         }
@@ -469,7 +474,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                     .app
                     .view_page_anonymous(
                         session.as_deref(),
-                        cookie(headers, crate::security::ANONYMOUS_COOKIE)
+                        cookie(headers, &presentation.anonymous_cookie)
                             .ok()
                             .as_deref(),
                         route.id,
@@ -478,7 +483,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                     )
                     .await
                 {
-                    Ok(r) => rendered(r, gateway.origin.secure),
+                    Ok(r) => rendered(r, gateway.origin.secure, presentation),
                     Err(e) => error(e, &presentation.login_path),
                 }
             }
@@ -521,7 +526,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     }
     let session = cookie(headers, &presentation.session_cookie);
     let login = cookie(headers, &presentation.login_cookie);
-    let anonymous = cookie(headers, crate::security::ANONYMOUS_COOKIE);
+    let anonymous = cookie(headers, &presentation.anonymous_cookie);
     let bytes = match tokio::time::timeout(
         Duration::from_secs(30),
         to_bytes(request.into_body(), MAX_ENCODED_FORM_BYTES),
@@ -533,20 +538,22 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     };
     let mut form = match decode_form(&bytes) {
         Ok(form) => form,
-        Err(_) if path == REGISTRATION_PATH => return registration_failed(),
+        Err(_) if path == presentation.registration_path => {
+            return registration_failed(presentation);
+        }
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
-    let Some(csrf) = form.remove("_csrf") else {
-        return if path == REGISTRATION_PATH {
-            registration_failed()
+    let Some(csrf) = form.remove(&presentation.csrf_field) else {
+        return if path == presentation.registration_path {
+            registration_failed(presentation)
         } else {
             StatusCode::FORBIDDEN.into_response()
         };
     };
-    if path == REGISTRATION_PATH {
+    if path == presentation.registration_path {
         let (Some(username), Some(password)) = (form.remove("username"), form.remove("password"))
         else {
-            return registration_failed();
+            return registration_failed(presentation);
         };
         let invite = if gateway.app.registration == crate::Registration::Invite {
             form.remove("invite")
@@ -556,7 +563,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
         if !form.is_empty()
             || (gateway.app.registration == crate::Registration::Invite && invite.is_none())
         {
-            return registration_failed();
+            return registration_failed(presentation);
         }
         return match gateway
             .app
@@ -578,7 +585,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                 response
             }
             Err(RequestError::Busy) => busy(),
-            Err(_) => registration_failed(),
+            Err(_) => registration_failed(presentation),
         };
     }
     if path == presentation.login_path {
@@ -619,10 +626,11 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                 .into_response(),
         };
     }
-    if let Some((resource, id)) = capability_path(&path) {
-        let (Some(submission), Some(secret)) =
-            (form.remove("_submission"), form.remove("_capability"))
-        else {
+    if let Some((resource, id)) = capability_path(&path, presentation) {
+        let (Some(submission), Some(secret)) = (
+            form.remove(&presentation.submission_field),
+            form.remove(&presentation.capability_field),
+        ) else {
             return StatusCode::FORBIDDEN.into_response();
         };
         if !form.is_empty() {
@@ -640,7 +648,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
             )
             .await
         {
-            Ok(page) => rendered(page, gateway.origin.secure),
+            Ok(page) => rendered(page, gateway.origin.secure, presentation),
             Err(e) => error(e, &presentation.login_path),
         };
     }
@@ -675,7 +683,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
         Ok(op) => op,
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
-    let capability = form.remove("_capability");
+    let capability = form.remove(&presentation.capability_field);
     if capability.is_some() && !crate::manifest::is_capability(op) {
         return StatusCode::BAD_REQUEST.into_response();
     }
@@ -687,7 +695,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
             Err(_) => return redirect(&presentation.login_path),
         }
     };
-    let Some(submission) = form.remove("_submission") else {
+    let Some(submission) = form.remove(&presentation.submission_field) else {
         return StatusCode::FORBIDDEN.into_response();
     };
     match gateway
@@ -702,7 +710,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
         )
         .await
     {
-        Ok(r) => rendered(r, gateway.origin.secure),
+        Ok(r) => rendered(r, gateway.origin.secure, presentation),
         Err(RequestError::Busy) => busy(),
         Err(e) => {
             let unknown = matches!(e, RequestError::OutcomeUnknown);
@@ -726,7 +734,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                     .await
             };
             match recovered {
-                Ok(r) => rendered(r, gateway.origin.secure),
+                Ok(r) => rendered(r, gateway.origin.secure, presentation),
                 Err(_) => error(e, &presentation.login_path),
             }
         }
@@ -1088,6 +1096,9 @@ mod tests {
                     action_path: "/submit".into(),
                     stylesheet_path: "/theme.css".into(),
                     stylesheet: Some("body { color: #123; margin: 1rem }".into()),
+                    csrf_field: "check".into(),
+                    submission_field: "ticket".into(),
+                    ..Presentation::default()
                 }
             } else {
                 Presentation::default()
@@ -1158,10 +1169,10 @@ mod tests {
             assert!(login.starts_with("HTTP/1.1 200"));
             assert!(login.contains("HttpOnly; SameSite=Strict"));
             assert_eq!(login.contains("rel=\"stylesheet\""), custom);
-            let csrf = fixture::hidden(&login, "_csrf");
+            let csrf = fixture::hidden(&login, &p.csrf_field);
             let challenge = cookie(&login, &p.login_cookie);
             let body = url::form_urlencoded::Serializer::new(String::new())
-                .append_pair("_csrf", &csrf)
+                .append_pair(&p.csrf_field, &csrf)
                 .append_pair("username", "alice")
                 .append_pair("password", "socket test password")
                 .finish();
@@ -1182,12 +1193,12 @@ mod tests {
             assert!(page.contains(&format!("action=\"{}/1\"", p.action_path)));
             assert!(page.contains(&format!("action=\"{}\"", p.logout_path)));
             assert_eq!(page.contains("rel=\"stylesheet\""), custom);
-            let submission = fixture::hidden(&page, "_submission");
+            let submission = fixture::hidden(&page, &p.submission_field);
             // The account navigation has a CSRF field too; it uses the same session token.
-            let csrf = fixture::hidden(&page, "_csrf");
+            let csrf = fixture::hidden(&page, &p.csrf_field);
             let body = url::form_urlencoded::Serializer::new(String::new())
-                .append_pair("_csrf", &csrf)
-                .append_pair("_submission", &submission)
+                .append_pair(&p.csrf_field, &csrf)
+                .append_pair(&p.submission_field, &submission)
                 .append_pair("body", "a note")
                 .finish();
             let recovery = exchange(
@@ -1209,7 +1220,11 @@ mod tests {
             assert!(missing.starts_with("HTTP/1.1 404"));
             let logout = exchange(
                 address,
-                &post(&p.logout_path, &cookie_header, &format!("_csrf={csrf}")),
+                &post(
+                    &p.logout_path,
+                    &cookie_header,
+                    &format!("{}={csrf}", p.csrf_field),
+                ),
             )
             .await;
             assert!(logout.starts_with("HTTP/1.1 303"));

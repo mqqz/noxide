@@ -1232,3 +1232,336 @@ async fn postgres_capability_conflicts_never_disclose_nonprojected_fields() {
         .await
         .unwrap();
 }
+
+async fn custom_presentation_contract(db: Database) {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use tower::ServiceExt;
+    let presentation = crate::Presentation {
+        anonymous_cookie: "visitor".into(),
+        registration_path: "/join".into(),
+        capability_path: "/manage".into(),
+        csrf_field: "check".into(),
+        submission_field: "ticket".into(),
+        capability_field: "edit_key".into(),
+        ..crate::Presentation::default()
+    };
+    let app = Arc::new(
+        Arc::try_unwrap(app(db.clone()).await)
+            .ok()
+            .unwrap()
+            .with_presentation(presentation)
+            .unwrap()
+            .with_registration(crate::Registration::Open),
+    );
+    let router = crate::http::router(
+        app.clone(),
+        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+    );
+    let get = |path: &str, cookie: &str| {
+        Request::builder()
+            .uri(path)
+            .header("Host", "localhost:8080")
+            .header("Cookie", cookie)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = router.clone().oneshot(get("/", "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    assert!(cookie.starts_with("visitor="));
+    let html = String::from_utf8(
+        to_bytes(response.into_body(), MAX_OUTPUT_BYTES)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    for marker in [
+        "noxide_anon",
+        "/_noxide/capability/",
+        "name=\"_csrf\"",
+        "name=\"_submission\"",
+        "name=\"_capability\"",
+    ] {
+        assert!(!html.contains(marker), "{marker}");
+    }
+    let csrf = fixture::hidden(&html, "check");
+    let submission = fixture::hidden(&html, "ticket");
+    let fields = [
+        ("check", csrf.as_str()),
+        ("ticket", submission.as_str()),
+        ("body", "custom form"),
+        ("published", "true"),
+    ];
+    let before = rows(&db).await;
+    let wrong_cookie = cookie.replacen("visitor=", "noxide_anon=", 1);
+    assert!(
+        !post(
+            router.clone(),
+            "/actions/1",
+            "http://localhost:8080",
+            &wrong_cookie,
+            &fields
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    let mut old_fields = fields;
+    old_fields[0].0 = "_csrf";
+    assert!(
+        !post(
+            router.clone(),
+            "/actions/1",
+            "http://localhost:8080",
+            &cookie,
+            &old_fields
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    old_fields = fields;
+    old_fields[1].0 = "_submission";
+    assert!(
+        !post(
+            router.clone(),
+            "/actions/1",
+            "http://localhost:8080",
+            &cookie,
+            &old_fields
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    assert_eq!(rows(&db).await, before);
+    let response = post(
+        router.clone(),
+        "/actions/1",
+        "http://localhost:8080",
+        &cookie,
+        &fields,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let handover = String::from_utf8(
+        to_bytes(response.into_body(), MAX_OUTPUT_BYTES)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let secret = handover
+        .split("<pre>")
+        .nth(1)
+        .unwrap()
+        .split("</pre>")
+        .next()
+        .unwrap();
+    let mut tx = db
+        .begin_read(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    let id = tx
+        .fetch::<1>("SELECT CAST(id AS TEXT) FROM nx_records", &[])
+        .await
+        .unwrap()[0][0]
+        .clone();
+    tx.commit().await.unwrap();
+    let response = router
+        .clone()
+        .oneshot(get(&format!("/notes/{id}"), &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        to_bytes(response.into_body(), MAX_OUTPUT_BYTES)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("name=\"edit_key\""));
+    assert!(!html.contains("name=\"_capability\""));
+    let edit = html.split("action=\"/actions/2\"").nth(1).unwrap();
+    let csrf = fixture::hidden(edit, "check");
+    let submission = fixture::hidden(edit, "ticket");
+    let fields = [
+        ("check", csrf.as_str()),
+        ("ticket", submission.as_str()),
+        ("edit_key", secret),
+        ("body", "edited through custom fields"),
+    ];
+    let response = post(
+        router.clone(),
+        "/actions/2",
+        "http://localhost:8080",
+        &cookie,
+        &fields,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let path = format!("/manage/1/{id}");
+    let response = router.clone().oneshot(get(&path, &cookie)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
+    let html = String::from_utf8(
+        to_bytes(response.into_body(), MAX_OUTPUT_BYTES)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains(&format!("action=\"{path}\"")));
+    assert!(html.contains("name=\"edit_key\""));
+    assert!(!html.contains("_noxide"));
+    let csrf = fixture::hidden(&html, "check");
+    let submission = fixture::hidden(&html, "ticket");
+    let rotation = [
+        ("check", csrf.as_str()),
+        ("ticket", submission.as_str()),
+        ("edit_key", secret),
+    ];
+    assert_eq!(
+        post(
+            router.clone(),
+            &path,
+            "http://localhost:8080",
+            &cookie,
+            &rotation
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    for old in [format!("/_noxide/capability/1/{id}"), "/register".into()] {
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(get(&old, &cookie))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SEE_OTHER
+        );
+    }
+    let response = router.clone().oneshot(get("/join", "")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let challenge = response.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let html = String::from_utf8(
+        to_bytes(response.into_body(), MAX_OUTPUT_BYTES)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("action=\"/join\""));
+    assert!(!html.contains("/register"));
+    assert!(!html.contains("_csrf"));
+    let csrf = fixture::hidden(&html, "check");
+    let registration = [
+        ("check", csrf.as_str()),
+        ("username", "newuser"),
+        ("password", "custom registration password"),
+    ];
+    let rejected = post(
+        router.clone(),
+        "/join",
+        "http://localhost:8080",
+        "",
+        &registration,
+    )
+    .await;
+    let html = String::from_utf8(
+        to_bytes(rejected.into_body(), MAX_OUTPUT_BYTES)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("href=\"/join\""));
+    assert!(!html.contains("/register"));
+    let response = post(
+        router,
+        "/join",
+        "http://localhost:8080",
+        &challenge,
+        &registration,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()[header::LOCATION], "/login");
+    let closed = Arc::new(
+        Arc::try_unwrap(app)
+            .ok()
+            .unwrap()
+            .with_registration(crate::Registration::Closed),
+    );
+    let router = crate::http::router(
+        closed,
+        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+    );
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(get("/join", ""))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        post(router, "/join", "http://localhost:8080", "", &[])
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn sqlite_custom_presentation_hides_fixed_markers_and_preserves_credentials() {
+    let temp = tempfile::tempdir().unwrap();
+    custom_presentation_contract(Database::sqlite(temp.path().join("presentation.db"))).await;
+}
+
+#[tokio::test]
+#[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable cluster"]
+async fn postgres_custom_presentation_hides_fixed_markers_and_preserves_credentials() {
+    use sqlx::Connection;
+    let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+    let name = format!(
+        "nx_presentation_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let mut case = url::Url::parse(&url).unwrap();
+    case.set_path(&format!("/{name}"));
+    custom_presentation_contract(Database::postgres(case.as_str()).unwrap()).await;
+    sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+}

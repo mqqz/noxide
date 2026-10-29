@@ -29,7 +29,6 @@ struct EditKey {
     signing: bool,
 }
 pub(crate) const ANONYMOUS_TTL: i64 = 900;
-pub(crate) const ANONYMOUS_COOKIE: &str = "noxide_anon";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]

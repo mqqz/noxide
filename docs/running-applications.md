@@ -142,6 +142,12 @@ The trusted operator can add a `presentation` object to the runtime configuratio
   "presentation": {
     "session_cookie": "account",
     "login_cookie": "challenge",
+    "anonymous_cookie": "visitor",
+    "csrf_field": "check",
+    "submission_field": "ticket",
+    "capability_field": "edit_key",
+    "registration_path": "/join",
+    "capability_path": "/manage",
     "login_path": "/signin",
     "logout_path": "/signout",
     "action_path": "/submit",
@@ -153,12 +159,24 @@ The trusted operator can add a `presentation` object to the runtime configuratio
 
 Omitted settings retain their defaults. All pages, including sign-in and form
 recovery, use these settings. Cookie security attributes remain host-controlled.
-Names must be distinct ASCII letters, digits, underscores, or hyphens, with at
-most 64 bytes. Endpoint paths must be distinct local paths without escapes,
-queries, or fragments; paths that overlap application routes are rejected before
+Cookie names must be distinct ASCII letters, digits, underscores, or hyphens,
+with at most 64 bytes. Host form field names use the same characters with at most
+32 bytes, must differ from each other, and cannot collide with resource fields
+or `username`, `password`, or `invite`. Endpoint paths must be distinct local
+paths without escapes, queries, or fragments; paths that overlap application routes are rejected before
 activation. Action path segments use the application route identifier grammar:
 a lowercase letter followed by lowercase letters, digits, or underscores, up to
 32 bytes per segment.
+
+The anonymous cookie defaults to `noxide_anon`; the host field defaults are
+`_csrf`, `_submission`, and `_capability`. Registration defaults to `/register`.
+The capability path defaults to `/_noxide/capability` and takes no trailing slash:
+resource and record IDs are appended, for example `/manage/1/42`. All host pages,
+failure links, recovery forms and submission parsing use the configured names.
+Historical names and endpoints are not aliases after changing the settings.
+Existing browser cookies and already rendered forms using the old names must be
+replaced when these settings change. Choosing custom names removes these fixed
+markers; it does not guarantee that a site's framework cannot be identified.
 
 CSS is deployment-owned data, never guest output. The `stylesheet` string accepts
 literal selectors and declarations, with a 64 KiB limit; the CLI's total runtime
@@ -434,12 +452,13 @@ versions; rotating an individual record through its host-owned capability form
 revokes that record's older secrets under every edit key. Removing an older key
 also prevents its receipts from recovering an edit secret.
 
-The fixed `noxide_anon` cookie name is reserved. Configured session and login
-cookie names must differ from it.
+The anonymous cookie defaults to `noxide_anon` and can be renamed through
+`presentation.anonymous_cookie`. All three configured cookie names must differ.
 
 ## Registration
 
-Registration defaults to `"registration": "closed"`; `/register` returns 404.
+Registration defaults to `"registration": "closed"`; the configured registration
+path (`/register` by default) returns 404.
 Set `"registration": "invite"` to require an operator-issued invite, or
 `"registration": "open"` to allow registration without one. Both enabled modes
 use fixed host-owned pages and the same bounded password-hashing admission as
