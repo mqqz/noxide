@@ -33,4 +33,5 @@ mod anonymous_tests;
 mod registration_tests;
 
 mod form_layout;
+mod policy;
 mod routing;

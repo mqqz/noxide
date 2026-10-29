@@ -82,34 +82,7 @@ pub(crate) async fn load(
         .transpose()
 }
 
-pub(crate) fn allowed(policy: &Policy, principal: &Principal, owner: &str, tenant: &str) -> bool {
-    policy.any.iter().any(|rule| {
-        !rule.is_empty()
-            && rule.iter().all(|p| match (principal, p) {
-                (_, Predicate::Public) => true,
-                (_, Predicate::Capability) => false,
-                (Principal::Anonymous, _) => false,
-                (Principal::User(user), Predicate::Owner) => user.id == owner,
-                (Principal::User(user), Predicate::SameTenant) => {
-                    !user.tenant.is_empty() && user.tenant == tenant
-                }
-                (
-                    Principal::User(user),
-                    Predicate::Role {
-                        name,
-                        tenant_scoped,
-                    },
-                ) => user.roles.iter().any(|(r, t)| {
-                    r == name
-                        && if *tenant_scoped {
-                            !tenant.is_empty() && t == tenant && user.tenant == tenant
-                        } else {
-                            t.is_empty()
-                        }
-                }),
-            })
-    })
-}
+pub(crate) use crate::policy::allowed;
 
 impl Effects {
     fn visibility_clause(&self, op: &Operation, params: &mut Vec<Param>) -> Result<String> {
@@ -347,56 +320,7 @@ impl Effects {
             }
             OperationKind::List => {
                 let mut params = vec![Param::Number(storage_resource)];
-                let mut clauses = Vec::new();
-                for rule in &op.policy.any {
-                    let mut terms = Vec::new();
-                    for predicate in rule {
-                        let term = match (&self.principal, predicate) {
-                            (_, Predicate::Public) => "1=1".into(),
-                            (_, Predicate::Capability) => "1=0".into(),
-                            (Principal::Anonymous, _) => "1=0".into(),
-                            (Principal::User(user), Predicate::Owner) => {
-                                params.push(user.id.clone().into());
-                                format!("owner=${}", params.len())
-                            }
-                            (Principal::User(user), Predicate::SameTenant) => {
-                                if user.tenant.is_empty() {
-                                    "1=0".into()
-                                } else {
-                                    params.push(user.tenant.clone().into());
-                                    format!("tenant=${}", params.len())
-                                }
-                            }
-                            (
-                                Principal::User(user),
-                                Predicate::Role {
-                                    name,
-                                    tenant_scoped,
-                                },
-                            ) => {
-                                if user.roles.iter().any(|(r, t)| {
-                                    r == name
-                                        && if *tenant_scoped {
-                                            !t.is_empty() && *t == user.tenant
-                                        } else {
-                                            t.is_empty()
-                                        }
-                                }) {
-                                    if *tenant_scoped {
-                                        params.push(user.tenant.clone().into());
-                                        format!("tenant=${}", params.len())
-                                    } else {
-                                        "1=1".into()
-                                    }
-                                } else {
-                                    "1=0".into()
-                                }
-                            }
-                        };
-                        terms.push(term);
-                    }
-                    clauses.push(format!("({})", terms.join(" AND ")));
-                }
+                let mut clauses = crate::policy::sql(&op.policy, &self.principal, &mut params);
                 if manifest::is_public(&op) {
                     clauses = vec![
                         self.visibility_clause(&op, &mut params)?
