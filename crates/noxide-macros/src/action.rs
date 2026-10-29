@@ -96,6 +96,11 @@ pub(super) fn expand_action(
     let redirect = declaration
         .redirect
         .ok_or_else(|| syn::Error::new(item.span(), "actions require a declared redirect page"))?;
+    let redirect_value = if declaration.redirect_parent {
+        quote!(::noxide::__private::Redirect::Parent { parent: #redirect::id() })
+    } else {
+        quote!(::noxide::__private::Redirect::Page(#redirect::id()))
+    };
     if declaration.inspect.is_some() != !declaration.inspection_fields.is_empty() {
         return Err(syn::Error::new(
             item.span(),
@@ -213,7 +218,7 @@ pub(super) fn expand_action(
                 ::noxide::__private::Action {
                     id: ::noxide::stable_id(concat!("action:", module_path!(), "::", stringify!(#name))),
                     version: #version, name: #label.into(),
-                    operation: <Self as ::noxide::ActionType>::operation().id, redirect: #redirect::id(),
+                    operation: <Self as ::noxide::ActionType>::operation().id, redirect: #redirect_value,
                     fields: vec![#(#keys.into()),*], inspect: #inspection, layout: vec![],
                 }
             }

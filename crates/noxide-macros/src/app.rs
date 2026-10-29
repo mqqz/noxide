@@ -407,8 +407,7 @@ impl Parse for CrudBlock {
                     match option.to_string().as_str() {
                         "fields" => options.extend(quote!(, fields(#tokens))),
                         "redirect" => {
-                            let path: syn::Path = syn::parse2(tokens)?;
-                            options.extend(quote!(, redirect = #path));
+                            options.extend(quote!(, redirect = #tokens));
                         }
                         "handler" => handler = Some(syn::parse2(tokens)?),
                         "layout" => layout = Some(syn::parse2(tokens)?),

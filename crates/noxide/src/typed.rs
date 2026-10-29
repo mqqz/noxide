@@ -272,7 +272,7 @@ impl<A: ActionType> Submission<A> {
                     resource: op.resource,
                     id: record.id,
                     destination: RouteRef {
-                        route: A::definition().redirect,
+                        route: A::definition().redirect.route(),
                         target: Some(record.id),
                     },
                 }

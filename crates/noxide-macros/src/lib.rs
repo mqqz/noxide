@@ -334,6 +334,7 @@ struct OperationDeclaration {
     fields: Vec<Ident>,
     visible: Option<(Ident, Expr)>,
     redirect: Option<syn::Path>,
+    redirect_parent: bool,
     inspect: Option<Type>,
     inspection_fields: Vec<Ident>,
     version: u32,
@@ -357,6 +358,7 @@ impl Parse for OperationDeclaration {
             fields: Vec::new(),
             visible: None,
             redirect: None,
+            redirect_parent: false,
             inspect: None,
             inspection_fields: Vec::new(),
             version: 1,
@@ -428,7 +430,18 @@ impl Parse for OperationDeclaration {
                 }
                 "redirect" => {
                     input.parse::<Token![=]>()?;
-                    result.redirect = Some(input.parse()?);
+                    let path: syn::Path = input.parse()?;
+                    if path.is_ident("parent") && input.peek(syn::token::Paren) {
+                        let args;
+                        parenthesized!(args in input);
+                        result.redirect = Some(args.parse()?);
+                        if !args.is_empty() {
+                            return Err(args.error("expected one parent page"));
+                        }
+                        result.redirect_parent = true;
+                    } else {
+                        result.redirect = Some(path);
+                    }
                 }
                 "inspect" => {
                     input.parse::<Token![=]>()?;
@@ -983,7 +996,7 @@ mod declaration_tests {
         )
         .unwrap();
         let text = tokens.to_string();
-        assert!(text.contains("redirect : show :: id ()"));
+        assert!(text.contains("Redirect :: Page (show :: id ())"));
         assert!(!text.contains("show :: definition"));
         assert!(text.contains("< Self as :: noxide :: ActionType > :: operation ()"));
         assert!(!text.contains("Self :: operation ()"));
@@ -1244,4 +1257,38 @@ pub fn app(attr: TokenStream, input: TokenStream) -> TokenStream {
             .into();
     }
     finish(expand_app(parse_macro_input!(input as syn::ItemMod)))
+}
+
+#[cfg(test)]
+mod parent_redirect_tests {
+    use super::*;
+    #[test]
+    fn parent_redirect_lowering_is_typed_for_each_mutation() {
+        for kind in ["create", "update", "delete"] {
+            let fields = if kind == "delete" {
+                ""
+            } else {
+                ", fields(body)"
+            };
+            let declaration: OperationDeclaration = syn::parse_str(&format!(
+                "{kind}(Reply), allow = owner{fields}, redirect = parent(thread)"
+            ))
+            .unwrap();
+            let item: syn::ItemStruct = syn::parse_quote!(
+                struct ChangeReply;
+            );
+            let lowered = action::expand_action(declaration, item);
+            // The public expansion path enforces operation semantics separately.
+            assert!(lowered.is_ok());
+            assert!(lowered.unwrap().to_string().contains("Redirect :: Parent"));
+        }
+        for bad in ["parent()", "parent(thread, other)", "parent(thread(other))"] {
+            assert!(
+                syn::parse_str::<OperationDeclaration>(&format!(
+                    "delete(Reply), allow = owner, redirect = {bad}"
+                ))
+                .is_err()
+            );
+        }
+    }
 }

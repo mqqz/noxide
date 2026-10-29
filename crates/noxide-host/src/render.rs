@@ -313,6 +313,7 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
 }
 
 pub(crate) enum Recovery<'a> {
+    Committed,
     Retry {
         unknown: bool,
     },
@@ -337,6 +338,14 @@ pub(crate) fn recovery(
     let a = crate::manifest::action(m, action)?;
     let empty = Fields::new();
     let (title, explanation, status, readonly, button, errors) = match &reason {
+        Recovery::Committed => (
+            "Changes saved",
+            "Your change was saved. Recover the original edit secret using this submission before leaving this page.",
+            200,
+            true,
+            "Recover edit secret",
+            &empty,
+        ),
         Recovery::Retry { unknown: true } => (
             "Submission result",
             "The result is not yet confirmed. Check this submission before starting another one.",
@@ -885,6 +894,26 @@ pub(crate) fn capability_rotation(
     out.push(&format!("<label>Current edit secret<input type=\"password\" name=\"{}\" autocomplete=\"off\" maxlength=\"128\" required></label><button>Rotate secret</button></form></main></body></html>", presentation.capability_field))?;
     Ok(Rendered {
         status: 200,
+        body: out.0.into_bytes(),
+        location: None,
+        anonymous_cookie: None,
+    })
+}
+
+pub(crate) fn handover_continue(page: &Rendered, link: &str) -> Result<Rendered> {
+    let mut out = Buffer(String::from_utf8(page.body.clone())?);
+    // Links are offered only after the secret, never as an automatic redirect.
+    let insertion = out
+        .0
+        .rfind("</main>")
+        .ok_or_else(|| anyhow::anyhow!("invalid handover"))?;
+    let mut anchor = Buffer(String::new());
+    anchor.push("<a href=\"")?;
+    anchor.text(link)?;
+    anchor.push("\">Continue to thread</a>")?;
+    out.0.insert_str(insertion, &anchor.0);
+    Ok(Rendered {
+        status: page.status,
         body: out.0.into_bytes(),
         location: None,
         anonymous_cookie: None,
