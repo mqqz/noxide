@@ -4,7 +4,7 @@
 //! persistence. `prepare_response` may prepare recovery/handover data before
 //! commitment; callers deliver it only after commit confirmation or a verified
 //! committed receipt. An unknown commit outcome stays in receipt recovery.
-//! `postcommit` resolves presentation after commitment and cannot undo the write.
+//! `finish_navigation` resolves presentation after commitment and cannot undo the write.
 //! Parent destination checks use fresh read authority and the captured incarnation;
 //! a child edit credential never grants parent read authority.
 use super::*;
