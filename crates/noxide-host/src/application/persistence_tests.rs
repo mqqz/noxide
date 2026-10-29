@@ -781,31 +781,31 @@ async fn concurrent_gets_write_nothing(db: Database) {
     );
     let mut reads = tokio::task::JoinSet::new();
     for path in ["/login", "/"] {
-        for index in 0..200 {
+        for _ in 0..2 {
             let router = router.clone();
             let session = session.clone();
             reads.spawn(async move {
-                // Existing admission is fail-fast at 16 page views. Retry busy
-                // responses within a bounded test deadline to render every GET.
-                // Stagger retries after the initial concurrent burst so a small
-                // CI runner can finish cold PostgreSQL connections instead of
-                // repeatedly restarting the same synchronized overload.
+                // Keep four clients active while rendering all 400 GETs. A
+                // 400-client retry storm can starve cold PostgreSQL connections
+                // on small runners. Overload rejection has dedicated admission
+                // tests; this test checks that successful concurrent reads never
+                // change storage.
                 tokio::time::timeout(Duration::from_secs(60), async {
-                    let mut retry_delay = Duration::from_millis(10 + (index * 37 % 200));
-                    loop {
-                        let request = Request::builder()
-                            .uri(path)
-                            .header("Host", "localhost:8080")
-                            .header("Cookie", format!("session={session}"))
-                            .body(Body::empty())
-                            .unwrap();
-                        let response = router.clone().oneshot(request).await.unwrap();
-                        if response.status() != StatusCode::SERVICE_UNAVAILABLE {
-                            assert_eq!(response.status(), StatusCode::OK);
-                            break;
+                    for _ in 0..100 {
+                        loop {
+                            let request = Request::builder()
+                                .uri(path)
+                                .header("Host", "localhost:8080")
+                                .header("Cookie", format!("session={session}"))
+                                .body(Body::empty())
+                                .unwrap();
+                            let response = router.clone().oneshot(request).await.unwrap();
+                            if response.status() != StatusCode::SERVICE_UNAVAILABLE {
+                                assert_eq!(response.status(), StatusCode::OK);
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(25)).await;
                         }
-                        tokio::time::sleep(retry_delay).await;
-                        retry_delay = (retry_delay * 2).min(Duration::from_secs(1));
                     }
                 })
                 .await
