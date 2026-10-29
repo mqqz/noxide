@@ -23,7 +23,7 @@ pub(super) struct ParentDestination {
 }
 pub(super) struct Prepared {
     pub fallback: Rendered,
-    navigation: Option<(ParentDestination, auth::Principal, u32, bool)>,
+    navigation: Option<(ParentDestination, auth::Principal, bool)>,
 }
 impl Prepared {
     pub fn ready(fallback: Rendered) -> Self {
@@ -149,7 +149,7 @@ impl Application {
         };
         Ok(Prepared {
             fallback,
-            navigation: Some((destination, principal.clone(), op.resource, handover)),
+            navigation: Some((destination, principal.clone(), handover)),
         })
     }
     pub(super) async fn finish_navigation(
@@ -165,14 +165,14 @@ impl Application {
                 resume.notified().await;
             }
         }
-        let Some((destination, principal, child, handover)) = prepared.navigation.take() else {
+        let Some((destination, principal, handover)) = prepared.navigation.take() else {
             return prepared.fallback;
         };
         if Instant::now() >= deadline {
             return prepared.fallback;
         }
-        // Eight database calls were reserved before the mutation: capture uses
-        // one bounded load and navigation uses one bounded load (two calls each).
+        // Four navigation calls are reserved once for this request. Capture is
+        // charged separately on each mutation attempt; this path loads one record.
         let resolved = timeout_at(deadline, async {
             let mut tx = self.database.begin_read(deadline.into_std()).await?;
             let route = manifest::route(&self.manifest, destination.route)?;
@@ -196,12 +196,9 @@ impl Application {
                 Some(&destination.incarnation),
             )
             .await?;
-            let allowed = record.is_some_and(|r| {
-                manifest::parent_field(
-                    manifest::resource(&self.manifest, child).expect("validated resource"),
-                )
-                .is_some_and(|field| manifest::parent_permits(field, &r.record.fields, false))
-            });
+            // The destination's read policy owns visibility, including private
+            // owner/moderator views. Child-list visibility grants no authority here.
+            let allowed = record.is_some();
             tx.commit().await?;
             if !allowed {
                 return Ok(None);
@@ -238,6 +235,111 @@ mod tests {
     use super::*;
     use crate::{parent_tests, test_support as fixture};
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn private_parent_navigation_matches_owner_and_moderator_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        private_parent_case(Database::sqlite(tmp.path().join("private-parent.db"))).await;
+    }
+
+    async fn private_parent_case(db: Database) {
+        db.initialize().await.unwrap();
+        let mut m = parent_tests::declarations();
+        m.actions[0].redirect = Redirect::Parent { parent: 3 };
+        let read = &mut m.operations[3];
+        read.policy = Policy {
+            any: vec![
+                vec![Predicate::Owner],
+                vec![Predicate::Role {
+                    name: "moderator".into(),
+                    tenant_scoped: true,
+                }],
+            ],
+        };
+        read.visibility = None;
+        read.fields = None;
+        m.routes[2].access = Access::Authenticated;
+        let app = Application::new(
+            &fixture::component(None),
+            &serde_json::to_vec(&m).unwrap(),
+            manifest::digest(&m).unwrap(),
+            db.clone(),
+            HostKeys::generate().unwrap(),
+            Limits::default(),
+        )
+        .unwrap();
+        app.activate().await.unwrap();
+        parent_tests::seed(&db, &m).await;
+        parent_tests::set_parent(&db, &m, false, false).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut tx = db.begin(deadline.into_std()).await.unwrap();
+        tx.execute(
+            "INSERT INTO nx_accounts(id,password,tenant,epoch) VALUES('alice','unused','one',1)",
+            &[],
+        )
+        .await
+        .unwrap();
+        let storage = tx.storage_resource(&m, 2).await.unwrap();
+        tx.execute(
+            "UPDATE nx_records SET owner='alice',tenant='one' WHERE resource=$1",
+            &[storage.into()],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        for (id, tenant, moderator, expected) in [
+            ("alice", "one", false, true),
+            ("mod", "one", true, true),
+            ("stranger", "one", false, false),
+            ("mod", "two", true, false),
+            ("", "", false, false),
+        ] {
+            let principal = if id.is_empty() {
+                auth::Principal::Anonymous
+            } else {
+                auth::Principal::User(auth::User {
+                    id: id.into(),
+                    tenant: tenant.into(),
+                    roles: if moderator {
+                        vec![("moderator".into(), tenant.into())]
+                    } else {
+                        vec![]
+                    },
+                })
+            };
+            let mut tx = db.begin_read(deadline.into_std()).await.unwrap();
+            let normal = repository::read_resource(&mut tx, &m, &principal, &m.operations[3], 10)
+                .await
+                .unwrap();
+            assert_eq!(normal.is_some(), expected);
+            tx.commit().await.unwrap();
+            // Exercise the post-commit response path, not just its read helper.
+            // The parent is unpublished, so the child's visibility predicate fails.
+            let response = app
+                .finish_navigation(
+                    Prepared {
+                        fallback: success(),
+                        navigation: Some((
+                            ParentDestination {
+                                route: 3,
+                                resource: 2,
+                                id: 10,
+                                incarnation: "parent".into(),
+                            },
+                            principal,
+                            false,
+                        )),
+                    },
+                    deadline,
+                )
+                .await;
+            assert_eq!(
+                response.location.as_deref(),
+                expected.then_some("/threads/10")
+            );
+            assert_eq!(response.status, if expected { 303 } else { 200 });
+        }
+    }
 
     #[tokio::test]
     async fn capability_update_and_delete_do_not_authorize_private_parent() {
@@ -466,7 +568,7 @@ mod tests {
         use sqlx::Connection;
         let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
         let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-        for case in ["capability", "fault"] {
+        for case in ["capability", "fault", "private_parent"] {
             let name = format!(
                 "nx_redirect_{case}_{}",
                 std::time::SystemTime::now()
@@ -483,6 +585,8 @@ mod tests {
             let db = Database::postgres(case_url.as_str()).unwrap();
             if case == "capability" {
                 capability_case(db).await;
+            } else if case == "private_parent" {
+                private_parent_case(db).await;
             } else {
                 fault_case(db).await;
             }
