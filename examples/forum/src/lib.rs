@@ -11,9 +11,9 @@ pub mod forum {
         title: String,
         #[field(max_bytes = 4096)]
         body: String,
-        #[field()]
+        #[field(, initial = false)]
         published: bool,
-        #[field()]
+        #[field(, initial = false)]
         locked: bool,
     }
 
@@ -26,7 +26,7 @@ pub mod forum {
         thread: Id<Thread>,
         #[field(max_bytes = 4096)]
         body: String,
-        #[field()]
+        #[field(, initial = false)]
         published: bool,
     }
     #[query(list(Reply), allow = public, visible(published = true), fields(body))]
@@ -167,9 +167,9 @@ pub mod forum {
             } },
         ))
     }
-    #[action(create(Reply), fields(body, published), allow = owner, redirect = show_reply)]
+    #[action(create(Reply), fields(body), allow = owner, redirect = show_reply)]
     struct CreateReply;
-    #[action(create(Reply), fields(body, published), allow = public, redirect = show_reply)]
+    #[action(create(Reply), fields(body), allow = public, redirect = show_reply)]
     struct CreateAnonymousReply;
     #[action(update(Reply), fields(body), allow = owner, redirect = show_reply)]
     struct EditReply;
@@ -178,9 +178,9 @@ pub mod forum {
     #[action(update(Reply), fields(published), allow = role("moderator"), redirect = review_reply)]
     struct ModerateReply;
 
-    #[action(create(Thread), fields(title, body, published, locked), allow = owner, redirect = thread)]
+    #[action(create(Thread), fields(title, body), allow = owner, redirect = thread)]
     struct CreateThread;
-    #[action(create(Thread), fields(title, body, published, locked), allow = public, redirect = thread)]
+    #[action(create(Thread), fields(title, body), allow = public, redirect = thread)]
     struct CreateAnonymousThread;
     #[action(update(Thread), fields(title, body), allow = owner, redirect = thread)]
     struct EditThread;

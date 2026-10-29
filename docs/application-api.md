@@ -444,7 +444,7 @@ A public create action accepts anonymous submissions. Capability actions require
 an edit secret for the exact record:
 
 ```rust
-#[action(create(Article), allow = public, fields(title, body, published), redirect = article)]
+#[action(create(Article), allow = public, fields(title, body), redirect = article)]
 struct PublishArticle;
 
 #[action(update(Article), allow = capability, fields(title, body), redirect = article)]
@@ -561,3 +561,21 @@ updating the child's declared parent resource through the schema workflow.
 
 The [forum example](../examples/forum/README.md) exercises public threads,
 account-owned and edit-secret replies, editing, thread locks, and moderation.
+
+
+A non-optional boolean field may declare `#[field(initial = false)]` (or
+`true`). Only boolean literals are supported by the macro; choice variant
+syntax is a follow-up. The host validates manifest initial values independently,
+including canonical boolean or declared choice values and storage limits.
+
+Initial fields must be omitted from every create action's `fields(...)`.
+They are absent from typed create inputs and forms; submitted keys are rejected.
+The trusted host inserts the approved value at create commit, including custom
+handler creates. Creates must retain at least one writable field.
+
+This is a creation-time guarantee only. Update actions may list these fields,
+and their policies determine who can change them. An owner update listing
+`published` allows owners to publish themselves. Initial values affect the
+application contract digest and invalidate old submission tokens, but do not
+affect the schema digest. They apply to new rows; migration `AddField.value`
+remains a separate operator-selected backfill for existing rows.

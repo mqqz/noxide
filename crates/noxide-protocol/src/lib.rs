@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 pub const MAX_IR_BYTES: usize = 65_536;
 pub const MAX_NODES: usize = 1_024;
 pub const MAX_DEPTH: usize = 32;
@@ -135,9 +135,17 @@ pub struct Policy {
 pub struct TextField {
     pub kind: FieldKind,
     pub optional: bool,
+    #[serde(deserialize_with = "required_initial")]
+    pub initial: Option<String>,
     pub name: String,
     pub label: String,
     pub max_bytes: u32,
+}
+
+fn required_initial<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
 }
 
 /// Portable scalar schemas. Values cross the boundary in canonical text form.
@@ -393,9 +401,9 @@ mod tests {
         }
         required::<TextField>(
             serde_json::json!({
-                "kind": "text", "optional": false, "name": "body", "label": "Body", "max_bytes": 4096
+                "kind": "text", "optional": false, "initial": null, "name": "body", "label": "Body", "max_bytes": 4096
             }),
-            &["kind", "optional"],
+            &["kind", "optional", "initial"],
         );
         required::<Action>(
             serde_json::json!({

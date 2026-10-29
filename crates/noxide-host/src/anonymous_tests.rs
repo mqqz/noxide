@@ -12,6 +12,7 @@ fn declarations() -> Manifest {
     m.resources[0].fields.push(TextField {
         kind: FieldKind::Boolean,
         optional: false,
+        initial: None,
         name: "published".into(),
         label: "Published".into(),
         max_bytes: 5,
@@ -19,6 +20,7 @@ fn declarations() -> Manifest {
     m.resources[0].fields.push(TextField {
         kind: FieldKind::Text,
         optional: true,
+        initial: None,
         name: "private".into(),
         label: "Private field".into(),
         max_bytes: 128,

@@ -42,6 +42,19 @@ pub fn validate(m: &Manifest) -> Result<()> {
     unique(m.actions.iter().map(|x| x.id))?;
     let mut resource_keys = BTreeSet::new();
     for r in &m.resources {
+        for field in &r.fields {
+            if let Some(value) = &field.initial {
+                ensure!(
+                    !field.optional
+                        && matches!(field.kind, FieldKind::Boolean | FieldKind::Choice { .. }),
+                    "initial requires a non-optional boolean or choice"
+                );
+                ensure!(
+                    field.canonical(value).as_ref().ok() == Some(value),
+                    "invalid initial value"
+                );
+            }
+        }
         ensure!(
             identifier(&r.name)
                 && resource_keys.insert(&r.name)
@@ -312,11 +325,24 @@ pub fn validate(m: &Manifest) -> Result<()> {
             "parent is host-bound and immutable"
         );
         match op.kind {
-            OperationKind::Create => ensure!(
-                fields.len() + usize::from(parent_resource(m, op.resource)?.is_some())
-                    == resource(m, op.resource)?.fields.len(),
-                "creation requires every field"
-            ),
+            OperationKind::Create => {
+                ensure!(!fields.is_empty(), "create requires writable fields");
+                ensure!(
+                    fields.iter().all(|f| f.initial.is_none()),
+                    "initial value is host-applied"
+                );
+                ensure!(
+                    fields.len()
+                        + resource(m, op.resource)?
+                            .fields
+                            .iter()
+                            .filter(|f| f.initial.is_some())
+                            .count()
+                        + usize::from(parent_resource(m, op.resource)?.is_some())
+                        == resource(m, op.resource)?.fields.len(),
+                    "creation requires every writable field"
+                );
+            }
             OperationKind::Update => {
                 ensure!(!fields.is_empty(), "update requires writable fields")
             }
@@ -535,6 +561,7 @@ mod tests {
             max_bytes: 200,
             kind,
             optional,
+            initial: None,
         }
     }
 
