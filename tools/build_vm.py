@@ -109,7 +109,8 @@ class Image:
 def source_files(image, root, prefix):
     """Caller approves this source directory, including all regular source files.
 
-    Reject links, device files, Cargo configuration, and hidden inputs. Read via
+    Ignore regular .gitignore files; reject links, device files, Cargo configuration,
+    and other hidden inputs. Read via
     O_NOFOLLOW | O_NONBLOCK and validate the opened inode before reading so
     path replacement cannot escape the snapshot or block it on a FIFO.
     No credentials or general home directory are automatically included.
@@ -129,6 +130,10 @@ def source_files(image, root, prefix):
         for name in sorted(names):
             before = os.stat(name, dir_fd=directory, follow_symlinks=False)
             if stat.S_ISDIR(before.st_mode) and name in ("target", ".git", ".cargo"):
+                continue
+            # VCS ignore rules have no build meaning. Starters may contain one,
+            # but it is never read or transported into the VM.
+            if name == ".gitignore" and stat.S_ISREG(before.st_mode):
                 continue
             if name.startswith(".") or stat.S_ISLNK(before.st_mode):
                 raise ValueError("hidden or linked source input")

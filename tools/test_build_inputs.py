@@ -41,6 +41,19 @@ class Inputs(unittest.TestCase):
                 with self.assertRaises(OSError):
                     source_files(Image(), source, "src")
 
+    def test_regular_gitignore_is_ignored_without_following_links(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / ".gitignore").write_text("/target\n")
+            (root / "lib.rs").write_text("inert source")
+            image = Image()
+            source_files(image, root, "src")
+            self.assertEqual(set(image.files), {"src/lib.rs"})
+            (root / ".gitignore").unlink()
+            (root / ".gitignore").symlink_to(root / "lib.rs")
+            with self.assertRaises(ValueError):
+                source_files(Image(), root, "src")
+
     def test_links_hidden_files_and_devices_are_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)

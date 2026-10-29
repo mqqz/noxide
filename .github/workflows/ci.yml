@@ -40,7 +40,7 @@ jobs:
       - name: Check formatting
         run: |
           cargo fmt --all --check
-          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs
+          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs
       - name: Test build input validation
         run: python3 tools/test_build_inputs.py
       - name: Lint CI bootstrap
@@ -80,7 +80,7 @@ jobs:
       - name: Check formatting
         run: |
           cargo fmt --all --check
-          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs
+          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs
       - name: Lint all framework targets
         run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
       - name: Test SQLite and PostgreSQL
@@ -178,6 +178,20 @@ jobs:
             --manifest "$RUNNER_TEMP/noxide-ci/task-api/manifest.json" \
             --tasks --custom-presentation --geckodriver "$NOXIDE_GECKODRIVER" \
             --output "$RUNNER_TEMP/noxide-ci/task-browser"
+      - name: Build and test the public application
+        run: |
+          python3 tools/build_vm.py \
+            --kernel "$NOXIDE_CI_KERNEL" \
+            --toolchain "$(rustc --print sysroot)" \
+            --source examples/public-articles --name public_articles --metadata \
+            --output "$RUNNER_TEMP/noxide-ci/public"
+          target/debug/noxide component \
+            "$RUNNER_TEMP/noxide-ci/public/public_articles.wasm" \
+            "$RUNNER_TEMP/noxide-ci/public/public_articles.component.wasm"
+          python3 tools/test_public_app.py \
+            --component "$RUNNER_TEMP/noxide-ci/public/public_articles.component.wasm" \
+            --manifest "$RUNNER_TEMP/noxide-ci/public/manifest.json" \
+            --output "$RUNNER_TEMP/noxide-ci/public-http"
       - name: Test NoJS browser flow with SQLite
         run: |
           python3 tools/test_browser.py \

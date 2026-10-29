@@ -28,7 +28,16 @@ excluded.
 `Packaged SDK and browser` packages the SDK crates, then compiles the
 private-notes example against their versioned archive directories inside a fresh
 QEMU VM. This exercises the distributed WIT contract without relying on sibling
-monorepo paths. The trusted CLI admits the resulting component. Firefox then
+monorepo paths. The typed SDK VM job also compiles the notes, task-board, and
+public-articles convenience examples and their explicit equivalents. It compares
+complete contracts and uses the trusted CLI to require matching approval hashes.
+It also builds a CLI-generated starter, tests multiple resources with tenant/role
+and anonymous/capability CRUD policies, and requires declaration reordering to
+preserve approval hashes. Policy changes require new approval hashes, and schema
+additions that omit create fields fail admission.
+The trusted CLI admits the resulting component. A separately VM-built public
+application is exercised through real HTTP for row visibility, projected fields,
+public cookie behavior, missing records, and escaped text. Firefox then
 exercises creation, two-tab edit conflicts, explicit resubmission, deletion, and
 receipt recovery with JavaScript disabled. It uses SQLite on localhost and
 PostgreSQL through the test onion-origin proxy. This proxy does not establish Tor
