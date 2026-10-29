@@ -11,9 +11,9 @@ pub mod forum {
         title: String,
         #[field(max_bytes = 4096)]
         body: String,
-        #[field(, initial = false)]
+        #[field(initial = false)]
         published: bool,
-        #[field(, initial = false)]
+        #[field(initial = false)]
         locked: bool,
     }
 
@@ -26,7 +26,7 @@ pub mod forum {
         thread: Id<Thread>,
         #[field(max_bytes = 4096)]
         body: String,
-        #[field(, initial = false)]
+        #[field(initial = false)]
         published: bool,
     }
     #[query(list(Reply), allow = public, visible(published = true), fields(body))]
@@ -58,7 +58,7 @@ pub mod forum {
             "Forum",
             html! { main {
                 h1 { "Forum" }
-                p { "Public discussions. Choose Published when creating a thread to make it visible." }
+                p { "New threads and replies await moderator approval." }
                 @if threads.is_empty() { p { "No public threads yet. Start a discussion below." } }
                 @for thread in threads { article {
                     h2 { a href=(routes::thread(thread.id())) { (&thread.title) } }
@@ -128,7 +128,7 @@ pub mod forum {
             html! { main {
                 nav { a href=(routes::moderation()) { "Moderation queue" } }
                 h1 { (&thread.title) } pre { (&thread.body) }
-                p { "Clear Published to hide this thread. Authors cannot change visibility after creation." }
+                p { "Clear Published to hide this thread. Only the declared moderator actions can change visibility." }
                 (visibility)
                 @for reply in replies.fetch() { p { a href=(routes::review_reply(reply.id)) { "Review reply" } } }
             } },

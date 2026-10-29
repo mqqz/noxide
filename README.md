@@ -177,3 +177,5 @@ This project's code is licensed under either the [MIT License](LICENSE-MIT) or t
 [Apache License, Version 2.0](LICENSE-APACHE), at your option.
 
 The [application API guide](docs/application-api.md) covers typed declarations, templates, forms, isolated builds, and schema migrations.
+
+Boolean fields can declare literal `#[field(initial = false)]` values applied by the trusted host at create commit. Create projections exclude them; update projections and policies still govern later changes. See the [application API](docs/application-api.md).

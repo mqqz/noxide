@@ -12,7 +12,7 @@ mod articles {
         title: String,
         #[field(max_bytes = 4096)]
         body: String,
-        #[field(, initial = false)]
+        #[field()]
         published: bool,
         #[field(max_bytes = 1024)]
         private_notes: String,

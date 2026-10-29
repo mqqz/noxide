@@ -77,7 +77,7 @@ An unmarked resource receives no inferred access policy.
 
 CRUD entries name each enabled mutation. Create and update require separate
 `fields(...)` lists, and every entry requires `redirect(page_name)`. Omitted
-operations generate nothing. Existing host rules require create to name every
+operations generate nothing. Existing host rules require create to name every writable
 ordinary stored field (parent references are host-bound) and create/update redirects to target a record page. Adding a field
 therefore requires updating create explicitly before admission succeeds. An optional `allow = ...` forwards to the existing
 policy parser; otherwise the resource must be marked `owner`. For example:
@@ -444,6 +444,7 @@ A public create action accepts anonymous submissions. Capability actions require
 an edit secret for the exact record:
 
 ```rust
+// Article.published declares #[field(initial = false)].
 #[action(create(Article), allow = public, fields(title, body), redirect = article)]
 struct PublishArticle;
 
@@ -497,14 +498,14 @@ struct Reply {
     thread: Id<Thread>,
     #[field(max_bytes = 4096)]
     body: String,
-    #[field()]
+    #[field(initial = false)]
     published: bool,
 }
 
 #[query(list(Reply), allow = public, visible(published = true), fields(body))]
 struct ThreadReplies;
 
-#[action(create(Reply), fields(body, published), allow = owner, redirect = show_reply)]
+#[action(create(Reply), fields(body), allow = owner, redirect = show_reply)]
 struct CreateReply;
 ```
 
@@ -579,3 +580,5 @@ and their policies determine who can change them. An owner update listing
 application contract digest and invalidate old submission tokens, but do not
 affect the schema digest. They apply to new rows; migration `AddField.value`
 remains a separate operator-selected backfill for existing rows.
+
+Contract review follow-up: the CLI currently prints approval and schema hashes, without a human-readable policy summary. A future summary should list each initial field and value together with every update action that can write it and that action’s policy. Until then, inspect the full approved manifest.
