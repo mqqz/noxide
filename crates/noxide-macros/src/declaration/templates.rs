@@ -1,4 +1,10 @@
-use super::*;
+use proc_macro2::TokenStream as Tokens;
+use quote::{format_ident, quote};
+use syn::{
+    Expr, Ident, LitStr, Pat, Token, braced, parenthesized,
+    parse::{Parse, ParseStream},
+    spanned::Spanned,
+};
 
 #[derive(Debug)]
 enum Node {
@@ -10,7 +16,7 @@ enum Node {
     If(Expr, Vec<Node>, Vec<Node>),
 }
 
-pub(super) struct Template(Vec<Node>);
+pub(crate) struct Template(Vec<Node>);
 impl Parse for Template {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         nodes(input).map(Self)
@@ -150,7 +156,7 @@ fn emit(nodes: &[Node], target: &Ident, form: bool) -> syn::Result<Tokens> {
     Ok(output)
 }
 
-pub(super) fn expand_template(template: Template, form: bool) -> syn::Result<Tokens> {
+pub(crate) fn expand_template(template: Template, form: bool) -> syn::Result<Tokens> {
     let builder = Ident::new("__noxide_fragment", proc_macro2::Span::mixed_site());
     let construction = if form {
         quote!(::noxide::FormLayout::new())
