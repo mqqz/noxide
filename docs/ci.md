@@ -38,7 +38,9 @@ preserve approval hashes. Policy changes require new approval hashes, and schema
 additions that omit create fields fail admission.
 The trusted CLI admits the resulting component. A separately built public
 application is exercised through real HTTP for row visibility, projected fields,
-public cookie behavior, missing records, and escaped text. Firefox then
+public cookie behavior, missing records, and escaped text. The forum is built and
+checked through HTTP for registration, account and anonymous replies, parent-scoped
+pagination, editing, moderation, and stale forms after locking. Firefox then
 exercises creation, two-tab edit conflicts, explicit resubmission, deletion, and
 receipt recovery with JavaScript disabled. It uses SQLite on localhost and
 PostgreSQL through the test onion-origin proxy. This proxy does not establish Tor

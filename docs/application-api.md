@@ -6,7 +6,8 @@ authorization, form validation, HTML serialization, and transaction commitment.
 
 Start with [private-notes](../examples/private-notes/src/lib.rs) for text CRUD, or
 [task-board](../examples/task-board/src/lib.rs) for integers, choices, optional
-values, checkboxes, and custom form layouts.
+values, checkboxes, and custom form layouts. The [forum](../examples/forum/README.md)
+exercises parent relationships, public and anonymous posting, and moderation.
 
 Use `noxide::prelude::*` for the common declarations and rendering types, or
 import individual names as the examples do.
@@ -541,3 +542,6 @@ parent with children is rejected. Schema changes rebuild the relationship indexe
 and validate all references within the bounded migration transaction; an orphaned
 reference rolls the migration back. Renaming a parent resource also requires
 updating the child's declared parent resource through the schema workflow.
+
+The [forum example](../examples/forum/README.md) exercises public threads,
+account-owned and edit-secret replies, editing, thread locks, and moderation.

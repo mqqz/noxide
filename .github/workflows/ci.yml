@@ -40,7 +40,7 @@ jobs:
       - name: Check formatting
         run: |
           cargo fmt --all --check
-          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs
+          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs examples/forum/src/lib.rs
       - name: Fetch locked framework dependencies
         run: cargo fetch --locked
       - name: Build workspace
@@ -88,7 +88,7 @@ jobs:
       - name: Check formatting
         run: |
           cargo fmt --all --check
-          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs
+          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs examples/forum/src/lib.rs
       - name: Lint all framework targets
         run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
       - name: Test SQLite and PostgreSQL
@@ -204,6 +204,14 @@ jobs:
             --component "$RUNNER_TEMP/noxide-ci/public/public_articles.component.wasm" \
             --manifest "$RUNNER_TEMP/noxide-ci/public/manifest.json" \
             --output "$RUNNER_TEMP/noxide-ci/public-http"
+      - name: Build and test the forum
+        run: |
+          target/debug/noxide build --framework "$PWD" \
+            --app examples/forum --name forum \
+            --output "$RUNNER_TEMP/noxide-ci/forum"
+          python3 tools/test_forum.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/forum" \
+            --output "$RUNNER_TEMP/noxide-ci/forum-http"
       - name: Test NoJS browser flow with SQLite
         run: |
           python3 tools/test_browser.py \
@@ -230,6 +238,7 @@ jobs:
             ${{ runner.temp }}/noxide-ci/**/*.metrics.json
             ${{ runner.temp }}/noxide-ci/**/*.png
             ${{ runner.temp }}/noxide-ci/**/requests.json
+            ${{ runner.temp }}/noxide-ci/**/results.json
             ${{ runner.temp }}/noxide-ci/**/blocked-browser-requests.json
 
   hostile-builds:
