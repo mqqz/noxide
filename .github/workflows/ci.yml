@@ -145,6 +145,10 @@ jobs:
         run: cargo fetch --locked
       - name: Build trusted host CLI
         run: cargo build -p noxide-cli --locked --offline
+      - name: Test installed CLI project lifecycle
+        run: python3 tools/test_lifecycle.py --output "$RUNNER_TEMP/noxide-ci/lifecycle"
+      - name: Test CLI source archive outside the workspace
+        run: python3 tools/test_cli_package.py --output "$RUNNER_TEMP/noxide-ci/cli-package"
       - name: Test textarea newline preservation in Firefox
         run: |
           python3 tools/test_render_browser.py \
