@@ -17,31 +17,7 @@
   ],
   "operations": [
     {
-      "id": 1374915834,
-      "resource": 2206293706,
-      "kind": "delete",
-      "policy": {
-        "any": [
-          [
-            "owner"
-          ]
-        ]
-      }
-    },
-    {
-      "id": 1511218517,
-      "resource": 2206293706,
-      "kind": "update",
-      "policy": {
-        "any": [
-          [
-            "owner"
-          ]
-        ]
-      }
-    },
-    {
-      "id": 2330643300,
+      "id": 814167518,
       "resource": 2206293706,
       "kind": "read",
       "policy": {
@@ -53,7 +29,7 @@
       }
     },
     {
-      "id": 3137046913,
+      "id": 1175018442,
       "resource": 2206293706,
       "kind": "list",
       "policy": {
@@ -65,9 +41,33 @@
       }
     },
     {
-      "id": 4226205441,
+      "id": 1331059706,
       "resource": 2206293706,
       "kind": "create",
+      "policy": {
+        "any": [
+          [
+            "owner"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 4037267469,
+      "resource": 2206293706,
+      "kind": "delete",
+      "policy": {
+        "any": [
+          [
+            "owner"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 4207036322,
+      "resource": 2206293706,
+      "kind": "update",
       "policy": {
         "any": [
           [
@@ -79,52 +79,30 @@
   ],
   "routes": [
     {
-      "id": 3362413297,
-      "path": "/notes/{note}",
-      "resource": 2206293706,
-      "operations": [
-        2330643300
-      ],
-      "forms": [
-        4088484768,
-        3614109451
-      ]
-    },
-    {
-      "id": 4280382251,
+      "id": 2786829506,
       "path": "/",
       "resource": null,
       "operations": [
-        3137046913
+        1175018442
       ],
       "forms": [
-        2924443456
+        3289557613
+      ]
+    },
+    {
+      "id": 2852644704,
+      "path": "/notes/{note}",
+      "resource": 2206293706,
+      "operations": [
+        814167518
+      ],
+      "forms": [
+        85700721,
+        1592812990
       ]
     }
   ],
   "actions": [
-    {
-      "layout": [],
-      "id": 2924443456,
-      "version": 1,
-      "name": "Create note",
-      "operation": 4226205441,
-      "redirect": 3362413297,
-      "fields": [
-        "body"
-      ],
-      "inspect": null
-    },
-    {
-      "layout": [],
-      "id": 3614109451,
-      "version": 1,
-      "name": "Delete note",
-      "operation": 1374915834,
-      "redirect": 4280382251,
-      "fields": [],
-      "inspect": null
-    },
     {
       "layout": [
         {
@@ -147,11 +125,33 @@
           }
         }
       ],
-      "id": 4088484768,
+      "id": 85700721,
       "version": 1,
       "name": "Edit note",
-      "operation": 1511218517,
-      "redirect": 3362413297,
+      "operation": 4207036322,
+      "redirect": 2852644704,
+      "fields": [
+        "body"
+      ],
+      "inspect": null
+    },
+    {
+      "layout": [],
+      "id": 1592812990,
+      "version": 1,
+      "name": "Delete note",
+      "operation": 4037267469,
+      "redirect": 2786829506,
+      "fields": [],
+      "inspect": null
+    },
+    {
+      "layout": [],
+      "id": 3289557613,
+      "version": 1,
+      "name": "Create note",
+      "operation": 1331059706,
+      "redirect": 2852644704,
       "fields": [
         "body"
       ],

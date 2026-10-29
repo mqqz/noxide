@@ -1143,9 +1143,11 @@ fn private_notes_approval_digest_is_unchanged() {
         "../../../examples/private-notes/manifest.json"
     ))
     .unwrap();
+    // The inline app module intentionally changes declaration IDs and requires
+    // renewed approval. Pin its updated contract to catch unintended drift.
     assert_eq!(
         URL_SAFE_NO_PAD.encode(manifest::digest(&m).unwrap()),
-        "jKUms09nfOJN4kK0zmHL4tweVWcKwmUJtk7UfhuojlA"
+        "j0xMewW3Rx5FfJpfV7BXbTNh4mhJD3tUwuXFb7_-g8Q"
     );
 }
 
