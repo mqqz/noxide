@@ -43,6 +43,11 @@ jobs:
           rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs examples/forum/src/lib.rs
       - name: Fetch locked framework dependencies
         run: cargo fetch --locked
+      - name: Check example lockfiles
+        run: |
+          for manifest in examples/*/Cargo.toml; do
+            cargo metadata --manifest-path "$manifest" --locked --offline --format-version 1 > /dev/null
+          done
       - name: Build workspace
         run: cargo build --workspace --locked --offline
       - name: Lint all framework targets
