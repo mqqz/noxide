@@ -557,6 +557,10 @@ Pages return a strict prefix fitting the actual serialized result budget. A byte
 limit can shorten a page; the next page resumes after its last returned record.
 Rows are never skipped to fit later rows. A first record that cannot fit produces
 a controlled failure. Host-generated next links retain the concrete record URL.
+The repository-result budget is separate from the complete Document IR budget.
+Choose page sizes that leave room for parent content, forms, markup, and JSON
+escaping at maximum field lengths. The forum renders full reply bodies with a
+six-record public limit; its moderator list renders only links and requests 20.
 
 Opaque authenticated cursors expire after 15 minutes and are bound to the approved
 query, deployment, caller context, and parent scope. They grant no authority;

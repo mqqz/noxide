@@ -157,14 +157,53 @@ def main():
                 match = re.search(r'href="([^"]+)">Next page', html)
                 path = unescape(match[1]) if match else None
                 if path:
-                    assert path.startswith(first + "?before="), path
-            assert len(bodies) == 2
+                    assert path.startswith(first + "?cursor="), path
+            assert len(bodies) == 1
             joined = "".join(bodies)
             assert "Edited reply" in joined
             for i in (2, 4, 6):
                 assert f"Reply number {i}" in joined
             for i in (1, 3, 5, 7):
                 assert f"Reply number {i}" not in joined
+            # Maximum-sized parent and replies must leave room for Document IR
+            # framing. Quotes exercise the worst legal JSON expansion (2x).
+            for fill in ("x", '"'):
+                body = fill * 4096
+                expected = []
+                # Operator fixtures avoid exhausting deliberate action rate limits.
+                # HTTP reads still execute the actual compiled guest and renderer.
+                with sqlite3.connect(args.output / "forum.db") as db:
+                    thread_template = db.execute("SELECT resource, owner, tenant FROM nx_records WHERE id=?",
+                                                 (int(first.rsplit("/", 1)[1]),)).fetchone()
+                    last_id = db.execute("SELECT MAX(id) FROM nx_records").fetchone()[0]
+                    thread_id = last_id + 1
+                    sequence = db.execute("UPDATE nx_creation_counter SET value=value+1 WHERE singleton=1 RETURNING value").fetchone()[0]
+                    fields = json.dumps({"title": fill * 200, "body": body, "published": "true", "locked": "false"})
+                    db.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(?,?,?,?,?,?,1,?)",
+                               (thread_template[0], thread_id, *thread_template[1:], fields, f"budget-thread-{sequence}", sequence))
+                    large_thread = f"/threads/{thread_id}"
+                    template = db.execute("SELECT resource, owner, tenant FROM nx_records WHERE id=?",
+                                          (int(reply_urls[0].rsplit("/", 1)[1]),)).fetchone()
+                    last_id = thread_id
+                    for index in range(15):
+                        record_id = last_id + index + 1
+                        sequence = db.execute("UPDATE nx_creation_counter SET value=value+1 WHERE singleton=1 RETURNING value").fetchone()[0]
+                        fields = json.dumps({"thread": large_thread.rsplit("/", 1)[1], "body": body, "published": "true"})
+                        db.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(?,?,?,?,?,?,1,?)",
+                                   (template[0], record_id, *template[1:], fields, f"budget-fixture-{sequence}", sequence))
+                        expected.append(f"/replies/{record_id}")
+                for client in (anonymous, user):
+                    path, seen, pages = large_thread, [], 0
+                    while path:
+                        status, _, html = client.request("GET", path)
+                        assert status == 200, (status, large_thread)
+                        seen.extend(re.findall(r'href="(/replies/\d+)">View or edit reply', html))
+                        match = re.search(r'href="([^"]+)">Next page', html)
+                        path = unescape(match[1]) if match else None
+                        pages += 1
+                        assert pages <= 3
+                    assert seen == expected, (seen, expected)
+                    assert pages == 3
             _, _, html = anonymous.request("GET", first)
             status, _, handover = anonymous.submit(html, action("replies", "create", "public"), body="Anonymous reply")
             assert status == 200 and "<pre>" in handover
@@ -203,7 +242,7 @@ def main():
             assert user.submit(html, action("threads", "update", moderator), published="true", locked="false")[0] == 303
             assert anonymous.request("GET", reply_path)[0] == 200
             (args.output / "results.json").write_text(json.dumps({"registration": True, "authenticated_replies": True,
-                "anonymous_editing": True, "scoped_pagination": True, "moderation": True, "stale_form_lock": True}, indent=2))
+                "anonymous_editing": True, "scoped_pagination": True, "maximum_document_pagination": True, "moderation": True, "stale_form_lock": True}, indent=2))
         finally:
             server.terminate()
             try:
