@@ -42,6 +42,10 @@ printf '{}' > /tmp/work/noxide-contract.json
             check_build_status(output)
         self.assertNotIn(b'NOXIDE_CONTRACT_BEGIN', output)
 
+    def test_output_is_bounded_while_process_runs(self):
+        with self.assertRaisesRegex(ValueError, 'output limit'):
+            self.run_recipe('head -c 18000000 /dev/zero\n')
+
     def test_deadline_stops_process(self):
         with self.assertRaises(subprocess.TimeoutExpired):
             self.run_recipe('sleep 30\n', seconds=0.1)
