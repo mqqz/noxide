@@ -478,6 +478,7 @@ mod tests {
             max_bytes: 200,
             kind,
             optional,
+            initial: None,
         }
     }
 

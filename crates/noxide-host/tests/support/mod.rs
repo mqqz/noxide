@@ -16,6 +16,7 @@ pub fn manifest() -> Manifest {
             fields: vec![TextField {
                 kind: FieldKind::Text,
                 optional: false,
+                initial: None,
                 name: "body".into(),
                 label: "Note".into(),
                 max_bytes: 4096,

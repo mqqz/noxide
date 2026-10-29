@@ -120,7 +120,7 @@ configuration; it does not authorize dirty instance or request-context reuse.
 
 ## Boundary protocol and rendering
 
-The version-3 Rust/JSON contracts live in `noxide-protocol`. The SDK's
+The version-4 Rust/JSON contracts live in `noxide-protocol`. The SDK's
 `crates/noxide/wit/application.wit` defines the versioned import world. Request
 grants stay inside the host; guests cannot select them through resource handles.
 
@@ -599,3 +599,5 @@ after its execution deadline expires. Cleanup retains its bounded allowance
 after execution expires. Consequently runtime wall time is an execution budget,
 not a single end-to-end HTTP latency promise. The application WASM gate bounds
 waiting; the runtime semaphore independently protects direct runtime calls.
+
+At create commit, the host inserts admitted field initial values after binding any parent and before validating the complete stored record. Clients cannot submit these fields. Initial values are contract metadata, excluded from migration schema identity; update actions retain their declared authority.
