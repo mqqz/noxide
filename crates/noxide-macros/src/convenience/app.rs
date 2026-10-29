@@ -1,4 +1,13 @@
-use super::*;
+use super::crud::CrudBlock;
+use crate::registration::{Registration, expand_application};
+use proc_macro2::TokenStream as Tokens;
+use quote::{ToTokens, quote};
+use std::collections::{BTreeMap, BTreeSet};
+use syn::{
+    Attribute, Ident, LitStr, Token, Type, braced, parenthesized,
+    parse::{Parse, ParseStream},
+    spanned::Spanned,
+};
 
 fn app_attribute(attr: &Attribute, name: &str) -> bool {
     let path = attr.path();
@@ -21,7 +30,7 @@ fn unconditional(attrs: &[Attribute]) -> syn::Result<()> {
     Ok(())
 }
 
-pub(super) fn expand_app(mut module: syn::ItemMod) -> syn::Result<Tokens> {
+pub(crate) fn expand_app(mut module: syn::ItemMod) -> syn::Result<Tokens> {
     unconditional(&module.attrs)?;
     let (_, items) = module
         .content
@@ -103,36 +112,14 @@ pub(super) fn expand_app(mut module: syn::ItemMod) -> syn::Result<Tokens> {
             if app_attribute_path(&invocation.mac.path, "crud") {
                 unconditional(&invocation.attrs)?;
                 let crud = syn::parse2::<CrudBlock>(invocation.mac.tokens.clone())?;
-                for entry in crud.entries {
-                    let resource = &crud.resource;
-                    let name = &entry.name;
-                    if !names.insert(name.to_string()) {
-                        return Err(syn::Error::new(
-                            name.span(),
-                            "generated action name collision",
-                        ));
-                    }
-                    let kind = &entry.kind;
-                    let mut options = entry.options;
-                    if !entry.policy {
-                        if !owners.contains(&resource.to_string()) {
-                            return Err(syn::Error::new(
-                                resource.span(),
-                                "CRUD requires an explicit policy or owner resource",
-                            ));
-                        }
-                        options.extend(quote!(, allow = owner));
-                    }
-                    // Validate with the same parser used by explicit action declarations.
-                    let declaration: OperationDeclaration =
-                        syn::parse2(quote!(#kind(#resource) #options))?;
-                    let marker: syn::ItemStruct = syn::parse_quote!(struct #name;);
-                    generated.insert(name.to_string(), expand_action(declaration, marker)?);
-                    actions.insert(name.to_string(), (syn::parse_quote!(#name), entry.handler));
-                    if let Some(layout) = entry.layout {
-                        layouts.insert(name.to_string(), layout);
-                    }
-                }
+                super::crud::lower_crud(
+                    crud,
+                    &owners,
+                    &mut names,
+                    &mut generated,
+                    &mut actions,
+                    &mut layouts,
+                )?;
                 continue;
             }
             if app_attribute_path(&invocation.mac.path, "hooks") {
@@ -198,70 +185,7 @@ pub(super) fn expand_app(mut module: syn::ItemMod) -> syn::Result<Tokens> {
                 }
                 let name = &i.sig.ident;
                 pages.insert(name.to_string(), syn::parse_quote!(#name));
-                for input in &mut i.sig.inputs {
-                    let syn::FnArg::Typed(arg) = input else {
-                        continue;
-                    };
-                    let Ok((kind, resource)) = generic_argument(&arg.ty) else {
-                        continue;
-                    };
-                    let operation = match kind.to_string().as_str() {
-                        "List" => "list",
-                        "Read" => "read",
-                        _ => continue,
-                    };
-                    let Type::Path(capability) = arg.ty.as_ref() else {
-                        unreachable!()
-                    };
-                    let mut capability_path = capability.path.clone();
-                    for segment in &mut capability_path.segments {
-                        segment.arguments = syn::PathArguments::None;
-                    }
-                    if !app_attribute_path(&capability_path, &kind.to_string()) {
-                        return Err(syn::Error::new(
-                            capability.span(),
-                            "read shorthand must use List<Resource> or Read<Resource>, optionally qualified by noxide",
-                        ));
-                    }
-                    let Type::Path(path) = resource else {
-                        return Err(syn::Error::new(
-                            resource.span(),
-                            "expected local resource name",
-                        ));
-                    };
-                    let Some(resource_name) = path.path.get_ident() else {
-                        return Err(syn::Error::new(
-                            resource.span(),
-                            "expected local resource name",
-                        ));
-                    };
-                    if !owners.contains(&resource_name.to_string()) {
-                        return Err(syn::Error::new(
-                            resource.span(),
-                            "read shorthand requires a local owner resource; use Query<ExplicitQuery>",
-                        ));
-                    }
-                    let query_name = format_ident!("__Noxide_{}_{}", operation, resource_name);
-                    let query_key = query_name.to_string();
-                    if names.contains(&query_key) {
-                        return Err(syn::Error::new(
-                            resource.span(),
-                            "generated query name collision",
-                        ));
-                    }
-                    if let std::collections::btree_map::Entry::Vacant(entry) =
-                        generated.entry(query_key)
-                    {
-                        let operation = Ident::new(operation, resource.span());
-                        let declaration =
-                            syn::parse2(quote!(#operation(#resource), allow = owner))?;
-                        entry.insert(expand_query(
-                            declaration,
-                            syn::parse_quote!(#[allow(non_camel_case_types)] struct #query_name;),
-                        )?);
-                    }
-                    *arg.ty = syn::parse_quote!(::noxide::Query<#query_name>);
-                }
+                super::inferred_queries::lower_inputs(i, &owners, &names, &mut generated)?;
             }
             _ => {}
         }
@@ -345,107 +269,11 @@ pub(super) fn expand_app(mut module: syn::ItemMod) -> syn::Result<Tokens> {
     })
 }
 
-fn app_attribute_path(path: &syn::Path, name: &str) -> bool {
+pub(super) fn app_attribute_path(path: &syn::Path, name: &str) -> bool {
     path.is_ident(name)
         || (path.segments.len() == 2
             && path.segments[0].ident == "noxide"
             && path.segments[1].ident == name)
-}
-
-struct CrudBlock {
-    resource: Ident,
-    entries: Vec<CrudEntry>,
-}
-struct CrudEntry {
-    kind: Ident,
-    name: Ident,
-    options: Tokens,
-    policy: bool,
-    handler: Option<syn::Path>,
-    layout: Option<syn::Path>,
-}
-impl Parse for CrudBlock {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let resource = input.parse()?;
-        let body;
-        braced!(body in input);
-        let mut entries = Vec::new();
-        while !body.is_empty() {
-            let kind: Ident = body.parse()?;
-            if !["create", "update", "delete"].contains(&kind.to_string().as_str()) {
-                return Err(syn::Error::new(
-                    kind.span(),
-                    "expected create, update, or delete",
-                ));
-            }
-            let name = body.parse()?;
-            let content;
-            braced!(content in body);
-            let mut options = Tokens::new();
-            let mut policy = false;
-            let mut handler = None;
-            let mut layout = None;
-            let mut seen = BTreeSet::new();
-            while !content.is_empty() {
-                let option: Ident = content.parse()?;
-                if !seen.insert(option.to_string()) {
-                    return Err(syn::Error::new(option.span(), "duplicate CRUD option"));
-                }
-                if option == "allow" {
-                    content.parse::<Token![=]>()?;
-                    let expression: Expr = content.parse()?;
-                    policy = true;
-                    options.extend(quote!(, allow = #expression));
-                } else {
-                    let args;
-                    parenthesized!(args in content);
-                    let tokens: Tokens = args.parse()?;
-                    match option.to_string().as_str() {
-                        "fields" => options.extend(quote!(, fields(#tokens))),
-                        "redirect" => {
-                            options.extend(quote!(, redirect = #tokens));
-                        }
-                        "handler" => handler = Some(syn::parse2(tokens)?),
-                        "layout" => layout = Some(syn::parse2(tokens)?),
-                        _ => return Err(syn::Error::new(option.span(), "unknown CRUD option")),
-                    }
-                }
-                if !content.is_empty() {
-                    content.parse::<Token![,]>()?;
-                }
-            }
-            if kind != "delete" && !seen.contains("fields") {
-                return Err(syn::Error::new(
-                    kind.span(),
-                    "CRUD create/update require explicit fields(...)",
-                ));
-            }
-            if kind == "delete" && seen.contains("fields") {
-                return Err(syn::Error::new(
-                    kind.span(),
-                    "CRUD delete accepts no fields",
-                ));
-            }
-            if !seen.contains("redirect") {
-                return Err(syn::Error::new(kind.span(), "CRUD requires redirect(...)"));
-            }
-            entries.push(CrudEntry {
-                kind,
-                name,
-                options,
-                policy,
-                handler,
-                layout,
-            });
-        }
-        if entries.is_empty() {
-            return Err(body.error("enable at least one CRUD operation"));
-        }
-        if !input.is_empty() {
-            return Err(input.error("expected one resource per CRUD block"));
-        }
-        Ok(Self { resource, entries })
-    }
 }
 
 struct HookAssociation {

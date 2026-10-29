@@ -1,6 +1,11 @@
-use super::*;
+use crate::declaration::policy::{PolicyAtom, policy_tokens};
+use crate::declaration::{OperationDeclaration, marker};
+use crate::syntax::stable_id;
+use proc_macro2::TokenStream as Tokens;
+use quote::{format_ident, quote};
+use syn::spanned::Spanned;
 
-pub(super) fn expand_query(
+pub(crate) fn expand_query(
     declaration: OperationDeclaration,
     item: syn::ItemStruct,
 ) -> syn::Result<Tokens> {

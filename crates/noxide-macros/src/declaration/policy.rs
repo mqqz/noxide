@@ -1,7 +1,10 @@
-use super::*;
+use crate::syntax::key;
+use proc_macro2::TokenStream as Tokens;
+use quote::quote;
+use syn::{Ident, LitStr, Token, parenthesized, parse::ParseStream};
 
 #[derive(Clone)]
-pub(super) enum PolicyAtom {
+pub(crate) enum PolicyAtom {
     Public,
     Capability,
     Owner,
@@ -9,7 +12,7 @@ pub(super) enum PolicyAtom {
     Role(LitStr, bool),
 }
 
-pub(super) fn policy(input: ParseStream<'_>) -> syn::Result<Vec<Vec<PolicyAtom>>> {
+pub(crate) fn policy(input: ParseStream<'_>) -> syn::Result<Vec<Vec<PolicyAtom>>> {
     let name: Ident = input.parse()?;
     match name.to_string().as_str() {
         "public" => Ok(vec![vec![PolicyAtom::Public]]),
@@ -84,7 +87,7 @@ pub(super) fn policy(input: ParseStream<'_>) -> syn::Result<Vec<Vec<PolicyAtom>>
     }
 }
 
-pub(super) fn policy_tokens(rules: &[Vec<PolicyAtom>]) -> Tokens {
+pub(crate) fn policy_tokens(rules: &[Vec<PolicyAtom>]) -> Tokens {
     let rules = rules.iter().map(|rule| {
         let predicates = rule.iter().map(|atom| match atom {
             PolicyAtom::Public => quote!(::noxide::__private::Predicate::Public),
