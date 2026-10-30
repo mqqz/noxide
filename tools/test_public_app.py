@@ -12,6 +12,8 @@ import socket
 import sqlite3
 import subprocess
 import time
+import re
+from html import unescape
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -37,6 +39,7 @@ def main():
         "listen": {"tcp": f"127.0.0.1:{port}"},
     }))
     subprocess.run([binary, "init", config], check=True, timeout=10)
+    subprocess.run([binary, "schema", "indexes", config], check=True, timeout=10)
 
     def get(path, cookie=""):
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
@@ -68,10 +71,10 @@ def main():
                 resource = database.execute(
                     "SELECT storage_id FROM nx_resource_catalog WHERE resource_key='articles'"
                 ).fetchone()[0]
-                for identifier, published in ((1, "true"), (2, "false")):
-                    fields = {"title": "Public <script>" if identifier == 1 else "Unpublished fixture",
+                for identifier, published in ((1, "true"), (2, "false"), (3, "true"), (4, "true")):
+                    fields = {"title": "Public <script>" if identifier == 1 else (f"Other public {identifier}" if published == "true" else "Unpublished fixture"),
                               "body": "Published body" if identifier == 1 else "Hidden body",
-                              "published": published, "private_notes": "Private editorial fixture"}
+                              "published": published, "private_notes": "Private editorial fixture", "category": "games" if identifier == 4 else "books"}
                     # Allocate creation order in the same transaction as the fixture row.
                     sequence = database.execute(
                         "UPDATE nx_creation_counter SET value=value+1 "
@@ -95,6 +98,28 @@ def main():
                 status, _, body = get(path)
                 assert status == 404
                 assert "Hidden body" not in body and "Private editorial fixture" not in body
+            status, _, body = get("/categories?category=books")
+            assert status == 200 and "Public &lt;script&gt;" in body
+            link = unescape(re.search(r'href="([^"]*cursor=[^"]+)"', body).group(1))
+            assert "category=books&amp;cursor=" in body
+            assert get(link)[0] == 200
+            assert get(link.replace("category=books", "category=games"))[0] != 200
+            assert get("/categories?category=games")[0] == 200
+            status, _, overview = get("/overview?category=books")
+            assert status == 200 and "More in category" in overview and ">See all</a>" in overview
+            assert 'href="/categories?category=books"' in overview
+            next_overview = unescape(re.search(r'href="([^"]*cursor=[^"]+)"', overview).group(1))
+            status, _, second = get(next_overview)
+            assert status == 200 and "Public &lt;script&gt;" in second, "preview must ignore the paginated cursor"
+            status, _, complete = get("/overview?category=games")
+            assert status == 200 and "More in category" not in complete and ">See all</a>" not in complete
+            status, _, highlights = get("/highlights?category=books")
+            assert status == 200 and ">Next page</a>" not in highlights
+            assert get("/highlights?category=books&cursor=ignored")[2] == highlights
+            missing = get("/missing")
+            for query in ("", "?category=unknown", "?category=Books", "?category=books&category=games", "?other=books", "?category=books&other=x", "?category=%GG"):
+                invalid = get("/categories" + query)
+                assert invalid[0] == missing[0] == 404 and invalid[2] == missing[2]
             (args.output / "results.json").write_text(json.dumps({
                 "public_list": True, "public_read": True, "unpublished_hidden": True,
                 "private_projection_hidden": True, "escaped": True,

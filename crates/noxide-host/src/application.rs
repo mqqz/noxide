@@ -26,6 +26,133 @@ use std::{
 };
 use tokio::time::{Instant, timeout_at};
 
+fn cursor_scope(
+    identity: (&str, &str),
+    route: u32,
+    target: Option<u64>,
+    parent_incarnation: Option<String>,
+    list: Option<&Operation>,
+    subject: &str,
+    params: &Fields,
+) -> serde_json::Result<String> {
+    let (contract, deployment) = identity;
+    if params.is_empty() {
+        serde_json::to_string(&(
+            contract,
+            deployment,
+            route,
+            target,
+            parent_incarnation,
+            list,
+            subject,
+        ))
+    } else {
+        serde_json::to_string(&(
+            contract,
+            deployment,
+            route,
+            target,
+            parent_incarnation,
+            list,
+            subject,
+            params,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod query_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_scopes_bind_canonical_parameters_and_account() {
+        let params = Fields::from([("category".into(), "books".into())]);
+        let scope = cursor_scope(
+            ("contract", "deployment"),
+            1,
+            None,
+            None,
+            None,
+            "alice",
+            &params,
+        )
+        .unwrap();
+        let other = Fields::from([("category".into(), "games".into())]);
+        assert_ne!(
+            scope,
+            cursor_scope(
+                ("contract", "deployment"),
+                1,
+                None,
+                None,
+                None,
+                "alice",
+                &other
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            scope,
+            cursor_scope(
+                ("contract", "deployment"),
+                1,
+                None,
+                None,
+                None,
+                "bob",
+                &params
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn cursor_scope_strings_are_unchanged() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/queries");
+        for (name, parented) in [
+            ("private-notes", false),
+            ("forum", true),
+            ("private-inbox", false),
+        ] {
+            let manifest =
+                manifest::parse(&std::fs::read(root.join(format!("example-{name}.json"))).unwrap())
+                    .unwrap();
+            let list = manifest
+                .operations
+                .iter()
+                .find(|op| {
+                    op.kind == OperationKind::List
+                        && manifest::parent_resource(&manifest, op.resource)
+                            .unwrap()
+                            .is_some()
+                            == parented
+                })
+                .unwrap();
+            let route = manifest
+                .routes
+                .iter()
+                .find(|r| r.operations.contains(&list.id))
+                .unwrap();
+            let scope = cursor_scope(
+                ("contract", "deployment"),
+                route.id,
+                parented.then_some(42),
+                parented.then(|| "parent-incarnation".into()),
+                Some(list),
+                "account-id",
+                &Fields::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                scope,
+                std::fs::read_to_string(root.join(format!("{name}.scope"))).unwrap(),
+                "{name}"
+            );
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum RequestError {
     Authentication,
@@ -68,6 +195,7 @@ pub struct Application {
     pub(crate) presentation: crate::Presentation,
     pub(crate) registration: auth::Registration,
     pub(crate) manifest: Arc<Manifest>,
+    pub(crate) plans: BTreeMap<u32, Arc<crate::query_plan::ListPlan>>,
     pub(crate) keys: Arc<HostKeys>,
     database: Database,
     runtime: Runtime,
@@ -448,6 +576,7 @@ impl Application {
         Ok(Self {
             presentation: crate::Presentation::default(),
             registration: auth::Registration::Closed,
+            plans: crate::query_plan::compile_all(&m)?,
             manifest: Arc::new(m),
             keys: Arc::new(keys),
             database,
@@ -762,6 +891,7 @@ impl Application {
                 render::resolve(
                     &self.manifest,
                     &RouteRef {
+                        params: Default::default(),
                         route,
                         target: Some(receipt.id),
                     },
@@ -1185,6 +1315,26 @@ impl Application {
         target: Option<u64>,
         cursor: Option<&str>,
     ) -> std::result::Result<Rendered, RequestError> {
+        self.view_page_parameters(
+            cookie,
+            anonymous_cookie,
+            route,
+            target,
+            cursor,
+            Fields::new(),
+        )
+        .await
+    }
+
+    pub(crate) async fn view_page_parameters(
+        &self,
+        cookie: Option<&str>,
+        anonymous_cookie: Option<&str>,
+        route: u32,
+        target: Option<u64>,
+        cursor: Option<&str>,
+        params: Fields,
+    ) -> std::result::Result<Rendered, RequestError> {
         let _request = self
             .admission_limits
             .requests()
@@ -1200,7 +1350,11 @@ impl Application {
         if cursor.is_some_and(|c| c.len() > 4096) {
             return Err(RequestError::InvalidCursor);
         }
-        let reference = RouteRef { route, target };
+        let reference = RouteRef {
+            params: params.clone(),
+            route,
+            target,
+        };
         render::resolve(&self.manifest, &reference).map_err(|_| RequestError::InvalidRequest)?;
         let deadline = Instant::now() + self.runtime.limits().wall_time;
         timeout_at(deadline, async {
@@ -1226,17 +1380,18 @@ impl Application {
                 Some((token, principal)) => (Some(token), principal),
                 None => (None, auth::Principal::Anonymous),
             };
-            let list = manifest::route(&self.manifest,route).map_err(|_| RequestError::InvalidRequest)?.operations.iter().filter_map(|id| manifest::operation(&self.manifest,*id).ok()).find(|op| op.kind==OperationKind::List);
+            let list = manifest::route(&self.manifest,route).map_err(|_| RequestError::InvalidRequest)?.operations.iter().filter_map(|id| manifest::operation(&self.manifest,*id).ok()).find(|op| op.kind==OperationKind::List && !manifest::is_preview(op));
             let parent_incarnation = if let (Some(target),Some(op)) = (target,list) {
                 if let Some(parent)=manifest::parent_resource(&self.manifest,op.resource).map_err(|_| RequestError::Rejected)? {
                     crate::repository::load(&mut tx,&self.manifest,parent.id,target).await.map_err(RequestError::database)?.map(|r|r.incarnation)
                 } else {None}
             } else {None};
             let subject=principal.user().map(|u|u.id.as_str()).unwrap_or("");
-            let scope=serde_json::to_string(&(&self.contract,&self.deployment,route,target,parent_incarnation,list,subject)).map_err(|_|RequestError::Rejected)?;
+            let scope=cursor_scope((&self.contract,&self.deployment),route,target,parent_incarnation,list,subject,&params).map_err(|_|RequestError::Rejected)?;
             // A fixed-size digest binds every approved setting without exposing it in URLs.
             let scope=URL_SAFE_NO_PAD.encode(Sha256::digest(scope.as_bytes()));
-            let cursor = cursor.map(|encoded| {
+            let preview_only = list.is_none() && manifest::route(&self.manifest, route).map_err(|_| RequestError::InvalidRequest)?.operations.iter().any(|id| manifest::operation(&self.manifest,*id).is_ok_and(manifest::is_preview));
+            let cursor = cursor.filter(|_| !preview_only).map(|encoded| {
                 let token=self.keys.verify_cursor(encoded,now).map_err(|_|RequestError::InvalidCursor)?;
                 match token.kind { TokenKind::Cursor { scope: bound,after } if list.is_some() && bound==scope && after>0 && after<=i64::MAX as u64 => Ok(after), _=>Err(RequestError::InvalidCursor) }
             }).transpose()?;
@@ -1247,6 +1402,7 @@ impl Application {
             } else { (None,None) };
             let forms = self.forms(&mut tx, route, target, session.as_ref(), anonymous.as_ref(), &principal, now).await.map_err(|_| RequestError::Rejected)?;
             let request = RequestView {
+                params: params.clone(),
                 available_forms: forms
                     .iter()
                     .filter_map(|(id, form)| form.as_ref().map(|_| *id))
@@ -1258,6 +1414,13 @@ impl Application {
                 inspection: None,
             };
             let effects = Effects {
+                invoked: Default::default(),
+                list_bytes: 0,
+                list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
+                result_limit: noxide_protocol::MAX_RESULT_BYTES,
+                truncated: false,
+                see_all: Vec::new(),
+                plans: self.plans.clone(),
                 tx,
                 manifest: self.manifest.clone(),
                 principal,
@@ -1296,7 +1459,8 @@ impl Application {
             }
             let next_page = effects.more.map(|after| {
                 let (_,encoded)=self.keys.issue(TokenKind::Cursor {scope:scope.clone(),after},"",now,900).map_err(|_|RequestError::Rejected)?;
-                Ok(format!("{}?cursor={encoded}",crate::routing::resolve(&self.manifest,&reference).expect("validated route")))
+                let path = crate::routing::resolve(&self.manifest,&reference).expect("validated route");
+                Ok(format!("{path}{}cursor={encoded}", if params.is_empty() { "?" } else { "&" }))
             }).transpose()?;
             let mut rendered = render::render(
                 &response,
@@ -1308,6 +1472,7 @@ impl Application {
                         .as_ref()
                         .map(|session| self.keys.csrf(&session.nonce)),
                     next_page,
+                    preview_links: effects.see_all.clone(),
                 },
             )
             .map_err(|_| RequestError::Rejected)?;

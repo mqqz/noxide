@@ -57,6 +57,8 @@ pub(crate) fn declarations() -> Manifest {
         }
     }
     m.operations.push(Operation {
+        filter: Vec::new(),
+        disclose: Vec::new(),
         list: None,
         id: 4,
         resource: 2,
@@ -75,6 +77,7 @@ pub(crate) fn declarations() -> Manifest {
     m.routes[0].access = Access::Public;
     m.routes[1].access = Access::Public;
     m.routes.push(Route {
+        params: Vec::new(),
         id: 3,
         path: "/threads/{thread}".into(),
         resource: Some(2),
@@ -86,6 +89,9 @@ pub(crate) fn declarations() -> Manifest {
     m
 }
 pub(crate) async fn seed(db: &Database, m: &Manifest) {
+    if m.operations.iter().any(|op| !op.filter.is_empty()) {
+        db.reconcile_query_indexes(m).await.unwrap();
+    }
     let mut tx = db
         .begin(Instant::now() + Duration::from_secs(5))
         .await
@@ -113,13 +119,21 @@ pub(crate) async fn seed(db: &Database, m: &Manifest) {
 }
 async fn effects(db: &Database, m: &Manifest, route: u32, target: u64) -> Effects {
     Effects {
+        invoked: Default::default(),
+        list_bytes: 0,
+        list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
+        result_limit: noxide_protocol::MAX_RESULT_BYTES,
+        truncated: false,
+        see_all: Vec::new(),
         tx: db
             .begin(Instant::now() + Duration::from_secs(5))
             .await
             .unwrap(),
         manifest: Arc::new(m.clone()),
+        plans: crate::query_plan::compile_all(m).unwrap(),
         principal: Principal::Anonymous,
         request: RequestView {
+            params: Default::default(),
             version: VERSION,
             kind: RequestKind::Route(route),
             target: Some(target),
@@ -191,6 +205,8 @@ async fn mutation_case(db: Database) {
     db.initialize().await.unwrap();
     let mut m = declarations();
     m.operations.push(Operation {
+        filter: Vec::new(),
+        disclose: Vec::new(),
         list: None,
         id: 5,
         resource: 1,
@@ -399,6 +415,7 @@ async fn parents_case(db: Database, sqlite: bool) {
             seen.extend(rows.iter().map(|r| r.id));
             assert!(rows.iter().all(|r| r.fields.len() == 1));
             e.cursor = e.more.take();
+            e.next_request();
             if e.cursor.is_none() {
                 break;
             }
@@ -433,6 +450,7 @@ async fn parents_case(db: Database, sqlite: bool) {
             .unwrap()
             .is_none()
     );
+    e.next_request();
     e.request.target = Some(11);
     assert!(
         serde_json::from_slice::<Option<Record>>(&e.invoke(2, 11).await.unwrap())
@@ -538,6 +556,8 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         tenant_scoped: false,
     };
     m.operations.push(Operation {
+        filter: Vec::new(),
+        disclose: Vec::new(),
         list: None,
         id: 5,
         resource: 2,
@@ -664,6 +684,8 @@ async fn postgres_relationships_pagination_forms_and_migrations() {
     for case in [
         "redirect",
         "prefix",
+        "prefix_desc",
+        "filtered",
         "parents",
         "forms",
         "integrity",
@@ -686,7 +708,9 @@ async fn postgres_relationships_pagination_forms_and_migrations() {
         case_url.set_path(&format!("/{name}"));
         let db = Database::postgres(case_url.as_str()).unwrap();
         match case {
-            "prefix" => chronological_prefix_case(db).await,
+            "prefix" => chronological_prefix_case(db, false).await,
+            "prefix_desc" => chronological_prefix_case(db, true).await,
+            "filtered" => filtered_parent_case(db).await,
             "redirect" => redirect_case(db).await,
             "parents" => parents_case(db, false).await,
             "forms" => forms_case(db, false).await,
@@ -822,95 +846,102 @@ async fn index_scope_case(db: Database, sqlite: bool) {
         fields
     );
     let storage = e.tx.storage_resource(&renamed, 1).await.unwrap();
-    let expression = e.tx.parent_expression("parent_thread").unwrap();
+    let expression = e.tx.field_expression("parent_thread").unwrap();
     if !sqlite {
         e.tx.execute("SET LOCAL enable_seqscan=off", &[])
             .await
             .unwrap();
     }
-    for (filter, index) in [
-        (
-            format!("resource={storage} AND owner='alice'"),
-            "nx_records_owner".to_owned(),
-        ),
-        (
-            format!("resource={storage} AND tenant='team'"),
-            "nx_records_tenant".to_owned(),
-        ),
-        (
-            format!("resource={storage} AND {expression}='10' AND owner='alice'"),
-            format!("nx_parent_{storage}_owner"),
-        ),
-        (
-            format!("resource={storage} AND {expression}='10' AND tenant='team'"),
-            format!("nx_parent_{storage}_tenant"),
-        ),
-    ] {
-        let query = format!(
-            "SELECT id FROM nx_records WHERE {filter} AND created_seq>0 ORDER BY nx_records.created_seq LIMIT 3"
-        );
-        let plan = e.tx.explain(&query).await.unwrap();
-        // PostgreSQL may prefer the equally ordered global owner/tenant
-        // index on tiny fixtures. Require an ordered indexed seek, while
-        // allowing that legitimate cost-based choice.
-        let alternative = if index.ends_with("_owner") {
-            "nx_records_owner"
-        } else {
-            "nx_records_tenant"
-        };
-        assert!(
-            plan.iter()
-                .any(|line| line.contains(&index) || line.contains(alternative)),
-            "{index}: {plan:?}"
-        );
-        assert!(
-            !plan
-                .iter()
-                .any(|line| line.contains("Sort") || line.contains("TEMP B-TREE")),
-            "{plan:?}"
-        );
-    }
-    if !sqlite {
-        // Generic prepared plans retain an ordered seek. Cost estimates on
-        // tiny fixtures may prefer the global creation index.
-        let storage = e.tx.storage_resource(&renamed, 1).await.unwrap();
-        let expression = e.tx.parent_expression("parent_thread").unwrap();
-        e.tx.execute("SET LOCAL plan_cache_mode=force_generic_plan", &[])
-            .await
-            .unwrap();
-        e.tx.execute("SET LOCAL enable_seqscan=off", &[])
-            .await
-            .unwrap();
-        e.tx.execute(&format!("PREPARE parent_index_scope(bigint,text,bigint) AS SELECT id FROM nx_records WHERE resource=$1 AND resource={storage} AND {expression}=$2 AND created_seq>$3 ORDER BY nx_records.created_seq ASC LIMIT 3"), &[]).await.unwrap();
-        let plan =
-            e.tx.fetch::<1>(
-                &format!("EXPLAIN EXECUTE parent_index_scope({storage},'10',0)"),
-                &[],
-            )
-            .await
-            .unwrap();
-        assert!(
-            plan.iter()
-                .any(|line| line[0].contains(&format!("nx_parent_{storage}"))
-                    || line[0].contains("nx_records_created")),
-            "{plan:?}"
-        );
-        assert!(
-            !plan.iter().any(|line| line[0].contains("Sort")),
-            "{plan:?}"
-        );
-        e.tx.execute("DEALLOCATE parent_index_scope", &[])
-            .await
-            .unwrap();
+    for direction in ["ASC", "DESC"] {
+        for (filter, index) in [
+            (
+                format!("resource={storage} AND owner='alice'"),
+                "nx_records_owner".to_owned(),
+            ),
+            (
+                format!("resource={storage} AND tenant='team'"),
+                "nx_records_tenant".to_owned(),
+            ),
+            (
+                format!("resource={storage} AND {expression}='10' AND owner='alice'"),
+                format!("nx_parent_{storage}_owner"),
+            ),
+            (
+                format!("resource={storage} AND {expression}='10' AND tenant='team'"),
+                format!("nx_parent_{storage}_tenant"),
+            ),
+        ] {
+            let query = format!(
+                "SELECT id FROM nx_records WHERE {filter} AND created_seq>0 ORDER BY nx_records.created_seq {direction} LIMIT 3"
+            );
+            let plan = e.tx.explain(&query).await.unwrap();
+            // PostgreSQL may prefer the equally ordered global owner/tenant
+            // index on tiny fixtures. Require an ordered indexed seek, while
+            // allowing that legitimate cost-based choice.
+            let alternative = if index.ends_with("_owner") {
+                "nx_records_owner"
+            } else {
+                "nx_records_tenant"
+            };
+            assert!(
+                plan.iter()
+                    .any(|line| line.contains(&index) || line.contains(alternative)),
+                "{index}: {plan:?}"
+            );
+            assert!(
+                !plan
+                    .iter()
+                    .any(|line| line.contains("Sort") || line.contains("TEMP B-TREE")),
+                "{plan:?}"
+            );
+        }
+        if !sqlite {
+            // Generic prepared plans retain an ordered seek. Cost estimates on
+            // tiny fixtures may prefer the global creation index.
+            let storage = e.tx.storage_resource(&renamed, 1).await.unwrap();
+            let expression = e.tx.field_expression("parent_thread").unwrap();
+            e.tx.execute("SET LOCAL plan_cache_mode=force_generic_plan", &[])
+                .await
+                .unwrap();
+            e.tx.execute("SET LOCAL enable_seqscan=off", &[])
+                .await
+                .unwrap();
+            e.tx.execute(&format!("PREPARE parent_index_scope(bigint,text,bigint) AS SELECT id FROM nx_records WHERE resource=$1 AND resource={storage} AND {expression}=$2 AND created_seq>$3 ORDER BY nx_records.created_seq {direction} LIMIT 3"), &[]).await.unwrap();
+            let plan =
+                e.tx.fetch::<1>(
+                    &format!("EXPLAIN EXECUTE parent_index_scope({storage},'10',0)"),
+                    &[],
+                )
+                .await
+                .unwrap();
+            assert!(
+                plan.iter()
+                    .any(|line| line[0].contains(&format!("nx_parent_{storage}"))
+                        || line[0].contains("nx_records_created")),
+                "{plan:?}"
+            );
+            assert!(
+                !plan.iter().any(|line| line[0].contains("Sort")),
+                "{plan:?}"
+            );
+            e.tx.execute("DEALLOCATE parent_index_scope", &[])
+                .await
+                .unwrap();
+        }
     }
     e.tx.rollback().await.unwrap();
 }
 
-async fn chronological_prefix_case(db: Database) {
+async fn chronological_prefix_case(db: Database, descending: bool) {
     db.initialize().await.unwrap();
     let mut m = declarations();
     m.operations[0].list = Some(ListSettings {
-        order: ListOrder::CreatedAsc,
+        preview: None,
+        order: if descending {
+            ListOrder::CreatedDesc
+        } else {
+            ListOrder::CreatedAsc
+        },
         page_size: 20,
     });
     m.resources[0].fields.push(TextField {
@@ -958,11 +989,26 @@ async fn chronological_prefix_case(db: Database) {
     let bytes = e.invoke(1, 0).await.unwrap();
     assert!(bytes.len() <= MAX_RESULT_BYTES);
     let rows: Vec<Record> = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [2, 4, 6]);
+    assert_eq!(
+        rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        if descending {
+            vec![12, 10, 8]
+        } else {
+            vec![2, 4, 6]
+        }
+    );
     e.cursor = e.more.take();
+    e.next_request();
     assert!(e.cursor.is_some());
     let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
-    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [8, 10, 12]);
+    assert_eq!(
+        rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        if descending {
+            vec![6, 4, 2]
+        } else {
+            vec![8, 10, 12]
+        }
+    );
     assert!(e.more.is_none());
     e.tx.rollback().await.unwrap();
     // Visibility changes behind the cursor do not turn live continuation into a snapshot.
@@ -979,7 +1025,14 @@ async fn chronological_prefix_case(db: Database) {
     tx.commit().await.unwrap();
     let mut e = effects(&db, &m, 3, 10).await;
     let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
-    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [4, 6, 8]);
+    assert_eq!(
+        rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        if descending {
+            vec![12, 10, 8]
+        } else {
+            vec![4, 6, 8]
+        }
+    );
     let after = e.more;
     e.tx.rollback().await.unwrap();
     let mut tx = db
@@ -1003,14 +1056,28 @@ async fn chronological_prefix_case(db: Database) {
     tx.commit().await.unwrap();
     let mut e = effects(&db, &m, 3, 10).await;
     e.cursor = after;
+    e.next_request();
     let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
-    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [10, 12, 99]);
+    assert_eq!(
+        rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        if descending {
+            vec![6, 4, 2]
+        } else {
+            vec![10, 12, 99]
+        }
+    );
     e.tx.rollback().await.unwrap();
 }
 #[tokio::test]
 async fn sqlite_chronological_byte_prefix_and_late_visibility() {
     let tmp = tempfile::tempdir().unwrap();
-    chronological_prefix_case(Database::sqlite(tmp.path().join("prefix.db"))).await;
+    chronological_prefix_case(Database::sqlite(tmp.path().join("prefix.db")), false).await;
+}
+
+#[tokio::test]
+async fn sqlite_descending_byte_prefix_and_live_insertion() {
+    let tmp = tempfile::tempdir().unwrap();
+    chronological_prefix_case(Database::sqlite(tmp.path().join("descending.db")), true).await;
 }
 
 #[tokio::test]
@@ -1101,6 +1168,7 @@ async fn opaque_cursors_bind_parent_contract_deployment_and_identity() {
     tx.commit().await.unwrap();
     let mut changed = m.clone();
     changed.operations[0].list = Some(ListSettings {
+        preview: None,
         order: ListOrder::CreatedAsc,
         page_size: 4,
     });
@@ -1466,4 +1534,124 @@ async fn parent_read_authority_matches_normal_get_and_excludes_list_authority() 
         );
         tx.commit().await.unwrap();
     }
+}
+
+async fn filtered_parent_case(db: Database) {
+    db.initialize().await.unwrap();
+    let mut m = declarations();
+    m.resources[0].fields.push(boolean("archived"));
+    m.actions[0].fields.push("archived".into());
+    m.operations[0].filter.push(Condition {
+        field: "archived".into(),
+        equals: Operand::Literal("false".into()),
+    });
+    m.operations[0].disclose.push("archived".into());
+    m.operations[0].list = Some(ListSettings {
+        preview: None,
+        order: ListOrder::CreatedAsc,
+        page_size: 1,
+    });
+    manifest::validate(&m).unwrap();
+    seed(&db, &m).await;
+    for descending in [false, true] {
+        m.operations[0].list.as_mut().unwrap().order = if descending {
+            ListOrder::CreatedDesc
+        } else {
+            ListOrder::CreatedAsc
+        };
+        let mut tx = db
+            .begin(Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+        for [id, encoded] in tx
+            .fetch::<2>(
+                "SELECT CAST(id AS TEXT),fields FROM nx_records WHERE resource=1",
+                &[],
+            )
+            .await
+            .unwrap()
+        {
+            let id: i64 = id.parse().unwrap();
+            let mut fields: Fields = serde_json::from_str(&encoded).unwrap();
+            fields.insert("archived".into(), (id % 4 != 0).to_string());
+            tx.execute(
+                "UPDATE nx_records SET fields=$1 WHERE resource=1 AND id=$2",
+                &[serde_json::to_string(&fields).unwrap().into(), id.into()],
+            )
+            .await
+            .unwrap();
+        }
+        let index = crate::query_plan::required_indexes(&m)
+            .unwrap()
+            .remove(0)
+            .name(1);
+        let parent = tx.field_expression("thread").unwrap();
+        let visible = tx.field_expression("published").unwrap();
+        let selected = tx.field_expression("archived").unwrap();
+        let direction = if descending { "DESC" } else { "ASC" };
+        if matches!(db, Database::Postgres(_)) {
+            tx.execute("SET LOCAL enable_seqscan=off", &[])
+                .await
+                .unwrap();
+        }
+        let plan = tx.explain(&format!("SELECT id FROM nx_records WHERE resource=1 AND {parent}='10' AND {visible}='true' AND {selected}='false' AND created_seq>0 ORDER BY nx_records.created_seq {direction} LIMIT 2")).await.unwrap().join("\n");
+        assert!(plan.contains(&index), "{plan}");
+        assert!(
+            !plan.contains("Sort") && !plan.contains("TEMP B-TREE"),
+            "{plan}"
+        );
+        tx.commit().await.unwrap();
+        let mut e = effects(&db, &m, 3, 10).await;
+        let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+        assert_eq!(rows[0].id, if descending { 12 } else { 4 });
+        assert!(!rows[0].fields.contains_key("archived"));
+        assert!(
+            crate::repository::read_resource(&mut e.tx, &m, &e.principal, &m.operations[1], 2)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let after = e.more;
+        e.tx.rollback().await.unwrap();
+        let mut tx = db
+            .begin(Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+        let row = tx
+            .fetch::<1>(
+                "SELECT fields FROM nx_records WHERE resource=1 AND id=8",
+                &[],
+            )
+            .await
+            .unwrap();
+        let mut fields: Fields = serde_json::from_str(&row[0][0]).unwrap();
+        fields.insert("archived".into(), "true".into());
+        tx.execute(
+            "UPDATE nx_records SET fields=$1 WHERE resource=1 AND id=8",
+            &[serde_json::to_string(&fields).unwrap().into()],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let mut e = effects(&db, &m, 3, 10).await;
+        e.cursor = after;
+        e.next_request();
+        let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            [if descending { 4 } else { 12 }]
+        );
+        assert!(e.more.is_none());
+        e.tx.rollback().await.unwrap();
+    }
+    set_parent(&db, &m, false, false).await;
+    let mut e = effects(&db, &m, 3, 10).await;
+    let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+    assert!(rows.is_empty());
+    e.tx.rollback().await.unwrap();
+}
+#[tokio::test]
+async fn sqlite_filtered_parent_visibility_and_live_selection() {
+    let tmp = tempfile::tempdir().unwrap();
+    filtered_parent_case(Database::sqlite(tmp.path().join("filtered-parent.db"))).await;
 }

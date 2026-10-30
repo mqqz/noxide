@@ -65,6 +65,8 @@ fn declarations() -> Manifest {
         ),
     ] {
         m.operations.push(Operation {
+            filter: Vec::new(),
+            disclose: Vec::new(),
             list: None,
             id,
             resource: 1,
@@ -77,6 +79,7 @@ fn declarations() -> Manifest {
         });
     }
     m.routes.push(Route {
+        params: Vec::new(),
         id: 3,
         path: "/private".into(),
         resource: None,
@@ -184,6 +187,8 @@ fn manifest_private_operations_forbid_public_metadata() {
 fn manifest_action_inspection_cannot_use_public_read() {
     let mut m = declarations();
     m.operations.push(Operation {
+        filter: Vec::new(),
+        disclose: Vec::new(),
         list: None,
         id: 8,
         resource: 1,
@@ -259,10 +264,18 @@ fn effects(
     target: Option<u64>,
 ) -> Effects {
     Effects {
+        invoked: Default::default(),
+        list_bytes: 0,
+        list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
+        result_limit: noxide_protocol::MAX_RESULT_BYTES,
+        truncated: false,
+        see_all: Vec::new(),
         tx,
         manifest: Arc::new(m.clone()),
+        plans: crate::query_plan::compile_all(m).unwrap(),
         principal,
         request: RequestView {
+            params: Default::default(),
             version: VERSION,
             kind: RequestKind::Route(route),
             target,
@@ -353,6 +366,7 @@ async fn public_repository(db: Database, choice: bool) {
                 break;
             }
             e.cursor = e.more.take();
+            e.next_request();
             if e.cursor.is_none() {
                 break;
             }
@@ -360,6 +374,7 @@ async fn public_repository(db: Database, choice: bool) {
         assert_eq!(ids.len(), 10);
         e.request.kind = RequestKind::Route(2);
         for id in 1..=21 {
+            e.next_request();
             e.request.target = Some(id);
             let record: Option<Record> =
                 serde_json::from_slice(&e.invoke(2, id).await.unwrap()).unwrap();
@@ -536,6 +551,7 @@ async fn public_request_flows(db: Database) {
     let mut m = declarations();
     m.routes[0].access = Access::PublicOptional;
     m.routes.push(Route {
+        params: Vec::new(),
         id: 4,
         path: "/public".into(),
         resource: None,
@@ -847,6 +863,8 @@ async fn sqlite_initial_create_commit_is_host_owned() {
             tx.commit().await.unwrap();
             let mut updates = m.clone();
             updates.operations.push(Operation {
+                filter: Vec::new(),
+                disclose: Vec::new(),
                 list: None,
                 id: 4,
                 resource: 1,

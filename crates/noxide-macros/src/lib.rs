@@ -655,7 +655,10 @@ mod pagination_tests {
     fn list_settings_are_narrow_and_bounded() {
         for declaration in [
             "list(Reply), order=created_asc, page_size=20",
+            "list(Reply), order=created_desc, page_size=20",
             "list(Reply)",
+            "list(Reply), preview",
+            "list(Reply), preview(see_all=all_replies)",
         ] {
             assert!(
                 syn::parse_str::<OperationDeclaration>(&format!("{declaration}, allow=owner"))
@@ -667,6 +670,9 @@ mod pagination_tests {
             "list(Reply),page_size=0",
             "list(Reply),page_size=21",
             "read(Reply),page_size=3",
+            "read(Reply),preview",
+            "create(Reply),preview",
+            "list(Reply),preview(other=all_replies)",
             "create(Reply),order=created_asc",
             "list(Reply),page_size=3,page_size=4",
         ] {

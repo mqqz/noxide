@@ -115,6 +115,8 @@ jobs:
         run: |
           cargo test -p noxide-host --features query-metrics --locked --offline --lib sqlite_account_bindings_and_full_pages -- --nocapture
           cargo test -p noxide-host --features query-metrics --locked --offline --lib postgres_account_bindings_and_full_pages -- --ignored --nocapture
+          cargo test -p noxide-host --features query-metrics --locked --offline --lib sqlite_filtered_account_and_single_lists -- --nocapture
+          cargo test -p noxide-host --features query-metrics --locked --offline --lib postgres_filtered_account_and_single_lists -- --ignored --nocapture
       - name: Check documentation
         env:
           RUSTDOCFLAGS: -D warnings
@@ -189,6 +191,10 @@ jobs:
             "$RUNNER_TEMP/noxide-ci/sdk/private_notes.component.wasm"
           echo "NOXIDE_TEST_COMPONENT=$RUNNER_TEMP/noxide-ci/sdk/private_notes.component.wasm" >> "$GITHUB_ENV"
           echo "NOXIDE_TEST_MANIFEST=$RUNNER_TEMP/noxide-ci/sdk/manifest.json" >> "$GITHUB_ENV"
+      - name: Check query contracts and typed filters
+        run: |
+          python3 tools/test_query_contracts.py
+          python3 tools/test_query_filters.py
       - name: Test typed SDK and compile failures locally
         run: |
           python3 tools/test_sdk_api.py \

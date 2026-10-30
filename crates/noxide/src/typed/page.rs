@@ -130,6 +130,7 @@ mod tests {
         link.end();
         content.link(
             RouteRef {
+                params: Default::default(),
                 route: 1,
                 target: None,
             },

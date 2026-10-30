@@ -1,6 +1,16 @@
 use super::*;
 
 impl Database {
+    /// Reconcile operation-derived indexes under the operator maintenance lock.
+    pub async fn reconcile_query_indexes(&self, target: &noxide_protocol::Manifest) -> Result<()> {
+        crate::manifest::validate(target)?;
+        let mut tx = self.begin_schema().await?;
+        tx.check_storage().await?;
+        tx.bind_schema_catalog(target).await?;
+        tx.reconcile_query_indexes(target).await?;
+        tx.commit().await
+    }
+
     /// Rehearse the full transition with real data, then roll back every write.
     pub async fn schema_check(
         &self,
@@ -133,6 +143,11 @@ impl Transaction {
     }
 
     pub(crate) async fn bind_schema(&mut self, manifest: &noxide_protocol::Manifest) -> Result<()> {
+        self.bind_schema_catalog(manifest).await?;
+        self.validate_query_indexes(manifest).await
+    }
+
+    async fn bind_schema_catalog(&mut self, manifest: &noxide_protocol::Manifest) -> Result<()> {
         if self.schema_definition().await?.is_some() {
             self.validate_account_indexes(&manifest.resources).await?;
             return self.check_schema(manifest).await;
@@ -160,6 +175,62 @@ impl Transaction {
         }
         self.parent_indexes(&manifest.resources).await?;
         self.store_schema(&manifest.resources, &[]).await
+    }
+
+    async fn query_indexes(&mut self) -> Result<Vec<String>> {
+        let sql = match self.backend {
+            Backend::Sqlite(_) => {
+                "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='nx_records' AND name GLOB 'nx_q_*'"
+            }
+            Backend::Postgres(_) => {
+                "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND tablename='nx_records' AND left(indexname,5)='nx_q_'"
+            }
+        };
+        Ok(self
+            .fetch::<1>(sql, &[])
+            .await?
+            .into_iter()
+            .map(|[name]| name)
+            .collect())
+    }
+    async fn validate_query_indexes(&mut self, manifest: &noxide_protocol::Manifest) -> Result<()> {
+        let existing = self.query_indexes().await?;
+        for requirement in crate::query_plan::required_indexes(manifest)? {
+            let storage = self.storage_key(&requirement.resource).await?;
+            let name = requirement.name(storage);
+            ensure!(
+                existing.contains(&name),
+                "missing derived index {name} for resource {} queries {:?}; run noxide schema indexes CONFIG",
+                requirement.resource,
+                requirement.queries
+            );
+        }
+        Ok(())
+    }
+    async fn reconcile_query_indexes(
+        &mut self,
+        manifest: &noxide_protocol::Manifest,
+    ) -> Result<()> {
+        let existing = self.query_indexes().await?;
+        let mut required = std::collections::BTreeSet::new();
+        for requirement in crate::query_plan::required_indexes(manifest)? {
+            let storage = self.storage_key(&requirement.resource).await?;
+            let name = requirement.name(storage);
+            if !existing.contains(&name) {
+                self.execute(&requirement.sql(self, storage)?, &[]).await?;
+            }
+            required.insert(name);
+        }
+        for name in existing {
+            ensure!(
+                name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'),
+                "invalid derived index name"
+            );
+            if !required.contains(&name) {
+                self.execute(&format!("DROP INDEX {name}"), &[]).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn validate_account_indexes(
@@ -201,14 +272,14 @@ impl Transaction {
                 .iter()
                 .filter(|f| matches!(f.kind, noxide_protocol::FieldKind::Account { .. }))
             {
-                let expression = self.parent_expression(&field.name)?;
+                let expression = self.field_expression(&field.name)?;
                 for (suffix, columns) in [("i", ""), ("t", "tenant,")] {
                     self.execute(&format!("CREATE INDEX nx_a_{storage:x}_{}_{suffix} ON nx_records(resource, ({expression}), {columns}created_seq) WHERE resource={storage}", field.name), &[]).await?;
                 }
             }
             if let Some(field) = crate::manifest::parent_field(resource) {
                 let storage = self.storage_key(&resource.name).await?;
-                let expression = self.parent_expression(&field.name)?;
+                let expression = self.field_expression(&field.name)?;
                 self.execute(&format!("CREATE INDEX nx_parent_{storage} ON nx_records(resource, ({expression}), created_seq) WHERE resource={storage}"), &[]).await?;
                 for column in ["owner", "tenant"] {
                     self.execute(&format!("CREATE INDEX nx_parent_{storage}_{column} ON nx_records(resource, ({expression}), {column}, created_seq) WHERE resource={storage}"),&[]).await?;
@@ -229,7 +300,7 @@ impl Transaction {
                 };
                 let child_storage = self.storage_key(&child.name).await?;
                 let parent_storage = self.storage_key(parent).await?;
-                let expression = self.parent_expression(&field.name)?;
+                let expression = self.field_expression(&field.name)?;
                 let missing = self.fetch::<1>(&format!("SELECT CAST(child.id AS TEXT) FROM (SELECT id,{expression} AS parent_id FROM nx_records WHERE resource=$1) child WHERE NOT EXISTS (SELECT 1 FROM nx_records parent WHERE parent.resource=$2 AND CAST(parent.id AS TEXT)=child.parent_id) LIMIT 1"), &[child_storage.into(), parent_storage.into()]).await?;
                 ensure!(missing.is_empty(), "migration would orphan a child record");
             }
@@ -330,6 +401,13 @@ impl Transaction {
         );
         ensure!(history.len() < 128, "migration history limit");
         schema::transition(&source, &target.resources, &migration.operations)?;
+        for name in self.query_indexes().await? {
+            ensure!(
+                name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'),
+                "invalid derived index name"
+            );
+            self.execute(&format!("DROP INDEX {name}"), &[]).await?;
+        }
         for resource in &source {
             let storage = self.storage_key(&resource.name).await?;
             for field in resource
@@ -468,6 +546,7 @@ impl Transaction {
         self.validate_stored_resources(&target.resources).await?;
         self.validate_parents(&target.resources).await?;
         self.parent_indexes(&target.resources).await?;
+        self.reconcile_query_indexes(target).await?;
         history.push(schema::AppliedMigration {
             from: migration.from.clone(),
             to: migration.to.clone(),

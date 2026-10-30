@@ -215,6 +215,7 @@ impl Application {
             Ok(Some(render::resolve(
                 &self.manifest,
                 &RouteRef {
+                    params: Default::default(),
                     route: destination.route,
                     target: Some(destination.id),
                 },
@@ -403,6 +404,8 @@ mod tests {
         m.routes[2].operations = vec![6, 1];
         for (id, kind) in [(4, OperationKind::Update), (5, OperationKind::Delete)] {
             m.operations.push(Operation {
+                filter: Vec::new(),
+                disclose: Vec::new(),
                 list: None,
                 id,
                 resource: 1,

@@ -19,6 +19,7 @@ pub struct RenderContext<'a> {
     pub forms: BTreeMap<u32, Option<FormCredentials>>,
     pub logout_csrf: Option<String>,
     pub next_page: Option<String>,
+    pub preview_links: Vec<RouteRef>,
 }
 
 impl RenderContext<'_> {
@@ -29,6 +30,7 @@ impl RenderContext<'_> {
             forms: BTreeMap::new(),
             logout_csrf: None,
             next_page: None,
+            preview_links: Vec::new(),
         }
     }
 }
@@ -150,7 +152,9 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
         ResponseIntent::Rejected { .. } => anyhow::bail!("rejection requires action context"),
     };
     ensure!(
-        doc.title.len() <= 128 && doc.nodes.len() <= MAX_NODES,
+        doc.title.len() <= 128
+            && doc.nodes.len() <= MAX_NODES
+            && serde_json::to_vec(doc)?.len() <= MAX_IR_BYTES,
         "document limit"
     );
     let mut out = Buffer(String::new());
@@ -295,6 +299,15 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
         stack.is_empty() && link_depth.is_none(),
         "unclosed document"
     );
+    for reference in &context.preview_links {
+        let manifest = context
+            .manifest
+            .ok_or_else(|| anyhow::anyhow!("preview link requires manifest"))?;
+        let path = crate::routing::resolve(manifest, reference)?;
+        out.push("<nav aria-label=\"More records\"><a href=\"")?;
+        out.text(&path)?;
+        out.push("\">See all</a></nav>")?;
+    }
     if let Some(next) = &context.next_page {
         out.push("<nav aria-label=\"Pages\"><a href=\"")?;
         out.text(next)?;
@@ -456,6 +469,7 @@ pub(crate) fn unavailable(presentation: &crate::Presentation, m: &Manifest) -> R
                 Instruction::Text("This record is no longer available for this action.".into()),
                 Instruction::Link {
                     destination: RouteRef {
+                        params: Default::default(),
                         route: m
                             .routes
                             .iter()
@@ -676,6 +690,7 @@ mod tests {
 
     fn record_route(path: &str) -> Route {
         Route {
+            params: Vec::new(),
             access: noxide_protocol::Access::Authenticated,
             id: 1,
             path: path.into(),
@@ -707,6 +722,7 @@ mod tests {
             resolve(
                 &manifest,
                 &RouteRef {
+                    params: Default::default(),
                     route: 1,
                     target: Some(81)
                 }
@@ -718,6 +734,7 @@ mod tests {
             resolve(
                 &manifest,
                 &RouteRef {
+                    params: Default::default(),
                     route: 1,
                     target: None
                 }
@@ -797,6 +814,7 @@ mod link_tests {
         };
         let begin = Instruction::BeginLink {
             destination: RouteRef {
+                params: Default::default(),
                 route: 1,
                 target: None,
             },

@@ -15,6 +15,155 @@ pub fn digest(manifest: &Manifest) -> Result<[u8; 32]> {
     Ok(Sha256::digest(serde_json::to_vec(manifest)?).into())
 }
 
+fn validate_selection(m: &Manifest, op: &Operation) -> Result<()> {
+    ensure!(
+        op.filter.is_empty() || op.kind == OperationKind::List,
+        "filter requires list"
+    );
+    ensure!(
+        op.disclose.is_empty() || (op.kind == OperationKind::List && is_public(op)),
+        "disclose requires public list"
+    );
+    ensure!(op.filter.len() <= 4, "filter limit");
+    let resource = resource(m, op.resource)?;
+    let mut filtered = BTreeSet::new();
+    let mut inferred = BTreeSet::new();
+    for condition in &op.filter {
+        ensure!(
+            filtered.insert(condition.field.as_str()),
+            "duplicate filter field"
+        );
+        let field = resource
+            .fields
+            .iter()
+            .find(|f| f.name == condition.field)
+            .ok_or_else(|| anyhow::anyhow!("unknown filter field"))?;
+        ensure!(
+            matches!(field.kind, FieldKind::Boolean | FieldKind::Choice { .. }),
+            "invalid filter kind"
+        );
+        match &condition.equals {
+            Operand::Literal(value) => ensure!(
+                field.canonical(value).is_ok_and(|v| v == *value),
+                "noncanonical filter value"
+            ),
+            Operand::Param(name) => ensure!(
+                identifier(name) && name != "cursor",
+                "invalid filter parameter"
+            ),
+        }
+        ensure!(
+            op.visibility
+                .as_ref()
+                .is_none_or(|v| v.field != condition.field),
+            "filter duplicates visibility"
+        );
+        if is_public(op)
+            && op
+                .fields
+                .as_ref()
+                .is_none_or(|p| !p.contains(&condition.field))
+        {
+            inferred.insert(condition.field.as_str());
+        }
+    }
+    let disclosed: BTreeSet<_> = op.disclose.iter().map(String::as_str).collect();
+    ensure!(
+        disclosed.len() == op.disclose.len() && disclosed == inferred,
+        "invalid filter disclosure"
+    );
+    Ok(())
+}
+
+pub(crate) fn parameter_fields<'a>(
+    m: &'a Manifest,
+    route: &Route,
+) -> Result<std::collections::BTreeMap<&'a str, &'a TextField>> {
+    let mut fields: std::collections::BTreeMap<&str, &TextField> =
+        std::collections::BTreeMap::new();
+    for id in &route.operations {
+        let op = operation(m, *id)?;
+        let resource = resource(m, op.resource)?;
+        for condition in &op.filter {
+            if let Operand::Param(name) = &condition.equals {
+                ensure!(route.params.contains(name), "undeclared route parameter");
+                let field = resource
+                    .fields
+                    .iter()
+                    .find(|f| f.name == condition.field)
+                    .ok_or_else(|| anyhow::anyhow!("unknown filter field"))?;
+                if let Some(previous) = fields.get(name.as_str()) {
+                    ensure!(previous.kind == field.kind, "inconsistent parameter kind");
+                    if !previous.optional {
+                        continue;
+                    }
+                }
+                fields.insert(name.as_str(), field);
+            }
+        }
+    }
+    Ok(fields)
+}
+fn validate_route_params(m: &Manifest, route: &Route) -> Result<()> {
+    ensure!(
+        route.path != "/" || route.params.is_empty(),
+        "index route cannot declare parameters"
+    );
+    let names: BTreeSet<_> = route.params.iter().collect();
+    ensure!(
+        route.params.len() <= 4
+            && names.len() == route.params.len()
+            && names
+                .iter()
+                .all(|name| identifier(name) && name.as_str() != "cursor"),
+        "invalid route parameters"
+    );
+    let fields = parameter_fields(m, route)?;
+    ensure!(fields.len() == route.params.len(), "unused route parameter");
+    Ok(())
+}
+pub(crate) fn validate_params(m: &Manifest, route: &Route, values: &Fields) -> Result<()> {
+    ensure!(
+        values.len() == route.params.len()
+            && route.params.iter().all(|name| values.contains_key(name)),
+        "invalid route parameters"
+    );
+    for id in &route.operations {
+        let op = operation(m, *id)?;
+        let resource = resource(m, op.resource)?;
+        for condition in &op.filter {
+            if let Operand::Param(name) = &condition.equals {
+                let field = resource
+                    .fields
+                    .iter()
+                    .find(|f| f.name == condition.field)
+                    .ok_or_else(|| anyhow::anyhow!("unknown filter field"))?;
+                let value = values
+                    .get(name)
+                    .ok_or_else(|| anyhow::anyhow!("missing route parameter"))?;
+                ensure!(
+                    field.canonical(value).is_ok_and(|v| v == *value),
+                    "invalid route parameter"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn is_preview(op: &Operation) -> bool {
+    op.list.as_ref().is_some_and(|s| s.preview.is_some())
+}
+fn selection_equal(left: &Operation, right: &Operation) -> bool {
+    let fields = |op: &Operation| {
+        op.filter
+            .iter()
+            .map(|c| (c.field.clone(), c.equals.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    fields(left) == fields(right)
+}
+
 fn unique(ids: impl Iterator<Item = u32>) -> Result<()> {
     let mut seen = BTreeSet::new();
     for id in ids {
@@ -163,6 +312,10 @@ pub fn validate(m: &Manifest) -> Result<()> {
         );
     }
     for op in &m.operations {
+        validate_selection(m, op)?;
+        if op.kind == OperationKind::List {
+            crate::query_plan::compile(m, op)?;
+        }
         ensure!(
             op.list
                 .as_ref()
@@ -258,7 +411,9 @@ pub fn validate(m: &Manifest) -> Result<()> {
         }
     }
     let mut paths = BTreeSet::new();
+    crate::query_plan::required_indexes(m)?;
     for r in &m.routes {
+        validate_route_params(m, r)?;
         crate::render::validate_path(r)?;
         ensure!(paths.insert(&r.path), "duplicate route path");
         for other in &m.routes {
@@ -280,14 +435,67 @@ pub fn validate(m: &Manifest) -> Result<()> {
                 );
             }
         }
+        let lists: Vec<_> = r
+            .operations
+            .iter()
+            .map(|id| operation(m, *id))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|op| op.kind == OperationKind::List)
+            .collect();
+        ensure!(lists.len() <= 4, "route list limit");
         ensure!(
-            r.operations
-                .iter()
-                .filter(|id| operation(m, **id).is_ok_and(|op| op.kind == OperationKind::List))
-                .count()
-                <= 1,
-            "a list route has one cursor scope"
+            lists.iter().filter(|op| !is_preview(op)).count() <= 1,
+            "route paginated list limit"
         );
+        ensure!(
+            lists
+                .iter()
+                .map(|op| op.list.as_ref().map_or(3, |s| s.page_size) as usize)
+                .sum::<usize>()
+                <= 40,
+            "route list row budget"
+        );
+        for op in &lists {
+            if let Some(see_all) = op
+                .list
+                .as_ref()
+                .and_then(|s| s.preview.as_ref())
+                .and_then(|p| p.see_all)
+            {
+                let destination = route(m, see_all)?;
+                ensure!(
+                    destination
+                        .params
+                        .iter()
+                        .all(|name| r.params.contains(name)),
+                    "preview destination parameters"
+                );
+                let source_fields = parameter_fields(m, r)?;
+                for (name, target) in parameter_fields(m, destination)? {
+                    let source = source_fields
+                        .get(name)
+                        .ok_or_else(|| anyhow::anyhow!("preview destination parameters"))?;
+                    ensure!(
+                        source.kind == target.kind && (!source.optional || target.optional),
+                        "incompatible preview destination parameter"
+                    );
+                }
+                ensure!(
+                    destination
+                        .operations
+                        .iter()
+                        .filter_map(|id| operation(m, *id).ok())
+                        .any(|full| full.kind == OperationKind::List
+                            && !is_preview(full)
+                            && full.resource == op.resource
+                            && full.policy == op.policy
+                            && full.visibility == op.visibility
+                            && selection_equal(full, op)),
+                    "invalid preview destination"
+                );
+            }
+        }
         for id in &r.operations {
             let op = operation(m, *id)?;
             let parent = parent_resource(m, op.resource)?;
@@ -402,6 +610,10 @@ pub fn validate(m: &Manifest) -> Result<()> {
         }
         validate_layout(m, a)?;
         let r = route(m, a.redirect.route())?;
+        ensure!(
+            r.params.is_empty(),
+            "mutation redirect requires an unparameterized route"
+        );
         if matches!(a.redirect, Redirect::Parent { .. }) {
             ensure!(
                 r.operations
@@ -590,6 +802,104 @@ pub(crate) fn anonymous_action(op: &Operation) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn host_rejects_forged_selection_and_disclosure() {
+        let mut m = crate::parent_tests::declarations();
+        m.resources[0]
+            .fields
+            .push(field("archived", FieldKind::Boolean, false));
+        m.actions[0].fields.push("archived".into());
+        m.operations[0].filter = vec![Condition {
+            field: "archived".into(),
+            equals: Operand::Literal("false".into()),
+        }];
+        m.operations[0].disclose = vec!["archived".into()];
+        validate(&m).unwrap();
+        let rejects = |bad: Manifest| assert!(validate(&bad).is_err());
+        let mut bad = m.clone();
+        bad.operations[1].filter = bad.operations[0].filter.clone();
+        rejects(bad);
+        let mut bad = m.clone();
+        bad.operations[1].disclose = vec!["archived".into()];
+        rejects(bad);
+        let mut bad = m.clone();
+        bad.operations[0].filter = vec![m.operations[0].filter[0].clone(); 5];
+        rejects(bad);
+        let mut bad = m.clone();
+        bad.operations[0]
+            .filter
+            .push(m.operations[0].filter[0].clone());
+        rejects(bad);
+        for name in ["missing", "body", "thread", "published"] {
+            let mut bad = m.clone();
+            bad.operations[0].filter[0].field = name.into();
+            bad.operations[0].disclose = vec![name.into()];
+            rejects(bad);
+        }
+        for value in ["False", "0", " true "] {
+            let mut bad = m.clone();
+            bad.operations[0].filter[0].equals = Operand::Literal(value.into());
+            rejects(bad);
+        }
+        for kind in [
+            FieldKind::Integer {
+                min: None,
+                max: None,
+            },
+            FieldKind::Account {
+                scope: AccountScope::SameTenant,
+            },
+        ] {
+            let mut bad = m.clone();
+            bad.resources[0].fields.last_mut().unwrap().kind = kind;
+            rejects(bad);
+        }
+        let mut bad = m.clone();
+        bad.operations[0].disclose.clear();
+        rejects(bad);
+        let mut bad = m.clone();
+        bad.operations[0].disclose.push("body".into());
+        rejects(bad);
+        let mut bad = m.clone();
+        bad.operations[0].disclose.push("archived".into());
+        rejects(bad);
+        let mut bad = m.clone();
+        bad.operations[0]
+            .fields
+            .as_mut()
+            .unwrap()
+            .push("archived".into());
+        rejects(bad);
+        let mut bad = m.clone();
+        bad.operations[0].policy.any = vec![vec![Predicate::Owner]];
+        bad.operations[0].visibility = None;
+        bad.operations[0].fields = None;
+        rejects(bad);
+        let mut selected = m.operations[0].clone();
+        selected.filter[0].equals = Operand::Literal("true".into());
+        let mut changed = m.clone();
+        changed.operations[0] = selected;
+        assert_ne!(digest(&m).unwrap(), digest(&changed).unwrap());
+    }
+
+    #[test]
+    fn query_contract_bytes_and_digests_are_unchanged() {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/queries");
+        for line in include_str!("../../../tools/fixtures/queries/digests.txt").lines() {
+            let (name, expected) = line.split_once(' ').unwrap();
+            let bytes = std::fs::read(root.join(name)).unwrap();
+            let manifest = parse(&bytes).unwrap();
+            assert_eq!(serde_json::to_vec(&manifest).unwrap(), bytes, "{name}");
+            assert_eq!(
+                URL_SAFE_NO_PAD.encode(digest(&manifest).unwrap()),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn private_notes_approval_digest_is_unchanged() {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -890,6 +1200,7 @@ mod pagination_tests {
     fn host_rejects_forged_list_settings_and_contract_binds_page_size() {
         let mut m = crate::test_support::manifest();
         m.operations[0].list = Some(ListSettings {
+            preview: None,
             order: ListOrder::CreatedAsc,
             page_size: 20,
         });
@@ -903,6 +1214,7 @@ mod pagination_tests {
         }
         m.operations[0].list = None;
         m.operations[1].list = Some(ListSettings {
+            preview: None,
             order: ListOrder::CreatedAsc,
             page_size: 3,
         });

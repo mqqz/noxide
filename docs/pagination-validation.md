@@ -77,3 +77,119 @@ to a disposable local cluster with `CREATE DATABASE` permission. Use a backend
 name prefix in the test filter to run one backend only. Benchmark databases live
 in temporary directories or uniquely named PostgreSQL databases; dispose of the
 cluster after collecting evidence.
+
+## Compiled list compatibility
+
+Increment 1 keeps the two existing execution paths and cursor contract. Local
+validation on 2026-10-30 ran the workspace suite with ignored PostgreSQL tests
+(excluding crash-worker and browser entry points), the instrumented SQLite host
+suite, and the real private-inbox HTTP/component fixture. The exact serialized
+contracts and cursor-scope fixtures remained unchanged. The inbox measurement
+still checks 21 index visits per exact scan on its 100,000-unrelated-record
+fixture; this is a dataset measurement, not a latency or arbitrary-policy bound.
+
+Increment 2 adds descending account pagination and descending parent-scoped byte
+prefix/live-insertion cases on SQLite and PostgreSQL. Ordered parent owner/tenant
+plan checks exercise both directions, including PostgreSQL generic prepared
+plans. On the same inbox dataset, descending exact scans also measured 21 visits
+on each backend. The updated newest-first inbox and the existing forum HTTP
+fixtures passed locally. The original inbox source is retained beside its golden
+manifest so the compatibility producer stays fixed despite the deliberate example
+order change.
+
+## Literal filter baseline
+
+Before derived indexes, the increment 3 instrumented fixture measured 210 index
+visits on both SQLite and PostgreSQL to return 21 owner candidates from 1,000
+caller records with one in ten matching `archived = false`. The fixture also has
+one matching unauthorized record. These are baseline measurements, not asserted
+performance limits. The separate unfiltered inbox fixture retains its 100,000
+unrelated records and 21-visit assertion. Filter regressions cover both orders,
+exact and residual account policies, read/list authorization equivalence, public
+projection/disclosure, parent visibility and records changing selection between
+pages. Workspace tests with PostgreSQL and the instrumented SQLite suite passed
+locally on 2026-10-30; SDK positive/negative and compatibility producers passed.
+
+## Derived filter indexes
+
+On 2026-10-30, the filtered fixture extended the baseline to 1,000 caller records
+(one in ten matching) plus 100,000 unrelated records. Owner exact scans measured
+21 visits on SQLite and PostgreSQL with derived indexes, compared with the earlier
+210-visit baseline without them. Both-direction SQLite plans and PostgreSQL generic
+prepared plans require derived owner, account and account-plus-tenant indexes with
+no sort; public parent selection also checks its derived index in both orders.
+Missing-index refusal, idempotent reconciliation, removal without schema migration,
+and the ninth-shape admission rejection have regressions. Existing contracts add
+no derived indexes.
+
+The separate single-path `any(owner, role("moderator"))` filtered benchmark on this
+dataset measured 100,021 visits for an ungranted moderator and 21 for a granted
+moderator on **both** databases. It uses one SQL policy disjunction, not the account
+merge path. The ungranted case is a material sparse-authorization cost: an available
+ordered index does not imply bounded index visits. This evidence supports the
+conditional increment 7 design discussion after the first six increments; no new
+merge policy classification is introduced here. Request deadlines remain the bound.
+
+The broad PostgreSQL suite exhausted the disposable cluster's default predicate
+lock capacity. The successful rerun uses 512 connections,
+`max_pred_locks_per_transaction=512`, and `max_locks_per_transaction=256`.
+These are local test-cluster settings, not production sizing recommendations.
+
+## Host-bound parameter validation
+
+Increment 5 runs the filtered owner/account cases with both literal and parameter
+operands, in both orders on SQLite and PostgreSQL. Forged route declarations and
+links cover required names, duplicate/reserved/unused names, kind disagreements,
+missing disclosure and target validation. A router test uses a signed session and
+an unusable database path: invalid parameter inputs still return the unknown-route
+404 before session/database lookup. Existing session admission remains enforced
+for valid requests. Empty parameter maps preserve all original scope goldens;
+nonempty scopes bind canonical values and account identity.
+
+The category example was built and exercised through real HTTP for canonical
+links, pagination, cross-value cursor rejection, and matching 404 responses for
+invalid inputs. The full workspace suite with PostgreSQL, instrumented SQLite
+suite, compatibility producers and SDK compile cases passed on 2026-10-30.
+
+## Several bounded lists
+
+Increment 6 validation on 2026-10-30 covers four declared lists totaling 40 rows: a
+paginated account list, an exact account preview, a single-path owner preview and
+a residual account preview. SQLite and PostgreSQL exercise both orders and both
+invocation orders within a two-second transaction deadline on 300 records. The
+residual preview is empty with `truncated = true`; row and maximum-field byte
+prefixes also report truncation. Shared serialized results stay below 131,072
+bytes, pending pagination retains its allowance, and repeated invocations and an
+exhausted list-work budget fail. Rendering all maximum-sized fields is rejected
+by the independent Document IR byte bound.
+
+The same fixture applies a field-add migration that creates derived indexes,
+then a field rename that drops and replaces them; activation checks the new
+requirements and confirms the old names are gone on both databases. Final audit
+also added the catalog-derived constant resource predicate to collection scans
+and look-ahead, allowing PostgreSQL generic plans to prove partial-index scope.
+Policy, visibility, parent scope and selection remain separate SQL conjunctions.
+
+The full workspace suite (including opt-in PostgreSQL tests, excluding the
+internal crash-worker entry point and Firefox fixtures), Clippy, workspace and
+example formatting, instrumented SQLite suite and PostgreSQL account metrics
+passed. The final workspace and instrumented host runs used
+`RUST_TEST_THREADS=4`; a previous highly parallel run let an existing registration
+rate bucket refill before its exhaustion assertion. The cluster settings above
+were retained. The SDK suite passed 36 compile-pass and 41 compile-fail cases,
+including the current query example as a WASM fixture. All 16 original manifest
+byte/digest fixtures and three original cursor-scope strings remain unchanged.
+Python build-input/local-runner checks passed (23 and four tests).
+
+Real HTTP checks passed for category parameters, mixed pagination/previews,
+preview-only cursor ignoring, canonical see-all links and complete-preview link
+omission. The inbox HTTP/component fixture passed on SQLite and PostgreSQL; the
+forum HTTP fixture passed on SQLite. Firefox/NoJS browser fixtures were not run
+locally for these increments. CI now runs the query compatibility/native filter
+checks, advanced SDK cases and selective-filter index metrics.
+
+Index reconciliation deliberately uses transactional exclusive maintenance on
+both providers; online PostgreSQL concurrent index creation remains outside this
+implementation. The multi-rule measurement above remains evidence for a separate
+increment 7 design; merge classification still changes paths only for policies
+containing `principal_is`. No deployment or external publication was performed.

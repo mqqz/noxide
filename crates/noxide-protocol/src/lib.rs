@@ -11,6 +11,7 @@ pub const MAX_OUTPUT_BYTES: usize = 262_144;
 pub const MAX_INPUT_BYTES: usize = 32_768;
 pub const MAX_REQUEST_BYTES: usize = 65_536;
 pub const MAX_RESULT_BYTES: usize = 65_536;
+pub const MAX_LIST_RESULT_BYTES: usize = 131_072;
 pub const MAX_MANIFEST_BYTES: usize = 32_768;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -37,6 +38,8 @@ pub enum Container {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RouteRef {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
     pub route: u32,
     pub target: Option<u64>,
 }
@@ -253,6 +256,10 @@ pub enum OperationKind {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filter: Vec<Condition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disclose: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list: Option<ListSettings>,
     pub id: u32,
@@ -268,13 +275,42 @@ pub struct Operation {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ListSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<Preview>,
     pub order: ListOrder,
     pub page_size: u8,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Preview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub see_all: Option<u32>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewResult {
+    pub items: Vec<Record>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Condition {
+    pub field: String,
+    pub equals: Operand,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Operand {
+    Literal(String),
+    Param(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ListOrder {
     CreatedAsc,
+    CreatedDesc,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -301,6 +337,8 @@ impl Access {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Route {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<String>,
     pub id: u32,
     pub path: String,
     /// A record route addresses exactly one declared resource.
@@ -377,6 +415,8 @@ pub enum RequestKind {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RequestView {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
     pub version: u32,
     pub kind: RequestKind,
     pub target: Option<u64>,
