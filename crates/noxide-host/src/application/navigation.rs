@@ -1,8 +1,8 @@
 //! Mutation response preparation and bounded post-commit navigation.
 //!
-//! Submission owns canonicalization, authorization, mutation and atomic receipt
-//! persistence. `prepare_response` may prepare recovery/handover data before
-//! commitment; callers deliver it only after commit confirmation or a verified
+//! Action owns authorization, mutation and atomic receipt persistence; submission
+//! owns canonicalization and the web response binding. `prepare_response` may
+//! prepare recovery/handover data before commitment; callers deliver it only after commit confirmation or a verified
 //! committed receipt. An unknown commit outcome stays in receipt recovery.
 //! `finish_navigation` resolves presentation after commitment and cannot undo the write.
 //! Parent destination checks use fresh read authority and the captured incarnation;
