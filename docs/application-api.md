@@ -497,6 +497,9 @@ change preserves access.
 
 ## Parent relationships and scoped pagination
 
+The [declarative query design](architecture/queries.md) describes planned selection,
+ordering and parameter extensions, with compatibility and execution constraints.
+
 A child resource can declare one required, immutable parent ID:
 
 ```rust
@@ -654,6 +657,9 @@ The [architecture layers](architecture/layers.md) describe explicit SDK declarat
 optional convenience lowering, and independent host enforcement.
 
 ## Account references and principal policies
+
+The [declarative query design](architecture/queries.md#two-existing-execution-paths)
+records how query extensions preserve account-list execution and authorization.
 
 `AccountId` is an opaque identity, distinct from a login name. Parsing checks its
 canonical encoding only; it does not grant authority or prove account eligibility.

@@ -1,0 +1,16 @@
+example-forum.json UOWFLrTYFpVQW05Cyvg-2jPLKkjeZTC1OlKqS-cQ0FU
+example-private-inbox.json SuTlc32dnMJK6FnJGByYgdgFyCWWu9Mc1LKNOOiOSW4
+example-private-notes.json 1W3N2rgaNuZIFY6OzFQgfOLkmnxdBHJCej52XIJ8N1o
+example-public-articles.json ZXqsLLa7L51HJh8qKk9bvgNfQauc1eyOwRwXUUWAOVw
+example-task-board.json S0VqN2S5_W1MFcewli4-yHQL8LVKJW-Vj4DmySdvmmg
+sdk-forum-explicit.json td3yG9UAzgzskyO4-HJYDFX9_1PaI3Pi_moMc6B1Hgs
+sdk-forum-layout-explicit.json 6rFMGd50D6T8nPU_AmZdUGYMf7ilQZIu4VvfAlduakk
+sdk-forum-simple.json td3yG9UAzgzskyO4-HJYDFX9_1PaI3Pi_moMc6B1Hgs
+sdk-policy-board-explicit.json bhks8oxqA9j2s50jUkdIv9EyggPtRpydeYIIdcoTNAg
+sdk-policy-board-simple.json bhks8oxqA9j2s50jUkdIv9EyggPtRpydeYIIdcoTNAg
+sdk-private-notes-explicit.json yTHjgAVMinudbn2DS9Mo0sRGeEgEwwCRz3L0Z9-DYC8
+sdk-public-articles-explicit.json tGY1d0Bnq2gGhoy0BKr_6r0USuAAYe9JvOItkWEMz_c
+sdk-repeated-explicit.json k9bBKUvfnStHh2OeZzuL3jta0kI-4ETpsF9zdHqtrUM
+sdk-repeated-simple.json k9bBKUvfnStHh2OeZzuL3jta0kI-4ETpsF9zdHqtrUM
+sdk-task-board-advanced.json lZsF9rDKYmDvP7ZEtmbqL2KFZU7vAAugrD3Xm8R0icc
+sdk-task-board-explicit.json S0VqN2S5_W1MFcewli4-yHQL8LVKJW-Vj4DmySdvmmg

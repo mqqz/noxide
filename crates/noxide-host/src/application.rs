@@ -26,6 +26,77 @@ use std::{
 };
 use tokio::time::{Instant, timeout_at};
 
+fn cursor_scope(
+    contract: &str,
+    deployment: &str,
+    route: u32,
+    target: Option<u64>,
+    parent_incarnation: Option<String>,
+    list: Option<&Operation>,
+    subject: &str,
+) -> serde_json::Result<String> {
+    serde_json::to_string(&(
+        contract,
+        deployment,
+        route,
+        target,
+        parent_incarnation,
+        list,
+        subject,
+    ))
+}
+
+#[cfg(test)]
+mod query_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_scope_strings_are_unchanged() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/queries");
+        for (name, parented) in [
+            ("private-notes", false),
+            ("forum", true),
+            ("private-inbox", false),
+        ] {
+            let manifest =
+                manifest::parse(&std::fs::read(root.join(format!("example-{name}.json"))).unwrap())
+                    .unwrap();
+            let list = manifest
+                .operations
+                .iter()
+                .find(|op| {
+                    op.kind == OperationKind::List
+                        && manifest::parent_resource(&manifest, op.resource)
+                            .unwrap()
+                            .is_some()
+                            == parented
+                })
+                .unwrap();
+            let route = manifest
+                .routes
+                .iter()
+                .find(|r| r.operations.contains(&list.id))
+                .unwrap();
+            let scope = cursor_scope(
+                "contract",
+                "deployment",
+                route.id,
+                parented.then_some(42),
+                parented.then(|| "parent-incarnation".into()),
+                Some(list),
+                "account-id",
+            )
+            .unwrap();
+            assert_eq!(
+                scope,
+                std::fs::read_to_string(root.join(format!("{name}.scope"))).unwrap(),
+                "{name}"
+            );
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum RequestError {
     Authentication,
@@ -1233,7 +1304,7 @@ impl Application {
                 } else {None}
             } else {None};
             let subject=principal.user().map(|u|u.id.as_str()).unwrap_or("");
-            let scope=serde_json::to_string(&(&self.contract,&self.deployment,route,target,parent_incarnation,list,subject)).map_err(|_|RequestError::Rejected)?;
+            let scope=cursor_scope(&self.contract,&self.deployment,route,target,parent_incarnation,list,subject).map_err(|_|RequestError::Rejected)?;
             // A fixed-size digest binds every approved setting without exposing it in URLs.
             let scope=URL_SAFE_NO_PAD.encode(Sha256::digest(scope.as_bytes()));
             let cursor = cursor.map(|encoded| {

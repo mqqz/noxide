@@ -71,3 +71,5 @@ existing authority model.
 
 The [refactor validation record](refactor-validation.md) lists executed commands
 and checks that still require CI infrastructure.
+
+See [declarative queries](queries.md) for the staged query design and compatibility contract.
