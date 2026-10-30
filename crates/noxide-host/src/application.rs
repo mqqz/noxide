@@ -30,7 +30,7 @@ fn cursor_scope(
     identity: (&str, &str),
     route: u32,
     target: Option<u64>,
-    parent_incarnation: Option<String>,
+    scope_incarnation: Option<String>,
     list: Option<&Operation>,
     subject: &str,
     params: &Fields,
@@ -42,7 +42,7 @@ fn cursor_scope(
             deployment,
             route,
             target,
-            parent_incarnation,
+            scope_incarnation,
             list,
             subject,
         ))
@@ -52,7 +52,7 @@ fn cursor_scope(
             deployment,
             route,
             target,
-            parent_incarnation,
+            scope_incarnation,
             list,
             subject,
             params,
@@ -107,7 +107,7 @@ mod query_compatibility_tests {
     }
 
     #[test]
-    fn cursor_scope_strings_are_unchanged() {
+    fn cursor_scope_strings_match_recorded_fixtures() {
         let root =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/queries");
         for (name, parented) in [
@@ -123,7 +123,7 @@ mod query_compatibility_tests {
                 .iter()
                 .find(|op| {
                     op.kind == OperationKind::List
-                        && manifest::parent_resource(&manifest, op.resource)
+                        && manifest::reference_resource(&manifest, op.resource)
                             .unwrap()
                             .is_some()
                             == parented
@@ -975,12 +975,12 @@ impl Application {
         match (&op.kind, target) {
             (OperationKind::Create, None) => {
                 ensure!(
-                    manifest::parent_resource(&self.manifest, op.resource)?.is_none(),
+                    manifest::reference_resource(&self.manifest, op.resource)?.is_none(),
                     RequestError::InvalidRequest
                 );
             }
             (OperationKind::Create, Some(target)) => {
-                let parent = manifest::parent_resource(&self.manifest, op.resource)?
+                let parent = manifest::reference_resource(&self.manifest, op.resource)?
                     .ok_or(RequestError::InvalidRequest)?;
                 let route = manifest::route(&self.manifest, target.route)?;
                 ensure!(
@@ -1062,14 +1062,13 @@ impl Application {
         let op = manifest::operation(&self.manifest, action.operation)?;
         if op.kind == OperationKind::Create {
             self.authorize_create(action, principal)?;
-            let parent = manifest::parent_resource(&self.manifest, op.resource)?
+            let parent = manifest::reference_resource(&self.manifest, op.resource)?
                 .ok_or_else(|| anyhow::anyhow!("missing parent"))?;
-            let field = manifest::parent_field(manifest::resource(&self.manifest, op.resource)?)
-                .expect("parent");
+            let source_resource = manifest::resource(&self.manifest, op.resource)?;
             return Ok(stored.filter(|r| {
                 r.record.resource == parent.id
                     && r.incarnation == target.incarnation
-                    && manifest::parent_permits(field, &r.record.fields, true)
+                    && manifest::gate_permits(source_resource, &r.record.fields, true)
             }));
         }
         match stored {
@@ -1128,15 +1127,12 @@ impl Application {
                         )
                     })
                 {
-                    if let Some(parent) = manifest::parent_resource(&self.manifest, op.resource)? {
-                        let field = manifest::parent_field(manifest::resource(
-                            &self.manifest,
-                            op.resource,
-                        )?)
-                        .expect("parent");
+                    if let Some(parent) = manifest::reference_resource(&self.manifest, op.resource)?
+                    {
+                        let source_resource = manifest::resource(&self.manifest, op.resource)?;
                         if let Some(record) = &stored
                             && record.record.resource == parent.id
-                            && manifest::parent_permits(field, &record.record.fields, true)
+                            && manifest::gate_permits(source_resource, &record.record.fields, true)
                         {
                             Some(self.credentials(
                                 action,
@@ -1275,7 +1271,7 @@ impl Application {
         {
             ensure!(id == target.id, "receipt target differs");
         }
-        if matches!(action.redirect, Redirect::Parent { .. }) {
+        if matches!(action.redirect, Redirect::Reference { .. }) {
             return Ok(navigation::success());
         }
         render::render(
@@ -1381,13 +1377,13 @@ impl Application {
                 None => (None, auth::Principal::Anonymous),
             };
             let list = manifest::route(&self.manifest,route).map_err(|_| RequestError::InvalidRequest)?.operations.iter().filter_map(|id| manifest::operation(&self.manifest,*id).ok()).find(|op| op.kind==OperationKind::List && !manifest::is_preview(op));
-            let parent_incarnation = if let (Some(target),Some(op)) = (target,list) {
-                if let Some(parent)=manifest::parent_resource(&self.manifest,op.resource).map_err(|_| RequestError::Rejected)? {
+            let scope_incarnation = if let (Some(target),Some(op)) = (target,list) {
+                if let Some(parent)=manifest::reference_resource(&self.manifest,op.resource).map_err(|_| RequestError::Rejected)? {
                     crate::repository::load(&mut tx,&self.manifest,parent.id,target).await.map_err(RequestError::database)?.map(|r|r.incarnation)
                 } else {None}
             } else {None};
             let subject=principal.user().map(|u|u.id.as_str()).unwrap_or("");
-            let scope=cursor_scope((&self.contract,&self.deployment),route,target,parent_incarnation,list,subject,&params).map_err(|_|RequestError::Rejected)?;
+            let scope=cursor_scope((&self.contract,&self.deployment),route,target,scope_incarnation,list,subject,&params).map_err(|_|RequestError::Rejected)?;
             // A fixed-size digest binds every approved setting without exposing it in URLs.
             let scope=URL_SAFE_NO_PAD.encode(Sha256::digest(scope.as_bytes()));
             let preview_only = list.is_none() && manifest::route(&self.manifest, route).map_err(|_| RequestError::InvalidRequest)?.operations.iter().any(|id| manifest::operation(&self.manifest,*id).is_ok_and(manifest::is_preview));
@@ -1414,6 +1410,8 @@ impl Application {
                 inspection: None,
             };
             let effects = Effects {
+                provenance: Default::default(),
+                follow_sources: Vec::new(),
                 invoked: Default::default(),
                 list_bytes: 0,
                 list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,

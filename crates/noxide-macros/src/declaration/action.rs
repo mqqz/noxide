@@ -112,8 +112,11 @@ pub(crate) fn expand_action(
     let redirect = declaration
         .redirect
         .ok_or_else(|| syn::Error::new(item.span(), "actions require a declared redirect page"))?;
-    let redirect_value = if declaration.redirect_parent {
-        quote!(::noxide::__private::Redirect::Parent { parent: #redirect::id() })
+    let redirect_value = if let Some(field) = &declaration.redirect_reference {
+        let resource = &declaration.resource;
+        let hash = stable_id(&field.to_string());
+        quote!(::noxide::__private::Redirect::Reference {
+            field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into(), route: #redirect::id() })
     } else {
         quote!(::noxide::__private::Redirect::Page(#redirect::id()))
     };
@@ -136,6 +139,21 @@ pub(crate) fn expand_action(
     let controls_name = format_ident!("{name}Controls");
     let original_name = format_ident!("{name}Original");
     let resource = &declaration.resource;
+    if declaration.scope.is_some() || declaration.via.is_some() {
+        return Err(syn::Error::new(
+            item.span(),
+            "scope and via require queries",
+        ));
+    }
+    let bind = if let Some((field, query)) = &declaration.bind {
+        let hash = stable_id(&field.to_string());
+        quote!(Some(::noxide::__private::Bind {
+            field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into(),
+            eligible: <#query as ::noxide::QueryType>::operation().id,
+        }))
+    } else {
+        quote!(None)
+    };
     let policy = policy_tokens(&declaration.policy, &declaration.resource);
     let version = declaration.version;
     let names = &declaration.fields;
@@ -229,7 +247,7 @@ pub(crate) fn expand_action(
                 #controls_name { #(#names: ::noxide::ControlField::new(#keys)),* }
             }
             fn operation() -> ::noxide::__private::Operation {
-                ::noxide::__private::Operation {
+                ::noxide::__private::Operation { scope: None, via: None,
                     filter: Vec::new(), disclose: Vec::new(),
                 list: None, visibility: None, fields: None,
                     id: ::noxide::stable_id(concat!("mutation:", module_path!(), "::", stringify!(#name))),
@@ -238,7 +256,7 @@ pub(crate) fn expand_action(
                 }
             }
             fn definition() -> ::noxide::__private::Action {
-                ::noxide::__private::Action {
+                ::noxide::__private::Action { bind: #bind,
                     id: ::noxide::stable_id(concat!("action:", module_path!(), "::", stringify!(#name))),
                     version: #version, name: #label.into(),
                     operation: <Self as ::noxide::ActionType>::operation().id, redirect: #redirect_value,

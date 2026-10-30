@@ -31,7 +31,11 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
     let mut keys = BTreeSet::new();
     let mut hashes = BTreeSet::new();
     let mut identity = false;
+    let mut id_name = None;
     let mut accounts = 0;
+    let mut references = 0;
+    let mut gate = quote!(None);
+    let mut gate_field = 0u32;
     let name = &input.ident;
     for field in &fields.named {
         let rust_name = field.ident.as_ref().expect("named field");
@@ -55,6 +59,7 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
                 ));
             }
             identity = true;
+            id_name = Some(rust_name);
             decoding.push(quote!(#rust_name: ::noxide::Id::<Self>::new(record.id)));
             continue;
         }
@@ -62,6 +67,15 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
             .ok()
             .filter(|(kind, _)| *kind == "Id")
             .map(|(_, ty)| ty);
+        if parent.is_some() {
+            references += 1;
+            if references > 1 {
+                return Err(syn::Error::new(
+                    ty.span(),
+                    "at most one reference field per resource",
+                ));
+            }
+        }
         if parent.is_none() {
             validate_field_type(ty, false)?;
         }
@@ -89,64 +103,66 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
             .iter()
             .filter(|attr| attr.path().is_ident("field"))
             .collect();
-        if attrs.len() != 1 {
+        if attrs.len() > 1 || (attrs.is_empty() && parent.is_none()) {
             return Err(syn::Error::new(
                 field.span(),
                 "stored fields require #[field(...)]",
             ));
         }
-        attrs[0].parse_nested_meta(|meta| {
-            if meta.path.is_ident("scope") {
-                let value: Ident = meta.value()?.parse()?;
-                if scope || !account || value != "same_tenant" {
-                    return Err(meta.error("account fields require scope = same_tenant"));
+        if let Some(attr) = attrs.first() {
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("scope") {
+                    let value: Ident = meta.value()?.parse()?;
+                    if scope || !account || value != "same_tenant" {
+                        return Err(meta.error("account fields require scope = same_tenant"));
+                    }
+                    scope = true;
+                    return Ok(());
                 }
-                scope = true;
-                return Ok(());
-            }
-            if meta.path.is_ident("initial") {
-                if initial.is_some() {
-                    return Err(meta.error("duplicate initial value"));
+                if meta.path.is_ident("initial") {
+                    if initial.is_some() {
+                        return Err(meta.error("duplicate initial value"));
+                    }
+                    if quote!(#ty).to_string() != "bool" {
+                        return Err(meta.error("initial requires a non-optional bool field"));
+                    }
+                    let value: syn::LitBool = meta.value()?.parse()?;
+                    initial = Some(value);
+                    return Ok(());
                 }
-                if quote!(#ty).to_string() != "bool" {
-                    return Err(meta.error("initial requires a non-optional bool field"));
-                }
-                let value: syn::LitBool = meta.value()?.parse()?;
-                initial = Some(value);
-                return Ok(());
-            }
-            if meta.path.is_ident("visible") || meta.path.is_ident("create_when") {
-                let content;
-                parenthesized!(content in meta.input);
-                let name: Ident = content.parse()?;
-                content.parse::<Token![=]>()?;
-                let value: Expr = content.parse()?;
-                if !content.is_empty() {
-                    return Err(content.error("expected one parent predicate"));
-                }
-                let slot = if meta.path.is_ident("visible") {
-                    &mut visible
+                if meta.path.is_ident("visible") || meta.path.is_ident("create_when") {
+                    let content;
+                    parenthesized!(content in meta.input);
+                    let name: Ident = content.parse()?;
+                    content.parse::<Token![=]>()?;
+                    let value: Expr = content.parse()?;
+                    if !content.is_empty() {
+                        return Err(content.error("expected one parent predicate"));
+                    }
+                    let slot = if meta.path.is_ident("visible") {
+                        &mut visible
+                    } else {
+                        &mut create_when
+                    };
+                    if slot.replace((name, value)).is_some() {
+                        return Err(meta.error("duplicate parent predicate"));
+                    }
+                } else if meta.path.is_ident("key") && field_key.is_none() {
+                    field_key = Some(key(meta.value()?.parse()?)?);
+                } else if meta.path.is_ident("label") && label.is_none() {
+                    label = Some(meta.value()?.parse::<LitStr>()?);
+                } else if meta.path.is_ident("max_bytes") && maximum.is_none() {
+                    maximum = Some(meta.value()?.parse::<LitInt>()?);
+                } else if meta.path.is_ident("min") && min.is_none() {
+                    min = Some(meta.value()?.parse::<Expr>()?);
+                } else if meta.path.is_ident("max") && max.is_none() {
+                    max = Some(meta.value()?.parse::<Expr>()?);
                 } else {
-                    &mut create_when
-                };
-                if slot.replace((name, value)).is_some() {
-                    return Err(meta.error("duplicate parent predicate"));
+                    return Err(meta.error("unknown or duplicate field option"));
                 }
-            } else if meta.path.is_ident("key") && field_key.is_none() {
-                field_key = Some(key(meta.value()?.parse()?)?);
-            } else if meta.path.is_ident("label") && label.is_none() {
-                label = Some(meta.value()?.parse::<LitStr>()?);
-            } else if meta.path.is_ident("max_bytes") && maximum.is_none() {
-                maximum = Some(meta.value()?.parse::<LitInt>()?);
-            } else if meta.path.is_ident("min") && min.is_none() {
-                min = Some(meta.value()?.parse::<Expr>()?);
-            } else if meta.path.is_ident("max") && max.is_none() {
-                max = Some(meta.value()?.parse::<Expr>()?);
-            } else {
-                return Err(meta.error("unknown or duplicate field option"));
-            }
-            Ok(())
-        })?;
+                Ok(())
+            })?;
+        }
         if account && !scope {
             return Err(syn::Error::new(
                 ty.span(),
@@ -203,33 +219,44 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
                 scope: ::noxide::__private::AccountScope::SameTenant
             })
         } else if let Some(parent) = parent {
-            if min.is_some() || max.is_some() {
+            if min.is_some() || max.is_some() || initial.is_some() {
                 return Err(syn::Error::new(
                     ty.span(),
-                    "parent cannot have numeric bounds",
+                    "references cannot have initial values or numeric bounds",
                 ));
             }
-            let (vf, vv) = visible
-                .ok_or_else(|| syn::Error::new(ty.span(), "parent requires visible(...)"))?;
-            let (wf, wv) = create_when
-                .ok_or_else(|| syn::Error::new(ty.span(), "parent requires create_when(...)"))?;
-            let vh = stable_id(&vf.to_string());
-            let wh = stable_id(&wf.to_string());
-            quote!(::noxide::FieldKind::Parent {
+            match (visible, create_when) {
+                (Some((vf, vv)), Some((wf, wv))) => {
+                    gate_field = stable_id(&rust_name.to_string());
+                    let vh = stable_id(&vf.to_string());
+                    let wh = stable_id(&wf.to_string());
+                    gate = quote!(Some(::noxide::__private::Gate {
+                        field: #field_key.into(),
+                        visible: ::noxide::__private::Visibility {
+                            field: <#parent as ::noxide::FieldSpec<#vh>>::KEY.into(),
+                            equals: ::noxide::FieldValue::encode(&#vv),
+                        },
+                        create_when: ::noxide::__private::Visibility {
+                            field: <#parent as ::noxide::FieldSpec<#wh>>::KEY.into(),
+                            equals: ::noxide::FieldValue::encode(&#wv),
+                        },
+                    }));
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(syn::Error::new(
+                        ty.span(),
+                        "a gate requires both visible(...) and create_when(...)",
+                    ));
+                }
+            }
+            quote!(::noxide::FieldKind::Reference {
                 resource: <#parent as ::noxide::ResourceType>::KEY.into(),
-                visible: ::noxide::__private::Visibility {
-                    field: <#parent as ::noxide::FieldSpec<#vh>>::KEY.into(),
-                    equals: ::noxide::FieldValue::encode(&#vv),
-                },
-                create_when: ::noxide::__private::Visibility {
-                    field: <#parent as ::noxide::FieldSpec<#wh>>::KEY.into(),
-                    equals: ::noxide::FieldValue::encode(&#wv),
-                },
             })
         } else if visible.is_some() || create_when.is_some() {
             return Err(syn::Error::new(
                 ty.span(),
-                "parent predicates require Id<Resource>",
+                "gate predicates require Id<Resource>",
             ));
         } else if min.is_some() || max.is_some() {
             let lower = min.map_or_else(|| quote!(None), |v| quote!(Some(#v)));
@@ -292,12 +319,15 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
             "Resource requires between 1 and 8 stored fields",
         ));
     }
+    let id_name = id_name.expect("checked id");
     Ok(quote! {
         impl ::noxide::ResourceType for #name {
+            const GATE_FIELD: u32 = #gate_field;
+            fn record_id(&self) -> u64 { self.#id_name.get() }
             const KEY: &'static str = #persistent_key;
             fn definition() -> ::noxide::__private::Resource {
                 ::noxide::__private::Resource {
-                    id: ::noxide::stable_id(<Self as ::noxide::ResourceType>::KEY), name: <Self as ::noxide::ResourceType>::KEY.into(), fields: vec![#(#definitions),*],
+                    id: ::noxide::stable_id(<Self as ::noxide::ResourceType>::KEY), name: <Self as ::noxide::ResourceType>::KEY.into(), fields: vec![#(#definitions),*], gate: #gate,
                 }
             }
             fn from_record(record: ::noxide::__private::Record) -> Self {

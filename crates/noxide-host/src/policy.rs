@@ -15,7 +15,7 @@ pub(crate) struct ScanRule {
     pub rule: usize,
     pub exact: bool,
 }
-pub(crate) fn list_strategy(policy: &Policy, parented: bool) -> ListStrategy {
+pub(crate) fn list_strategy(policy: &Policy, scoped: bool) -> ListStrategy {
     if !policy
         .any
         .iter()
@@ -31,7 +31,7 @@ pub(crate) fn list_strategy(policy: &Policy, parented: bool) -> ListStrategy {
             .enumerate()
             .map(|(rule, atoms)| ScanRule {
                 rule,
-                exact: !parented
+                exact: !scoped
                     && atoms
                         .iter()
                         .filter(|p| matches!(p, Predicate::Owner | Predicate::PrincipalIs { .. }))
@@ -215,13 +215,13 @@ mod tests {
             let policy = Policy {
                 any: vec![vec![recipient.clone()], atoms.clone()],
             };
-            for parented in [false, true] {
-                let ListStrategy::Merge(scans) = list_strategy(&policy, parented) else {
+            for scoped in [false, true] {
+                let ListStrategy::Merge(scans) = list_strategy(&policy, scoped) else {
                     panic!("expected merge")
                 };
                 assert_eq!(scans.len(), 2);
                 for scan in &scans {
-                    let expected = !parented
+                    let expected = !scoped
                         && policy.any[scan.rule]
                             .iter()
                             .filter(|p| {

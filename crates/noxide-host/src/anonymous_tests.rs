@@ -39,6 +39,8 @@ fn declarations() -> Manifest {
     }
     for (id, kind) in [(4, OperationKind::Update), (5, OperationKind::Delete)] {
         m.operations.push(Operation {
+            scope: None,
+            via: None,
             filter: Vec::new(),
             disclose: Vec::new(),
             list: None,
@@ -56,6 +58,7 @@ fn declarations() -> Manifest {
         .fields
         .extend(["published".into(), "private".into()]);
     m.actions.push(Action {
+        bind: None,
         id: 2,
         version: 1,
         name: "Edit".into(),
@@ -66,6 +69,7 @@ fn declarations() -> Manifest {
         inspect: None,
     });
     m.actions.push(Action {
+        bind: None,
         id: 3,
         version: 1,
         name: "Delete".into(),
@@ -805,6 +809,8 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
         let mut m = declarations();
         if inspect {
             m.operations.push(Operation {
+                scope: None,
+                via: None,
                 filter: Vec::new(),
                 disclose: Vec::new(),
                 list: None,
@@ -913,6 +919,8 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
             available_forms: vec![],
         };
         let mut effects = crate::repository::Effects {
+            provenance: Default::default(),
+            follow_sources: Vec::new(),
             invoked: Default::default(),
             list_bytes: 0,
             list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,

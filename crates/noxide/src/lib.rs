@@ -21,6 +21,20 @@ impl Context {
     pub fn read(&mut self, operation: u32, id: u64) -> Option<Record> {
         self.invoke(operation, id)
     }
+    #[cfg(target_arch = "wasm32")]
+    fn follow(&mut self, operation: u32, sources: &[(u32, u64)]) -> Vec<Option<Record>> {
+        use bindings::noxide::application::host;
+        for &(resource, id) in sources {
+            host::follow_source(resource, id);
+        }
+        let len = host::follow(operation);
+        let bytes = read_buffer(len, host::result_chunk);
+        serde_json::from_slice(&bytes).expect("host follow contract")
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn follow(&mut self, _operation: u32, _sources: &[(u32, u64)]) -> Vec<Option<Record>> {
+        panic!("Noxide applications execute as isolated WebAssembly components")
+    }
     /// Creates exactly the fields validated for the submitted action. The guest
     /// cannot substitute ownership, a different input, or an unrelated target.
     pub fn create(&mut self, operation: u32) -> Record {

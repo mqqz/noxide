@@ -11,6 +11,7 @@ pub fn manifest() -> Manifest {
     Manifest {
         version: VERSION,
         resources: vec![Resource {
+            gate: None,
             id: 1,
             name: "notes".into(),
             fields: vec![TextField {
@@ -24,6 +25,8 @@ pub fn manifest() -> Manifest {
         }],
         operations: vec![
             Operation {
+                scope: None,
+                via: None,
                 filter: Vec::new(),
                 disclose: Vec::new(),
                 list: None,
@@ -35,6 +38,8 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
+                scope: None,
+                via: None,
                 filter: Vec::new(),
                 disclose: Vec::new(),
                 list: None,
@@ -46,6 +51,8 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
+                scope: None,
+                via: None,
                 filter: Vec::new(),
                 disclose: Vec::new(),
                 list: None,
@@ -78,6 +85,7 @@ pub fn manifest() -> Manifest {
             },
         ],
         actions: vec![Action {
+            bind: None,
             layout: Vec::new(),
             id: 1,
             version: 1,

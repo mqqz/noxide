@@ -6,6 +6,9 @@ use syn::{
     spanned::Spanned,
 };
 pub(crate) struct OperationDeclaration {
+    pub(crate) scope: Option<Ident>,
+    pub(crate) via: Option<(Type, Ident)>,
+    pub(crate) bind: Option<(Ident, Type)>,
     pub(crate) preview: Option<Option<syn::Path>>,
     pub(crate) filter: Vec<(Ident, Expr)>,
     pub(crate) disclose: Vec<Ident>,
@@ -17,7 +20,7 @@ pub(crate) struct OperationDeclaration {
     pub(crate) fields: Vec<Ident>,
     pub(crate) visible: Option<(Ident, Expr)>,
     pub(crate) redirect: Option<syn::Path>,
-    pub(crate) redirect_parent: bool,
+    pub(crate) redirect_reference: Option<Ident>,
     pub(crate) inspect: Option<Type>,
     pub(crate) inspection_fields: Vec<Ident>,
     pub(crate) version: u32,
@@ -33,6 +36,9 @@ impl Parse for OperationDeclaration {
             return Err(resource.error("expected one resource type"));
         }
         let mut result = Self {
+            scope: None,
+            via: None,
+            bind: None,
             preview: None,
             filter: Vec::new(),
             disclose: Vec::new(),
@@ -44,7 +50,7 @@ impl Parse for OperationDeclaration {
             fields: Vec::new(),
             visible: None,
             redirect: None,
-            redirect_parent: false,
+            redirect_reference: None,
             inspect: None,
             inspection_fields: Vec::new(),
             version: 1,
@@ -63,6 +69,56 @@ impl Parse for OperationDeclaration {
                 ));
             }
             match option.to_string().as_str() {
+                "scope" => {
+                    if result.kind != "list" {
+                        return Err(input.error("scope requires list"));
+                    }
+                    let content;
+                    parenthesized!(content in input);
+                    result.scope = Some(content.parse()?);
+                    if !content.is_empty() {
+                        return Err(content.error("expected reference field"));
+                    }
+                }
+                "via" => {
+                    if result.kind != "read" {
+                        return Err(input.error("via requires read"));
+                    }
+                    let content;
+                    parenthesized!(content in input);
+                    let source = content.parse()?;
+                    content.parse::<Token![.]>()?;
+                    let field = content.parse()?;
+                    if !content.is_empty() {
+                        return Err(content.error("expected source.field"));
+                    }
+                    result.via = Some((source, field));
+                }
+                "bind" => {
+                    if result.kind != "create" {
+                        return Err(input.error("bind requires create"));
+                    }
+                    let content;
+                    parenthesized!(content in input);
+                    let field = content.parse()?;
+                    content.parse::<Token![=]>()?;
+                    let target: Ident = content.parse()?;
+                    if target != "target" {
+                        return Err(content.error("binding requires target"));
+                    }
+                    content.parse::<Token![,]>()?;
+                    let eligible: Ident = content.parse()?;
+                    if eligible != "eligible" {
+                        return Err(content.error("expected eligible"));
+                    }
+                    content.parse::<Token![=]>()?;
+                    let query = content.parse()?;
+                    if !content.is_empty() {
+                        return Err(content.error("expected eligibility query"));
+                    }
+                    result.bind = Some((field, query));
+                }
+
                 "preview" => {
                     if result.kind != "list" {
                         return Err(input.error("preview requires list"));
@@ -170,14 +226,15 @@ impl Parse for OperationDeclaration {
                 "redirect" => {
                     input.parse::<Token![=]>()?;
                     let path: syn::Path = input.parse()?;
-                    if path.is_ident("parent") && input.peek(syn::token::Paren) {
+                    if path.is_ident("reference") && input.peek(syn::token::Paren) {
                         let args;
                         parenthesized!(args in input);
+                        result.redirect_reference = Some(args.parse()?);
+                        args.parse::<Token![,]>()?;
                         result.redirect = Some(args.parse()?);
                         if !args.is_empty() {
-                            return Err(args.error("expected one parent page"));
+                            return Err(args.error("expected reference field and page"));
                         }
-                        result.redirect_parent = true;
                     } else {
                         result.redirect = Some(path);
                     }
