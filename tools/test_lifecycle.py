@@ -16,6 +16,23 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
 
+class RetryBusyGet(urllib.request.BaseHandler):
+    """Retry bounded busy GETs, including GETs reached after a successful POST."""
+    handler_order = 499  # Run before HTTPDefaultErrorHandler raises HTTPError.
+    retries = 5
+    delay = 0.2
+
+    def http_error_503(self, request, response, code, message, headers):
+        if request.get_method() != 'GET':
+            return None
+        remaining = getattr(request, '_noxide_busy_retries', self.retries)
+        if remaining == 0:
+            return None
+        request._noxide_busy_retries = remaining - 1
+        response.close()
+        time.sleep(self.delay)
+        return self.parent.open(request, timeout=request.timeout)
+
 class Forms(HTMLParser):
     def __init__(self, html):
         super().__init__()
@@ -69,7 +86,7 @@ def main():
             if process.poll() is not None:
                 raise AssertionError('dev exited: ' + log.decode(errors='replace'))
         raise AssertionError('timed out waiting for ' + token + ': ' + log.decode(errors='replace'))
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()), RetryBusyGet())
     origin = 'http://localhost:8080'
     def get(path='/'):
         return opener.open(origin + path, timeout=5).read().decode()

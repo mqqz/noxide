@@ -10,6 +10,7 @@ sdk-policy-board-explicit.json p2uuT_SPyeug4f8tiwbQ7QvLdQPdsZ6v1nv664vE8JI
 sdk-policy-board-simple.json p2uuT_SPyeug4f8tiwbQ7QvLdQPdsZ6v1nv664vE8JI
 sdk-private-notes-explicit.json Z4wvplRxxZ9S_YgGaHLGa3RpNrBk8-8a-7rH-Zwp0pk
 sdk-public-articles-explicit.json o8QULkVpzMrrf-nsOSk2uATtPaZBvoG5OyC11Jtg7K0
+sdk-public-articles-simple.json o8QULkVpzMrrf-nsOSk2uATtPaZBvoG5OyC11Jtg7K0
 sdk-repeated-explicit.json PX9KXZSwQDINrzySmx90a4ZCdOI8kuDHzARK1Q6X6qA
 sdk-repeated-simple.json PX9KXZSwQDINrzySmx90a4ZCdOI8kuDHzARK1Q6X6qA
 sdk-shop.json vey81oS5-XrJWSoMNhBEgeZI5Btn6ns49oLx9JPeZX0
