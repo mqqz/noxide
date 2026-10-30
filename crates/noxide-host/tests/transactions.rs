@@ -324,17 +324,16 @@ impl Case {
         }
     }
     async fn host(db: &Database, keys: &[u8], mode: &str) -> Arc<Application> {
+        Self::host_with_limits(db, keys, mode, Limits::default()).await
+    }
+    async fn host_with_limits(
+        db: &Database,
+        keys: &[u8],
+        mode: &str,
+        limits: Limits,
+    ) -> Arc<Application> {
         let m = declarations();
         manifest::validate(&m).unwrap();
-        let limits = if mode == "deadline" {
-            Limits {
-                fuel: 100_000_000,
-                wall_time: Duration::from_millis(20),
-                ..Limits::default()
-            }
-        } else {
-            Limits::default()
-        };
         let app = Arc::new(
             Application::new(
                 &component(mode),
@@ -704,10 +703,27 @@ async fn guest_failures(mut case: Case) {
         "guest-outcome",
     ] {
         case.app = Case::host(&case.db, &case.keys, mode).await;
+        // Mint the form under normal limits. The deadline case constrains the
+        // action, not the PostgreSQL reads needed to render eight forms.
         let (token, csrf, _) = case.form(1).await;
+        // Keep the same component/deployment while tightening only action limits.
+        let app = if mode == "deadline" {
+            Case::host_with_limits(
+                &case.db,
+                &case.keys,
+                mode,
+                Limits {
+                    fuel: 100_000_000,
+                    wall_time: Duration::from_millis(20),
+                    ..Limits::default()
+                },
+            )
+            .await
+        } else {
+            case.app.clone()
+        };
         let before = case.inspect.state().await;
-        let result = case
-            .app
+        let result = app
             .submit(&case.alice, 1, &token, &csrf, order("1", "guest failure"))
             .await;
         if mode == "reject" {
