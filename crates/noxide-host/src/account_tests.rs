@@ -1002,6 +1002,7 @@ fn preview_parameter_declarations() -> Manifest {
         m.actions[0].fields.push(name.into());
     }
     m.routes[0].params.push("flag".into());
+    m.routes[0].path = "/previews".into();
     m.operations[4].filter.push(Condition {
         field: "source_flag".into(),
         equals: Operand::Param("flag".into()),
@@ -1027,6 +1028,15 @@ fn preview_parameter_declarations() -> Manifest {
         .as_mut()
         .unwrap()
         .see_all = Some(3);
+    m.routes.push(Route {
+        id: 4,
+        path: "/".into(),
+        resource: None,
+        operations: vec![],
+        forms: vec![],
+        access: Access::Authenticated,
+        params: vec![],
+    });
     m
 }
 #[test]
