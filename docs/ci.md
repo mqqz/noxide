@@ -46,6 +46,13 @@ receipt recovery with JavaScript disabled. It uses SQLite on localhost and
 PostgreSQL through the test onion-origin proxy. This proxy does not establish Tor
 transport behavior.
 
+The `examples` application matrix also builds shop with the trusted CLI and runs
+its HTML-form transaction walkthrough on SQLite and a separately created,
+disposable PostgreSQL database (`noxide_shop`). It checks shared quantity input,
+stock decrement, order/note creation, escaping, replay and stock rejection. Shop
+source is included in the example formatting check. These checks use fresh output
+directories and never reset an operator database.
+
 `Hostile application builds` runs weekly and on manual dispatch. It checks
 build-script and procedural-macro containment in two fresh VMs, including host
 file/socket/network access, writes outside scratch, cross-build persistence, and

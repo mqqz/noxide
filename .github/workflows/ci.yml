@@ -40,7 +40,7 @@ jobs:
       - name: Check formatting
         run: |
           cargo fmt --all --check
-          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs examples/forum/src/lib.rs examples/private-inbox/src/lib.rs
+          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs examples/forum/src/lib.rs examples/private-inbox/src/lib.rs examples/shop/src/lib.rs
       - name: Cache Rust dependencies and workspace builds
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -387,6 +387,22 @@ jobs:
           python3 tools/test_forum.py \
             --bundle "$RUNNER_TEMP/noxide-ci/forum" \
             --output "$RUNNER_TEMP/noxide-ci/forum-http"
+      - name: Build and test the shop
+        if: matrix.suite == 'examples'
+        env:
+          NOXIDE_SHOP_POSTGRES: postgresql://noxide:ci-only-password@127.0.0.1:5432/noxide_shop
+        run: |
+          target/debug/noxide build --framework "$PWD" \
+            --app examples/shop --name shop --output "$RUNNER_TEMP/noxide-ci/shop"
+          python3 tools/test_shop.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/shop" \
+            --output "$RUNNER_TEMP/noxide-ci/shop-sqlite" \
+            --host-cli target/debug/noxide
+          psql "$NOXIDE_TEST_POSTGRES" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE noxide_shop'
+          python3 tools/test_shop.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/shop" \
+            --output "$RUNNER_TEMP/noxide-ci/shop-postgres" \
+            --host-cli target/debug/noxide --postgres "$NOXIDE_SHOP_POSTGRES"
       - name: Test NoJS browser flow with SQLite
         if: matrix.suite == 'sdk'
         run: |
