@@ -200,6 +200,7 @@ fn host_rejects_parameterized_mutation_redirects() {
             Target::Signed
         };
         if kind != OperationKind::Create {
+            m.actions[0].target_reads = vec![2];
             m.operations[2].bind = None;
             m.actions[0].steps[0].assign.retain(|a| a.field != "thread");
             m.operations[2].policy = Policy {

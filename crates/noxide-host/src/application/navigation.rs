@@ -474,6 +474,7 @@ mod tests {
         db.initialize().await.unwrap();
         let mut m = parent_tests::declarations();
         m.operations.iter_mut().find(|op| op.id == 4).unwrap().id = 6;
+        m.actions[0].target_reads = vec![6];
         m.routes[2].operations = vec![6, 1];
         m.operations[2].bind.as_mut().unwrap().eligible = 6;
         for (id, kind) in [(4, OperationKind::Update), (5, OperationKind::Delete)] {

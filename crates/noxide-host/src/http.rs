@@ -325,7 +325,7 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
         || path
             .strip_prefix(&format!("{}/", app.presentation.action_path))
             .and_then(|s| s.parse().ok())
-            .and_then(|id| crate::manifest::action(&app.manifest, id).ok())
+            .and_then(|id| crate::manifest::web_action(&app.manifest, id).ok())
             .and_then(|a| crate::manifest::operation(&app.manifest, a.steps[0].operation).ok())
             .is_some_and(crate::manifest::anonymous_action)
     {
@@ -752,7 +752,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let op = match crate::manifest::action(&gateway.app.manifest, action)
+    let op = match crate::manifest::web_action(&gateway.app.manifest, action)
         .and_then(|a| crate::manifest::operation(&gateway.app.manifest, a.steps[0].operation))
     {
         Ok(op) => op,
@@ -1325,3 +1325,6 @@ mod parent_redirect_disconnect_tests {
         server.await.unwrap().unwrap();
     }
 }
+
+#[cfg(test)]
+mod binding_tests;

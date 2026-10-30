@@ -298,10 +298,12 @@ pub fn register_action(m: &mut Manifest, mut action: FixtureAction) {
             .filter(|op| {
                 op.kind == OperationKind::Read
                     && op.via.is_none()
-                    && (signed == Some(op.resource)
-                        || m.routes.iter().any(|route| {
+                    && match signed {
+                        Some(resource) => op.resource == resource,
+                        None => m.routes.iter().any(|route| {
                             route.id == action.redirect.route && route.resource == Some(op.resource)
-                        }))
+                        }),
+                    }
             })
             .map(|op| op.id)
             .collect();
