@@ -1,9 +1,10 @@
 # Frozen SDK contracts
 
-Captured before production changes at PR #15 merge
-`dca07b5015b6d24bc391c7e45cacc67ea0e7f767` using the trusted local SDK harness.
-The first capture was `/tmp/noxide-refactor-baseline-sdk`; the independently
-registered laid-out forum was verified in `/tmp/noxide-refactor-baseline-v2`.
+Captured with the trusted local SDK harness and re-recorded for the typed
+reference protocol in PR #25. The SDK equivalence fixtures define the application
+being compared; query-track snapshots may evolve independently. In particular,
+`public-articles-simple.rs` is paired with `public-articles-explicit.rs`, while
+`tools/fixtures/queries/public-articles.rs` covers newer query features.
 
 JSON files are complete canonical manifests; approval-hashes.json contains the
 host-computed approved contract digests. Do not normalize away identities,

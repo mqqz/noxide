@@ -149,8 +149,11 @@ def convenience_fixtures():
     passing = []
     comparisons = []
     for app in EQUIVALENT_APPS:
+        simple = ROOT / "tools/fixtures/sdk" / (app + "-simple.rs")
+        if not simple.is_file():
+            simple = ROOT / "examples" / app / "src/lib.rs"
         for variant, path in (
-            ("simple", (ROOT / "tools/fixtures/sdk" / (app + "-simple.rs")) if app in ("policy-board", "repeated", "forum") else (ROOT / "tools/fixtures/queries/public-articles.rs" if app == "public-articles" else ROOT / "examples" / app / "src/lib.rs")),
+            ("simple", simple),
             ("explicit", ROOT / "tools/fixtures/sdk" / (app + "-explicit.rs")),
         ):
             name = app + "-" + variant
@@ -338,7 +341,7 @@ cd /tmp/work/examples/private-notes
 
 
 def validate_contracts(contracts, comparisons, output_dir, host_cli):
-    # Captured from the unmodified PR #15 merge, before implementation moves.
+    # Compare the dedicated SDK pairs against their recorded contract baselines.
     assert contracts["forum-layout-simple"] == contracts["forum-layout-explicit"], "laid-out forum mismatch"
     frozen = ROOT / "tools/fixtures/sdk/baseline"
     for path in sorted(frozen.glob("*.json")):
