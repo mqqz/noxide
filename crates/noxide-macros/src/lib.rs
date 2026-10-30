@@ -6,9 +6,11 @@ mod declaration;
 mod registration;
 mod syntax;
 use convenience::app::expand_app;
+#[cfg(test)]
+use declaration::action::expand_action;
 use declaration::{
     OperationDeclaration,
-    action::expand_action,
+    action::{ActionDeclaration, expand_declared_action},
     choice::expand_choice,
     page::{PageDeclaration, expand_page},
     query::expand_query,
@@ -227,8 +229,8 @@ pub fn query(attr: TokenStream, input: TokenStream) -> TokenStream {
 
 #[proc_macro_attribute]
 pub fn action(attr: TokenStream, input: TokenStream) -> TokenStream {
-    finish(expand_action(
-        parse_macro_input!(attr as OperationDeclaration),
+    finish(expand_declared_action(
+        parse_macro_input!(attr as ActionDeclaration),
         parse_macro_input!(input as syn::ItemStruct),
     ))
 }
