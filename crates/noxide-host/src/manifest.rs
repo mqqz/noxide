@@ -640,6 +640,14 @@ pub fn validate(m: &Manifest) -> Result<()> {
 }
 
 pub(crate) fn signed_resource(m: &Manifest, action: &Action) -> Result<Option<u32>> {
+    signed_resource_parts(m, &action.steps, action.inspect.as_ref())
+}
+
+pub(crate) fn signed_resource_parts(
+    m: &Manifest,
+    steps: &[Step],
+    inspect: Option<&Inspection>,
+) -> Result<Option<u32>> {
     let mut signed = None;
     let mut include = |resource| -> Result<()> {
         ensure!(
@@ -649,7 +657,7 @@ pub(crate) fn signed_resource(m: &Manifest, action: &Action) -> Result<Option<u3
         signed = Some(resource);
         Ok(())
     };
-    for step in &action.steps {
+    for step in steps {
         let op = operation(m, step.operation)?;
         if step.target == Target::Signed {
             include(op.resource)?;
@@ -662,7 +670,7 @@ pub(crate) fn signed_resource(m: &Manifest, action: &Action) -> Result<Option<u3
             }
         }
     }
-    if let Some(inspect) = &action.inspect {
+    if let Some(inspect) = inspect {
         include(operation(m, inspect.operation)?.resource)?;
     }
     Ok(signed)
@@ -1122,11 +1130,12 @@ pub(crate) fn action_fields<'a>(_m: &Manifest, action: &'a Action) -> Result<Vec
 }
 
 pub(crate) fn validate_input(_m: &Manifest, action: &Action, fields: &Fields) -> Result<()> {
-    ensure!(
-        fields.len() == action.inputs.len(),
-        "unexpected action fields"
-    );
-    for input in &action.inputs {
+    validate_inputs(&action.inputs, fields)
+}
+
+pub(crate) fn validate_inputs(inputs: &[Input], fields: &Fields) -> Result<()> {
+    ensure!(fields.len() == inputs.len(), "unexpected action fields");
+    for input in inputs {
         let value = fields
             .get(&input.name)
             .ok_or_else(|| anyhow::anyhow!("missing input"))?;

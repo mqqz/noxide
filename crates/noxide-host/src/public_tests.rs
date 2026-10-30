@@ -850,7 +850,9 @@ async fn sqlite_initial_create_commit_is_host_owned() {
             if let Some(value) = supplied {
                 e.request.input.insert("published".into(), value.into());
             }
-            let result = e.execute_transaction(&m.actions[0]).await;
+            let result = e
+                .execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+                .await;
             if supplied.is_some() {
                 assert!(result.is_err());
                 e.tx.commit().await.unwrap();
@@ -925,7 +927,11 @@ async fn sqlite_initial_create_commit_is_host_owned() {
                 revision: stored.revision,
             });
 
-            e.execute_transaction(&updates.actions[1]).await.unwrap();
+            e.execute_transaction(
+                crate::application::ActionCore::of(&updates, &updates.actions[1]).unwrap(),
+            )
+            .await
+            .unwrap();
             e.tx.commit().await.unwrap();
             let mut tx = db
                 .begin_read(Instant::now() + Duration::from_secs(5))

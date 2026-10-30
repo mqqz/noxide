@@ -1,4 +1,5 @@
 mod action;
+pub(crate) use action::ActionCore;
 mod capabilities;
 mod navigation;
 mod submission;
@@ -773,13 +774,13 @@ impl Application {
     async fn submission_identity(
         &self,
         tx: &mut Transaction,
-        action: &Action,
+        action: ActionCore<'_>,
         cookie: &str,
         submission: &str,
         csrf: &str,
         now: i64,
     ) -> Result<(Token, Token, auth::Principal)> {
-        let op = manifest::operation(&self.manifest, action.steps[0].operation)?;
+        let op = manifest::operation(&self.manifest, action.first_operation())?;
         if manifest::anonymous_action(op) {
             let anonymous = self
                 .keys
@@ -820,14 +821,14 @@ impl Application {
     async fn authorized_target(
         &self,
         tx: &mut Transaction,
-        action: &Action,
+        action: ActionCore<'_>,
         target: &RecordTarget,
         principal: &auth::Principal,
         capability: Option<&str>,
     ) -> Result<Option<StoredRecord>> {
         if !manifest::is_capability(manifest::operation(
             &self.manifest,
-            action.steps[0].operation,
+            action.first_operation(),
         )?) {
             return self.current_target(tx, action, target, principal).await;
         }
@@ -931,7 +932,11 @@ impl Application {
         })
     }
 
-    fn submission_target(&self, token: &Token, action: &Action) -> Result<Option<RecordTarget>> {
+    fn submission_target(
+        &self,
+        token: &Token,
+        action: ActionCore<'_>,
+    ) -> Result<Option<RecordTarget>> {
         let (TokenKind::Submission {
             contract,
             action: id,
@@ -953,7 +958,10 @@ impl Application {
                 && *version == action.version,
             RequestError::InvalidRequest
         );
-        match (manifest::signed_resource(&self.manifest, action)?, target) {
+        match (
+            manifest::signed_resource_parts(&self.manifest, action.steps, action.inspect)?,
+            target,
+        ) {
             (None, None) => {}
             (Some(resource), Some(target)) => {
                 let route = manifest::route(&self.manifest, target.route)?;
@@ -976,7 +984,7 @@ impl Application {
 
     fn target_allowed(
         &self,
-        action: &Action,
+        action: ActionCore<'_>,
         route: u32,
         principal: &auth::Principal,
         stored: &StoredRecord,
@@ -1044,7 +1052,7 @@ impl Application {
     async fn current_target(
         &self,
         tx: &mut Transaction,
-        action: &Action,
+        action: ActionCore<'_>,
         target: &RecordTarget,
         principal: &auth::Principal,
     ) -> Result<Option<StoredRecord>> {
@@ -1081,7 +1089,10 @@ impl Application {
         let mut forms = BTreeMap::new();
         for id in &r.forms {
             let action = manifest::action(&self.manifest, *id)?;
-            let op = manifest::operation(&self.manifest, action.steps[0].operation)?;
+            let op = manifest::operation(
+                &self.manifest,
+                ActionCore::of(&self.manifest, action)?.first_operation(),
+            )?;
             let subject = if manifest::anonymous_action(op) {
                 anonymous
             } else {
@@ -1094,7 +1105,12 @@ impl Application {
             let credentials = if manifest::signed_resource(&self.manifest, action)?.is_some() {
                 if let Some(record) = &stored {
                     if (manifest::is_capability(op) && record.cap_version.is_some())
-                        || self.target_allowed(action, route, principal, record)?
+                        || self.target_allowed(
+                            ActionCore::of(&self.manifest, action)?,
+                            route,
+                            principal,
+                            record,
+                        )?
                     {
                         let grant = RecordTarget {
                             resource: record.record.resource,
@@ -1115,7 +1131,10 @@ impl Application {
                 } else {
                     None
                 }
-            } else if self.authorize_create(action, principal).is_ok() {
+            } else if self
+                .authorize_create(ActionCore::of(&self.manifest, action)?, principal)
+                .is_ok()
+            {
                 Some(self.credentials(action, subject, now, None, Fields::new())?)
             } else {
                 None
@@ -1153,7 +1172,10 @@ impl Application {
     ) -> Result<Rendered> {
         target.revision = stored.revision;
         let credentials = self.credentials(action, session, now, Some(target), Fields::new())?;
-        let operation = manifest::operation(&self.manifest, action.steps[0].operation)?;
+        let operation = manifest::operation(
+            &self.manifest,
+            ActionCore::of(&self.manifest, action)?.first_operation(),
+        )?;
         let current = if manifest::is_capability(operation) {
             Fields::new()
         } else if operation.kind == OperationKind::Delete {
@@ -1278,7 +1300,7 @@ impl Application {
                 let token=self.keys.verify_cursor(encoded,now).map_err(|_|RequestError::InvalidCursor)?;
                 match token.kind { TokenKind::Cursor { scope: bound,after } if list.is_some() && bound==scope && after>0 && after<=i64::MAX as u64 => Ok(after), _=>Err(RequestError::InvalidCursor) }
             }).transpose()?;
-            let needs_anonymous = manifest::route(&self.manifest, route).map_err(|_| RequestError::InvalidRequest)?.forms.iter().any(|id| manifest::action(&self.manifest,*id).ok().and_then(|a| manifest::operation(&self.manifest,a.steps[0].operation).ok()).is_some_and(manifest::anonymous_action));
+            let needs_anonymous = manifest::route(&self.manifest, route).map_err(|_| RequestError::InvalidRequest)?.forms.iter().any(|id| manifest::action(&self.manifest,*id).ok().and_then(|a| ActionCore::of(&self.manifest, a).ok()).and_then(|a| manifest::operation(&self.manifest,a.first_operation()).ok()).is_some_and(manifest::anonymous_action));
             let (anonymous, new_cookie) = if needs_anonymous {
                 if let Some(token) = anonymous_cookie.and_then(|c| self.keys.anonymous(c, now).ok()) { (Some(token), None) }
                 else { let (token,cookie) = self.keys.issue(TokenKind::Anonymous, "", now, security::ANONYMOUS_TTL).map_err(|_| RequestError::Rejected)?; (Some(token),Some(cookie)) }
@@ -1360,7 +1382,7 @@ impl Application {
             )
             .map_err(|_| RequestError::Rejected)?;
             if let ResponseIntent::Page(doc) | ResponseIntent::NotFound(doc) = &response
-                && doc.nodes.iter().any(|n| matches!(n, Instruction::Form { action } if manifest::action(&self.manifest,*action).ok().and_then(|a| manifest::operation(&self.manifest,a.steps[0].operation).ok()).is_some_and(manifest::anonymous_action))) { rendered.anonymous_cookie = new_cookie; }
+                && doc.nodes.iter().any(|n| matches!(n, Instruction::Form { action } if manifest::action(&self.manifest,*action).ok().and_then(|a| ActionCore::of(&self.manifest, a).ok()).and_then(|a| manifest::operation(&self.manifest,a.first_operation()).ok()).is_some_and(manifest::anonymous_action))) { rendered.anonymous_cookie = new_cookie; }
             effects.tx.commit().await.map_err(|_| RequestError::Busy)?;
             Ok(rendered)
         })

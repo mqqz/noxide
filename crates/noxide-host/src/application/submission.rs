@@ -28,7 +28,8 @@ impl Application {
             .await
             .map_err(|_| RequestError::Busy)?;
         let op = manifest::action(&self.manifest, action)
-            .and_then(|a| manifest::operation(&self.manifest, a.steps[0].operation))
+            .and_then(|a| ActionCore::of(&self.manifest, a))
+            .and_then(|a| manifest::operation(&self.manifest, a.first_operation()))
             .map_err(|_| RequestError::InvalidRequest)?;
         let _anonymous_write = self.anonymous_write(manifest::anonymous_action(op)).await?;
         let _database = self
@@ -43,7 +44,9 @@ impl Application {
             .map_err(|_| RequestError::InvalidRequest)?;
         manifest::validate_input(&self.manifest, a, &input)
             .map_err(|_| RequestError::InvalidRequest)?;
-        let input_hash = input_digest(a, &input).map_err(|_| RequestError::InvalidRequest)?;
+        let input_hash = ActionCore::of(&self.manifest, a)
+            .and_then(|core| input_digest(core, &input))
+            .map_err(|_| RequestError::InvalidRequest)?;
         let deadline = Instant::now() + self.runtime.limits().wall_time;
         let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
         for _ in 0..3 {
@@ -130,14 +133,15 @@ impl Application {
         let deadline = Instant::now() + self.runtime.limits().wall_time;
         let prepared = timeout_at(deadline, async {
             let a = manifest::action(&self.manifest, action)?;
+            let core = ActionCore::of(&self.manifest, a)?;
             let mut tx = self.database.begin(deadline.into_std()).await?;
             self.admission(&mut tx, false).await?;
             let now = security::now()?;
             let now = self.observe_clock_write(&mut tx, now).await?;
             let (token, session, principal) = self
-                .submission_identity(&mut tx, a, cookie, submission, csrf, now)
+                .submission_identity(&mut tx, core, cookie, submission, csrf, now)
                 .await?;
-            let target = self.submission_target(&token, a)?;
+            let target = self.submission_target(&token, core)?;
             let receipt = self
                 .load_receipt(&mut tx, &token.nonce, &session.nonce)
                 .await?;
@@ -145,7 +149,7 @@ impl Application {
                 let canonical = manifest::canonical_input(&self.manifest, a, input).ok();
                 let expected = canonical
                     .as_ref()
-                    .map(|input| input_digest(a, input))
+                    .map(|input| input_digest(core, input))
                     .transpose()?;
 
                 let response = if expected.as_ref() == Some(digest) {
@@ -165,7 +169,7 @@ impl Application {
             }
             if let Some(target) = target {
                 let Some(stored) = self
-                    .authorized_target(&mut tx, a, &target, &principal, capability)
+                    .authorized_target(&mut tx, core, &target, &principal, capability)
                     .await?
                 else {
                     return self
@@ -189,7 +193,7 @@ impl Application {
                         .map(navigation::Prepared::ready);
                 }
             } else {
-                self.authorize_create(a, &principal)?;
+                self.authorize_create(core, &principal)?;
             }
             let credentials = FormCredentials {
                 csrf: csrf.into(),
@@ -226,7 +230,16 @@ impl Application {
         let a = manifest::action(&self.manifest, action)?;
         let attempt = self
             .attempt_action(
-                cookie, action, submission, csrf, input, input_hash, capability, budget,
+                action::Submitter {
+                    cookie,
+                    submission,
+                    csrf,
+                },
+                ActionCore::of(&self.manifest, a)?,
+                input,
+                input_hash,
+                capability,
+                budget,
             )
             .await;
         let _wasm = budget.wasm.take();
@@ -304,7 +317,7 @@ impl Application {
     }
 }
 
-pub(super) fn input_digest(action: &Action, input: &Fields) -> Result<String> {
+pub(super) fn input_digest(action: ActionCore<'_>, input: &Fields) -> Result<String> {
     ensure!(
         input.len() == action.inputs.len(),
         "unexpected digest input"
@@ -361,6 +374,7 @@ pub(super) struct ExecutionBudget {
     pub(super) host_calls: u32,
     pub(super) database_calls: u32,
     parent_navigation_reserved: bool,
+    // Hold admission through binding response preparation and receipt persistence.
     pub(super) wasm: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl ExecutionBudget {
@@ -394,35 +408,6 @@ impl ExecutionBudget {
     }
 }
 
-impl Application {
-    pub(super) fn authorize_create(
-        &self,
-        action: &Action,
-        principal: &auth::Principal,
-    ) -> Result<()> {
-        for step in &action.steps {
-            let op = manifest::operation(&self.manifest, step.operation)?;
-            if op.kind != OperationKind::Create {
-                continue;
-            }
-            ensure!(
-                manifest::is_public(op)
-                    || principal.user().is_ok_and(|user| repository::allowed(
-                        &op.policy,
-                        principal,
-                        crate::policy::Row {
-                            owner: &user.id,
-                            tenant: &user.tenant,
-                            fields: &Default::default()
-                        }
-                    )),
-                repository::ReferenceUnavailable
-            );
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod parent_redirect_budget_tests {
     use super::*;
@@ -444,7 +429,7 @@ mod parent_redirect_budget_tests {
             ("body".into(), "retried reply".into()),
             ("published".into(), "true".into()),
         ]);
-        let digest = input_digest(&m.actions[0], &input).unwrap();
+        let digest = input_digest(ActionCore::of(&m, &m.actions[0]).unwrap(), &input).unwrap();
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
         let mut budget = ExecutionBudget::new(app.runtime.limits(), deadline);
         // Complete capture, mutation and response preparation on every attempt.

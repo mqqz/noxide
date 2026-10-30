@@ -117,7 +117,11 @@ async fn contract(db: Database, descending: bool) {
             .await
             .unwrap();
         let mut e = effects(tx, &m, &alice, true, target);
-        assert!(e.execute_transaction(&m.actions[0]).await.is_err());
+        assert!(
+            e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+                .await
+                .is_err()
+        );
         e.tx.rollback().await.unwrap();
     }
     for principal in [
@@ -134,7 +138,11 @@ async fn contract(db: Database, descending: bool) {
             .unwrap();
         let mut e = effects(tx, &m, &alice, true, &bob);
         e.principal = principal;
-        assert!(e.execute_transaction(&m.actions[0]).await.is_err());
+        assert!(
+            e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+                .await
+                .is_err()
+        );
         e.tx.rollback().await.unwrap();
     }
     let tx = db
@@ -145,7 +153,11 @@ async fn contract(db: Database, descending: bool) {
     e.request
         .input
         .insert("recipient_tenant".into(), eve.clone());
-    assert!(e.execute_transaction(&m.actions[0]).await.is_err());
+    assert!(
+        e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+            .await
+            .is_err()
+    );
     assert_eq!(
         e.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_records", &[])
             .await
@@ -160,7 +172,10 @@ async fn contract(db: Database, descending: bool) {
             .await
             .unwrap();
         let mut e = effects(tx, &m, &alice, true, if i == 0 { &alice } else { &bob });
-        let outcomes = e.execute_transaction(&m.actions[0]).await.unwrap();
+        let outcomes = e
+            .execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+            .await
+            .unwrap();
         let record = repository::load(&mut e.tx, &m, 1, outcomes[0].id)
             .await
             .unwrap()
@@ -339,7 +354,9 @@ async fn contract(db: Database, descending: bool) {
         .await
         .unwrap();
     let mut e = effects(tx, &m, &alice, true, &racing);
-    e.execute_transaction(&m.actions[0]).await.unwrap();
+    e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+        .await
+        .unwrap();
     let (created, disabled) = tokio::join!(e.tx.commit(), db.disable_account(&racing));
     created.unwrap();
     disabled.unwrap();
@@ -348,7 +365,11 @@ async fn contract(db: Database, descending: bool) {
         .await
         .unwrap();
     let mut e = effects(tx, &m, &alice, true, &racing);
-    assert!(e.execute_transaction(&m.actions[0]).await.is_err());
+    assert!(
+        e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+            .await
+            .is_err()
+    );
     e.tx.rollback().await.unwrap();
     db.disable_account(&bob).await.unwrap();
     let tx = db
@@ -356,7 +377,11 @@ async fn contract(db: Database, descending: bool) {
         .await
         .unwrap();
     let mut e = effects(tx, &m, &alice, true, &bob);
-    assert!(e.execute_transaction(&m.actions[0]).await.is_err());
+    assert!(
+        e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+            .await
+            .is_err()
+    );
     e.tx.rollback().await.unwrap();
     db.delete_account(&bob).await.unwrap();
     let mut tx = db
