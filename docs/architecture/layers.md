@@ -73,3 +73,5 @@ The [refactor validation record](refactor-validation.md) lists executed commands
 and checks that still require CI infrastructure.
 
 See [declarative queries](queries.md) for the staged query design and compatibility contract.
+
+See [declared action transactions](transactions.md) for the accepted transaction design.
