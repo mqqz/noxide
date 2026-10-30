@@ -25,15 +25,19 @@ Three condition kinds remain separate:
   unreadable through an approved read. A sold item can disappear from an
   available-items list while remaining readable on its record page.
 
-Every scan composes `(policy) AND visibility AND parent AND selection`. A compiled
+Every scan composes `(policy) AND visibility AND scope AND selection`. A compiled
 list plan grants nothing: execution reads authority and visibility from the
 approved operation and rechecks `policy::allowed` on stored rows. Classification
 of policy atoms belongs in `policy.rs`. Values come only from approved literals
 or host-validated request parameters; `Query<Q>::fetch()` takes no arguments.
 Index existence never grants permission to filter a field.
 
-New protocol fields must default and omit their empty values so existing
-serialized contracts and approval digests stay unchanged. Derived indexes do not
+The typed-reference track deliberately re-records manifests, digests and cursor
+scopes, and bumps storage version; its changes override the compatibility rule
+below. See [typed references](references.md).
+
+For subsequent compatible query extensions, new protocol fields must default and
+omit empty values so existing serialized contracts and approval digests stay unchanged. Derived indexes do not
 change table layout and do not warrant a `STORAGE_VERSION` bump.
 
 ## Two existing execution paths
@@ -44,10 +48,10 @@ recheck row policy, and look ahead for continuation.
 
 Any policy containing `principal_is` uses the existing account merge path. Each
 rule scans ordered `(created_seq, id)` candidates. A rule with at most one identity
-atom (`owner` or `principal_is`) and no parent scope is exact: its ordered composite
+atom (`owner` or `principal_is`) and no reference scope is exact: its ordered composite
 index supports `page_size + 1` candidates. A residual rule scans its first identity
 atom with limit `min(256 / rules, 64)`. Candidates are deduplicated by creation
-sequence, loaded and independently authorized, parent-checked, and appended within
+sequence, loaded and independently authorized, gate-checked, and appended within
 the byte prefix. A conservative boundary preserves continuation when a residual
 scan reaches its bound, even if the page is short or empty.
 
@@ -56,7 +60,7 @@ not extend merge execution to other policies without the conditional design in
 increment 7. No additional execution engine or host-managed index table is planned.
 
 The host compiles an immutable plan map at manifest load. A plan retains only
-operation ID, parent field, scan strategy, selection, order and limit. It does not
+operation ID, reference scope field, scan strategy, selection, order and limit. It does not
 copy policy, resource, visibility or projection. `policy.rs` classifies exact and
 residual scans independently of the current principal and constructs their scan
 policies. Execution still takes authority from the approved operation.
@@ -93,8 +97,8 @@ must retain this behavior and cannot turn a bounded scan into a false end.
 
 Cursor scope uses canonical serialization of the approved list `Operation` plus
 canonical parameter values sorted by name. Empty maps retain the original scope. It also binds the
-contract digest, deployment identity, route, target, parent incarnation and current
-account identity. Cursors cannot cross accounts, parent scopes, parameter values,
+contract digest, deployment identity, route, target, scope target incarnation and current
+account identity. Cursors cannot cross accounts, reference scopes, parameter values,
 orders or changed operations, and do not survive deployments. No separate query
 identity hash is needed; index-name hashes only name derived indexes.
 
