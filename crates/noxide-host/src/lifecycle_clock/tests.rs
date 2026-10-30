@@ -72,14 +72,20 @@ fn new_version_with_unchanged_watermark_proves_progress() {
     freshness
         .observe_at(observed(clock(10_000, 2), next), next)
         .unwrap();
+    // A higher version proves progress after the previous observation at t=0,
+    // not this read at t=4. Another tick advances the proven lower bound.
+    let following = start + Duration::from_secs(5);
+    freshness
+        .observe_at(observed(clock(10_000, 3), following), following)
+        .unwrap();
     assert!(
         freshness
-            .attempt_at(clock(10_000, 2), start + Duration::from_secs(8))
+            .attempt_at(clock(10_000, 3), start + Duration::from_secs(8))
             .is_ok()
     );
     assert!(
         freshness
-            .attempt_at(clock(10_000, 2), start + Duration::from_secs(9))
+            .attempt_at(clock(10_000, 3), start + Duration::from_secs(9))
             .is_err()
     );
 }
@@ -132,6 +138,133 @@ fn delayed_observation_regression_and_old_snapshots_fail_closed() {
     );
     assert!(freshness.attempt_at(clock(10_000, 1), start).is_err());
     assert!(freshness.attempt_at(clock(9_999, 3), start).is_err());
+}
+
+#[test]
+fn delayed_higher_version_cannot_renew_from_current_read_start() {
+    let freshness = Freshness::default();
+    let start = Instant::now();
+    freshness
+        .committed_at(committed(clock(10_000, 1), start), start)
+        .unwrap();
+    let baseline = start + Duration::from_millis(30_000);
+    freshness
+        .observe_at(observed(clock(10_000, 99), baseline), baseline)
+        .unwrap();
+    assert!(freshness.attempt_at(clock(10_000, 99), baseline).is_err());
+
+    // Final tick v100 commits at t=30.001, then ticking stops. The read starts
+    // at t=34.900 and is delivered at t=39.800, matching the review reproducer.
+    let read_started = start + Duration::from_millis(34_900);
+    let delivered = start + Duration::from_millis(39_800);
+    freshness
+        .observe_at(observed(clock(10_000, 100), read_started), delivered)
+        .unwrap();
+    assert!(freshness.attempt_at(clock(10_000, 100), delivered).is_err());
+    let reread = start + Duration::from_millis(39_900);
+    freshness
+        .observe_at(observed(clock(10_000, 100), reread), reread)
+        .unwrap();
+    assert!(freshness.attempt_at(clock(10_000, 100), reread).is_err());
+}
+
+#[test]
+fn immediate_higher_version_expires_from_previous_observation_start() {
+    let freshness = Freshness::default();
+    let start = Instant::now();
+    freshness
+        .committed_at(committed(clock(10_000, 1), start), start)
+        .unwrap();
+    let baseline = start + Duration::from_millis(30_000);
+    freshness
+        .observe_at(observed(clock(10_000, 99), baseline), baseline)
+        .unwrap();
+
+    // Final tick commits at t=30.001. Even with immediate delivery at t=34.900,
+    // the proven lower bound remains t=30.000 and expires exactly at t=35.000.
+    let read_started = start + Duration::from_millis(34_900);
+    freshness
+        .observe_at(observed(clock(10_000, 100), read_started), read_started)
+        .unwrap();
+    for (millis, available) in [
+        (34_900, true),
+        (34_999, true),
+        (35_000, false),
+        (39_800, false),
+    ] {
+        assert_eq!(
+            freshness
+                .attempt_at(clock(10_000, 100), start + Duration::from_millis(millis))
+                .is_ok(),
+            available,
+            "attempt at t={millis}ms"
+        );
+    }
+}
+
+#[test]
+fn stopped_ticks_cannot_be_kept_fresh_by_repeated_reads() {
+    let freshness = Freshness::default();
+    let start = Instant::now();
+    freshness
+        .committed_at(committed(clock(10_000, 1), start), start)
+        .unwrap();
+    // New versions are read at t=1, 2, 3. The final v4 tick committed at
+    // t=2.001. The final proof is anchored at the preceding read, t=2.000.
+    for second in 1..=3 {
+        let now = start + Duration::from_secs(second);
+        freshness
+            .observe_at(observed(clock(10_000, second as i64 + 1), now), now)
+            .unwrap();
+    }
+    for (millis, available) in [(4_000, true), (6_999, true), (7_000, false), (8_000, false)] {
+        let now = start + Duration::from_millis(millis);
+        freshness
+            .observe_at(observed(clock(10_000, 4), now), now)
+            .unwrap();
+        assert_eq!(
+            freshness.attempt_at(clock(10_000, 4), now).is_ok(),
+            available
+        );
+    }
+}
+
+#[test]
+fn restart_and_delayed_own_tick_require_new_confirmed_fresh_progress() {
+    let restarted = Freshness::default();
+    let start = Instant::now();
+    let current = start + Duration::from_millis(40_000);
+    for version in [100, 101] {
+        assert!(
+            restarted
+                .observe_at(observed(clock(10_000, version), current), current)
+                .is_err()
+        );
+    }
+    assert!(restarted.attempt_at(clock(10_000, 101), current).is_err());
+    assert!(
+        restarted
+            .committed_at(
+                committed(clock(10_000, 102), current),
+                current + FRESHNESS_LIMIT
+            )
+            .is_err()
+    );
+    assert!(
+        restarted
+            .attempt_at(clock(10_000, 102), current + FRESHNESS_LIMIT)
+            .is_err()
+    );
+    let confirmed = start + Duration::from_millis(46_000);
+    restarted
+        .committed_at(committed(clock(10_000, 103), confirmed), confirmed)
+        .unwrap();
+    assert!(restarted.attempt_at(clock(10_000, 103), confirmed).is_ok());
+    assert!(
+        restarted
+            .attempt_at(clock(10_000, 103), confirmed + FRESHNESS_LIMIT)
+            .is_err()
+    );
 }
 
 async fn fixture(database: &Database) {

@@ -181,11 +181,13 @@ impl Freshness {
                 // Crucially, do not update either monotonic time for a reread.
                 return Ok(());
             }
-            // After losing continuity, the first unseen version is only a new
-            // baseline; it could have committed long before this observation.
-            // Another strictly newer version within the window proves progress.
-            state.fresh_since = if recent(previous.started, observation.started) {
-                Some(observation.started)
+            // A higher version proves a commit after the previous snapshot,
+            // whose earliest possible time is the previous read's start. It
+            // does not prove a commit after this read started. Anchor the lease
+            // to that conservative lower bound, including delivery delay.
+            // A stale proof only establishes the next observation baseline.
+            state.fresh_since = if recent(previous.started, now) {
+                Some(previous.started)
             } else {
                 None
             };

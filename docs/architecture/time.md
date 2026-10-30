@@ -43,8 +43,11 @@ nor its lease. Optional heartbeat observations use a separate bounded read-only
 transaction, timed before BEGIN; an old request snapshot cannot renew freshness.
 A response taking five seconds cannot establish freshness. After a stale period,
 the first unseen version is only a baseline because it might already be old;
-a subsequent greater version within five seconds proves progress. A newly
-confirmed own tick also restores freshness. Observations cannot bypass the
+a subsequent greater version proves a commit after the previous snapshot. Its
+freshness deadline is anchored to that previous read's start, not the current
+read's start or delivery time. The conservative bound must still be within five
+seconds when consumed; otherwise the read establishes only the next baseline.
+A newly confirmed own tick also restores freshness. Observations cannot bypass the
 required own startup tick. Out-of-order observations fail closed.
 
 After the normal host deployment fence, every temporal transaction captures one
