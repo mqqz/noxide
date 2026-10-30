@@ -105,6 +105,10 @@ pub(crate) fn parameter_fields<'a>(
     Ok(fields)
 }
 fn validate_route_params(m: &Manifest, route: &Route) -> Result<()> {
+    ensure!(
+        route.path != "/" || route.params.is_empty(),
+        "index route cannot declare parameters"
+    );
     let names: BTreeSet<_> = route.params.iter().collect();
     ensure!(
         route.params.len() <= 4

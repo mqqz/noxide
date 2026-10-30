@@ -457,6 +457,16 @@ async fn filtered_lists(db: Database) {
         .await
         .unwrap();
     let mut m = declarations();
+    m.routes[0].path = "/filtered".into();
+    m.routes.push(Route {
+        id: 3,
+        path: "/".into(),
+        resource: None,
+        operations: vec![],
+        forms: vec![],
+        access: Access::Authenticated,
+        params: vec![],
+    });
     m.resources[0].fields.push(TextField {
         name: "archived".into(),
         label: "Archived".into(),

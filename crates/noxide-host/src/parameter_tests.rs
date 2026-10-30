@@ -17,6 +17,52 @@ fn declarations() -> Manifest {
     m
 }
 #[test]
+fn host_rejects_required_parameters_on_index_route() {
+    let mut m = crate::test_support::manifest();
+    m.resources[0].fields.push(TextField {
+        name: "flag".into(),
+        label: "Flag".into(),
+        kind: FieldKind::Boolean,
+        optional: false,
+        initial: None,
+        max_bytes: 5,
+    });
+    m.actions[0].fields.push("flag".into());
+    m.operations[0].filter.push(Condition {
+        field: "flag".into(),
+        equals: Operand::Param("flag".into()),
+    });
+    m.routes[0].params.push("flag".into());
+    m.routes[0].path = "/filtered".into();
+    m.routes.push(Route {
+        id: 3,
+        path: "/".into(),
+        resource: None,
+        operations: vec![],
+        forms: vec![],
+        access: Access::Authenticated,
+        params: vec![],
+    });
+    manifest::validate(&m).unwrap();
+    let home = RouteRef {
+        route: 3,
+        target: None,
+        params: Fields::new(),
+    };
+    assert_eq!(crate::routing::resolve(&m, &home).unwrap(), "/");
+    assert!(crate::render::unavailable(&crate::Presentation::default(), &m).is_ok());
+    m.routes.pop();
+    m.routes[0].path = "/".into();
+    let error = manifest::parse(&serde_json::to_vec(&m).unwrap())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("index route cannot declare parameters"),
+        "{error}"
+    );
+}
+
+#[test]
 fn host_rejects_parameterized_mutation_redirects() {
     let boolean = |name: &str| TextField {
         name: name.into(),
@@ -100,13 +146,14 @@ fn host_rejects_parameterized_mutation_redirects() {
         equals: Operand::Param("flag".into()),
     });
     m.routes[0].params.push("flag".into());
+    m.routes[0].path = "/filtered".into();
     m.routes[0].forms.clear();
     m.routes[1].forms.push(1);
     m.operations[2].kind = OperationKind::Delete;
     m.actions[0].fields.clear();
     m.routes.push(Route {
         id: 3,
-        path: "/all".into(),
+        path: "/".into(),
         resource: None,
         operations: vec![],
         forms: vec![],
