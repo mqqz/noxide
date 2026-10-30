@@ -55,6 +55,7 @@ impl Parse for CrudBlock {
                     parenthesized!(args in content);
                     let tokens: Tokens = args.parse()?;
                     match option.to_string().as_str() {
+                        "bind" => options.extend(quote!(, bind(#tokens))),
                         "fields" => options.extend(quote!(, fields(#tokens))),
                         "redirect" => {
                             options.extend(quote!(, redirect = #tokens));

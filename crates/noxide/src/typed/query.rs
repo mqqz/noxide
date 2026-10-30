@@ -7,9 +7,13 @@ pub trait QueryType {
     type Output;
     fn operation() -> Operation;
     fn from_record(record: Record) -> Self::Output;
+    fn record_id(record: &Self::Output) -> u64;
 }
 pub trait ListQuery: QueryType {}
 pub trait ReadQuery: QueryType {}
+pub trait FollowQuery: QueryType {
+    type Source: QueryType;
+}
 /// Arguments are constructed for one request; host checks remain authoritative.
 pub trait FromRequest: Sized {
     fn from_request(request: &RequestView) -> Self;
@@ -83,4 +87,49 @@ impl<Q: QueryType> Query<Q> {
 pub struct Preview<T> {
     pub items: Vec<T>,
     pub truncated: bool,
+}
+
+impl<Q: FollowQuery> Query<Q> {
+    pub fn follow_many(
+        &mut self,
+        sources: &[<Q::Source as QueryType>::Output],
+    ) -> Result<Vec<Option<Q::Output>>, crate::NotFound> {
+        if sources.len() > 20 {
+            return Err(crate::NotFound);
+        }
+        let resource = <Q::Source as QueryType>::Resource::definition().id;
+        let identities: Vec<_> = sources
+            .iter()
+            .map(|source| (resource, Q::Source::record_id(source)))
+            .collect();
+        let results = self.context.follow(Q::operation().id, &identities);
+        Ok(results
+            .into_iter()
+            .map(|record| record.map(Q::from_record))
+            .collect())
+    }
+}
+
+/// Records retain their supplying query type for typed follow inputs.
+pub struct QueryRecord<Q: QueryType> {
+    resource: Q::Resource,
+    marker: PhantomData<Q>,
+}
+impl<Q: QueryType> QueryRecord<Q> {
+    pub fn into_resource(self) -> Q::Resource {
+        self.resource
+    }
+    #[doc(hidden)]
+    pub fn new(resource: Q::Resource) -> Self {
+        Self {
+            resource,
+            marker: PhantomData,
+        }
+    }
+}
+impl<Q: QueryType> std::ops::Deref for QueryRecord<Q> {
+    type Target = Q::Resource;
+    fn deref(&self) -> &Self::Target {
+        &self.resource
+    }
 }

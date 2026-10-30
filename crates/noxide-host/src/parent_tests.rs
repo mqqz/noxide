@@ -28,20 +28,24 @@ pub(crate) fn declarations() -> Manifest {
             max_bytes: 20,
             optional: false,
             initial: None,
-            kind: FieldKind::Parent {
+            kind: FieldKind::Reference {
                 resource: "threads".into(),
-                visible: Visibility {
-                    field: "published".into(),
-                    equals: "true".into(),
-                },
-                create_when: Visibility {
-                    field: "locked".into(),
-                    equals: "false".into(),
-                },
             },
         },
     ]);
+    m.resources[0].gate = Some(Gate {
+        field: "thread".into(),
+        visible: Visibility {
+            field: "published".into(),
+            equals: "true".into(),
+        },
+        create_when: Visibility {
+            field: "locked".into(),
+            equals: "false".into(),
+        },
+    });
     m.resources.push(Resource {
+        gate: None,
         id: 2,
         name: "threads".into(),
         fields: vec![boolean("published"), boolean("locked")],
@@ -57,6 +61,8 @@ pub(crate) fn declarations() -> Manifest {
         }
     }
     m.operations.push(Operation {
+        scope: None,
+        via: None,
         filter: Vec::new(),
         disclose: Vec::new(),
         list: None,
@@ -85,6 +91,15 @@ pub(crate) fn declarations() -> Manifest {
         forms: vec![1],
         access: Access::PublicOptional,
     });
+    m.actions[0].bind = Some(Bind {
+        field: "thread".into(),
+        eligible: 4,
+    });
+    m.operations
+        .iter_mut()
+        .find(|op| op.kind == OperationKind::List)
+        .unwrap()
+        .scope = Some("thread".into());
     m.actions[0].fields.push("published".into());
     m
 }
@@ -119,6 +134,8 @@ pub(crate) async fn seed(db: &Database, m: &Manifest) {
 }
 async fn effects(db: &Database, m: &Manifest, route: u32, target: u64) -> Effects {
     Effects {
+        provenance: Default::default(),
+        follow_sources: Vec::new(),
         invoked: Default::default(),
         list_bytes: 0,
         list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
@@ -189,6 +206,7 @@ fn parent_admission_rejects_unbound_or_mutable_relationships() {
     bad.resources[1]
         .fields
         .push(m.resources[0].fields[2].clone());
+    bad.resources[1].gate = m.resources[0].gate.clone();
     assert!(manifest::validate(&bad).is_err());
     let field = m.resources[0].fields[2].clone();
     let mut bad = m;
@@ -205,6 +223,8 @@ async fn mutation_case(db: Database) {
     db.initialize().await.unwrap();
     let mut m = declarations();
     m.operations.push(Operation {
+        scope: None,
+        via: None,
         filter: Vec::new(),
         disclose: Vec::new(),
         list: None,
@@ -221,6 +241,7 @@ async fn mutation_case(db: Database) {
         fields: None,
     });
     m.actions.push(Action {
+        bind: None,
         id: 2,
         version: 1,
         name: "Edit reply".into(),
@@ -365,7 +386,7 @@ async fn concurrent_case(db: Database) {
                     .await
                     .unwrap_err()
                     .to_string()
-                    .contains("parent unavailable or locked")
+                    .contains("reference unavailable")
             );
             e.tx.rollback().await.unwrap();
         });
@@ -427,8 +448,8 @@ async fn parents_case(db: Database, sqlite: bool) {
         );
         let indexes =
             e.tx.fetch::<1>(
-                if sqlite { "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'nx_parent_%'" }
-                else { "SELECT indexname FROM pg_indexes WHERE schemaname='public' AND indexname LIKE 'nx_parent_%'" },
+                if sqlite { "SELECT name FROM sqlite_master WHERE type='index' AND substr(name,1,5)='nx_r_'" }
+                else { "SELECT indexname FROM pg_indexes WHERE schemaname='public' AND substr(indexname,1,5)='nx_r_'" },
                 &[],
             )
             .await
@@ -509,8 +530,9 @@ async fn forms_case(db: Database, _sqlite: bool) {
         .submit(&cookie, 1, &token, &csrf, input.clone())
         .await
         .unwrap();
-    assert_eq!(conflict.status, 409);
-    // The parent's revision changed: recover a fresh form, never silently retarget.
+    assert_eq!(conflict.status, denied.status);
+    assert_eq!(conflict.body, denied.body);
+    // Stale bindings share the unavailable response; obtain a new page form.
     let page = app.view_page(None, 3, Some(10), None).await.unwrap();
     let cookie = page.anonymous_cookie.unwrap();
     let text = String::from_utf8(page.body).unwrap();
@@ -556,6 +578,8 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         tenant_scoped: false,
     };
     m.operations.push(Operation {
+        scope: None,
+        via: None,
         filter: Vec::new(),
         disclose: Vec::new(),
         list: None,
@@ -569,6 +593,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         fields: None,
     });
     m.actions.push(Action {
+        bind: None,
         id: 2,
         version: 1,
         name: "Delete thread".into(),
@@ -614,7 +639,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
     replacement.id = 3;
     replacement.name = "replacement".into();
     target.resources.push(replacement);
-    let FieldKind::Parent { resource, .. } = &mut target.resources[0].fields[2].kind else {
+    let FieldKind::Reference { resource, .. } = &mut target.resources[0].fields[2].kind else {
         unreachable!()
     };
     *resource = "replacement".into();
@@ -644,7 +669,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
             .await
             .unwrap_err()
             .to_string()
-            .contains("orphan")
+            .contains("type changes require a conversion")
     );
     let mut e = effects(&db, &m, 3, 10).await;
     e.tx.check_schema(&m).await.unwrap();
@@ -658,6 +683,17 @@ async fn integrity_case(db: Database, _sqlite: bool) {
     // A valid field rename rebuilds the index and preserves the relationship.
     let mut renamed = m.clone();
     renamed.resources[0].fields[2].name = "parent_thread".into();
+    renamed.resources[0].gate.as_mut().unwrap().field = "parent_thread".into();
+    for op in &mut renamed.operations {
+        if op.scope.as_deref() == Some("thread") {
+            op.scope = Some("parent_thread".into());
+        }
+    }
+    for action in &mut renamed.actions {
+        if let Some(bind) = &mut action.bind {
+            bind.field = "parent_thread".into();
+        }
+    }
     let migration = crate::schema::Migration {
         version: 1,
         from: crate::schema::digest(&m.resources).unwrap(),
@@ -682,6 +718,8 @@ async fn postgres_relationships_pagination_forms_and_migrations() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     for case in [
+        "gated_destination",
+        "follow",
         "redirect",
         "prefix",
         "prefix_desc",
@@ -708,6 +746,8 @@ async fn postgres_relationships_pagination_forms_and_migrations() {
         case_url.set_path(&format!("/{name}"));
         let db = Database::postgres(case_url.as_str()).unwrap();
         match case {
+            "gated_destination" => gated_destination_case(db).await,
+            "follow" => follow_case(db).await,
             "prefix" => chronological_prefix_case(db, false).await,
             "prefix_desc" => chronological_prefix_case(db, true).await,
             "filtered" => filtered_parent_case(db).await,
@@ -750,7 +790,7 @@ async fn optional_auth_pages_omit_declared_owner_forms_for_anonymous_visitors() 
 }
 
 #[tokio::test]
-async fn parent_indexes_do_not_index_unrelated_text_fields() {
+async fn reference_indexes_do_not_index_unrelated_text_fields() {
     let tmp = tempfile::tempdir().unwrap();
     index_scope_case(Database::sqlite(tmp.path().join("index-scope.db")), true).await;
 }
@@ -772,6 +812,7 @@ async fn index_scope_case(db: Database, sqlite: bool) {
     db.initialize().await.unwrap();
     let mut m = declarations();
     m.resources.push(Resource {
+        gate: None,
         id: 3,
         name: "unrelated".into(),
         fields: ["thread", "parent_thread"]
@@ -820,6 +861,17 @@ async fn index_scope_case(db: Database, sqlite: bool) {
     // Rebuild the parent index while same-named, large text already exists.
     let mut renamed = m.clone();
     renamed.resources[0].fields[2].name = "parent_thread".into();
+    renamed.resources[0].gate.as_mut().unwrap().field = "parent_thread".into();
+    for op in &mut renamed.operations {
+        if op.scope.as_deref() == Some("thread") {
+            op.scope = Some("parent_thread".into());
+        }
+    }
+    for action in &mut renamed.actions {
+        if let Some(bind) = &mut action.bind {
+            bind.field = "parent_thread".into();
+        }
+    }
     let migration = crate::schema::Migration {
         version: 1,
         from: crate::schema::digest(&m.resources).unwrap(),
@@ -864,11 +916,11 @@ async fn index_scope_case(db: Database, sqlite: bool) {
             ),
             (
                 format!("resource={storage} AND {expression}='10' AND owner='alice'"),
-                format!("nx_parent_{storage}_owner"),
+                format!("nx_r_{storage:x}_parent_thread_owner"),
             ),
             (
                 format!("resource={storage} AND {expression}='10' AND tenant='team'"),
-                format!("nx_parent_{storage}_tenant"),
+                format!("nx_r_{storage:x}_parent_thread_tenant"),
             ),
         ] {
             let query = format!(
@@ -915,9 +967,9 @@ async fn index_scope_case(db: Database, sqlite: bool) {
                 .await
                 .unwrap();
             assert!(
-                plan.iter()
-                    .any(|line| line[0].contains(&format!("nx_parent_{storage}"))
-                        || line[0].contains("nx_records_created")),
+                plan.iter().any(|line| line[0]
+                    .contains(&format!("nx_r_{storage:x}_parent_thread"))
+                    || line[0].contains("nx_records_created")),
                 "{plan:?}"
             );
             assert!(
@@ -1347,7 +1399,10 @@ async fn postgres_full_creation_benchmark() {
 pub(crate) async fn redirect_app(db: Database) -> (Application, Manifest) {
     db.initialize().await.unwrap();
     let mut m = declarations();
-    m.actions[0].redirect = Redirect::Parent { parent: 3 };
+    m.actions[0].redirect = Redirect::Reference {
+        field: "thread".into(),
+        route: 3,
+    };
     manifest::validate(&m).unwrap();
     let app = Application::new(
         &fixture::component(None),
@@ -1445,17 +1500,26 @@ async fn sqlite_parent_redirect_handover_replay_and_visibility() {
 fn parent_redirect_admission_and_contract_identity() {
     let ordinary = declarations();
     let mut parent = ordinary.clone();
-    parent.actions[0].redirect = Redirect::Parent { parent: 3 };
+    parent.actions[0].redirect = Redirect::Reference {
+        field: "thread".into(),
+        route: 3,
+    };
     manifest::validate(&parent).unwrap();
     assert_ne!(
         manifest::digest(&ordinary).unwrap(),
         manifest::digest(&parent).unwrap()
     );
     for route in [1, 2, 999] {
-        parent.actions[0].redirect = Redirect::Parent { parent: route };
+        parent.actions[0].redirect = Redirect::Reference {
+            field: "thread".into(),
+            route,
+        };
         assert!(manifest::validate(&parent).is_err());
     }
-    parent.actions[0].redirect = Redirect::Parent { parent: 3 };
+    parent.actions[0].redirect = Redirect::Reference {
+        field: "thread".into(),
+        route: 3,
+    };
     let mut additional = parent.operations[3].clone();
     additional.id = 99;
     parent.operations.push(additional);
@@ -1654,4 +1718,322 @@ async fn filtered_parent_case(db: Database) {
 async fn sqlite_filtered_parent_visibility_and_live_selection() {
     let tmp = tempfile::tempdir().unwrap();
     filtered_parent_case(Database::sqlite(tmp.path().join("filtered-parent.db"))).await;
+}
+
+fn followed_declarations() -> Manifest {
+    let mut m = declarations();
+    m.resources[0].gate = None;
+    m.operations[0]
+        .fields
+        .as_mut()
+        .unwrap()
+        .push("thread".into());
+    let mut follow = m.operations[3].clone();
+    follow.id = 6;
+    follow.via = Some(Via {
+        source: 1,
+        field: "thread".into(),
+    });
+    m.operations.push(follow);
+    m.routes[2].operations.push(6);
+    manifest::validate(&m).unwrap();
+    m
+}
+
+#[test]
+fn forged_reference_and_follow_declarations_are_rejected_independently() {
+    let m = followed_declarations();
+    let reject = |mutate: &dyn Fn(&mut Manifest)| {
+        let mut bad = m.clone();
+        mutate(&mut bad);
+        assert!(
+            manifest::validate(&bad).is_err(),
+            "forged declaration admitted: {bad:?}"
+        );
+    };
+    reject(&|m| m.actions[0].bind = None);
+    reject(&|m| m.actions[0].bind.as_mut().unwrap().field = "body".into());
+    reject(&|m| m.actions[0].bind.as_mut().unwrap().eligible = 2);
+    reject(&|m| {
+        let mut read = m.operations[3].clone();
+        read.id = 7;
+        m.operations.push(read);
+        m.actions[0].bind.as_mut().unwrap().eligible = 7;
+    });
+    reject(&|m| {
+        let mut field = m.resources[0].fields[2].clone();
+        field.name = "other".into();
+        m.resources[0].fields.push(field);
+    });
+    reject(&|m| {
+        m.resources[0].gate = declarations().resources[0].gate.clone();
+        m.resources[0].gate.as_mut().unwrap().field = "body".into();
+    });
+    reject(&|m| {
+        m.resources[0].gate = declarations().resources[0].gate.clone();
+        m.resources[1].gate = m.resources[0].gate.clone();
+    });
+    reject(&|m| {
+        m.resources[0].gate = declarations().resources[0].gate.clone();
+        m.operations[0].scope = None;
+    });
+    reject(&|m| m.operations[1].scope = Some("thread".into()));
+    reject(&|m| m.operations[0].scope = Some("body".into()));
+    reject(&|m| {
+        m.operations[2].via = Some(Via {
+            source: 1,
+            field: "thread".into(),
+        })
+    });
+    reject(&|m| m.operations[4].scope = Some("thread".into()));
+    reject(&|m| {
+        m.operations[0].filter.push(Condition {
+            field: "thread".into(),
+            equals: Operand::Literal("10".into()),
+        })
+    });
+    reject(&|m| m.operations[4].via.as_mut().unwrap().field = "body".into());
+    reject(&|m| m.operations[4].via.as_mut().unwrap().source = 4);
+    reject(&|m| m.operations[4].resource = 1);
+    reject(&|m| {
+        m.operations[0]
+            .fields
+            .as_mut()
+            .unwrap()
+            .retain(|f| f != "thread")
+    });
+    reject(&|m| m.operations[4].via.as_mut().unwrap().source = 6);
+    reject(&|m| m.routes[2].operations.retain(|id| *id != 1));
+    reject(&|m| {
+        m.actions[0].redirect = Redirect::Reference {
+            field: "body".into(),
+            route: 3,
+        };
+    });
+    // Required protocol fields and deny_unknown_fields reject a second gate too.
+    let raw = serde_json::to_string(&m.resources[0]).unwrap().replacen(
+        "\"gate\":null",
+        "\"gate\":null,\"gate\":null",
+        1,
+    );
+    assert!(serde_json::from_str::<Resource>(&raw).is_err());
+}
+
+async fn follow_case(db: Database) {
+    db.initialize().await.unwrap();
+    let m = followed_declarations();
+    seed(&db, &m).await;
+    let mut e = effects(&db, &m, 3, 10).await;
+    assert!(
+        e.invoke(6, 10).await.is_err(),
+        "ordinary read must reject follow"
+    );
+    assert!(e.follow(4).await.is_err(), "follow requires via");
+    e.follow_source(1, 2).unwrap();
+    assert!(e.follow(6).await.is_err(), "source never returned");
+    e.next_request();
+    let mut rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+    assert_eq!(rows.len(), 3);
+    rows[0].fields.insert("thread".into(), "20".into());
+    e.follow_source(1, rows[0].id).unwrap();
+    e.follow_source(1, rows[0].id).unwrap();
+    e.follow_source(1, rows[1].id).unwrap();
+    let before = e.list_calls;
+    let products: Vec<Option<Record>> =
+        serde_json::from_slice(&e.follow(6).await.unwrap()).unwrap();
+    assert_eq!(
+        before - e.list_calls,
+        2,
+        "one catalog lookup and one batched read"
+    );
+    assert_eq!(products.len(), 3);
+    for product in products {
+        let product = product.unwrap();
+        assert_eq!(product.id, 10);
+        assert_eq!(product.fields.len(), 1);
+        assert!(product.fields.contains_key("locked"));
+    }
+    assert!(e.follow(6).await.is_err(), "follow is single use");
+    for source in [(1, 8), (2, rows[0].id)] {
+        e.next_request();
+        e.invoke(1, 0).await.unwrap();
+        e.follow_source(source.0, source.1).unwrap();
+        assert!(
+            e.follow(6).await.is_err(),
+            "lookahead or other operation has no provenance"
+        );
+    }
+    e.next_request();
+    for _ in 0..20 {
+        e.follow_source(1, 2).unwrap();
+    }
+    assert!(e.follow_source(1, 2).is_err());
+    e.next_request();
+    e.invoke(1, 0).await.unwrap();
+    e.follow_source(1, 2).unwrap();
+    e.list_calls = 1;
+    assert!(e.follow(6).await.is_err());
+    e.tx.rollback().await.unwrap();
+    let mut e = effects(&db, &m, 3, 10).await;
+    let one_record_bytes = serde_json::to_vec(&rows[..1]).unwrap().len();
+    e.list_bytes = MAX_LIST_RESULT_BYTES - 128 - one_record_bytes;
+    let prefix: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+    assert_eq!(prefix.len(), 1, "byte limit returns a strict prefix");
+    e.follow_source(1, 4).unwrap();
+    assert!(
+        e.follow(6).await.is_err(),
+        "byte-discarded source has no provenance"
+    );
+    e.tx.rollback().await.unwrap();
+    let mut other = m.clone();
+    let mut preview = other.operations[0].clone();
+    preview.id = 7;
+    preview.list = Some(ListSettings {
+        order: ListOrder::CreatedAsc,
+        page_size: 3,
+        preview: Some(Preview { see_all: None }),
+    });
+    other.operations.push(preview);
+    other.routes[2].operations.push(7);
+    manifest::validate(&other).unwrap();
+    let mut e = effects(&db, &other, 3, 10).await;
+    e.invoke(7, 0).await.unwrap();
+    e.follow_source(1, 2).unwrap();
+    assert!(
+        e.follow(6).await.is_err(),
+        "another source operation does not grant provenance"
+    );
+    e.tx.rollback().await.unwrap();
+    let mut preview = m.clone();
+    preview.operations[0].list = Some(ListSettings {
+        order: ListOrder::CreatedAsc,
+        page_size: 1,
+        preview: Some(Preview { see_all: None }),
+    });
+    manifest::validate(&preview).unwrap();
+    let mut e = effects(&db, &preview, 3, 10).await;
+    let result: PreviewResult = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+    assert_eq!(result.items.len(), 1);
+    assert!(result.truncated);
+    e.follow_source(1, 4).unwrap();
+    assert!(
+        e.follow(6).await.is_err(),
+        "preview lookahead cannot become a source"
+    );
+    e.tx.rollback().await.unwrap();
+    let mut e = effects(&db, &m, 3, 10).await;
+    e.invoke(1, 0).await.unwrap();
+    e.follow_source(1, 2).unwrap();
+    e.list_bytes = MAX_LIST_RESULT_BYTES;
+    assert!(
+        e.follow(6).await.is_err(),
+        "aggregate output exhaustion is a controlled failure"
+    );
+    e.tx.rollback().await.unwrap();
+    let mut ineligible = m.clone();
+    let eligible = ineligible
+        .operations
+        .iter_mut()
+        .find(|op| op.id == 4)
+        .unwrap();
+    eligible.policy = Policy {
+        any: vec![vec![Predicate::Owner]],
+    };
+    eligible.visibility = None;
+    eligible.fields = None;
+    manifest::validate(&ineligible).unwrap();
+    let mut e = effects(&db, &ineligible, 3, 10).await;
+    e.request.kind = RequestKind::Action(1);
+    e.request.input = Fields::from([
+        ("body".into(), "order".into()),
+        ("published".into(), "true".into()),
+    ]);
+    e.grant = Some(crate::security::RecordTarget {
+        resource: 2,
+        id: 10,
+        incarnation: "parent".into(),
+        revision: 1,
+        route: 3,
+    });
+    assert!(
+        e.invoke(3, 0)
+            .await
+            .unwrap_err()
+            .is::<crate::repository::ReferenceUnavailable>(),
+        "eligible read policy is enforced independently of gates"
+    );
+    e.tx.rollback().await.unwrap();
+    // Product visibility does not gate orders, but it does govern follow reads.
+    set_parent(&db, &m, false, false).await;
+    let mut e = effects(&db, &m, 3, 10).await;
+    let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+    assert_eq!(rows.len(), 3, "ungated references remain visible");
+    e.follow_source(1, rows[0].id).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Vec<Option<Record>>>(&e.follow(6).await.unwrap()).unwrap(),
+        vec![None]
+    );
+    e.tx.rollback().await.unwrap();
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    let storage = tx.storage_resource(&m, 2).await.unwrap();
+    tx.execute(
+        "DELETE FROM nx_records WHERE resource=$1 AND id=10",
+        &[storage.into()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let mut e = effects(&db, &m, 3, 10).await;
+    e.invoke(1, 0).await.unwrap();
+    e.follow_source(1, 2).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Vec<Option<Record>>>(&e.follow(6).await.unwrap()).unwrap(),
+        vec![None]
+    );
+    e.tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_follow_provenance_projection_and_ungated_visibility() {
+    let tmp = tempfile::tempdir().unwrap();
+    follow_case(Database::sqlite(tmp.path().join("follow.db"))).await;
+}
+
+async fn gated_destination_case(db: Database) {
+    db.initialize().await.unwrap();
+    let m = declarations();
+    seed(&db, &m).await;
+    for visible in [true, false] {
+        set_parent(&db, &m, visible, true).await;
+        let mut tx = db
+            .begin_read(Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+        let result = crate::repository::authorize_page_resource(
+            &mut tx,
+            &m,
+            &Principal::Anonymous,
+            &m.routes[1],
+            1,
+            2,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.is_some(),
+            visible,
+            "destination uses public target gate, not creation lock"
+        );
+        tx.rollback().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn reference_destination_checks_its_own_gate() {
+    let tmp = tempfile::tempdir().unwrap();
+    gated_destination_case(Database::sqlite(tmp.path().join("gated-destination.db"))).await;
 }

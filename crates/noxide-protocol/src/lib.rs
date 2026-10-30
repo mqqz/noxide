@@ -194,10 +194,8 @@ pub enum FieldKind {
         scope: AccountScope,
     },
     Boolean,
-    Parent {
+    Reference {
         resource: String,
-        visible: Visibility,
-        create_when: Visibility,
     },
     Integer {
         min: Option<i64>,
@@ -238,6 +236,7 @@ pub enum FormInstruction {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Resource {
+    pub gate: Option<Gate>,
     pub id: u32,
     pub name: String,
     pub fields: Vec<TextField>,
@@ -256,6 +255,8 @@ pub enum OperationKind {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
+    pub scope: Option<String>,
+    pub via: Option<Via>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filter: Vec<Condition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -354,12 +355,12 @@ pub struct Route {
 #[serde(untagged, deny_unknown_fields)]
 pub enum Redirect {
     Page(u32),
-    Parent { parent: u32 },
+    Reference { field: String, route: u32 },
 }
 impl Redirect {
     pub fn route(&self) -> u32 {
         match self {
-            Self::Page(route) | Self::Parent { parent: route } => *route,
+            Self::Page(route) | Self::Reference { route, .. } => *route,
         }
     }
 }
@@ -367,6 +368,7 @@ impl Redirect {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Action {
+    pub bind: Option<Bind>,
     pub layout: Vec<FormInstruction>,
     pub id: u32,
     pub version: u32,
@@ -455,10 +457,10 @@ impl TextField {
                 "false" => "false".into(),
                 _ => return Err("Choose true or false.".into()),
             },
-            FieldKind::Parent { .. } => {
-                let id = input.parse::<u64>().map_err(|_| "invalid parent ID")?;
+            FieldKind::Reference { .. } => {
+                let id = input.parse::<u64>().map_err(|_| "invalid reference ID")?;
                 if id == 0 || id > i64::MAX as u64 || id.to_string() != input {
-                    return Err("invalid parent ID".into());
+                    return Err("invalid reference ID".into());
                 }
                 id.to_string()
             }
@@ -531,4 +533,24 @@ mod tests {
             &["available_forms"],
         );
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Gate {
+    pub field: String,
+    pub visible: Visibility,
+    pub create_when: Visibility,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Bind {
+    pub field: String,
+    pub eligible: u32,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Via {
+    pub source: u32,
+    pub field: String,
 }

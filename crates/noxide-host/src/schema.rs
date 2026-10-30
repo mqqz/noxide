@@ -187,7 +187,10 @@ pub(crate) fn transition(
             } => {
                 let destination = field(resource(&target, key)?, name)?.clone();
                 ensure!(
-                    !matches!(destination.kind, FieldKind::Account { .. }),
+                    !matches!(
+                        destination.kind,
+                        FieldKind::Account { .. } | FieldKind::Reference { .. }
+                    ),
                     "account bindings require creation of a new record"
                 );
                 destination.canonical(value).map_err(anyhow::Error::msg)?;
@@ -233,6 +236,11 @@ pub(crate) fn transition(
                     .context("unknown migration field")?;
                 f.name = to.clone();
                 f.label = to.clone();
+                if let Some(gate) = &mut r.gate
+                    && gate.field == *from
+                {
+                    gate.field = to.clone();
+                }
                 // Keep the source schema here. A following explicit operation
                 // may convert or constrain the renamed field; the final equality
                 // check rejects undeclared schema changes.
@@ -325,13 +333,15 @@ fn same_kind(a: &FieldKind, b: &FieldKind) -> bool {
     if let (FieldKind::Account { scope: a }, FieldKind::Account { scope: b }) = (a, b) {
         return a == b;
     }
+    if let (FieldKind::Reference { resource: a }, FieldKind::Reference { resource: b }) = (a, b) {
+        return a == b;
+    }
     matches!(
         (a, b),
         (FieldKind::Text, FieldKind::Text)
             | (FieldKind::Boolean, FieldKind::Boolean)
             | (FieldKind::Integer { .. }, FieldKind::Integer { .. })
             | (FieldKind::Choice { .. }, FieldKind::Choice { .. })
-            | (FieldKind::Parent { .. }, FieldKind::Parent { .. })
     )
 }
 

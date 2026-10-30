@@ -173,7 +173,7 @@ impl Transaction {
             )
             .await?;
         }
-        self.parent_indexes(&manifest.resources).await?;
+        self.reference_indexes(&manifest.resources).await?;
         self.store_schema(&manifest.resources, &[]).await
     }
 
@@ -264,7 +264,7 @@ impl Transaction {
         Ok(())
     }
 
-    async fn parent_indexes(&mut self, resources: &[noxide_protocol::Resource]) -> Result<()> {
+    async fn reference_indexes(&mut self, resources: &[noxide_protocol::Resource]) -> Result<()> {
         for resource in resources {
             let storage = self.storage_key(&resource.name).await?;
             for field in resource
@@ -277,22 +277,25 @@ impl Transaction {
                     self.execute(&format!("CREATE INDEX nx_a_{storage:x}_{}_{suffix} ON nx_records(resource, ({expression}), {columns}created_seq) WHERE resource={storage}", field.name), &[]).await?;
                 }
             }
-            if let Some(field) = crate::manifest::parent_field(resource) {
+            if let Some(field) = crate::manifest::reference_field(resource) {
                 let storage = self.storage_key(&resource.name).await?;
                 let expression = self.field_expression(&field.name)?;
-                self.execute(&format!("CREATE INDEX nx_parent_{storage} ON nx_records(resource, ({expression}), created_seq) WHERE resource={storage}"), &[]).await?;
-                for column in ["owner", "tenant"] {
-                    self.execute(&format!("CREATE INDEX nx_parent_{storage}_{column} ON nx_records(resource, ({expression}), {column}, created_seq) WHERE resource={storage}"),&[]).await?;
+                self.execute(&format!("CREATE INDEX nx_r_{storage:x}_{} ON nx_records(resource, ({expression}), created_seq) WHERE resource={storage}", field.name), &[]).await?;
+                for column in ["owner", "tenant"]
+                    .into_iter()
+                    .filter(|_| resource.gate.is_some())
+                {
+                    self.execute(&format!("CREATE INDEX nx_r_{storage:x}_{}_{column} ON nx_records(resource, ({expression}), {column}, created_seq) WHERE resource={storage}", field.name),&[]).await?;
                 }
             }
         }
         Ok(())
     }
 
-    async fn validate_parents(&mut self, resources: &[noxide_protocol::Resource]) -> Result<()> {
+    async fn validate_references(&mut self, resources: &[noxide_protocol::Resource]) -> Result<()> {
         for child in resources {
-            if let Some(field) = crate::manifest::parent_field(child) {
-                let noxide_protocol::FieldKind::Parent {
+            if let Some(field) = crate::manifest::reference_field(child) {
+                let noxide_protocol::FieldKind::Reference {
                     resource: parent, ..
                 } = &field.kind
                 else {
@@ -423,13 +426,19 @@ impl Transaction {
                     .await?;
                 }
             }
-            if crate::manifest::parent_field(resource).is_some() {
+            if let Some(field) = crate::manifest::reference_field(resource) {
                 let storage = self.storage_key(&resource.name).await?;
-                for column in ["owner", "tenant"] {
-                    self.execute(&format!("DROP INDEX nx_parent_{storage}_{column}"), &[])
-                        .await?;
+                for column in ["owner", "tenant"]
+                    .into_iter()
+                    .filter(|_| resource.gate.is_some())
+                {
+                    self.execute(
+                        &format!("DROP INDEX nx_r_{storage:x}_{}_{column}", field.name),
+                        &[],
+                    )
+                    .await?;
                 }
-                self.execute(&format!("DROP INDEX nx_parent_{storage}"), &[])
+                self.execute(&format!("DROP INDEX nx_r_{storage:x}_{}", field.name), &[])
                     .await?;
             }
         }
@@ -544,8 +553,8 @@ impl Transaction {
             }
         }
         self.validate_stored_resources(&target.resources).await?;
-        self.validate_parents(&target.resources).await?;
-        self.parent_indexes(&target.resources).await?;
+        self.validate_references(&target.resources).await?;
+        self.reference_indexes(&target.resources).await?;
         self.reconcile_query_indexes(target).await?;
         history.push(schema::AppliedMigration {
             from: migration.from.clone(),

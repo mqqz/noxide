@@ -65,6 +65,8 @@ fn declarations() -> Manifest {
         ),
     ] {
         m.operations.push(Operation {
+            scope: None,
+            via: None,
             filter: Vec::new(),
             disclose: Vec::new(),
             list: None,
@@ -187,6 +189,8 @@ fn manifest_private_operations_forbid_public_metadata() {
 fn manifest_action_inspection_cannot_use_public_read() {
     let mut m = declarations();
     m.operations.push(Operation {
+        scope: None,
+        via: None,
         filter: Vec::new(),
         disclose: Vec::new(),
         list: None,
@@ -264,6 +268,8 @@ fn effects(
     target: Option<u64>,
 ) -> Effects {
     Effects {
+        provenance: Default::default(),
+        follow_sources: Vec::new(),
         invoked: Default::default(),
         list_bytes: 0,
         list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
@@ -863,6 +869,8 @@ async fn sqlite_initial_create_commit_is_host_owned() {
             tx.commit().await.unwrap();
             let mut updates = m.clone();
             updates.operations.push(Operation {
+                scope: None,
+                via: None,
                 filter: Vec::new(),
                 disclose: Vec::new(),
                 list: None,
@@ -879,6 +887,7 @@ async fn sqlite_initial_create_commit_is_host_owned() {
                 fields: None,
             });
             updates.actions.push(Action {
+                bind: None,
                 id: 2,
                 version: 1,
                 name: "Moderate".into(),

@@ -6,6 +6,7 @@ fn manifest() -> Manifest {
     Manifest {
         version: VERSION,
         resources: vec![Resource {
+            gate: None,
             id: 1,
             name: "notes".into(),
             fields: vec![TextField {
@@ -18,6 +19,8 @@ fn manifest() -> Manifest {
             }],
         }],
         operations: vec![Operation {
+            scope: None,
+            via: None,
             filter: Vec::new(),
             disclose: Vec::new(),
             id: 1,

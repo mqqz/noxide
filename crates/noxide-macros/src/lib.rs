@@ -524,7 +524,7 @@ mod declaration_tests {
     }
 
     #[test]
-    fn nested_option_and_resource_relations_are_rejected() {
+    fn nested_option_is_rejected_and_plain_reference_is_supported() {
         let input = syn::parse_quote! {
             #[resource(key = "tasks")]
             struct Task { #[id] id: Id<Self>, #[field(key = "name")] name: Option<Option<String>> }
@@ -539,7 +539,7 @@ mod declaration_tests {
             #[resource(key = "tasks")]
             struct Task { #[id] id: Id<Self>, #[field(key = "other")] other: Id<Task> }
         };
-        assert!(expand_resource(input).is_err());
+        assert!(expand_resource(input).is_ok());
     }
 }
 
@@ -708,7 +708,7 @@ mod parent_redirect_tests {
                 ", fields(body)"
             };
             let declaration: OperationDeclaration = syn::parse_str(&format!(
-                "{kind}(Reply), allow = owner{fields}, redirect = parent(thread)"
+                "{kind}(Reply), allow = owner{fields}, redirect = reference(thread, thread)"
             ))
             .unwrap();
             let item: syn::ItemStruct = syn::parse_quote!(
@@ -717,7 +717,12 @@ mod parent_redirect_tests {
             let lowered = declaration::action::expand_action(declaration, item);
             // The public expansion path enforces operation semantics separately.
             assert!(lowered.is_ok());
-            assert!(lowered.unwrap().to_string().contains("Redirect :: Parent"));
+            assert!(
+                lowered
+                    .unwrap()
+                    .to_string()
+                    .contains("Redirect :: Reference")
+            );
         }
         for bad in ["parent()", "parent(thread, other)", "parent(thread(other))"] {
             assert!(

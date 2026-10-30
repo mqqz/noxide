@@ -105,19 +105,19 @@ mod repeated {
     fn remove_layout(fields: FormFields<DeleteSecret>) -> FormLayout {
         form! { (fields.submit("DeleteSecret")) }
     }
-    #[action(create(Reply), fields(body), allow = owner, redirect = parent(thread))]
+    #[action(create(Reply), fields(body), bind(thread = target, eligible = ReadThread), allow = owner, redirect = reference(thread, thread))]
     struct CreateReply;
-    #[action(create(Reply), fields(body), allow = public, redirect = reply)]
+    #[action(create(Reply), fields(body), bind(thread = target, eligible = ReadThread), allow = public, redirect = reply)]
     struct CreateAnonymousReply;
     #[action(update(Reply), fields(body), allow = owner, redirect = reply)]
     struct r#EditReply;
-    #[action(update(Reply), fields(body), allow = capability, redirect = parent(thread))]
+    #[action(update(Reply), fields(body), allow = capability, redirect = reference(thread, thread))]
     struct EditSecret;
     #[action(update(Reply), fields(published), allow = role("moderator"), redirect = reply)]
     struct ModerateReply;
     #[action(delete(Reply), allow = owner, redirect = index)]
     struct DeleteReply;
-    #[action(delete(Reply), allow = capability, redirect = parent(thread))]
+    #[action(delete(Reply), allow = capability, redirect = reference(thread, thread))]
     struct DeleteSecret;
     noxide::application! {
         pages: [index, thread, reply],

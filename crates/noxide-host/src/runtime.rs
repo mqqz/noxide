@@ -233,6 +233,44 @@ impl Runtime {
             },
         )
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        host.func_wrap(
+            "follow-source",
+            |mut cx: StoreContextMut<State>, (resource, id): (u32, u64)| {
+                let s = cx.data_mut();
+                s.charge()?;
+                s.effects
+                    .as_mut()
+                    .ok_or_else(|| wasmtime::Error::msg("no repository grant"))?
+                    .follow_source(resource, id)
+                    .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
+                Ok(())
+            },
+        )
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        host.func_wrap_async(
+            "follow",
+            |mut cx: StoreContextMut<State>, (operation,): (u32,)| {
+                Box::new(async move {
+                    let s = cx.data_mut();
+                    s.charge()?;
+                    let effects = s
+                        .effects
+                        .as_mut()
+                        .ok_or_else(|| wasmtime::Error::msg("no repository grant"))?;
+                    match effects.follow(operation).await {
+                        Ok(bytes) => {
+                            s.result = bytes;
+                            Ok((s.result.len() as u32,))
+                        }
+                        Err(error) => {
+                            s.failure = Some(error);
+                            wasmtime::bail!("repository operation failed")
+                        }
+                    }
+                })
+            },
+        )
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let instance = linker
             .instantiate_pre(&component)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;

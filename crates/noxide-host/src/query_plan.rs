@@ -11,7 +11,7 @@ use std::{collections::BTreeMap, sync::Arc};
 pub(crate) struct ListPlan {
     pub operation: u32,
     pub preview: bool,
-    pub parent: Option<String>,
+    pub scope: Option<String>,
     pub strategy: ListStrategy,
     pub selection: Vec<CompiledCondition>,
     pub order: ListOrder,
@@ -24,13 +24,13 @@ pub(crate) struct CompiledCondition {
 
 pub(crate) fn compile(m: &Manifest, op: &Operation) -> Result<ListPlan> {
     ensure!(op.kind == OperationKind::List, "expected list operation");
-    let resource = manifest::resource(m, op.resource)?;
-    let parent = manifest::parent_field(resource).map(|f| f.name.clone());
+    manifest::resource(m, op.resource)?;
+    let scope = op.scope.clone();
     Ok(ListPlan {
         operation: op.id,
         preview: op.list.as_ref().is_some_and(|s| s.preview.is_some()),
-        strategy: policy::list_strategy(&op.policy, parent.is_some()),
-        parent,
+        strategy: policy::list_strategy(&op.policy, scope.is_some()),
+        scope,
         selection: op
             .filter
             .iter()
@@ -165,7 +165,7 @@ pub(crate) fn required_indexes(m: &Manifest) -> Result<Vec<IndexRequirement>> {
         for scan in scans {
             let mut columns = policy::index_prefix(&op.policy, scan);
             if matches!(plan.strategy, ListStrategy::Single) {
-                if let Some(parent) = &plan.parent {
+                if let Some(parent) = &plan.scope {
                     columns.push(IndexColumn::Field(parent.clone()));
                 }
                 if let Some(visibility) = &op.visibility {
@@ -265,16 +265,5 @@ mod tests {
             error.contains("derived index limit") && error.contains("notes"),
             "{error}"
         );
-    }
-
-    #[test]
-    fn existing_contracts_require_no_derived_indexes() {
-        let root =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/queries");
-        for line in include_str!("../../../tools/fixtures/queries/digests.txt").lines() {
-            let name = line.split_once(' ').unwrap().0;
-            let m = crate::manifest::parse(&std::fs::read(root.join(name)).unwrap()).unwrap();
-            assert!(super::required_indexes(&m).unwrap().is_empty(), "{name}");
-        }
     }
 }

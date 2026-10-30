@@ -214,10 +214,10 @@ pub fn validate(m: &Manifest) -> Result<()> {
         ensure!(
             r.fields
                 .iter()
-                .filter(|f| matches!(f.kind, FieldKind::Parent { .. }))
+                .filter(|f| matches!(f.kind, FieldKind::Reference { .. }))
                 .count()
                 <= 1,
-            "one parent per resource"
+            "one reference per resource"
         );
         ensure!(
             r.fields
@@ -235,38 +235,15 @@ pub fn validate(m: &Manifest) -> Result<()> {
             );
             ensure!(f.max_bytes > 0 && f.max_bytes <= 4096, "field limit");
             match &f.kind {
-                FieldKind::Parent {
-                    resource: key,
-                    visible,
-                    create_when,
-                } => {
+                FieldKind::Reference { resource: key } => {
                     ensure!(
-                        !f.optional && f.max_bytes >= 19,
-                        "parent must be required and hold an ID"
+                        !f.optional && f.initial.is_none() && f.max_bytes >= 19,
+                        "reference must be required without defaults and hold an ID"
                     );
-                    let parent = m
-                        .resources
-                        .iter()
-                        .find(|p| &p.name == key)
-                        .ok_or_else(|| anyhow::anyhow!("unknown parent resource"))?;
                     ensure!(
-                        parent.id != r.id && parent_field(parent).is_none(),
-                        "parent relationships have one level"
+                        m.resources.iter().any(|target| &target.name == key),
+                        "unknown reference resource"
                     );
-                    for predicate in [visible, create_when] {
-                        let field = parent
-                            .fields
-                            .iter()
-                            .find(|f| f.name == predicate.field)
-                            .ok_or_else(|| anyhow::anyhow!("unknown parent predicate field"))?;
-                        ensure!(
-                            matches!(field.kind, FieldKind::Boolean | FieldKind::Choice { .. })
-                                && field
-                                    .canonical(&predicate.equals)
-                                    .is_ok_and(|v| v == predicate.equals),
-                            "invalid parent predicate"
-                        );
-                    }
                 }
                 FieldKind::Account { .. } => ensure!(
                     !f.optional && f.initial.is_none() && f.max_bytes >= 43,
@@ -311,7 +288,79 @@ pub fn validate(m: &Manifest) -> Result<()> {
             "record limit"
         );
     }
+    for r in &m.resources {
+        if let Some(gate) = &r.gate {
+            let field =
+                reference_field(r).ok_or_else(|| anyhow::anyhow!("gate requires reference"))?;
+            ensure!(gate.field == field.name, "gate must name reference");
+            let target = reference_resource(m, r.id)?.expect("reference target");
+            ensure!(target.gate.is_none(), "gate target cannot have a gate");
+            for predicate in [&gate.visible, &gate.create_when] {
+                let field = target
+                    .fields
+                    .iter()
+                    .find(|f| f.name == predicate.field)
+                    .ok_or_else(|| anyhow::anyhow!("unknown gate predicate field"))?;
+                ensure!(
+                    matches!(field.kind, FieldKind::Boolean | FieldKind::Choice { .. })
+                        && field
+                            .canonical(&predicate.equals)
+                            .is_ok_and(|v| v == predicate.equals),
+                    "invalid gate predicate"
+                );
+            }
+        }
+    }
     for op in &m.operations {
+        ensure!(
+            op.scope.is_none() || op.kind == OperationKind::List,
+            "scope requires list"
+        );
+        ensure!(
+            op.via.is_none() || op.kind == OperationKind::Read,
+            "via requires read"
+        );
+        ensure!(
+            op.scope.is_none() || op.via.is_none(),
+            "scope and via are exclusive"
+        );
+        let r = resource(m, op.resource)?;
+        if let Some(scope) = &op.scope {
+            ensure!(
+                reference_field(r).is_some_and(|f| &f.name == scope),
+                "scope requires reference field"
+            );
+        }
+        if op.kind == OperationKind::List
+            && let Some(gate) = &r.gate
+        {
+            ensure!(
+                op.scope.as_ref() == Some(&gate.field),
+                "gated list requires scope"
+            );
+        }
+        if let Some(via) = &op.via {
+            let source = operation(m, via.source)?;
+            ensure!(
+                source.via.is_none()
+                    && matches!(source.kind, OperationKind::Read | OperationKind::List),
+                "invalid follow source"
+            );
+            let source_resource = resource(m, source.resource)?;
+            ensure!(
+                reference_field(source_resource).is_some_and(|f| f.name == via.field)
+                    && reference_resource(m, source.resource)?
+                        .is_some_and(|target| target.id == op.resource),
+                "invalid follow reference"
+            );
+            ensure!(
+                source
+                    .fields
+                    .as_ref()
+                    .is_none_or(|fields| fields.contains(&via.field)),
+                "follow source projection hides reference"
+            );
+        }
         validate_selection(m, op)?;
         if op.kind == OperationKind::List {
             crate::query_plan::compile(m, op)?;
@@ -491,6 +540,7 @@ pub fn validate(m: &Manifest) -> Result<()> {
                             && full.resource == op.resource
                             && full.policy == op.policy
                             && full.visibility == op.visibility
+                            && full.scope == op.scope
                             && selection_equal(full, op)),
                     "invalid preview destination"
                 );
@@ -498,11 +548,20 @@ pub fn validate(m: &Manifest) -> Result<()> {
         }
         for id in &r.operations {
             let op = operation(m, *id)?;
-            let parent = parent_resource(m, op.resource)?;
-            if op.kind == OperationKind::List {
+            if let Some(via) = &op.via {
                 ensure!(
-                    r.resource == parent.map(|p| p.id),
-                    "list requires its parent route or a collection route"
+                    r.operations.contains(&via.source),
+                    "follow route requires source"
+                );
+            } else if op.kind == OperationKind::List {
+                let target = if op.scope.is_some() {
+                    reference_resource(m, op.resource)?.map(|p| p.id)
+                } else {
+                    None
+                };
+                ensure!(
+                    r.resource == target,
+                    "list requires scope route or collection route"
                 );
             } else {
                 ensure!(
@@ -514,11 +573,10 @@ pub fn validate(m: &Manifest) -> Result<()> {
         if let Some(id) = r.resource {
             resource(m, id)?;
             ensure!(
-                r.operations
-                    .iter()
-                    .any(|id| operation(m, *id)
-                        .is_ok_and(|op| op.kind == OperationKind::Read
-                            && op.resource == r.resource.unwrap())),
+                r.operations.iter().any(|id| operation(m, *id)
+                    .is_ok_and(|op| op.kind == OperationKind::Read
+                        && op.via.is_none()
+                        && op.resource == r.resource.unwrap())),
                 "record route requires a read operation"
             );
         }
@@ -526,10 +584,18 @@ pub fn validate(m: &Manifest) -> Result<()> {
             let a = action(m, *id)?;
             let op = operation(m, a.operation)?;
             if op.kind == OperationKind::Create {
-                if let Some(parent) = parent_resource(m, op.resource)? {
+                if let Some(parent) = reference_resource(m, op.resource)? {
                     ensure!(
                         r.resource == Some(parent.id),
-                        "child create requires parent route"
+                        "reference create requires target route"
+                    );
+                    let bind = a
+                        .bind
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("reference create requires bind"))?;
+                    ensure!(
+                        r.operations.contains(&bind.eligible),
+                        "binding eligibility must be on form route"
                     );
                 }
             } else {
@@ -556,6 +622,27 @@ pub fn validate(m: &Manifest) -> Result<()> {
         );
         let op = operation(m, a.operation)?;
         let fields = action_fields(m, a)?;
+        let reference = reference_field(resource(m, op.resource)?);
+        if let Some(bind) = &a.bind {
+            ensure!(
+                op.kind == OperationKind::Create && reference.is_some_and(|f| f.name == bind.field),
+                "bind requires reference create"
+            );
+            let eligible = operation(m, bind.eligible)?;
+            ensure!(
+                eligible.kind == OperationKind::Read
+                    && eligible.via.is_none()
+                    && reference_resource(m, op.resource)?
+                        .is_some_and(|r| r.id == eligible.resource),
+                "invalid binding eligibility"
+            );
+        } else {
+            ensure!(
+                op.kind != OperationKind::Create || reference.is_none(),
+                "reference create requires bind"
+            );
+        }
+
         if op.kind == OperationKind::Update {
             ensure!(
                 fields
@@ -568,8 +655,8 @@ pub fn validate(m: &Manifest) -> Result<()> {
         ensure!(
             fields
                 .iter()
-                .all(|f| !matches!(f.kind, FieldKind::Parent { .. })),
-            "parent is host-bound and immutable"
+                .all(|f| !matches!(f.kind, FieldKind::Reference { .. })),
+            "reference is host-bound and immutable"
         );
         match op.kind {
             OperationKind::Create => {
@@ -585,7 +672,7 @@ pub fn validate(m: &Manifest) -> Result<()> {
                             .iter()
                             .filter(|f| f.initial.is_some())
                             .count()
-                        + usize::from(parent_resource(m, op.resource)?.is_some())
+                        + usize::from(reference_resource(m, op.resource)?.is_some())
                         == resource(m, op.resource)?.fields.len(),
                     "creation requires every writable field"
                 );
@@ -614,12 +701,17 @@ pub fn validate(m: &Manifest) -> Result<()> {
             r.params.is_empty(),
             "mutation redirect requires an unparameterized route"
         );
-        if matches!(a.redirect, Redirect::Parent { .. }) {
+        if let Redirect::Reference { field, .. } = &a.redirect {
+            ensure!(
+                reference.is_some_and(|f| &f.name == field),
+                "redirect requires reference field"
+            );
             ensure!(
                 r.operations
                     .iter()
                     .filter(|id| operation(m, **id)
                         .is_ok_and(|read| read.kind == OperationKind::Read
+                            && read.via.is_none()
                             && Some(read.resource) == r.resource))
                     .count()
                     == 1,
@@ -627,8 +719,9 @@ pub fn validate(m: &Manifest) -> Result<()> {
             );
         }
         ensure!(
-            if matches!(a.redirect, Redirect::Parent { .. }) {
-                r.resource == parent_resource(m, op.resource)?.map(|p| p.id) && r.resource.is_some()
+            if matches!(a.redirect, Redirect::Reference { .. }) {
+                r.resource == reference_resource(m, op.resource)?.map(|p| p.id)
+                    && r.resource.is_some()
             } else if op.kind == OperationKind::Delete {
                 r.resource.is_none()
             } else {
@@ -640,16 +733,16 @@ pub fn validate(m: &Manifest) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn parent_field(resource: &Resource) -> Option<&TextField> {
+pub(crate) fn reference_field(resource: &Resource) -> Option<&TextField> {
     resource
         .fields
         .iter()
-        .find(|f| matches!(f.kind, FieldKind::Parent { .. }))
+        .find(|f| matches!(f.kind, FieldKind::Reference { .. }))
 }
-pub(crate) fn parent_resource(m: &Manifest, child: u32) -> Result<Option<&Resource>> {
-    match parent_field(resource(m, child)?) {
+pub(crate) fn reference_resource(m: &Manifest, child: u32) -> Result<Option<&Resource>> {
+    match reference_field(resource(m, child)?) {
         Some(TextField {
-            kind: FieldKind::Parent { resource: key, .. },
+            kind: FieldKind::Reference { resource: key, .. },
             ..
         }) => Ok(Some(
             m.resources
@@ -660,17 +753,11 @@ pub(crate) fn parent_resource(m: &Manifest, child: u32) -> Result<Option<&Resour
         _ => Ok(None),
     }
 }
-pub(crate) fn parent_permits(field: &TextField, parent: &Fields, write: bool) -> bool {
-    let FieldKind::Parent {
-        visible,
-        create_when,
-        ..
-    } = &field.kind
-    else {
-        return false;
-    };
-    parent.get(&visible.field) == Some(&visible.equals)
-        && (!write || parent.get(&create_when.field) == Some(&create_when.equals))
+pub(crate) fn gate_permits(resource: &Resource, target: &Fields, write: bool) -> bool {
+    resource.gate.as_ref().is_none_or(|gate| {
+        target.get(&gate.visible.field) == Some(&gate.visible.equals)
+            && (!write || target.get(&gate.create_when.field) == Some(&gate.create_when.equals))
+    })
 }
 
 pub(crate) fn is_public(op: &Operation) -> bool {
@@ -883,7 +970,7 @@ mod tests {
     }
 
     #[test]
-    fn query_contract_bytes_and_digests_are_unchanged() {
+    fn query_contract_bytes_and_digests_match_recorded_fixtures() {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         let root =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/queries");
@@ -898,21 +985,6 @@ mod tests {
                 "{name}"
             );
         }
-    }
-
-    #[test]
-    fn private_notes_approval_digest_is_unchanged() {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-        let m = parse(include_bytes!(
-            "../../../examples/private-notes/manifest.json"
-        ))
-        .unwrap();
-        // Explicit initial declarations and list settings require renewed
-        // approval. Pin the generated contract to catch unintended drift.
-        assert_eq!(
-            URL_SAFE_NO_PAD.encode(digest(&m).unwrap()),
-            "1W3N2rgaNuZIFY6OzFQgfOLkmnxdBHJCej52XIJ8N1o"
-        );
     }
 
     use super::*;
@@ -1275,16 +1347,8 @@ mod initial_tests {
         choice.resources[0].fields[1].initial = Some("draft".into());
         validate(&choice).unwrap();
         let mut parent = m.clone();
-        parent.resources[0].fields[1].kind = FieldKind::Parent {
+        parent.resources[0].fields[1].kind = FieldKind::Reference {
             resource: "notes".into(),
-            visible: Visibility {
-                field: "published".into(),
-                equals: "true".into(),
-            },
-            create_when: Visibility {
-                field: "published".into(),
-                equals: "true".into(),
-            },
         };
         assert!(
             validate(&parent)

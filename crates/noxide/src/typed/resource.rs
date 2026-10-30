@@ -64,9 +64,12 @@ impl<R> Id<R> {
 }
 
 pub trait ResourceType: Sized {
+    #[doc(hidden)]
+    const GATE_FIELD: u32 = 0;
     const KEY: &'static str;
     fn definition() -> Resource;
     fn from_record(record: Record) -> Self;
+    fn record_id(&self) -> u64;
 }
 pub trait FieldSpec<const KEY: u32> {
     type Value: FieldValue;
@@ -74,6 +77,7 @@ pub trait FieldSpec<const KEY: u32> {
 }
 pub trait FieldValue: Sized {
     const FILTERABLE: bool = false;
+    const REFERENCE: bool = false;
     const IMMUTABLE: bool = false;
     const OPTIONAL: bool = false;
     fn kind() -> FieldKind;
@@ -81,8 +85,12 @@ pub trait FieldValue: Sized {
     fn decode(value: &str) -> Self;
 }
 impl<R: ResourceType> FieldValue for Id<R> {
+    const REFERENCE: bool = true;
+    const IMMUTABLE: bool = true;
     fn kind() -> FieldKind {
-        panic!("parent fields require visible and create_when predicates")
+        FieldKind::Reference {
+            resource: R::KEY.into(),
+        }
     }
     fn encode(&self) -> String {
         self.value.to_string()
