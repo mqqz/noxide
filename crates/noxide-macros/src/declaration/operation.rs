@@ -6,6 +6,8 @@ use syn::{
     spanned::Spanned,
 };
 pub(crate) struct OperationDeclaration {
+    pub(crate) filter: Vec<(Ident, Expr)>,
+    pub(crate) disclose: Vec<Ident>,
     pub(crate) order: Option<Ident>,
     pub(crate) page_size: Option<u8>,
     pub(crate) kind: Ident,
@@ -30,6 +32,8 @@ impl Parse for OperationDeclaration {
             return Err(resource.error("expected one resource type"));
         }
         let mut result = Self {
+            filter: Vec::new(),
+            disclose: Vec::new(),
             order: None,
             page_size: None,
             kind,
@@ -57,6 +61,36 @@ impl Parse for OperationDeclaration {
                 ));
             }
             match option.to_string().as_str() {
+                "filter" => {
+                    if result.kind != "list" {
+                        return Err(input.error("filter requires list"));
+                    }
+                    let content;
+                    parenthesized!(content in input);
+                    let mut seen = BTreeSet::new();
+                    while !content.is_empty() {
+                        let name: Ident = content.parse()?;
+                        if !seen.insert(name.to_string()) {
+                            return Err(syn::Error::new(name.span(), "duplicate filter field"));
+                        }
+                        content.parse::<Token![=]>()?;
+                        result.filter.push((name, content.parse()?));
+                        if !content.is_empty() {
+                            content.parse::<Token![,]>()?;
+                        }
+                    }
+                }
+                "disclose" => {
+                    if result.kind != "list" {
+                        return Err(input.error("disclose requires list"));
+                    }
+                    let content;
+                    parenthesized!(content in input);
+                    result.disclose = content
+                        .parse_terminated(Ident::parse, Token![,])?
+                        .into_iter()
+                        .collect();
+                }
                 "order" => {
                     input.parse::<Token![=]>()?;
                     let order: Ident = input.parse()?;

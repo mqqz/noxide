@@ -715,3 +715,35 @@ It returns full pages when enough authorized records fit the output budget.
 Policies requiring residual filtering use bounded candidate scans and may return
 short or empty pages with a continuation. Continue using the host-rendered
 pagination links, rather than treating a short page as exhaustion.
+
+## List selection and disclosure
+
+Lists accept up to four distinct equality filters on Boolean or Choice fields:
+
+```rust
+#[query(list(Item), allow = public, visible(listed = true),
+        filter(status = Status::Available), disclose(status),
+        order = created_desc, page_size = 12, fields(title, price))]
+struct AvailableItems;
+
+#[query(list(Message), allow = any(owner, principal_is(recipient)),
+        filter(archived = false), order = created_desc, page_size = 20)]
+struct InboxMessages;
+```
+
+These are declaration sketches; declare the resources and choices first. Values
+must encode canonically for the declared field. Account, parent, text and integer
+fields are ineligible, and a filter cannot repeat the public visibility field.
+`filter` is list-only. It selects among accessible records and never grants access:
+a sold item disappears from the available list but remains readable through an
+approved read. Visibility governs both public lists and reads instead.
+
+For public queries, every filtered field outside `fields(...)` must appear in
+`disclose(...)`, and every disclosure must name such a field. A literal filter
+reveals whether the field equals that value for each visible record. Disclosure
+approves that inference only; it does not add the field to returned records.
+Private lists need no disclosure: their policy already permits complete records.
+Both execution paths bind literal values in SQL and check selection again on
+stored rows. Residual policies retain bounded scans and possible short/empty
+pages with continuation. See the [query design](architecture/queries.md) for the
+planned parameter disclosure rules and index lifecycle.

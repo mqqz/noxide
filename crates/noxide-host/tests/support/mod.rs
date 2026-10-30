@@ -24,6 +24,8 @@ pub fn manifest() -> Manifest {
         }],
         operations: vec![
             Operation {
+                filter: Vec::new(),
+                disclose: Vec::new(),
                 list: None,
                 visibility: None,
                 fields: None,
@@ -33,6 +35,8 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
+                filter: Vec::new(),
+                disclose: Vec::new(),
                 list: None,
                 visibility: None,
                 fields: None,
@@ -42,6 +46,8 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
+                filter: Vec::new(),
+                disclose: Vec::new(),
                 list: None,
                 visibility: None,
                 fields: None,

@@ -170,3 +170,7 @@ untrusted inputs. `--record` deliberately replaces the manifests; digest and
 scope fixtures require separate review and must not be updated for additive query
 features. Example package identities and the SDK suite's `task_board` identity
 are preserved by the collector.
+
+`python3 tools/test_query_filters.py` compiles the trusted Boolean/Choice filter
+examples and rejects unknown, text and account fields, filters on reads, and
+missing public disclosure. It executes only reviewed repository fixtures locally.

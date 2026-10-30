@@ -73,6 +73,7 @@ pub trait FieldSpec<const KEY: u32> {
     const KEY: &'static str;
 }
 pub trait FieldValue: Sized {
+    const FILTERABLE: bool = false;
     const IMMUTABLE: bool = false;
     const OPTIONAL: bool = false;
     fn kind() -> FieldKind;
@@ -102,6 +103,7 @@ impl FieldValue for String {
     }
 }
 impl FieldValue for bool {
+    const FILTERABLE: bool = true;
     fn kind() -> FieldKind {
         FieldKind::Boolean
     }
@@ -131,6 +133,7 @@ impl FieldValue for i64 {
     }
 }
 impl<T: FieldValue> FieldValue for Option<T> {
+    const FILTERABLE: bool = T::FILTERABLE;
     const OPTIONAL: bool = true;
     fn kind() -> FieldKind {
         T::kind()

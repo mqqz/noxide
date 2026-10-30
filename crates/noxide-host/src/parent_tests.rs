@@ -57,6 +57,8 @@ pub(crate) fn declarations() -> Manifest {
         }
     }
     m.operations.push(Operation {
+        filter: Vec::new(),
+        disclose: Vec::new(),
         list: None,
         id: 4,
         resource: 2,
@@ -192,6 +194,8 @@ async fn mutation_case(db: Database) {
     db.initialize().await.unwrap();
     let mut m = declarations();
     m.operations.push(Operation {
+        filter: Vec::new(),
+        disclose: Vec::new(),
         list: None,
         id: 5,
         resource: 1,
@@ -539,6 +543,8 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         tenant_scoped: false,
     };
     m.operations.push(Operation {
+        filter: Vec::new(),
+        disclose: Vec::new(),
         list: None,
         id: 5,
         resource: 2,
@@ -666,6 +672,7 @@ async fn postgres_relationships_pagination_forms_and_migrations() {
         "redirect",
         "prefix",
         "prefix_desc",
+        "filtered",
         "parents",
         "forms",
         "integrity",
@@ -690,6 +697,7 @@ async fn postgres_relationships_pagination_forms_and_migrations() {
         match case {
             "prefix" => chronological_prefix_case(db, false).await,
             "prefix_desc" => chronological_prefix_case(db, true).await,
+            "filtered" => filtered_parent_case(db).await,
             "redirect" => redirect_case(db).await,
             "parents" => parents_case(db, false).await,
             "forms" => forms_case(db, false).await,
@@ -1509,4 +1517,103 @@ async fn parent_read_authority_matches_normal_get_and_excludes_list_authority() 
         );
         tx.commit().await.unwrap();
     }
+}
+
+async fn filtered_parent_case(db: Database) {
+    db.initialize().await.unwrap();
+    let mut m = declarations();
+    m.resources[0].fields.push(boolean("archived"));
+    m.actions[0].fields.push("archived".into());
+    m.operations[0].filter.push(Condition {
+        field: "archived".into(),
+        equals: Operand::Literal("false".into()),
+    });
+    m.operations[0].disclose.push("archived".into());
+    m.operations[0].list = Some(ListSettings {
+        order: ListOrder::CreatedAsc,
+        page_size: 1,
+    });
+    manifest::validate(&m).unwrap();
+    seed(&db, &m).await;
+    for descending in [false, true] {
+        m.operations[0].list.as_mut().unwrap().order = if descending {
+            ListOrder::CreatedDesc
+        } else {
+            ListOrder::CreatedAsc
+        };
+        let mut tx = db
+            .begin(Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+        for [id, encoded] in tx
+            .fetch::<2>(
+                "SELECT CAST(id AS TEXT),fields FROM nx_records WHERE resource=1",
+                &[],
+            )
+            .await
+            .unwrap()
+        {
+            let id: i64 = id.parse().unwrap();
+            let mut fields: Fields = serde_json::from_str(&encoded).unwrap();
+            fields.insert("archived".into(), (id % 4 != 0).to_string());
+            tx.execute(
+                "UPDATE nx_records SET fields=$1 WHERE resource=1 AND id=$2",
+                &[serde_json::to_string(&fields).unwrap().into(), id.into()],
+            )
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+        let mut e = effects(&db, &m, 3, 10).await;
+        let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+        assert_eq!(rows[0].id, if descending { 12 } else { 4 });
+        assert!(!rows[0].fields.contains_key("archived"));
+        assert!(
+            crate::repository::read_resource(&mut e.tx, &m, &e.principal, &m.operations[1], 2)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let after = e.more;
+        e.tx.rollback().await.unwrap();
+        let mut tx = db
+            .begin(Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+        let row = tx
+            .fetch::<1>(
+                "SELECT fields FROM nx_records WHERE resource=1 AND id=8",
+                &[],
+            )
+            .await
+            .unwrap();
+        let mut fields: Fields = serde_json::from_str(&row[0][0]).unwrap();
+        fields.insert("archived".into(), "true".into());
+        tx.execute(
+            "UPDATE nx_records SET fields=$1 WHERE resource=1 AND id=8",
+            &[serde_json::to_string(&fields).unwrap().into()],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let mut e = effects(&db, &m, 3, 10).await;
+        e.cursor = after;
+        let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+            [if descending { 4 } else { 12 }]
+        );
+        assert!(e.more.is_none());
+        e.tx.rollback().await.unwrap();
+    }
+    set_parent(&db, &m, false, false).await;
+    let mut e = effects(&db, &m, 3, 10).await;
+    let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+    assert!(rows.is_empty());
+    e.tx.rollback().await.unwrap();
+}
+#[tokio::test]
+async fn sqlite_filtered_parent_visibility_and_live_selection() {
+    let tmp = tempfile::tempdir().unwrap();
+    filtered_parent_case(Database::sqlite(tmp.path().join("filtered-parent.db"))).await;
 }
