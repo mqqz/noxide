@@ -181,50 +181,59 @@ bounded message with Serde's recursion guard and validates the document's struct
 
 ## Data, sessions, and action scope
 
-Applications declare data operations. The host interprets an approved finite
-operation set; the guest SDK supplies list/read/create/update/delete helpers.
-There are no application native adapters, raw SQL, user-defined SQL functions, or arbitrary
-migration execution. Schema changes use approved host-managed operations.
+Applications declare reads and bounded action transactions. The host interprets
+an approved finite operation set; the guest SDK supplies route reads and action
+decisions. There are no application native adapters, raw SQL, user-defined SQL
+functions, or arbitrary migration execution. Schema changes use approved
+host-managed operations.
 
-For the notes fixture, the model has a host-generated NoteId, protected owner
-identity, and bounded body text. Each row also has a host-generated immutable
-incarnation and a positive revision. CreateNote permits one creation per action,
-with ownership set from the authenticated host principal. Owner-scoped ListNotes
-and ReadNote expose only the data their route needs. Resource schemas are
-persisted at activation and must match on subsequent requests.
+An action declares typed inputs, a revision requirement and one to four mutation
+steps, with at most two creates. CRUD actions lower to one-step transactions
+through the same executor. A delete must be the only step. Inputs are canonicalized
+under the action schema, independently of resource fields; one input can feed
+several assignments and appears once in a form and input digest. Guests cannot
+choose owner, tenant, target, incarnation, or revision.
 
-Every action declares its writable fields. Creation requires all resource fields;
-updates require a nonempty subset; deletion requires none. Missing and extra input
-fields fail validation. The host writes the canonical input exactly and preserves
-other fields. Guests cannot choose owner, tenant, target, incarnation, or revision.
+A record route binds its form to the current record ID, incarnation, revision,
+and issuing route. `Exact` requires that revision; `Identity` requires only the
+same ID and incarnation. Admission requires `Exact` for a signed target update
+using `Set`, or a deletion. SDK lowering defaults to `Exact`. An order may use
+`Identity` for a guarded stock adjustment when the user's decision does not depend
+on the displayed product revision. A guard does not protect a displayed price.
 
-A record route declares the resource it addresses. `Form { action }` on that route
-lets the host bind the form to the current record ID, incarnation, revision, and
-issuing route. A delete form performs one POST. Update and delete imports take no
-guest-selected target; the host checks the private grant, current authorization,
-and conditional write predicate. A successful update increments the revision once.
-Deletion removes the live row and retains only the submission receipt. Reusing a
-deleted numeric ID cannot make its old forms valid against a new incarnation.
+Actions have no repository imports. `invoke`, `follow-source` and `follow` during
+an action fail execution. An optional `inspect` names a read and projection on the
+signed target. The host authorizes it and supplies `RequestView.inspection` from
+the write transaction. The guest returns `Execute` or
+`Rejected { field_errors, message }`; the host rejects route decisions in actions
+and action decisions in routes. The guest never resumes after execution starts.
 
-Actions have no general repository read authority. An optional `inspect`
-declaration names a read operation and a field projection on the target resource.
-The host checks that policy and supplies the original values in
-`RequestView.inspection` from the same transaction. The snapshot remains unchanged
-after a staged mutation; absent a declaration, inspection is `None`.
+The host checks the signed identity and declared revision before guest execution.
+A stale `Exact` form produces a 409 conflict containing entered input and currently
+authorized values, with a fresh token requiring explicit resubmission. Missing,
+reincarnated and unauthorized targets share a 404 response. An uncertain commit
+keeps the original token and read-only input until receipt recovery resolves it.
 
-The host checks record existence and current read/mutation permissions before
-guest execution. A stale revision produces a 409 conflict with the entered input
-and currently authorized values. The new form binds to the current revision and
-requires explicit resubmission. Missing, reincarnated, and unauthorized targets
-share a 404 response. An uncertain commit keeps the original token and read-only
-input until the submission protocol resolves it.
+On `Execute`, each step reloads its target and authorizes its operation against
+current transaction state, including earlier writes. Inputs, constants, the signed
+target and earlier create identities supply assignments. Integer adjustments are
+signed-target updates only; they use checked arithmetic and declared bounds.
+Authorization precedes guards. A guard failure returns its approved message on its
+declared input, without exposing the step index or stored value. Conditional writes
+use the loaded incarnation and revision; a concurrent change is retryable, never
+success or a business rejection. Each update increments revision once per step.
 
-A guest can return `Rejected { field_errors, message }`, including after a staged
-mutation. The host bounds and escapes the explanation, checks error names against
-the declared fields, and rolls back the mutation and receipt claim. The resulting
-422 form preserves editable input and the original token/revision. Message text is
-limited to 1,024 bytes; at most eight field errors may contain 256 bytes each.
-Corrected input can use the same token because no execution committed.
+Rejections roll back every write and the receipt claim. The host bounds and escapes
+errors and validates their names against action inputs. The 422 form preserves
+editable input and the original token. Guest messages are limited to 1,024 bytes;
+at most eight field errors contain 256 bytes each. Reusing that token after a
+rejection evaluates current state because no receipt committed.
+
+All steps share the request deadline, fuel, repository invocation and database-call
+budgets. Each step charges one of the existing 16 repository invocations. Additional
+steps lengthen the write transaction; SQLite still permits one writer. These work
+bounds do not constitute a static database-cost estimate. See
+[declared transactions](transactions.md) for admission and failure semantics.
 
 Policy checks and writes use a transactionally coherent view. Shared conformance
 fixtures cover target predicates, nullability, integer ranges, ordering, and
@@ -254,16 +263,17 @@ state already published.
    policy; it does not require the original target still to exist.
 4. For a new attempt, begin a transaction and claim the submission atomically.
    A database uniqueness constraint arbitrates competing claims.
-5. Resolve authoritative facts and derive request grants in that transaction.
-   Check a targeted action's incarnation and expected revision. Return a trusted
-   conflict or unavailable response before guest execution if those checks fail.
-6. Instantiate a fresh guest under limits, initialize without authority, enable
-   its grants, and execute the handler.
-7. Obtain bounded output, validate the entire intent/IR, resolve references, and
-   serialize the complete response into a bounded host buffer.
-8. Store the minimal semantic receipt and commit it with the application writes.
+5. Resolve the signed target identity and declared `Exact` or `Identity`
+   requirement. Build canonical input and authorized inspection in the transaction.
+6. Instantiate a fresh guest under limits and run the handler with no storage
+   imports. Obtain a bounded `Execute` or `Rejected` decision.
+7. On `Execute`, authorize and execute every declared step in order. Derive all
+   mutation outcomes in the host and prepare the bounded response and navigation.
+8. Store every step outcome, navigation source, captured destination identity and
+   any anonymous handover in the receipt. Commit it atomically with all writes.
 9. After a known successful commit, release guest/transaction resources and send
-   the response under separate transmission limits.
+   the response under separate transmission limits. First delivery and recovery
+   both apply current destination authority.
 
 Before commit begins, a failure aborts the attempt: discard output and confirm
 rollback, or discard the connection if rollback cannot be confirmed.
@@ -281,7 +291,8 @@ scope; the accepted input digest is recorded atomically with execution.
 Mutation and submission claim share one transaction with the completed receipt
 and any declared outbox entry. The guarantee is at most one committed
 transactional execution per valid submission. Rolled-back attempts may repeat.
-The receipt stores outcome references, never a private rendered page or secrets.
+The receipt stores all step identities and outcomes, navigation and any anonymous
+edit handover, never a private rendered page or its contents.
 A matching completed receipt is recovered before current mutation authority or
 target existence is checked. Recovery still requires the original valid session,
 token, action/input binding, and deployment. Its redirect discloses no record

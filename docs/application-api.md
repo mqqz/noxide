@@ -319,22 +319,69 @@ noxide::application! {
 ```
 
 A declared CRUD action has a generated handler. A custom handler receives
-`Submission<Action>`, whose immutable input contains exactly the writable field
-projection:
+`Submission<Action>`, whose immutable input follows the action input schema:
 
 ```rust
-fn edit_task(submission: Submission<EditTask>) -> ActionResult<EditTask> {
+fn edit_task(submission: Submission<EditTask>) -> Result<Execute<EditTask>, ActionError<EditTask>> {
     if submission.input().title.trim().is_empty() {
         return Err(EditTask::title.error("Enter a title."));
     }
-    submission.apply()
+    Ok(submission.execute())
 }
 ```
 
-`apply()` stages the host-retained input and target. It accepts no replacement
-record, owner, or target. The host validates the outcome and renders a bounded
-response before committing the mutation and receipt. Traps, invalid output,
-rejections, and exhausted budgets roll back. Retry protection remains mandatory.
+`execute()` returns a decision without accessing storage. The host runs the
+approved steps, derives outcomes and prepares the response before committing all
+mutations and the receipt. Traps, invalid decisions, rejections and exhausted
+budgets roll back. Successful replay recovers every step outcome without running
+the guest or steps again. Rejections retain the original token and are evaluated
+against current state on resubmission.
+
+An explicit transaction declares inputs separately from resource fields:
+
+```rust
+#[action(
+    inputs(quantity: i64 = 1..=10, body: String = 2000),
+    revision = identity,
+    transaction(
+        update(Product, target, decrease(stock, by = quantity,
+            reject(quantity, "Not enough stock"))),
+        order = create(Order, set(quantity = quantity, product = target),
+            eligible = ReadProduct),
+        create(OrderNote, set(body = body, order = order), eligible = ReadOrder),
+    ),
+    allow = owner,
+    redirect = show_order(order),
+)]
+struct PlaceOrder;
+```
+
+This is the flow in [shop](../examples/shop/src/lib.rs): one quantity control feeds
+the guarded stock decrease and stored order quantity. A named earlier create can
+supply an immutable reference to another create. Inputs support existing scalar
+kinds, including typed account inputs on creates with host account-binding checks;
+reference inputs are forbidden. Text bounds are UTF-8 byte limits. Constants are
+literal values, not expressions. There are no branches, loops or selected targets.
+
+Transactions contain one to four steps, at most two creates, and no delete combined
+with other steps. A multi-step action cannot use public or capability operations.
+Updates and deletes use the signed `target`. Each step checks its own operation
+policy; later steps see earlier writes. Adjustments require bounded integer fields
+and required positive integer inputs. Only authorized guard failures produce the
+approved 422 explanation; missing targets and policy denials share a 404.
+
+`Exact` is the default revision requirement and is mandatory for signed-target
+`Set` updates and deletes. A stale form returns the existing 409 conflict flow.
+`Identity` keeps ID and incarnation checks while permitting intervening revisions.
+Use `Exact` whenever the user's decision depends on what was displayed, including
+a quoted price; a stock guard protects availability, not that price. In the shop
+example no price is stored or agreed by the transaction.
+
+Navigation names the signed target (`redirect = page(target)`), a named step
+(`redirect = page(order)`), or a reference on a named step
+(`redirect = reference(order.product, show_product)`). Every step outcome survives
+receipt recovery regardless of the navigation source. After commit and during
+recovery, current destination authorization still controls navigation.
 
 To inspect original values, declare both `inspect = ReadTask` and
 `inspect_fields(title)` on an update or delete action. `submission.original()`
@@ -520,11 +567,15 @@ struct CreateReply;
 ```
 
 These are declaration fragments; declare the resources and eligible query first.
-Every reference create explicitly declares `bind(...)`. The eligible query must
+Single-operation reference creates declare `bind(...)`; lowering places eligibility
+on the create operation and emits a signed-reference assignment. Multi-step creates
+use `eligible = Query` beside their assignments. The eligible query must
 be a read of the target on every page carrying the form. At submission the host
-checks the signed target identity, revision and incarnation, source create policy,
+checks the signed target identity and incarnation, source create policy,
 the eligible read's complete authorization and visibility, and both gate predicates
-inside the write transaction. Eligibility is not rechecked after creation.
+inside the write transaction. Reference eligibility does not compare revisions;
+the action separately enforces its declared `Exact` or `Identity` requirement.
+Eligibility is not rechecked after creation.
 
 A gate's `visible` condition hides public source reads and lists; `create_when`
 additionally blocks new records. Private operations retain their declared policy.
@@ -532,7 +583,9 @@ Locking a thread leaves existing reply reads, edits and deletion unaffected.
 Missing targets hide public gated records. A gate target cannot itself have a gate.
 
 References have no initial value, are absent from forms and action writable fields,
-and cannot appear in filters or disclosures. Attempts to submit or update one fail.
+and cannot appear in filters or disclosures. Declared create steps assign them
+from the signed target or an earlier create of the matching type. Attempts to
+submit or update one fail.
 A list can declare `scope(thread)` to select the page's thread. Lists of gated
 resources receive this scope automatically in SDK lowering; host admission requires
 it explicitly in the manifest. Ungated references also support unscoped collection
@@ -581,8 +634,8 @@ including canonical boolean or declared choice values and storage limits.
 
 Initial fields must be omitted from every create action's `fields(...)`.
 They are absent from typed create inputs and forms; submitted keys are rejected.
-The trusted host inserts the approved value at create commit, including custom
-handler creates. Creates must retain at least one writable field.
+The trusted host inserts the approved value at create commit, including actions with
+custom handlers. Creates must retain at least one writable field.
 
 This is a creation-time guarantee only. Update actions may list these fields,
 and their policies determine who can change them. An owner update listing

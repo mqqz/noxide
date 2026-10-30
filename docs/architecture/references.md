@@ -1,7 +1,8 @@
 # Typed references
 
 A resource may have one required, immutable `Id<T>` reference. The host binds it
-from a signed page target. A reference declares integrity, not read authority.
+from a signed page target or an earlier create step. A reference declares
+integrity, not read authority.
 The [runtime security contract](runtime.md#security-contract) applies throughout.
 
 Three decisions remain separate:
@@ -21,16 +22,25 @@ retain their own policies even when the thread is hidden.
 ## Integrity and binding
 
 References are required, have no initial value, and cannot be form controls,
-submitted fields, update fields, selection filters or disclosures. Every create
-action explicitly declares `bind(field = target, eligible = Query)`. The eligible
-operation must be a non-follow target read on every route carrying that form.
-The route must address the reference target resource.
+submitted inputs, update fields, selection filters or disclosures. A referencing
+create operation declares binding eligibility; the action assigns its reference
+with `SignedTarget` or `Created(n)`. The latter names an earlier create step of the
+matching resource. Admission rejects forward references and references to other
+resources. Updates to newly created records remain deferred.
 
-The signed target's identity, revision and incarnation are checked inside the
-write transaction, together with source create policy, the eligible read's full
-policy/visibility/gate semantics, and both source gate conditions. Losing
-eligibility later does not affect the source. Committed receipt recovery precedes
-new-execution checks and never reruns eligibility or creation gates.
+The explicit single-operation SDK syntax `bind(field = target, eligible = Query)`
+lowers to operation eligibility and a `Set(SignedTarget)` assignment. A multi-step
+create uses `create(Order, set(product = target, quantity = quantity),
+eligible = ReadProduct)`, or assigns a named earlier create instead of `target`.
+Eligibility must be a non-follow read of the referenced resource. Signed binding
+uses the page's signed target and applicable route read.
+
+Binding checks identity and incarnation, current eligibility, source create policy
+and both gate predicates inside the transaction. It does not compare the reference
+target's revision. The action's declared `Exact` or `Identity` requirement applies
+separately to its signed target before execution. Losing eligibility later does
+not affect the source. Receipt recovery precedes new execution checks and never
+reruns eligibility or creation gates.
 
 The target must exist. Deleting it while any record references it is rejected,
 including records the caller cannot read. Anyone permitted to create a referencing
@@ -79,8 +89,9 @@ entries, covering the route's 40 list records plus bounded reads.
 
 ## Redirects and recovery
 
-`redirect = reference(field, page)` names an unparameterized page with one target
-read. Inside the mutation transaction, the host captures the reference target's
+A single-step `redirect = reference(field, page)`, or multi-step
+`redirect = reference(step.field, page)`, names an unparameterized page with one
+target read. Inside the mutation transaction, the host captures the reference target's
 resource, ID and incarnation before deletion removes the source. The semantic
 receipt retains that destination. After commit and during recovery, current route
 and read authorization determine navigation. A denied, missing or replaced target
@@ -91,7 +102,7 @@ precedes navigation.
 ## Deferred until an application needs them
 
 - Reference selection from URL parameters and folding scope into filters.
-- A second binding source and multiple references per resource.
+- User-selected references, a second signed target and multiple references per resource.
 - Cross-thread gated lists and gates on private operations.
 - Mutable references and deletion behavior other than rejection.
 - Multi-hop follows.
