@@ -13,6 +13,8 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+cssparser.workspace = true
+image.workspace = true
 tokio.workspace = true
 wasmtime = { version = "=48.0.2", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "async"] }
 wasmparser = "0.245"
