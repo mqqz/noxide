@@ -942,3 +942,41 @@ pub(crate) fn handover_continue(page: &Rendered, link: &str) -> Result<Rendered>
         anonymous_cookie: None,
     })
 }
+
+/// A used submission cannot be reused with different input.
+pub(crate) fn form_already_used(
+    presentation: &crate::Presentation,
+    manifest: &Manifest,
+) -> Result<Rendered> {
+    let mut response = render(
+        &ResponseIntent::Page(Document::new(
+            "Form already used",
+            vec![
+                Instruction::Text(
+                    "This form already committed different input. Return home to start a new form."
+                        .into(),
+                ),
+                Instruction::Link {
+                    destination: RouteRef {
+                        params: Default::default(),
+                        route: manifest
+                            .routes
+                            .iter()
+                            .find(|r| r.path == "/")
+                            .expect("index route")
+                            .id,
+                        target: None,
+                    },
+                    text: "Return home".into(),
+                },
+            ],
+        )),
+        &RenderContext {
+            presentation,
+            manifest: Some(manifest),
+            ..RenderContext::empty()
+        },
+    )?;
+    response.status = 409;
+    Ok(response)
+}
