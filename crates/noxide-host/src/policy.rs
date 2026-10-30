@@ -337,3 +337,37 @@ mod tests {
         }
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+pub(crate) enum IndexColumn {
+    Owner,
+    Tenant,
+    Field(String),
+}
+pub(crate) fn index_prefix(policy: &Policy, scan: Option<&ScanRule>) -> Vec<IndexColumn> {
+    let atoms = match scan {
+        Some(scan) => &policy.any[scan.rule],
+        None if policy.any.len() == 1 => &policy.any[0],
+        None => return Vec::new(),
+    };
+    let identity = atoms.iter().find_map(|atom| match atom {
+        Predicate::Owner => Some(IndexColumn::Owner),
+        Predicate::PrincipalIs { field } => Some(IndexColumn::Field(field.clone())),
+        _ => None,
+    });
+    let tenant = atoms.iter().any(|atom| {
+        matches!(
+            atom,
+            Predicate::SameTenant
+                | Predicate::Role {
+                    tenant_scoped: true,
+                    ..
+                }
+        )
+    });
+    let mut columns: Vec<_> = identity.into_iter().collect();
+    if tenant && scan.is_none_or(|scan| scan.exact) && (scan.is_some() || columns.is_empty()) {
+        columns.push(IndexColumn::Tenant);
+    }
+    columns
+}

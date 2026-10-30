@@ -109,3 +109,28 @@ exact and residual account policies, read/list authorization equivalence, public
 projection/disclosure, parent visibility and records changing selection between
 pages. Workspace tests with PostgreSQL and the instrumented SQLite suite passed
 locally on 2026-10-30; SDK positive/negative and compatibility producers passed.
+
+## Derived filter indexes
+
+On 2026-10-30, the filtered fixture extended the baseline to 1,000 caller records
+(one in ten matching) plus 100,000 unrelated records. Owner exact scans measured
+21 visits on SQLite and PostgreSQL with derived indexes, compared with the earlier
+210-visit baseline without them. Both-direction SQLite plans and PostgreSQL generic
+prepared plans require derived owner, account and account-plus-tenant indexes with
+no sort; public parent selection also checks its derived index in both orders.
+Missing-index refusal, idempotent reconciliation, removal without schema migration,
+and the ninth-shape admission rejection have regressions. Existing contracts add
+no derived indexes.
+
+The separate single-path `any(owner, role("moderator"))` filtered benchmark on this
+dataset measured 100,021 visits for an ungranted moderator and 21 for a granted
+moderator on **both** databases. It uses one SQL policy disjunction, not the account
+merge path. The ungranted case is a material sparse-authorization cost: an available
+ordered index does not imply bounded index visits. This evidence supports the
+conditional increment 7 design discussion after the first six increments; no new
+merge policy classification is introduced here. Request deadlines remain the bound.
+
+The broad PostgreSQL suite exhausted the disposable cluster's default predicate
+lock capacity. The successful rerun uses 512 connections,
+`max_pred_locks_per_transaction=512`, and `max_locks_per_transaction=256`.
+These are local test-cluster settings, not production sizing recommendations.

@@ -1,8 +1,8 @@
 # Declarative queries
 
 This is the implementation plan for a small approved query vocabulary, starting
-at main `9917660`. Increments 0–3 record compatibility, compile list plans, add descending order and
-literal equality selection; later
+at main `9917660`. Increments 0–4 record compatibility, compile list plans, add descending order,
+literal equality selection and operator-reconciled indexes; later
 increments below are planned behavior until their implementation and validation land.
 
 Any approved query has a statically known shape, bounded execution, independently
@@ -117,7 +117,9 @@ SQLite and PostgreSQL validation and documentation accompany behavior changes.
 Derived indexes depend on operations, so deployment reconciliation must create
 missing indexes and remove obsolete ones even without a schema migration.
 Activation verifies requirements and refuses missing indexes with an operator
-command. PostgreSQL concurrent creation must run outside migration transactions.
+command. The implemented workflow uses exclusive transactional maintenance on both
+backends. Any future PostgreSQL concurrent creation must run outside migration
+transactions.
 
 Parameters are declared, never inferred. The strict URL parser admits only
 `cursor` and declared required canonical values, with bounded length and no

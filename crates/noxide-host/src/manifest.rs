@@ -317,6 +317,7 @@ pub fn validate(m: &Manifest) -> Result<()> {
         }
     }
     let mut paths = BTreeSet::new();
+    crate::query_plan::required_indexes(m)?;
     for r in &m.routes {
         crate::render::validate_path(r)?;
         ensure!(paths.insert(&r.path), "duplicate route path");

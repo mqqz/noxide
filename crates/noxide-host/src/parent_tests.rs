@@ -88,6 +88,9 @@ pub(crate) fn declarations() -> Manifest {
     m
 }
 pub(crate) async fn seed(db: &Database, m: &Manifest) {
+    if m.operations.iter().any(|op| !op.filter.is_empty()) {
+        db.reconcile_query_indexes(m).await.unwrap();
+    }
     let mut tx = db
         .begin(Instant::now() + Duration::from_secs(5))
         .await
@@ -1563,6 +1566,25 @@ async fn filtered_parent_case(db: Database) {
             .await
             .unwrap();
         }
+        let index = crate::query_plan::required_indexes(&m)
+            .unwrap()
+            .remove(0)
+            .name(1);
+        let parent = tx.field_expression("thread").unwrap();
+        let visible = tx.field_expression("published").unwrap();
+        let selected = tx.field_expression("archived").unwrap();
+        let direction = if descending { "DESC" } else { "ASC" };
+        if matches!(db, Database::Postgres(_)) {
+            tx.execute("SET LOCAL enable_seqscan=off", &[])
+                .await
+                .unwrap();
+        }
+        let plan = tx.explain(&format!("SELECT id FROM nx_records WHERE resource=1 AND {parent}='10' AND {visible}='true' AND {selected}='false' AND created_seq>0 ORDER BY nx_records.created_seq {direction} LIMIT 2")).await.unwrap().join("\n");
+        assert!(plan.contains(&index), "{plan}");
+        assert!(
+            !plan.contains("Sort") && !plan.contains("TEMP B-TREE"),
+            "{plan}"
+        );
         tx.commit().await.unwrap();
         let mut e = effects(&db, &m, 3, 10).await;
         let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();

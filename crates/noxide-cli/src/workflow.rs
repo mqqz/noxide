@@ -189,6 +189,7 @@ pub async fn build(command: &str, args: &[OsString]) -> Result<()> {
         let state = tempfile::tempdir()?;
         let database = noxide_host::Database::sqlite(state.path().join("test.db"));
         database.initialize().await?;
+        database.reconcile_query_indexes(&contract).await?;
         let app = noxide_host::Application::new(
             &super::read(
                 &output.join(format!("{name}.component.wasm")),
@@ -220,8 +221,24 @@ pub async fn schema(args: &[OsString]) -> Result<()> {
     let action = args
         .first()
         .and_then(|value| value.to_str())
-        .context("usage: noxide schema diff|check|apply ...")?;
+        .context("usage: noxide schema diff|check|apply|indexes ...")?;
     match action {
+        "indexes" => {
+            ensure!(args.len() == 2, "usage: noxide schema indexes CONFIG");
+            let (config, base) = super::config(Path::new(&args[1]))?;
+            let target = load(&base.join(&config.manifest))?;
+            use base64::Engine;
+            let approved = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(&config.approved_contract)?;
+            ensure!(
+                approved.as_slice() == manifest::digest(&target)?,
+                "target contract is not approved"
+            );
+            super::database(&config.database, &base)?
+                .reconcile_query_indexes(&target)
+                .await?;
+            println!("Query indexes reconciled. Activate the matching approved bundle.");
+        }
         "diff" => {
             ensure!(
                 args.len() == 4,
