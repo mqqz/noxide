@@ -165,17 +165,25 @@ latency when designing APIs and page flows.
     Use types to distinguish values with different security properties wherever
     that improves correctness without making application code harder to write.
 
+9. Small, general capability model with multiple ergonomic ways of using it.
+
+    A developer can build a new kind of application by composing existing
+    resources, queries, policies, actions, and rendering primitives—without
+    modifying `noxide-host`.
+
 ## Runtime design
 
 The [HTTP/application runtime design](docs/architecture/runtime.md) records the
 Wasmtime boundary, host-rendered document protocol, explicit authorization,
 transactional actions, and isolated builds.
 
+## Application API
+
+The [application API guide](docs/application-api.md) covers typed declarations,
+templates, forms, isolated builds, and schema migrations.
+
 ## License
 
 This project's code is licensed under either the [MIT License](LICENSE-MIT) or the
 [Apache License, Version 2.0](LICENSE-APACHE), at your option.
 
-The [application API guide](docs/application-api.md) covers typed declarations, templates, forms, isolated builds, and schema migrations.
-
-Boolean fields can declare literal `#[field(initial = false)]` values applied by the trusted host at create commit. Create projections exclude them; update projections and policies still govern later changes. See the [application API](docs/application-api.md).
