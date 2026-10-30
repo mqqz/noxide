@@ -90,7 +90,10 @@ pub mod forum {
         let (title, body, locked) = own
             .get(thread)
             .map(|t| (t.title.clone(), t.body.clone(), t.locked))
-            .or_else(|| read.get(thread).map(|t| (t.title.clone(), t.body.clone(), t.locked)))
+            .or_else(|| {
+                read.get(thread)
+                    .map(|t| (t.title.clone(), t.body.clone(), t.locked))
+            })
             .ok_or(NotFound)?;
         let replies = replies.fetch();
         Ok(Page::new(
