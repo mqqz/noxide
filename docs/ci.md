@@ -158,3 +158,15 @@ short-page fallback.
 including account-ID display, private reads, sender-only deletion, restart/replay,
 and revocation. With `--geckodriver`, it also runs Firefox with JavaScript disabled
 and saves a recipient screenshot. CI runs this on SQLite and PostgreSQL.
+
+## Query compatibility fixtures
+
+`cargo test -p noxide-host --lib query_` checks exact serialized manifest bytes,
+approval digests, and collection, parent and inbox cursor-scope strings captured
+at `9917660`. `python3 tools/test_query_contracts.py` also compiles every trusted
+SDK fixture and example natively and compares its emitted bytes to those goldens.
+This executes repository code and dependencies locally; do not use it for
+untrusted inputs. `--record` deliberately replaces the manifests; digest and
+scope fixtures require separate review and must not be updated for additive query
+features. Example package identities and the SDK suite's `task_board` identity
+are preserved by the collector.

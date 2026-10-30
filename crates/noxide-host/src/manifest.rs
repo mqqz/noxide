@@ -591,6 +591,24 @@ pub(crate) fn anonymous_action(op: &Operation) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn query_contract_bytes_and_digests_are_unchanged() {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/queries");
+        for line in include_str!("../../../tools/fixtures/queries/digests.txt").lines() {
+            let (name, expected) = line.split_once(' ').unwrap();
+            let bytes = std::fs::read(root.join(name)).unwrap();
+            let manifest = parse(&bytes).unwrap();
+            assert_eq!(serde_json::to_vec(&manifest).unwrap(), bytes, "{name}");
+            assert_eq!(
+                URL_SAFE_NO_PAD.encode(digest(&manifest).unwrap()),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn private_notes_approval_digest_is_unchanged() {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         let m = parse(include_bytes!(
