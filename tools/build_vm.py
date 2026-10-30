@@ -10,6 +10,7 @@ catalog.
 import argparse
 from build_catalog import catalog_packages, path_packages, validate_lock, summary, shell_command, safe_log
 from build_local import run_local
+from build_assets import ConsoleBudget, MAX_ARCHIVE, MAX_TOTAL as MAX_PUBLIC_SOURCE, MAX_SINGLE as MAX_PUBLIC_SINGLE, MAX_ASSETS, valid_name as valid_asset_name, from_tar
 from build_recipe import INIT, BUILD, recipe, emission
 import base64
 import gzip
@@ -111,7 +112,7 @@ class Image:
                 out.write(b"\0" * (-size % 4))
 
 
-def source_files(image, root, prefix):
+def source_files(image, root, prefix, public_assets=False):
     """Caller approves this source directory, including all regular source files.
 
     Ignore regular .gitignore files; reject links, device files, Cargo configuration,
@@ -121,9 +122,11 @@ def source_files(image, root, prefix):
     No credentials or general home directory are automatically included.
     """
     total = 0
+    public_total = 0
+    public_count = 0
     count = 0
     def walk(directory, relative, depth):
-        nonlocal total, count
+        nonlocal total, count, public_total, public_count
         if depth > 32:
             raise ValueError("source nesting limit")
         names = []
@@ -155,9 +158,17 @@ def source_files(image, root, prefix):
                 continue
             if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
                 raise ValueError("application source must contain regular files")
-            total += before.st_size
-            if total > MAX_SOURCE:
-                raise ValueError("source budget exceeded")
+            is_public = public_assets and child.startswith("public/")
+            if is_public:
+                public_count += 1
+                public_total += before.st_size
+                if (not valid_asset_name(child[len("public/"):]) or public_count > MAX_ASSETS
+                        or not 0 < before.st_size <= MAX_PUBLIC_SINGLE or public_total > MAX_PUBLIC_SOURCE):
+                    raise ValueError("public source asset budget or name")
+            else:
+                total += before.st_size
+                if total > MAX_SOURCE:
+                    raise ValueError("source budget exceeded")
             descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
             with os.fdopen(descriptor, "rb") as file:
                 after = os.fstat(file.fileno())
@@ -165,7 +176,7 @@ def source_files(image, root, prefix):
                         or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
                         or after.st_nlink != 1):
                     raise ValueError("source changed during snapshot")
-                data = file.read(MAX_SOURCE + 1)
+                data = file.read((MAX_PUBLIC_SINGLE if is_public else MAX_SOURCE) + 1)
             if len(data) != before.st_size:
                 raise ValueError("source changed during snapshot")
             image.add(f"{prefix}/{child}", data)
@@ -251,7 +262,7 @@ def toolchain(image, path):
         if directory.is_file() and "share" not in directory.parts:
             image.trusted(directory, "toolchain/" + str(directory.relative_to(path)))
     for binary in ("bash", "mount", "mkdir", "chmod", "cp", "setpriv", "env", "cat",
-                   "base64", "rm", "cmp", "timeout", "poweroff", "gcc", "as", "ld", "ar"):
+                   "base64", "tar", "head", "rm", "cmp", "timeout", "poweroff", "gcc", "as", "ld", "ar"):
         image.executable(binary)
     image.trusted(shutil.which("bash"), "usr/bin/sh")
     image.trusted(shutil.which("gcc"), "usr/bin/cc")
@@ -306,6 +317,7 @@ def run_vm(kernel, initrd, log_path, seconds):
     with subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, preexec_fn=limits) as process:
         output = bytearray()
+        budget = ConsoleBudget(MAX_LOG, "VM output limit exceeded")
         selector = selectors.DefaultSelector()
         selector.register(process.stdout, selectors.EVENT_READ)
         until = time.monotonic() + seconds
@@ -323,11 +335,11 @@ def run_vm(kernel, initrd, log_path, seconds):
                     # Process exit can leave artifact bytes in the pipe; drain to EOF.
                     if not chunk:
                         break
+                    budget.feed(chunk)
                     output += chunk
-                    if len(output) > MAX_LOG:
-                        raise ValueError("VM output limit exceeded")
             else:
                 raise TimeoutError("VM build deadline exceeded")
+            budget.finish()
         finally:
             process.kill() if process.poll() is None else None
             process.wait()
@@ -412,7 +424,7 @@ def main():
     workspace = (ROOT / "Cargo.toml").read_text().replace('    "crates/noxide-cli",\n', '').replace('    "crates/noxide-host",\n', '')
     image.add("src/Cargo.toml", workspace.encode())
     image.add("src/README.md", (ROOT / "README.md").read_bytes())
-    source_files(image, options.source.absolute(), "src/examples/private-notes")
+    source_files(image, options.source.absolute(), "src/examples/private-notes", public_assets=True)
     rewrite_sdk_path(image, "src/examples/private-notes/Cargo.toml")
     paths = path_packages(image.files)
     old_lock = image.files.get("src/examples/private-notes/Cargo.lock", (None,))[0]
@@ -446,7 +458,7 @@ def main():
             explanation = safe_log(output)[-4096:].decode('ascii')
             raise ValueError("dependency resolution failed: missing/stale lockfile or manifest requirements/features have no catalog solution; run deps resolve with the same catalog, or change the manifest/trusted catalog separately.\n" + explanation) from None
         raise
-    if dependencies and any(marker in output for marker in (b"NOXIDE_WASM_", b"NOXIDE_CONTRACT_")):
+    if dependencies and any(marker in output for marker in (b"NOXIDE_WASM_", b"NOXIDE_CONTRACT_", b"NOXIDE_ASSETS_")):
         raise ValueError("unexpected compilation artifact in dependency mode")
     candidate = artifact(output, "LOCK", 131072)
     validate_lock(candidate, approved, paths)
@@ -463,6 +475,7 @@ def main():
         if not isinstance(json.loads(contract), dict):
             raise ValueError("builder contract must be a JSON object")
         outputs.append(("manifest.json", contract))
+        outputs.append(("assets.pack", from_tar(artifact(output, "ASSETS", MAX_ARCHIVE))))
     for name, data in outputs:
         with (options.output / name).open("xb") as file:
             file.write(data)

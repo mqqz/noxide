@@ -6,6 +6,7 @@ Native build code has the invoking user's host authority.
 """
 import json
 from build_catalog import safe_log
+from build_assets import ConsoleBudget
 import os
 from pathlib import Path
 import re
@@ -49,6 +50,7 @@ def run_local(image, toolchain, log_path, seconds):
                    PATH=str(toolchain.resolve() / 'bin') + os.pathsep + env['PATH'])
         print('Local build: dependency build scripts, procedural macros, tests, and the metadata collector execute native code with your user permissions. Use --isolated for untrusted inputs.', flush=True)
         output = bytearray()
+        budget = ConsoleBudget(limit_message="local output limit exceeded")
         with log_path.open('wb') as log:
             process = subprocess.Popen(['sh', str(script_path)], cwd=root, env=env,
                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -61,19 +63,17 @@ def run_local(image, toolchain, log_path, seconds):
                 selector = selectors.DefaultSelector()
                 selector.register(process.stdout, selectors.EVENT_READ)
                 until = time.monotonic() + seconds
-                size = 0
                 try:
                     while time.monotonic() < until:
                         if selector.select(min(1, max(0, until - time.monotonic()))):
                             chunk = os.read(process.stdout.fileno(), 65536)
                             if not chunk:
                                 break
-                            size += len(chunk)
-                            if size > 16 * 1024 * 1024:
-                                raise ValueError("local output limit exceeded")
+                            budget.feed(chunk)
                             output.extend(chunk)
                     else:
                         raise subprocess.TimeoutExpired(process.args, seconds)
+                    budget.finish()
                 finally:
                     selector.close()
                     process.stdout.close()
