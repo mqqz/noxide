@@ -61,6 +61,7 @@ def main():
     cli = str(options.cli.resolve())
     app = root / 'my-forum'
     subprocess.run([cli, 'new', str(app)], env=environment, check=True)
+    subprocess.run([cli, 'check'], cwd=app, env=environment, check=True)
     expected = json.loads((ROOT / 'examples/private-notes/manifest.json').read_text())
     master, slave = pty.openpty()
     process = subprocess.Popen([cli, 'dev'], cwd=app, env=environment, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
