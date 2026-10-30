@@ -50,3 +50,8 @@ async fn test_account(db: &Database, login: &str) -> String {
         .await
         .unwrap_or_else(|_| "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into())
 }
+
+mod query_plan;
+
+#[cfg(test)]
+mod parameter_tests;

@@ -12,7 +12,7 @@ pub struct Message {
     #[field(max_bytes = 4096)]
     body: String,
 }
-#[query(list(Message), allow = any(owner, principal_is(recipient)), page_size = 20)]
+#[query(list(Message), allow = any(owner, principal_is(recipient)), order = created_desc, page_size = 20)]
 struct ListMessages;
 #[query(read(Message), allow = any(owner, principal_is(recipient)))]
 struct ReadMessage;

@@ -53,14 +53,49 @@ pub(crate) fn expand_query(
             "query declarations accept only an operation and allow policy",
         ));
     }
+    let inferred: std::collections::BTreeSet<_> = declaration
+        .filter
+        .iter()
+        .filter(|(f, _)| public && !declaration.fields.contains(f))
+        .map(|(f, _)| f.to_string())
+        .collect();
+    let disclosed: std::collections::BTreeSet<_> = declaration
+        .disclose
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    if inferred != disclosed || disclosed.len() != declaration.disclose.len() {
+        return Err(syn::Error::new(
+            item.span(),
+            "disclose must name exactly unprojected public filter fields",
+        ));
+    }
     let query_trait = if declaration.kind == "list" {
         quote!(::noxide::ListQuery)
     } else {
         quote!(::noxide::ReadQuery)
     };
     let page_size = declaration.page_size.unwrap_or(3);
+    let order = if declaration
+        .order
+        .as_ref()
+        .is_some_and(|o| o == "created_desc")
+    {
+        quote!(::noxide::__private::ListOrder::CreatedDesc)
+    } else {
+        quote!(::noxide::__private::ListOrder::CreatedAsc)
+    };
+    let preview = match &declaration.preview {
+        None => quote!(None),
+        Some(route) => {
+            let route = route
+                .as_ref()
+                .map_or_else(|| quote!(None), |route| quote!(Some(#route::id())));
+            quote!(Some(::noxide::__private::Preview { see_all: #route }))
+        }
+    };
     let list = if declaration.kind == "list" {
-        quote!(Some(::noxide::__private::ListSettings { order: ::noxide::__private::ListOrder::CreatedAsc, page_size: #page_size }))
+        quote!(Some(::noxide::__private::ListSettings { preview: #preview, order: #order, page_size: #page_size }))
     } else {
         quote!(None)
     };
@@ -69,6 +104,29 @@ pub(crate) fn expand_query(
     let policy = policy_tokens(&declaration.policy, &declaration.resource);
     let vis = &item.vis;
     let output_name = format_ident!("{name}Record");
+    let filters: Vec<_> = declaration.filter.iter().map(|(field, value)| -> syn::Result<Tokens> {
+        let hash = stable_id(&field.to_string());
+        let operand = if let syn::Expr::Call(call) = value && matches!(call.func.as_ref(), syn::Expr::Path(path) if path.path.is_ident("param")) {
+            if call.args.len() != 1 { return Err(syn::Error::new(value.span(), "param requires one name")); }
+            let syn::Expr::Path(path) = &call.args[0] else { return Err(syn::Error::new(value.span(), "param requires a name")); };
+            let name = path.path.get_ident().ok_or_else(|| syn::Error::new(value.span(), "param requires a name"))?.to_string();
+            quote!(::noxide::__private::Operand::Param(#name.into()))
+        } else {
+            quote!({ let value: &<#resource as ::noxide::FieldSpec<#hash>>::Value = &(#value); ::noxide::__private::Operand::Literal(::noxide::FieldValue::encode(value)) })
+        };
+        Ok(quote!({
+            const _: () = assert!(<<#resource as ::noxide::FieldSpec<#hash>>::Value as ::noxide::FieldValue>::FILTERABLE, "filter requires boolean or choice");
+            ::noxide::__private::Condition { field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into(), equals: #operand }
+        }))
+    }).collect::<syn::Result<_>>()?;
+    let disclosures: Vec<_> = declaration
+        .disclose
+        .iter()
+        .map(|field| {
+            let hash = stable_id(&field.to_string());
+            quote!(<#resource as ::noxide::FieldSpec<#hash>>::KEY.into())
+        })
+        .collect();
     let (projection, output, decode, visibility, fields) = if public {
         let names = &declaration.fields;
         let mut identity = "__noxide_record_id".to_owned();
@@ -122,7 +180,8 @@ pub(crate) fn expand_query(
             fn from_record(record: ::noxide::__private::Record) -> Self::Output { #decode }
             fn operation() -> ::noxide::__private::Operation {
                 ::noxide::__private::Operation {
-                    list: #list, visibility: #visibility, fields: #fields,
+                    filter: vec![#(#filters),*], disclose: vec![#(#disclosures),*],
+                list: #list, visibility: #visibility, fields: #fields,
                     id: ::noxide::stable_id(concat!("query:", module_path!(), "::", stringify!(#name))),
                     resource: <#resource as ::noxide::ResourceType>::definition().id,
                     kind: #kind, policy: #policy,

@@ -39,6 +39,8 @@ fn declarations() -> Manifest {
     }
     for (id, kind) in [(4, OperationKind::Update), (5, OperationKind::Delete)] {
         m.operations.push(Operation {
+            filter: Vec::new(),
+            disclose: Vec::new(),
             list: None,
             id,
             resource: 1,
@@ -803,6 +805,8 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
         let mut m = declarations();
         if inspect {
             m.operations.push(Operation {
+                filter: Vec::new(),
+                disclose: Vec::new(),
                 list: None,
                 id: 6,
                 resource: 1,
@@ -897,6 +901,7 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
             route: 2,
         };
         let request = RequestView {
+            params: Default::default(),
             version: VERSION,
             kind: RequestKind::Action(2),
             target: Some(42),
@@ -908,7 +913,14 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
             available_forms: vec![],
         };
         let mut effects = crate::repository::Effects {
+            invoked: Default::default(),
+            list_bytes: 0,
+            list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
+            result_limit: noxide_protocol::MAX_RESULT_BYTES,
+            truncated: false,
+            see_all: Vec::new(),
             tx,
+            plans: crate::query_plan::compile_all(&m).unwrap(),
             manifest: Arc::new(m),
             principal: crate::auth::Principal::Anonymous,
             request,
@@ -1460,7 +1472,7 @@ async fn custom_presentation_contract(db: Database) {
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::SEE_OTHER
+            StatusCode::NOT_FOUND
         );
     }
     let response = router.clone().oneshot(get("/join", "")).await.unwrap();

@@ -95,6 +95,41 @@ pub fn router(app: Arc<Application>, origin: Origin) -> Router {
         .with_state(Arc::new(Gateway { app, origin }))
 }
 
+pub(crate) fn parse_query(
+    m: &noxide_protocol::Manifest,
+    route: &noxide_protocol::Route,
+    raw: Option<&str>,
+) -> Result<(Option<String>, noxide_protocol::Fields)> {
+    let raw = raw.unwrap_or("");
+    ensure!(raw.len() <= 1024, "query string limit");
+    let bytes = raw.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] == b'%' {
+            ensure!(
+                bytes.get(i + 1).is_some_and(u8::is_ascii_hexdigit)
+                    && bytes.get(i + 2).is_some_and(u8::is_ascii_hexdigit),
+                "invalid query encoding"
+            );
+        }
+    }
+    let mut values = noxide_protocol::Fields::new();
+    for (key, value) in url::form_urlencoded::parse(bytes) {
+        ensure!(
+            key == "cursor" || route.params.iter().any(|name| name == &key),
+            "unknown query parameter"
+        );
+        ensure!(
+            values
+                .insert(key.into_owned(), value.into_owned())
+                .is_none(),
+            "duplicate query parameter"
+        );
+    }
+    let cursor = values.remove("cursor");
+    crate::manifest::validate_params(m, route, &values)?;
+    Ok((cursor, values))
+}
+
 fn cookie(headers: &HeaderMap, name: &str) -> Result<String> {
     let mut found = None;
     for header in headers.get_all(header::COOKIE) {
@@ -309,6 +344,19 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
     {
         return finish(busy());
     }
+    if request.method() == axum::http::Method::GET
+        && let Some(route) = app
+            .manifest
+            .routes
+            .iter()
+            .find(|r| crate::routing::match_path(r, path).is_some())
+        && parse_query(&app.manifest, route, request.uri().query()).is_err()
+    {
+        let Ok(_permit) = app.admission_limits.requests.request().await else {
+            return finish(busy());
+        };
+        return finish(StatusCode::NOT_FOUND.into_response());
+    }
     let public = (path == presentation.registration_path
         && app.registration == crate::Registration::Closed)
         || app
@@ -363,10 +411,6 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     if request.uri().path().len() > 256 {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let cursor = request
-        .uri()
-        .query()
-        .map(|q| q.strip_prefix("cursor=").unwrap_or(""));
     let path = request.uri().path().to_owned();
     if path == presentation.registration_path
         && gateway.app.registration == crate::Registration::Closed
@@ -474,6 +518,12 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
         });
         return match route {
             Some((route, target)) => {
+                let Ok((cursor, params)) =
+                    parse_query(&gateway.app.manifest, route, request.uri().query())
+                else {
+                    return StatusCode::NOT_FOUND.into_response();
+                };
+
                 let session = match route.access {
                     noxide_protocol::Access::Public => None,
                     noxide_protocol::Access::Authenticated => {
@@ -488,14 +538,15 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                 };
                 match gateway
                     .app
-                    .view_page_anonymous(
+                    .view_page_parameters(
                         session.as_deref(),
                         cookie(headers, &presentation.anonymous_cookie)
                             .ok()
                             .as_deref(),
                         route.id,
                         target,
-                        cursor,
+                        cursor.as_deref(),
+                        params.clone(),
                     )
                     .await
                 {
@@ -505,6 +556,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                         let restart = crate::routing::resolve(
                             &gateway.app.manifest,
                             &noxide_protocol::RouteRef {
+                                params: params.clone(),
                                 route: route.id,
                                 target,
                             },
@@ -517,20 +569,13 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                     Err(e) => error(e, &presentation.login_path),
                 }
             }
-            None => {
-                // Preserve the existing unknown-path response after route lookup.
-                if cookie(headers, &presentation.session_cookie).is_err() {
-                    redirect(&presentation.login_path)
-                } else {
-                    StatusCode::NOT_FOUND.into_response()
-                }
-            }
+            None => StatusCode::NOT_FOUND.into_response(),
         };
     }
     if request.method() != axum::http::Method::POST {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
-    if cursor.is_some() {
+    if request.uri().query().is_some() {
         return StatusCode::BAD_REQUEST.into_response();
     }
     if headers.get_all(header::ORIGIN).iter().count() != 1
@@ -1018,7 +1063,7 @@ mod tests {
                 let absent_css = exchange(address, &get(&p.stylesheet_path, "")).await;
                 // An unconfigured asset must behave like any unknown path,
                 // rather than retaining a distinctive anonymous 404 endpoint.
-                assert_eq!(absent_css, redirected);
+                assert_eq!(absent_css, exchange(address, &get("/missing", "")).await);
             }
             let login = exchange(address, &get(&p.login_path, "")).await;
             assert!(login.starts_with("HTTP/1.1 200"));

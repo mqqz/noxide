@@ -24,6 +24,8 @@ pub fn manifest() -> Manifest {
         }],
         operations: vec![
             Operation {
+                filter: Vec::new(),
+                disclose: Vec::new(),
                 list: None,
                 visibility: None,
                 fields: None,
@@ -33,6 +35,8 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
+                filter: Vec::new(),
+                disclose: Vec::new(),
                 list: None,
                 visibility: None,
                 fields: None,
@@ -42,6 +46,8 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
+                filter: Vec::new(),
+                disclose: Vec::new(),
                 list: None,
                 visibility: None,
                 fields: None,
@@ -53,6 +59,7 @@ pub fn manifest() -> Manifest {
         ],
         routes: vec![
             Route {
+                params: Vec::new(),
                 access: noxide_protocol::Access::Authenticated,
                 id: 1,
                 path: "/".into(),
@@ -61,6 +68,7 @@ pub fn manifest() -> Manifest {
                 forms: vec![1],
             },
             Route {
+                params: Vec::new(),
                 access: noxide_protocol::Access::Authenticated,
                 id: 2,
                 path: "/notes/{note}".into(),

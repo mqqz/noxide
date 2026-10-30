@@ -150,7 +150,7 @@ def convenience_fixtures():
     comparisons = []
     for app in EQUIVALENT_APPS:
         for variant, path in (
-            ("simple", (ROOT / "tools/fixtures/sdk" / (app + "-simple.rs")) if app in ("policy-board", "repeated", "forum") else ROOT / "examples" / app / "src/lib.rs"),
+            ("simple", (ROOT / "tools/fixtures/sdk" / (app + "-simple.rs")) if app in ("policy-board", "repeated", "forum") else (ROOT / "tools/fixtures/queries/public-articles.rs" if app == "public-articles" else ROOT / "examples" / app / "src/lib.rs")),
             ("explicit", ROOT / "tools/fixtures/sdk" / (app + "-explicit.rs")),
         ):
             name = app + "-" + variant
@@ -279,6 +279,12 @@ def convenience_fixtures():
         ("repeated-wrong-layout", repeated.replace("layout(secret_layout)", "layout(edit_layout)"), "mismatched types"),
         ("repeated-owner-moderator-field", repeated.rsplit("\n}", 1)[0] + '\n fn forbidden(f: FormFields<r#EditReply>) { let _ = f.published; }\n}\n', "no field"),
         ("repeated-capability-moderator-field", repeated.rsplit("\n}", 1)[0] + '\n fn forbidden(f: FormFields<EditSecret>) { let _ = f.published; }\n}\n', "no field"),
+    ]
+    query_example = (ROOT / "examples/public-articles/src/lib.rs").read_text()
+    passing.append(("public-query-features", query_example))
+    failures += [
+        ("public-param-disclosure", query_example.replace("disclose(category),", ""), "disclose must name"),
+        ("account-route-parameter", query_example.replace("routes::category(Category::Books)", 'routes::category("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".parse::<noxide::AccountId>().unwrap())'), "ParamValue"),
     ]
     return passing, failures, comparisons
 

@@ -18,6 +18,8 @@ fn manifest() -> Manifest {
             }],
         }],
         operations: vec![Operation {
+            filter: Vec::new(),
+            disclose: Vec::new(),
             id: 1,
             resource: 1,
             kind: OperationKind::List,
@@ -41,6 +43,7 @@ fn manifest() -> Manifest {
             list: None,
         }],
         routes: vec![Route {
+            params: Vec::new(),
             id: 1,
             path: "/".into(),
             resource: None,

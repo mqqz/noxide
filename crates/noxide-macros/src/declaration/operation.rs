@@ -6,6 +6,9 @@ use syn::{
     spanned::Spanned,
 };
 pub(crate) struct OperationDeclaration {
+    pub(crate) preview: Option<Option<syn::Path>>,
+    pub(crate) filter: Vec<(Ident, Expr)>,
+    pub(crate) disclose: Vec<Ident>,
     pub(crate) order: Option<Ident>,
     pub(crate) page_size: Option<u8>,
     pub(crate) kind: Ident,
@@ -30,6 +33,9 @@ impl Parse for OperationDeclaration {
             return Err(resource.error("expected one resource type"));
         }
         let mut result = Self {
+            preview: None,
+            filter: Vec::new(),
+            disclose: Vec::new(),
             order: None,
             page_size: None,
             kind,
@@ -57,13 +63,66 @@ impl Parse for OperationDeclaration {
                 ));
             }
             match option.to_string().as_str() {
+                "preview" => {
+                    if result.kind != "list" {
+                        return Err(input.error("preview requires list"));
+                    }
+                    let see_all = if input.peek(syn::token::Paren) {
+                        let content;
+                        parenthesized!(content in input);
+                        let option: Ident = content.parse()?;
+                        if option != "see_all" {
+                            return Err(syn::Error::new(option.span(), "expected see_all"));
+                        }
+                        content.parse::<Token![=]>()?;
+                        let route = content.parse()?;
+                        if !content.is_empty() {
+                            return Err(content.error("expected one preview destination"));
+                        }
+                        Some(route)
+                    } else {
+                        None
+                    };
+                    result.preview = Some(see_all);
+                }
+                "filter" => {
+                    if result.kind != "list" {
+                        return Err(input.error("filter requires list"));
+                    }
+                    let content;
+                    parenthesized!(content in input);
+                    let mut seen = BTreeSet::new();
+                    while !content.is_empty() {
+                        let name: Ident = content.parse()?;
+                        if !seen.insert(name.to_string()) {
+                            return Err(syn::Error::new(name.span(), "duplicate filter field"));
+                        }
+                        content.parse::<Token![=]>()?;
+                        result.filter.push((name, content.parse()?));
+                        if !content.is_empty() {
+                            content.parse::<Token![,]>()?;
+                        }
+                    }
+                }
+                "disclose" => {
+                    if result.kind != "list" {
+                        return Err(input.error("disclose requires list"));
+                    }
+                    let content;
+                    parenthesized!(content in input);
+                    result.disclose = content
+                        .parse_terminated(Ident::parse, Token![,])?
+                        .into_iter()
+                        .collect();
+                }
                 "order" => {
                     input.parse::<Token![=]>()?;
                     let order: Ident = input.parse()?;
-                    if order != "created_asc" || result.kind != "list" {
+                    if (order != "created_asc" && order != "created_desc") || result.kind != "list"
+                    {
                         return Err(syn::Error::new(
                             order.span(),
-                            "only list order=created_asc is supported",
+                            "list order must be created_asc or created_desc",
                         ));
                     }
                     result.order = Some(order);

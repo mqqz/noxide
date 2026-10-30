@@ -7,6 +7,7 @@ use syn::{
 };
 pub(crate) struct PageDeclaration {
     pub(crate) path: LitStr,
+    pub(crate) params: Vec<Ident>,
     pub(crate) access: Ident,
 }
 impl Parse for PageDeclaration {
@@ -21,13 +22,30 @@ impl Parse for PageDeclaration {
         input.parse::<Token![=]>()?;
         let path: LitStr = input.parse()?;
         let mut access = Ident::new("Authenticated", path.span());
-        if input.peek(Token![,]) {
+        let mut params = Vec::new();
+        let mut options = std::collections::BTreeSet::new();
+        while !input.is_empty() {
             input.parse::<Token![,]>()?;
-            if !input.is_empty() {
-                let option: Ident = input.parse()?;
-                if option != "access" {
-                    return Err(syn::Error::new(option.span(), "unknown page option"));
+            if input.is_empty() {
+                break;
+            }
+            let option: Ident = input.parse()?;
+            if !options.insert(option.to_string()) {
+                return Err(syn::Error::new(option.span(), "duplicate page option"));
+            }
+            if option == "params" {
+                let names;
+                syn::parenthesized!(names in input);
+                params = names
+                    .parse_terminated(Ident::parse, Token![,])?
+                    .into_iter()
+                    .collect();
+                let unique: std::collections::BTreeSet<_> =
+                    params.iter().map(ToString::to_string).collect();
+                if params.len() > 4 || unique.len() != params.len() || unique.contains("cursor") {
+                    return Err(syn::Error::new(option.span(), "invalid route parameters"));
                 }
+            } else if option == "access" {
                 input.parse::<Token![=]>()?;
                 let value: Ident = input.parse()?;
                 access = Ident::new(
@@ -35,24 +53,19 @@ impl Parse for PageDeclaration {
                         "authenticated" => "Authenticated",
                         "public" => "Public",
                         "public_optional" => "PublicOptional",
-                        _ => {
-                            return Err(syn::Error::new(
-                                value.span(),
-                                "expected authenticated, public, or public_optional",
-                            ));
-                        }
+                        _ => return Err(syn::Error::new(value.span(), "invalid page access")),
                     },
                     value.span(),
                 );
-                if input.peek(Token![,]) {
-                    input.parse::<Token![,]>()?;
-                }
+            } else {
+                return Err(syn::Error::new(option.span(), "unknown page option"));
             }
         }
-        if !input.is_empty() {
-            return Err(input.error("unknown page option"));
-        }
-        Ok(Self { path, access })
+        Ok(Self {
+            path,
+            access,
+            params,
+        })
     }
 }
 
@@ -105,6 +118,8 @@ pub(crate) fn expand_page(declaration: PageDeclaration, item: syn::ItemFn) -> sy
     let vis = &item.vis;
     let path = &declaration.path;
     let access = &declaration.access;
+    let params = &declaration.params;
+    let param_names: Vec<_> = params.iter().map(ToString::to_string).collect();
     let mut target = None;
     let mut query_operations = Vec::new();
     let mut forms = Vec::new();
@@ -174,6 +189,11 @@ pub(crate) fn expand_page(declaration: PageDeclaration, item: syn::ItemFn) -> sy
         }
         (quote!(None), quote!(), quote!(None))
     };
+    let separator = if target.is_some() && !params.is_empty() {
+        quote!(,)
+    } else {
+        quote!()
+    };
     Ok(quote! {
         #item
         #vis mod #name {
@@ -184,7 +204,8 @@ pub(crate) fn expand_page(declaration: PageDeclaration, item: syn::ItemFn) -> sy
             }
             pub fn definition() -> ::noxide::__private::Route {
                 ::noxide::__private::Route {
-                    access: ::noxide::__private::Access::#access,
+                    params: vec![#(#param_names.into()),*],
+                access: ::noxide::__private::Access::#access,
                     id: self::id(),
                     path: #path.into(), resource: #resource,
                     operations: vec![#(#query_operations.id),*], forms: vec![#(#forms),*],
@@ -195,8 +216,9 @@ pub(crate) fn expand_page(declaration: PageDeclaration, item: syn::ItemFn) -> sy
                 #(builder.operation(#query_operations);)*
                 builder.page(definition());
             }
-            pub fn link(#link_args) -> ::noxide::RouteRef {
-                ::noxide::RouteRef { route: self::id(), target: #link_target }
+            pub fn link(#link_args #separator #(#params: impl ::noxide::ParamValue),*) -> ::noxide::RouteRef {
+                ::noxide::RouteRef { params: ::std::collections::BTreeMap::from([#((#param_names.into(), ::noxide::FieldValue::encode(&#params))),*]),
+                route: self::id(), target: #link_target }
             }
             pub fn dispatch(_request: &::noxide::RequestView) -> ::noxide::ResponseIntent {
                 ::noxide::IntoPageResponse::into_response(super::#name(#(#args),*))

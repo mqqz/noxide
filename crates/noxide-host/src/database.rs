@@ -570,22 +570,12 @@ impl Transaction {
         .await?;
         Ok(candidate)
     }
-    pub(crate) fn parent_expression(&self, field: &str) -> Result<String> {
-        ensure!(crate::manifest::identifier(field), "invalid parent field");
+    pub(crate) fn field_expression(&self, field: &str) -> Result<String> {
+        ensure!(crate::manifest::identifier(field), "invalid field");
         Ok(match self.backend {
             Backend::Sqlite(_) => format!("json_extract(fields, '$.\"{field}\"')"),
             Backend::Postgres(_) => format!("(fields::jsonb ->> '{field}')"),
         })
-    }
-
-    pub(crate) fn field_text(&self, field: &str, index: usize) -> (String, Param) {
-        match self.backend {
-            Backend::Sqlite(_) => (
-                format!("json_extract(fields, ${index})"),
-                format!("$.\"{field}\"").into(),
-            ),
-            Backend::Postgres(_) => (format!("(fields::jsonb ->> ${index})"), field.into()),
-        }
     }
 
     pub(crate) fn bounded_text(&self, column: &str, maximum: usize) -> String {

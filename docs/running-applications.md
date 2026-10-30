@@ -687,3 +687,30 @@ revokes other accounts' access to them. Deleted accounts cannot be enabled.
 Restoring an older database restores older account state and may undo deletions.
 Tenant changes are unsupported; provision a nonempty tenant at creation for
 account-reference applications. `/account` shows a signed-in user's own ID.
+
+## Reconcile query indexes
+
+A filtered list declares derived equality-prefix indexes as part of admission.
+After approving the target contract (and applying any required schema migration),
+run this operator step before activating it, including deployments that change
+only operations:
+
+```sh
+noxide schema indexes CONFIG.json
+```
+
+This reconciles missing and obsolete `nx_q_*` indexes for the approved target.
+It can also bind a new empty application schema. Runtime activation verifies
+required indexes and names the command when one is missing; requests never build
+them. Existing unfiltered applications require no derived indexes. At most eight
+distinct shapes per resource are admitted, deduplicated across queries. Index
+existence grants no filter or record authority.
+
+The command uses the same exclusive maintenance lock and 60-second deadline as
+schema changes. Both SQLite and PostgreSQL create indexes transactionally while
+requests are fenced. Schedule a maintenance window; this is not an online
+`CREATE INDEX CONCURRENTLY` workflow. PostgreSQL concurrent index creation would
+need a separate operator workflow outside migration transactions. A timeout rolls
+back the reconciliation; activation continues to refuse missing requirements.
+Schema migrations drop and recreate derived indexes for their target contract.
+Derived indexes do not change the storage layout version.
