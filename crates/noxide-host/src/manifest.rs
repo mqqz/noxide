@@ -79,7 +79,8 @@ pub(crate) fn parameter_fields<'a>(
     m: &'a Manifest,
     route: &Route,
 ) -> Result<std::collections::BTreeMap<&'a str, &'a TextField>> {
-    let mut fields = std::collections::BTreeMap::new();
+    let mut fields: std::collections::BTreeMap<&str, &TextField> =
+        std::collections::BTreeMap::new();
     for id in &route.operations {
         let op = operation(m, *id)?;
         let resource = resource(m, op.resource)?;
@@ -91,9 +92,13 @@ pub(crate) fn parameter_fields<'a>(
                     .iter()
                     .find(|f| f.name == condition.field)
                     .ok_or_else(|| anyhow::anyhow!("unknown filter field"))?;
-                if let Some(previous) = fields.insert(name.as_str(), field) {
+                if let Some(previous) = fields.get(name.as_str()) {
                     ensure!(previous.kind == field.kind, "inconsistent parameter kind");
+                    if !previous.optional {
+                        continue;
+                    }
                 }
+                fields.insert(name.as_str(), field);
             }
         }
     }
@@ -462,6 +467,16 @@ pub fn validate(m: &Manifest) -> Result<()> {
                         .all(|name| r.params.contains(name)),
                     "preview destination parameters"
                 );
+                let source_fields = parameter_fields(m, r)?;
+                for (name, target) in parameter_fields(m, destination)? {
+                    let source = source_fields
+                        .get(name)
+                        .ok_or_else(|| anyhow::anyhow!("preview destination parameters"))?;
+                    ensure!(
+                        source.kind == target.kind && (!source.optional || target.optional),
+                        "incompatible preview destination parameter"
+                    );
+                }
                 ensure!(
                     destination
                         .operations

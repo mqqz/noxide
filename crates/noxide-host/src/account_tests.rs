@@ -978,6 +978,159 @@ fn host_rejects_forged_preview_shapes_and_destinations() {
         .see_all = Some(2);
     assert!(manifest::validate(&bad).is_err());
 }
+fn preview_parameter_declarations() -> Manifest {
+    let mut m = preview_declarations();
+    for name in ["source_flag", "destination_flag"] {
+        m.resources[0].fields.push(TextField {
+            name: name.into(),
+            label: name.into(),
+            kind: FieldKind::Boolean,
+            optional: false,
+            initial: None,
+            max_bytes: 5,
+        });
+        m.actions[0].fields.push(name.into());
+    }
+    m.routes[0].params.push("flag".into());
+    m.operations[4].filter.push(Condition {
+        field: "source_flag".into(),
+        equals: Operand::Param("flag".into()),
+    });
+    let mut extra = m.operations[4].clone();
+    extra.id = 7;
+    extra.filter[0].field = "destination_flag".into();
+    m.operations.push(extra);
+    m.routes.push(Route {
+        id: 3,
+        path: "/all".into(),
+        resource: None,
+        operations: vec![1, 7],
+        forms: vec![],
+        access: Access::Authenticated,
+        params: vec!["flag".into()],
+    });
+    m.operations[3]
+        .list
+        .as_mut()
+        .unwrap()
+        .preview
+        .as_mut()
+        .unwrap()
+        .see_all = Some(3);
+    m
+}
+#[test]
+fn host_rejects_incompatible_preview_parameter_domains() {
+    let choice = |keys: &[&str]| FieldKind::Choice {
+        variants: keys
+            .iter()
+            .map(|key| ChoiceVariant {
+                key: (*key).into(),
+                label: (*key).into(),
+            })
+            .collect(),
+    };
+    for (source, destination, value) in [
+        (FieldKind::Boolean, choice(&["yes", "no"]), "true"),
+        (choice(&["yes", "no"]), FieldKind::Boolean, "yes"),
+        (choice(&["yes", "no"]), choice(&["yes", "new"]), "no"),
+    ] {
+        let mut m = preview_parameter_declarations();
+        m.resources[0].fields[4].kind = source;
+        m.resources[0].fields[5].kind = destination;
+        let params = Fields::from([("flag".into(), value.into())]);
+        assert!(
+            crate::routing::resolve(
+                &m,
+                &RouteRef {
+                    route: 1,
+                    target: None,
+                    params: params.clone()
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            crate::routing::resolve(
+                &m,
+                &RouteRef {
+                    route: 3,
+                    target: None,
+                    params
+                }
+            )
+            .is_err()
+        );
+        let error = manifest::parse(&serde_json::to_vec(&m).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("incompatible preview destination parameter"),
+            "{error}"
+        );
+    }
+    for kind in [FieldKind::Boolean, choice(&["yes", "no"])] {
+        let mut m = preview_parameter_declarations();
+        m.resources[0].fields[4].kind = kind.clone();
+        m.resources[0].fields[5].kind = kind;
+        manifest::validate(&m).unwrap();
+    }
+    let mut m = preview_parameter_declarations();
+    m.resources[0].fields[4].optional = true;
+    let error = manifest::parse(&serde_json::to_vec(&m).unwrap())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("incompatible preview destination parameter"),
+        "{error}"
+    );
+    m.resources[0].fields[5].optional = true;
+    manifest::validate(&m).unwrap();
+    let empty = Fields::from([("flag".into(), String::new())]);
+    for route in [1, 3] {
+        assert!(
+            crate::routing::resolve(
+                &m,
+                &RouteRef {
+                    route,
+                    target: None,
+                    params: empty.clone()
+                }
+            )
+            .is_ok()
+        );
+    }
+    m.resources[0].fields[4].optional = false;
+    manifest::validate(&m).unwrap();
+    m.resources[0].fields[4].optional = true;
+    m.resources[0].fields[5].optional = false;
+    m.resources[0].fields[3].max_bytes -= 5;
+    let mut field = m.resources[0].fields[4].clone();
+    field.name = "required_flag".into();
+    field.optional = false;
+    m.resources[0].fields.push(field);
+    m.actions[0].fields.push("required_flag".into());
+    m.operations[4].filter.push(Condition {
+        field: "required_flag".into(),
+        equals: Operand::Param("flag".into()),
+    });
+    for _ in 0..2 {
+        manifest::validate(&m).unwrap();
+        assert!(
+            crate::routing::resolve(
+                &m,
+                &RouteRef {
+                    route: 1,
+                    target: None,
+                    params: empty.clone()
+                }
+            )
+            .is_err()
+        );
+        m.operations[4].filter.reverse();
+    }
+}
+
 async fn previews_case(db: Database) {
     db.initialize().await.unwrap();
     let alice = db

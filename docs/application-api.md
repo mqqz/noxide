@@ -819,7 +819,10 @@ Truncation is true on row or byte limits, a positive look-ahead, or a bounded
 residual scan. The host renders a checked “See all” link only when truncated and
 `see_all` names a route with an equivalent full list: same resource, policy,
 visibility and selection, with declared parameters drawn from the preview page.
-The link retains those canonical values and existing record-target checks.
+Parameter kinds must match across both routes, including Choice variants. The
+destination must accept every canonical source value, including empty values
+allowed by optional resource fields. The link retains canonical values and
+existing record-target checks.
 
 All list results share a 131,072-byte serialized budget; each result retains the
 65,536-byte limit. The host reserves room for a pending paginated result and
