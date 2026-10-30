@@ -105,6 +105,17 @@ def main():
             assert get(link)[0] == 200
             assert get(link.replace("category=books", "category=games"))[0] != 200
             assert get("/categories?category=games")[0] == 200
+            status, _, overview = get("/overview?category=books")
+            assert status == 200 and "More in category" in overview and ">See all</a>" in overview
+            assert 'href="/categories?category=books"' in overview
+            next_overview = unescape(re.search(r'href="([^"]*cursor=[^"]+)"', overview).group(1))
+            status, _, second = get(next_overview)
+            assert status == 200 and "Public &lt;script&gt;" in second, "preview must ignore the paginated cursor"
+            status, _, complete = get("/overview?category=games")
+            assert status == 200 and "More in category" not in complete and ">See all</a>" not in complete
+            status, _, highlights = get("/highlights?category=books")
+            assert status == 200 and ">Next page</a>" not in highlights
+            assert get("/highlights?category=books&cursor=ignored")[2] == highlights
             missing = get("/missing")
             for query in ("", "?category=unknown", "?category=Books", "?category=books&category=games", "?other=books", "?category=books&other=x", "?category=%GG"):
                 invalid = get("/categories" + query)

@@ -150,3 +150,46 @@ The category example was built and exercised through real HTTP for canonical
 links, pagination, cross-value cursor rejection, and matching 404 responses for
 invalid inputs. The full workspace suite with PostgreSQL, instrumented SQLite
 suite, compatibility producers and SDK compile cases passed on 2026-10-30.
+
+## Several bounded lists
+
+Increment 6 validation on 2026-10-30 covers four declared lists totaling 40 rows: a
+paginated account list, an exact account preview, a single-path owner preview and
+a residual account preview. SQLite and PostgreSQL exercise both orders and both
+invocation orders within a two-second transaction deadline on 300 records. The
+residual preview is empty with `truncated = true`; row and maximum-field byte
+prefixes also report truncation. Shared serialized results stay below 131,072
+bytes, pending pagination retains its allowance, and repeated invocations and an
+exhausted list-work budget fail. Rendering all maximum-sized fields is rejected
+by the independent Document IR byte bound.
+
+The same fixture applies a field-add migration that creates derived indexes,
+then a field rename that drops and replaces them; activation checks the new
+requirements and confirms the old names are gone on both databases. Final audit
+also added the catalog-derived constant resource predicate to collection scans
+and look-ahead, allowing PostgreSQL generic plans to prove partial-index scope.
+Policy, visibility, parent scope and selection remain separate SQL conjunctions.
+
+The full workspace suite (including opt-in PostgreSQL tests, excluding the
+internal crash-worker entry point and Firefox fixtures), Clippy, workspace and
+example formatting, instrumented SQLite suite and PostgreSQL account metrics
+passed. The final workspace and instrumented host runs used
+`RUST_TEST_THREADS=4`; a previous highly parallel run let an existing registration
+rate bucket refill before its exhaustion assertion. The cluster settings above
+were retained. The SDK suite passed 36 compile-pass and 41 compile-fail cases,
+including the current query example as a WASM fixture. All 16 original manifest
+byte/digest fixtures and three original cursor-scope strings remain unchanged.
+Python build-input/local-runner checks passed (23 and four tests).
+
+Real HTTP checks passed for category parameters, mixed pagination/previews,
+preview-only cursor ignoring, canonical see-all links and complete-preview link
+omission. The inbox HTTP/component fixture passed on SQLite and PostgreSQL; the
+forum HTTP fixture passed on SQLite. Firefox/NoJS browser fixtures were not run
+locally for these increments. CI now runs the query compatibility/native filter
+checks, advanced SDK cases and selective-filter index metrics.
+
+Index reconciliation deliberately uses transactional exclusive maintenance on
+both providers; online PostgreSQL concurrent index creation remains outside this
+implementation. The multi-rule measurement above remains evidence for a separate
+increment 7 design; merge classification still changes paths only for policies
+containing `principal_is`. No deployment or external publication was performed.

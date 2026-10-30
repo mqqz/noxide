@@ -195,34 +195,34 @@ pub(crate) fn expand_page(declaration: PageDeclaration, item: syn::ItemFn) -> sy
         quote!()
     };
     Ok(quote! {
-            #item
-            #vis mod #name {
-                #[allow(unused_imports)]
-                use super::*;
-                pub fn id() -> u32 {
-                    ::noxide::stable_id(concat!("route:", module_path!()))
-                }
-                pub fn definition() -> ::noxide::__private::Route {
-                    ::noxide::__private::Route {
-                        params: vec![#(#param_names.into()),*],
-    access: ::noxide::__private::Access::#access,
-                        id: self::id(),
-                        path: #path.into(), resource: #resource,
-                        operations: vec![#(#query_operations.id),*], forms: vec![#(#forms),*],
-                    }
-                }
-                pub fn register(builder: &mut ::noxide::ApplicationDefinition) {
-                    #(builder.resource(#resources);)*
-                    #(builder.operation(#query_operations);)*
-                    builder.page(definition());
-                }
-                pub fn link(#link_args #separator #(#params: impl ::noxide::ParamValue),*) -> ::noxide::RouteRef {
-                    ::noxide::RouteRef { params: ::std::collections::BTreeMap::from([#((#param_names.into(), ::noxide::FieldValue::encode(&#params))),*]),
-    route: self::id(), target: #link_target }
-                }
-                pub fn dispatch(_request: &::noxide::RequestView) -> ::noxide::ResponseIntent {
-                    ::noxide::IntoPageResponse::into_response(super::#name(#(#args),*))
+        #item
+        #vis mod #name {
+            #[allow(unused_imports)]
+            use super::*;
+            pub fn id() -> u32 {
+                ::noxide::stable_id(concat!("route:", module_path!()))
+            }
+            pub fn definition() -> ::noxide::__private::Route {
+                ::noxide::__private::Route {
+                    params: vec![#(#param_names.into()),*],
+                access: ::noxide::__private::Access::#access,
+                    id: self::id(),
+                    path: #path.into(), resource: #resource,
+                    operations: vec![#(#query_operations.id),*], forms: vec![#(#forms),*],
                 }
             }
-        })
+            pub fn register(builder: &mut ::noxide::ApplicationDefinition) {
+                #(builder.resource(#resources);)*
+                #(builder.operation(#query_operations);)*
+                builder.page(definition());
+            }
+            pub fn link(#link_args #separator #(#params: impl ::noxide::ParamValue),*) -> ::noxide::RouteRef {
+                ::noxide::RouteRef { params: ::std::collections::BTreeMap::from([#((#param_names.into(), ::noxide::FieldValue::encode(&#params))),*]),
+                route: self::id(), target: #link_target }
+            }
+            pub fn dispatch(_request: &::noxide::RequestView) -> ::noxide::ResponseIntent {
+                ::noxide::IntoPageResponse::into_response(super::#name(#(#args),*))
+            }
+        }
+    })
 }

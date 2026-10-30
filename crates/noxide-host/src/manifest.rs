@@ -142,6 +142,19 @@ pub(crate) fn validate_params(m: &Manifest, route: &Route, values: &Fields) -> R
     Ok(())
 }
 
+pub(crate) fn is_preview(op: &Operation) -> bool {
+    op.list.as_ref().is_some_and(|s| s.preview.is_some())
+}
+fn selection_equal(left: &Operation, right: &Operation) -> bool {
+    let fields = |op: &Operation| {
+        op.filter
+            .iter()
+            .map(|c| (c.field.clone(), c.equals.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    fields(left) == fields(right)
+}
+
 fn unique(ids: impl Iterator<Item = u32>) -> Result<()> {
     let mut seen = BTreeSet::new();
     for id in ids {
@@ -413,14 +426,57 @@ pub fn validate(m: &Manifest) -> Result<()> {
                 );
             }
         }
+        let lists: Vec<_> = r
+            .operations
+            .iter()
+            .map(|id| operation(m, *id))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|op| op.kind == OperationKind::List)
+            .collect();
+        ensure!(lists.len() <= 4, "route list limit");
         ensure!(
-            r.operations
-                .iter()
-                .filter(|id| operation(m, **id).is_ok_and(|op| op.kind == OperationKind::List))
-                .count()
-                <= 1,
-            "a list route has one cursor scope"
+            lists.iter().filter(|op| !is_preview(op)).count() <= 1,
+            "route paginated list limit"
         );
+        ensure!(
+            lists
+                .iter()
+                .map(|op| op.list.as_ref().map_or(3, |s| s.page_size) as usize)
+                .sum::<usize>()
+                <= 40,
+            "route list row budget"
+        );
+        for op in &lists {
+            if let Some(see_all) = op
+                .list
+                .as_ref()
+                .and_then(|s| s.preview.as_ref())
+                .and_then(|p| p.see_all)
+            {
+                let destination = route(m, see_all)?;
+                ensure!(
+                    destination
+                        .params
+                        .iter()
+                        .all(|name| r.params.contains(name)),
+                    "preview destination parameters"
+                );
+                ensure!(
+                    destination
+                        .operations
+                        .iter()
+                        .filter_map(|id| operation(m, *id).ok())
+                        .any(|full| full.kind == OperationKind::List
+                            && !is_preview(full)
+                            && full.resource == op.resource
+                            && full.policy == op.policy
+                            && full.visibility == op.visibility
+                            && selection_equal(full, op)),
+                    "invalid preview destination"
+                );
+            }
+        }
         for id in &r.operations {
             let op = operation(m, *id)?;
             let parent = parent_resource(m, op.resource)?;
@@ -1121,6 +1177,7 @@ mod pagination_tests {
     fn host_rejects_forged_list_settings_and_contract_binds_page_size() {
         let mut m = crate::test_support::manifest();
         m.operations[0].list = Some(ListSettings {
+            preview: None,
             order: ListOrder::CreatedAsc,
             page_size: 20,
         });
@@ -1134,6 +1191,7 @@ mod pagination_tests {
         }
         m.operations[0].list = None;
         m.operations[1].list = Some(ListSettings {
+            preview: None,
             order: ListOrder::CreatedAsc,
             page_size: 3,
         });

@@ -114,7 +114,7 @@ and browser commands. Pass `--local` to `tools/test_sdk_package.py` or
 `tools/ci/setup-vm.sh` installs packages with sudo and is intended only for the
 disposable Ubuntu CI runner.
 
-The application job also builds task-board, 28 compile-pass and 26 compile-fail SDK fixtures
+The application job also builds task-board, 36 compile-pass and 41 compile-fail SDK fixtures
 locally. It checks typed routes, field projections, control compatibility,
 and constrained templates. Both examples exercise NoJS browser flows; generated
 manifests travel with their components. PostgreSQL runs the same typed form flow
@@ -174,3 +174,8 @@ are preserved by the collector.
 `python3 tools/test_query_filters.py` compiles the trusted Boolean/Choice filter
 examples and rejects unknown, text and account fields, filters on reads, and
 missing public disclosure. It executes only reviewed repository fixtures locally.
+
+The SDK lowering suite keeps the original public-articles producer frozen for
+exact convenience/explicit contract comparisons. It additionally compiles the
+current category/preview example for WASM and rejects missing public parameter
+disclosure and account-valued route links.

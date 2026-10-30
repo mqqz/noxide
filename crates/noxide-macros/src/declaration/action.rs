@@ -204,48 +204,48 @@ pub(crate) fn expand_action(
         Tokens::new()
     };
     Ok(quote! {
-            #immutable_check
-            #item
-            #original
-            #vis struct #input_name { #(pub #names: #values),* }
-            #vis struct #controls_name { #(pub #names: ::noxide::ControlField<#values>),* }
-            impl ::noxide::ActionInput for #input_name {
-                fn from_fields(_fields: &::noxide::Fields) -> Self {
-                    Self { #(#names: <#values as ::noxide::FieldValue>::decode(_fields.get(#keys).expect("host action field"))),* }
+        #immutable_check
+        #item
+        #original
+        #vis struct #input_name { #(pub #names: #values),* }
+        #vis struct #controls_name { #(pub #names: ::noxide::ControlField<#values>),* }
+        impl ::noxide::ActionInput for #input_name {
+            fn from_fields(_fields: &::noxide::Fields) -> Self {
+                Self { #(#names: <#values as ::noxide::FieldValue>::decode(_fields.get(#keys).expect("host action field"))),* }
+            }
+        }
+        impl #name {
+            #(
+                #[allow(non_upper_case_globals)]
+                pub const #names: ::noxide::Field<Self, #values> = ::noxide::Field::new(#keys);
+            )*
+        }
+        impl ::noxide::ActionType for #name {
+            type Resource = #resource;
+            type Input = #input_name;
+            type Controls = #controls_name;
+            type Original = #original_type;
+            fn controls() -> Self::Controls {
+                #controls_name { #(#names: ::noxide::ControlField::new(#keys)),* }
+            }
+            fn operation() -> ::noxide::__private::Operation {
+                ::noxide::__private::Operation {
+                    filter: Vec::new(), disclose: Vec::new(),
+                list: None, visibility: None, fields: None,
+                    id: ::noxide::stable_id(concat!("mutation:", module_path!(), "::", stringify!(#name))),
+                    resource: <#resource as ::noxide::ResourceType>::definition().id,
+                    kind: #kind, policy: #policy,
                 }
             }
-            impl #name {
-                #(
-                    #[allow(non_upper_case_globals)]
-                    pub const #names: ::noxide::Field<Self, #values> = ::noxide::Field::new(#keys);
-                )*
+            fn definition() -> ::noxide::__private::Action {
+                ::noxide::__private::Action {
+                    id: ::noxide::stable_id(concat!("action:", module_path!(), "::", stringify!(#name))),
+                    version: #version, name: #label.into(),
+                    operation: <Self as ::noxide::ActionType>::operation().id, redirect: #redirect_value,
+                    fields: vec![#(#keys.into()),*], inspect: #inspection, layout: vec![],
+                }
             }
-            impl ::noxide::ActionType for #name {
-                type Resource = #resource;
-                type Input = #input_name;
-                type Controls = #controls_name;
-                type Original = #original_type;
-                fn controls() -> Self::Controls {
-                    #controls_name { #(#names: ::noxide::ControlField::new(#keys)),* }
-                }
-                fn operation() -> ::noxide::__private::Operation {
-                    ::noxide::__private::Operation {
-                        filter: Vec::new(), disclose: Vec::new(),
-    list: None, visibility: None, fields: None,
-                        id: ::noxide::stable_id(concat!("mutation:", module_path!(), "::", stringify!(#name))),
-                        resource: <#resource as ::noxide::ResourceType>::definition().id,
-                        kind: #kind, policy: #policy,
-                    }
-                }
-                fn definition() -> ::noxide::__private::Action {
-                    ::noxide::__private::Action {
-                        id: ::noxide::stable_id(concat!("action:", module_path!(), "::", stringify!(#name))),
-                        version: #version, name: #label.into(),
-                        operation: <Self as ::noxide::ActionType>::operation().id, redirect: #redirect_value,
-                        fields: vec![#(#keys.into()),*], inspect: #inspection, layout: vec![],
-                    }
-                }
-                fn inspection() -> Option<::noxide::__private::Operation> { #inspection_operation }
-            }
-        })
+            fn inspection() -> Option<::noxide::__private::Operation> { #inspection_operation }
+        }
+    })
 }

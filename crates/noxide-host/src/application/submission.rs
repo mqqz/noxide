@@ -145,7 +145,7 @@ impl Application {
                     let mut response = render::render(&ResponseIntent::Page(Document::new("Form already used", vec![
                         Instruction::Text("This form already committed different input. Return home to start a new form.".into()),
                         Instruction::Link { destination: RouteRef { params: Default::default(),
-route: self.manifest.routes.iter().find(|r| r.path == "/").expect("index route").id, target: None }, text: "Return home".into() },
+                        route: self.manifest.routes.iter().find(|r| r.path == "/").expect("index route").id, target: None }, text: "Return home".into() },
                     ])), &RenderContext { presentation: &self.presentation, manifest: Some(&self.manifest), ..RenderContext::empty() })?;
                     response.status = 409; navigation::Prepared::ready(response)
                 };
@@ -253,6 +253,12 @@ route: self.manifest.routes.iter().find(|r| r.path == "/").expect("index route")
             inspection,
         };
         let effects = Effects {
+            invoked: Default::default(),
+            list_bytes: 0,
+            list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
+            result_limit: noxide_protocol::MAX_RESULT_BYTES,
+            truncated: false,
+            see_all: Vec::new(),
             plans: self.plans.clone(),
             tx,
             manifest: self.manifest.clone(),

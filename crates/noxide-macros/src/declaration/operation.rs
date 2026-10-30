@@ -6,6 +6,7 @@ use syn::{
     spanned::Spanned,
 };
 pub(crate) struct OperationDeclaration {
+    pub(crate) preview: Option<Option<syn::Path>>,
     pub(crate) filter: Vec<(Ident, Expr)>,
     pub(crate) disclose: Vec<Ident>,
     pub(crate) order: Option<Ident>,
@@ -32,6 +33,7 @@ impl Parse for OperationDeclaration {
             return Err(resource.error("expected one resource type"));
         }
         let mut result = Self {
+            preview: None,
             filter: Vec::new(),
             disclose: Vec::new(),
             order: None,
@@ -61,6 +63,28 @@ impl Parse for OperationDeclaration {
                 ));
             }
             match option.to_string().as_str() {
+                "preview" => {
+                    if result.kind != "list" {
+                        return Err(input.error("preview requires list"));
+                    }
+                    let see_all = if input.peek(syn::token::Paren) {
+                        let content;
+                        parenthesized!(content in input);
+                        let option: Ident = content.parse()?;
+                        if option != "see_all" {
+                            return Err(syn::Error::new(option.span(), "expected see_all"));
+                        }
+                        content.parse::<Token![=]>()?;
+                        let route = content.parse()?;
+                        if !content.is_empty() {
+                            return Err(content.error("expected one preview destination"));
+                        }
+                        Some(route)
+                    } else {
+                        None
+                    };
+                    result.preview = Some(see_all);
+                }
                 "filter" => {
                     if result.kind != "list" {
                         return Err(input.error("filter requires list"));

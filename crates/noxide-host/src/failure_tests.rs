@@ -176,6 +176,12 @@ async fn stored_bounds(db: &Database) {
         .unwrap();
     }
     let mut effects = Effects {
+        invoked: Default::default(),
+        list_bytes: 0,
+        list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
+        result_limit: noxide_protocol::MAX_RESULT_BYTES,
+        truncated: false,
+        see_all: Vec::new(),
         tx,
         plans: crate::query_plan::compile_all(&m).unwrap(),
         manifest: Arc::new(m),
@@ -213,6 +219,7 @@ async fn stored_bounds(db: &Database) {
     assert!(records.iter().all(|r| r.fields == fields));
     assert_eq!(effects.more, Some(3));
     effects.cursor = effects.more.take();
+    effects.next_request();
     let records: Vec<Record> =
         serde_json::from_slice(&effects.invoke(1, 0).await.unwrap()).unwrap();
     assert_eq!(
