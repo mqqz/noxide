@@ -48,7 +48,7 @@ pub struct Action {
     pub revision: Revision,           // Exact | Identity, see Revision rules
     pub steps: Vec<Step>,             // 1..=4 steps, at most 2 creates
 }
-pub struct Input { pub name: String, pub label: String, pub kind: FieldKind, pub optional: bool }
+pub struct Input { pub name: String, pub label: String, pub kind: FieldKind, pub optional: bool, pub max_bytes: u32 }
 pub struct Step { pub operation: u32, pub target: Target, pub assign: Vec<Assignment> }
 pub enum Target { None, Signed }      // None for create, Signed for update/delete
 pub struct Assignment { pub field: String, pub change: Change }
@@ -73,7 +73,9 @@ guest-produced; they become host receipt types.
 ## Inputs
 
 Each input is defined once, with its own type, bounds, optionality and canonical
-encoding, using the existing `FieldKind` vocabulary. `initial` values and account
+encoding, using the existing `FieldKind` vocabulary. `Input.max_bytes` carries the byte
+bound, matching the existing resource field schema; `FieldKind::Text` does not
+carry that bound. `initial` values and account
 or reference kinds are not valid inputs. Canonicalization and the input digest use
 the action's input schema, not a resource's fields. One input may be consumed by
 several assignments; the form contains it once. For example, `quantity` is
