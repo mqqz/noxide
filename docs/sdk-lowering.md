@@ -27,8 +27,10 @@ the comparison and identifiers are not normalized away.
 2. Consume the resource owner shorthand, retaining its explicit persistent key.
 3. Lower `List<R>` and `Read<R>` to existing owner query expansions and rewrite
    handler inputs to `Query<GeneratedQuery>`.
-4. Lower named CRUD entries to existing action expansions. Preserve explicit
-   field projections, policies, redirects, and optional hooks.
+4. Lower named CRUD entries and single-operation actions to one-step transactions.
+   Derive typed inputs from the listed field schemas; preserve policies, redirects
+   and optional hooks. Explicit transactions declare inputs and ordered assignments
+   directly. Both forms use the same host executor.
 5. Collect pages, actions, and layouts in canonical order and invoke existing
    application expansion. Expose `noxide_manifest()` at crate root for build-time
    metadata extraction and emit the existing component export.
@@ -36,7 +38,7 @@ the comparison and identifiers are not normalized away.
 Queries have one deterministic name per operation/resource within the module.
 CRUD action names are supplied by the developer; operation kinds may repeat. Each
 entry lowers independently through the same action implementation, with its own
-policy, fields, redirect, hooks and layout. Collisions produce compilation
+policy, inputs, steps, revision requirement, redirect, hooks and layout. Collisions produce compilation
 errors. Meaningful order, including resource fields and form layouts, is retained.
 The macro neither reads files nor analyzes function bodies.
 
@@ -48,9 +50,10 @@ action policy restrictions apply unchanged. A resource addition alone grants no
 operations; page signatures and explicit mutations declare the requested authority.
 The operator approves the generated contract and the host checks actual calls.
 
-Existing identity algorithms are unchanged. Wrapping an older application in a
-new module changes namespace-derived IDs and requires reapproval. No compatibility
-or identity migration layer is provided. Persistent resource keys are explicit;
+Action transaction contracts replace the previous writable-field and guest-mutation
+model. Approval digests and receipt storage change; development databases must be
+recreated. No compatibility or identity migration layer is provided. Wrapping an
+application in a new module changes namespace-derived IDs and requires reapproval. Persistent resource keys are explicit;
 field keys may be inferred. Changes to inferred keys are detected as schema
 changes and require the existing explicit schema-change workflow.
 
@@ -114,10 +117,41 @@ immediate declarations and associates hooks; `crud.rs` lowers each named action
 independently and `inferred_queries.rs` rewrites supported read arguments through
 the explicit query expander. No declaration module depends on convenience code.
 
-The SDK harness compares complete JSON and approval digests against immutable
-fixtures in `tools/fixtures/sdk/baseline`, captured at PR #15 merge
-`dca07b5015b6d24bc391c7e45cacc67ea0e7f767` before production moves. Notes,
-task board, public articles, repeated actions and both forum contracts retain all
-identities, projections, policies, ordering and layouts. The laid-out forum has a
-separate explicit counterpart; the pre-layout conversion pair remains unchanged.
-Do not regenerate baselines to accommodate refactor drift.
+The SDK harness compares complete JSON and approval digests against the transaction
+contracts in `tools/fixtures/sdk/baseline`. These snapshots were updated for the
+declared transaction protocol, including operation reference eligibility, action
+input schemas, assignments, revision requirements and navigation sources. Notes,
+task board, public articles, repeated actions and both forum contracts retain their
+resource identities, policies, ordering and layouts. The laid-out forum has a
+separate explicit counterpart. Future refactors must preserve these baselines;
+intentional contract changes require explicit review.
+
+## Action decisions and transactions
+
+`ActionType::operations()` and `resources()` expose the finite declarations needed
+by every step. Registration collects all step resources and operations, plus any
+inspection read. `ActionType::definition()` returns the same canonical `Action`
+regardless of convenience syntax. The protocol contains action-level `Input`
+schemas, `Revision`, `Step`, `Assignment`, and `Change`; no single-operation action
+fields or guest mutation callback remain.
+
+A handler returns `Result<Execute<A>, ActionError<A>>`.
+`Submission::execute()` constructs the decision without a storage call. Without a
+handler registration returns that decision directly. The host supplies immutable
+canonical input and authorized inspection, then executes the approved steps after
+`Execute`. Route storage imports are unavailable during actions.
+
+The explicit `transaction(...)` syntax supports `set`, `increase`, `decrease`,
+required guard rejections and references to `target` or named earlier creates.
+Updates and deletes target the signed record; adjustments appear only in updates.
+`revision = identity` is explicit; lowering otherwise chooses `Exact`. The host
+independently checks that the declaration is strong enough. Input fields and
+controls are generated once even when several steps consume the same input.
+
+See [shop](../examples/shop/src/lib.rs) and the
+[transaction contract](architecture/transactions.md) for the three-step example
+and the host's admission, rollback, replay and budget rules.
+`tools/test_shop.py` exercises the built component through HTML forms: product
+creation, the three-step order and note, receipt replay, and stock rejection from
+a distinct preissued identity form. These implementation
+and test descriptions do not establish audited security or transport anonymity.

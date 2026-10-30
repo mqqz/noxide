@@ -1,7 +1,9 @@
 # Declared action transactions
 
-Status: accepted design, not implemented. Nothing in this document describes
-current behavior until the implementation stages below land. The
+Status: implemented: protocol admission, host step execution, transactional
+receipts, action-input forms, SDK lowering and the shop example. Provider and
+failure tests are implementation evidence, not an independent security audit or
+proof of transport anonymity. The
 [runtime security contract](runtime.md#security-contract) applies throughout.
 
 An action declares typed inputs and a bounded, straight-line transaction of
@@ -73,12 +75,13 @@ guest-produced; they become host receipt types.
 ## Inputs
 
 Each input is defined once, with its own type, bounds, optionality and canonical
-encoding, using the existing `FieldKind` vocabulary. `Input.max_bytes` carries the byte
-bound, matching the existing resource field schema; `FieldKind::Text` does not
+encoding, using the existing `FieldKind` vocabulary. `Input.max_bytes` carries
+the byte bound, matching the existing resource field schema; `FieldKind::Text` does not
 carry that bound. `initial` values and reference kinds are not valid inputs.
 Account inputs and `Set` assignments to account fields are allowed only on creates,
-with the existing host-enforced active-account and tenant-scope binding checks. Canonicalization and the input digest use
-the action's input schema, not a resource's fields. One input may be consumed by
+with the existing host-enforced active-account and tenant-scope binding checks.
+Canonicalization and the input digest use the action's input schema, not a
+resource's fields. One input may be consumed by
 several assignments; the form contains it once. For example, `quantity` is
 both the stock decrement and the order's stored quantity.
 
@@ -217,7 +220,7 @@ The manifest digest hashes the complete serialized manifest, so inputs,
 assignments, constants, step order, guards, revision requirements, inspection,
 and redirect bindings are all part of approval and submission-contract identity.
 
-## SDK shape (sketch; final syntax is decided in stage 4)
+## SDK shape
 
 ```rust
 #[action(
@@ -226,14 +229,18 @@ and redirect bindings are all part of approval and submission-contract identity.
     transaction(
         update(Product, target, decrease(stock, by = quantity,
                reject(quantity, "Not enough stock"))),
-        order = create(Order, set(quantity = quantity, product = target)),
-        create(OrderNote, set(body = body, order = order)),
+        order = create(Order, set(quantity = quantity, product = target), eligible = ReadProduct),
+        create(OrderNote, set(body = body, order = order), eligible = ReadOrder),
     ),
     allow = owner,
     redirect = show_order(order),
 )]
 struct PlaceOrder;
 ```
+
+`eligible = Query` on a create lowers reference eligibility onto its operation.
+`redirect = page(target)` names the signed target; `page(order)` names a step,
+and `reference(order.product, page)` names a reference on a step.
 
 A handler is `fn(Submission<A>) -> Result<Execute<A>, ActionError<A>>`.
 `Submission::execute()` returns the decision. Without a handler, the action
@@ -297,3 +304,6 @@ representation and debit/credit invariants), user-selected targets, deletes
 combined with other steps, updates to records created in the same transaction,
 conditional steps, more than one anonymous handover, and moving guest execution
 out of the write transaction.
+
+See the [implementation validation record](transaction-validation.md) for checks,
+acceptance-test coverage and approved design clarifications.
