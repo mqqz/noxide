@@ -62,46 +62,46 @@ mod repeated {
             html! { p { (&reply.body) } (edit) (secret) (moderate) (delete) (remove) },
         ))
     }
-    fn create_reply(submission: Submission<CreateReply>) -> ActionResult<CreateReply> {
-        submission.apply()
+    fn create_reply(submission: Submission<CreateReply>) -> Result<Execute<CreateReply>, ActionError<CreateReply>> {
+        Ok(submission.execute())
     }
     fn create_layout(fields: FormFields<CreateReply>) -> FormLayout {
         form! { (fields.body.textarea().rows(8)) (fields.submit("CreateReply")) }
     }
     fn anonymous_reply(
         submission: Submission<CreateAnonymousReply>,
-    ) -> ActionResult<CreateAnonymousReply> {
-        submission.apply()
+    ) -> Result<Execute<CreateAnonymousReply>, ActionError<CreateAnonymousReply>> {
+        Ok(submission.execute())
     }
     fn anonymous_layout(fields: FormFields<CreateAnonymousReply>) -> FormLayout {
         form! { (fields.body.textarea().rows(8)) (fields.submit("CreateAnonymousReply")) }
     }
-    fn edit_reply(submission: Submission<r#EditReply>) -> ActionResult<r#EditReply> {
-        submission.apply()
+    fn edit_reply(submission: Submission<r#EditReply>) -> Result<Execute<r#EditReply>, ActionError<r#EditReply>> {
+        Ok(submission.execute())
     }
     fn edit_layout(fields: FormFields<r#EditReply>) -> FormLayout {
         form! { (fields.body.textarea().rows(8)) (fields.submit("EditReply")) }
     }
-    fn edit_secret(submission: Submission<EditSecret>) -> ActionResult<EditSecret> {
-        submission.apply()
+    fn edit_secret(submission: Submission<EditSecret>) -> Result<Execute<EditSecret>, ActionError<EditSecret>> {
+        Ok(submission.execute())
     }
     fn secret_layout(fields: FormFields<EditSecret>) -> FormLayout {
         form! { (fields.body.textarea().rows(8)) (fields.submit("EditSecret")) }
     }
-    fn moderate_reply(submission: Submission<ModerateReply>) -> ActionResult<ModerateReply> {
-        submission.apply()
+    fn moderate_reply(submission: Submission<ModerateReply>) -> Result<Execute<ModerateReply>, ActionError<ModerateReply>> {
+        Ok(submission.execute())
     }
     fn moderate_layout(fields: FormFields<ModerateReply>) -> FormLayout {
         form! { (fields.published.checkbox()) (fields.submit("ModerateReply")) }
     }
-    fn delete_reply(submission: Submission<DeleteReply>) -> ActionResult<DeleteReply> {
-        submission.apply()
+    fn delete_reply(submission: Submission<DeleteReply>) -> Result<Execute<DeleteReply>, ActionError<DeleteReply>> {
+        Ok(submission.execute())
     }
     fn delete_layout(fields: FormFields<DeleteReply>) -> FormLayout {
         form! { (fields.submit("DeleteReply")) }
     }
-    fn delete_secret(submission: Submission<DeleteSecret>) -> ActionResult<DeleteSecret> {
-        submission.apply()
+    fn delete_secret(submission: Submission<DeleteSecret>) -> Result<Execute<DeleteSecret>, ActionError<DeleteSecret>> {
+        Ok(submission.execute())
     }
     fn remove_layout(fields: FormFields<DeleteSecret>) -> FormLayout {
         form! { (fields.submit("DeleteSecret")) }
