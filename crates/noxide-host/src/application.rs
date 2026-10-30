@@ -209,7 +209,7 @@ pub struct Application {
     clock: AtomicI64,
     checkpointed: AtomicI64,
     lifecycle_clock: crate::lifecycle_clock::Freshness,
-    maintenance: tokio::sync::Semaphore,
+    maintenance: Arc<tokio::sync::Semaphore>,
     maintenance_running: std::sync::atomic::AtomicBool,
     pub(crate) admission_limits: AdmissionLimits,
     #[cfg(test)]
@@ -528,7 +528,7 @@ impl Application {
             clock: AtomicI64::new(0),
             checkpointed: AtomicI64::new(0),
             lifecycle_clock: crate::lifecycle_clock::Freshness::default(),
-            maintenance: tokio::sync::Semaphore::new(1),
+            maintenance: Arc::new(tokio::sync::Semaphore::new(1)),
             maintenance_running: std::sync::atomic::AtomicBool::new(false),
             admission_limits,
             #[cfg(test)]
