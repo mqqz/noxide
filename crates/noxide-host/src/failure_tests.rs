@@ -177,6 +177,7 @@ async fn stored_bounds(db: &Database) {
     }
     let mut effects = Effects {
         tx,
+        plans: crate::query_plan::compile_all(&m).unwrap(),
         manifest: Arc::new(m),
         principal: Principal::User(crate::auth::User {
             id: crate::test_account(db, "alice").await,

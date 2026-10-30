@@ -909,6 +909,7 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
         };
         let mut effects = crate::repository::Effects {
             tx,
+            plans: crate::query_plan::compile_all(&m).unwrap(),
             manifest: Arc::new(m),
             principal: crate::auth::Principal::Anonymous,
             request,

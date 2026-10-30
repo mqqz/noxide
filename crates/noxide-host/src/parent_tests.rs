@@ -118,6 +118,7 @@ async fn effects(db: &Database, m: &Manifest, route: u32, target: u64) -> Effect
             .await
             .unwrap(),
         manifest: Arc::new(m.clone()),
+        plans: crate::query_plan::compile_all(m).unwrap(),
         principal: Principal::Anonymous,
         request: RequestView {
             version: VERSION,
@@ -822,7 +823,7 @@ async fn index_scope_case(db: Database, sqlite: bool) {
         fields
     );
     let storage = e.tx.storage_resource(&renamed, 1).await.unwrap();
-    let expression = e.tx.parent_expression("parent_thread").unwrap();
+    let expression = e.tx.field_expression("parent_thread").unwrap();
     if !sqlite {
         e.tx.execute("SET LOCAL enable_seqscan=off", &[])
             .await
@@ -874,7 +875,7 @@ async fn index_scope_case(db: Database, sqlite: bool) {
         // Generic prepared plans retain an ordered seek. Cost estimates on
         // tiny fixtures may prefer the global creation index.
         let storage = e.tx.storage_resource(&renamed, 1).await.unwrap();
-        let expression = e.tx.parent_expression("parent_thread").unwrap();
+        let expression = e.tx.field_expression("parent_thread").unwrap();
         e.tx.execute("SET LOCAL plan_cache_mode=force_generic_plan", &[])
             .await
             .unwrap();

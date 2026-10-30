@@ -42,6 +42,7 @@ fn effects(tx: Transaction, m: &Manifest, id: &str, action: bool, recipient: &st
     Effects {
         tx,
         manifest: Arc::new(m.clone()),
+        plans: crate::query_plan::compile_all(m).unwrap(),
         principal: Principal::User(User {
             id: id.into(),
             tenant: "team".into(),
@@ -185,7 +186,7 @@ async fn contract(db: Database) {
     for (column, id, index) in [
         ("owner".to_owned(), &alice, "nx_records_owner"),
         (
-            tx.parent_expression("recipient").unwrap(),
+            tx.field_expression("recipient").unwrap(),
             &bob,
             "nx_a_1_recipient_i",
         ),

@@ -139,6 +139,7 @@ pub struct Application {
     pub(crate) presentation: crate::Presentation,
     pub(crate) registration: auth::Registration,
     pub(crate) manifest: Arc<Manifest>,
+    pub(crate) plans: BTreeMap<u32, Arc<crate::query_plan::ListPlan>>,
     pub(crate) keys: Arc<HostKeys>,
     database: Database,
     runtime: Runtime,
@@ -519,6 +520,7 @@ impl Application {
         Ok(Self {
             presentation: crate::Presentation::default(),
             registration: auth::Registration::Closed,
+            plans: crate::query_plan::compile_all(&m)?,
             manifest: Arc::new(m),
             keys: Arc::new(keys),
             database,
@@ -1329,6 +1331,7 @@ impl Application {
                 inspection: None,
             };
             let effects = Effects {
+                plans: self.plans.clone(),
                 tx,
                 manifest: self.manifest.clone(),
                 principal,

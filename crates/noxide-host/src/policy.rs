@@ -5,6 +5,63 @@ use crate::{
 };
 use noxide_protocol::{Policy, Predicate};
 
+#[derive(Debug)]
+pub(crate) enum ListStrategy {
+    Single,
+    Merge(Vec<ScanRule>),
+}
+#[derive(Debug)]
+pub(crate) struct ScanRule {
+    pub rule: usize,
+    pub exact: bool,
+}
+pub(crate) fn list_strategy(policy: &Policy, parented: bool) -> ListStrategy {
+    if !policy
+        .any
+        .iter()
+        .flatten()
+        .any(|p| matches!(p, Predicate::PrincipalIs { .. }))
+    {
+        return ListStrategy::Single;
+    }
+    ListStrategy::Merge(
+        policy
+            .any
+            .iter()
+            .enumerate()
+            .map(|(rule, atoms)| ScanRule {
+                rule,
+                exact: !parented
+                    && atoms
+                        .iter()
+                        .filter(|p| matches!(p, Predicate::Owner | Predicate::PrincipalIs { .. }))
+                        .count()
+                        <= 1,
+            })
+            .collect(),
+    )
+}
+pub(crate) fn scan_policy(policy: &Policy, scan: &ScanRule) -> Policy {
+    let atoms = &policy.any[scan.rule];
+    let rule = if scan.exact {
+        atoms.clone()
+    } else {
+        atoms
+            .iter()
+            .find(|p| matches!(p, Predicate::Owner | Predicate::PrincipalIs { .. }))
+            .cloned()
+            .into_iter()
+            .collect()
+    };
+    Policy {
+        any: vec![if rule.is_empty() {
+            vec![Predicate::Public]
+        } else {
+            rule
+        }],
+    }
+}
+
 enum Condition<'a> {
     Allow,
     Deny,
@@ -94,7 +151,7 @@ pub(crate) fn sql(
                         params.push(id.into());
                         format!(
                             "{}=${}",
-                            tx.parent_expression(field).expect("admitted account field"),
+                            tx.field_expression(field).expect("admitted account field"),
                             params.len()
                         )
                     }
@@ -121,6 +178,68 @@ mod tests {
     use super::*;
     use crate::auth::User;
     use sqlx::{Connection, Row};
+
+    #[test]
+    fn list_strategies_preserve_existing_scan_shapes() {
+        let recipient = Predicate::PrincipalIs {
+            field: "recipient".into(),
+        };
+        let role = Predicate::Role {
+            name: "moderator".into(),
+            tenant_scoped: true,
+        };
+        for atom in [
+            Predicate::Public,
+            Predicate::Owner,
+            Predicate::SameTenant,
+            role.clone(),
+        ] {
+            assert!(matches!(
+                list_strategy(
+                    &Policy {
+                        any: vec![vec![atom.clone()], vec![Predicate::Owner]]
+                    },
+                    false
+                ),
+                ListStrategy::Single
+            ));
+        }
+        for atoms in [
+            vec![recipient.clone()],
+            vec![recipient.clone(), Predicate::SameTenant],
+            vec![role],
+            vec![Predicate::Owner],
+            vec![Predicate::Owner, recipient.clone()],
+            vec![recipient.clone(), recipient.clone()],
+        ] {
+            let policy = Policy {
+                any: vec![vec![recipient.clone()], atoms.clone()],
+            };
+            for parented in [false, true] {
+                let ListStrategy::Merge(scans) = list_strategy(&policy, parented) else {
+                    panic!("expected merge")
+                };
+                assert_eq!(scans.len(), 2);
+                for scan in &scans {
+                    let expected = !parented
+                        && policy.any[scan.rule]
+                            .iter()
+                            .filter(|p| {
+                                matches!(p, Predicate::Owner | Predicate::PrincipalIs { .. })
+                            })
+                            .count()
+                            <= 1;
+                    assert_eq!(scan.exact, expected);
+                    let compiled = scan_policy(&policy, scan);
+                    if expected {
+                        assert_eq!(compiled.any[0], policy.any[scan.rule]);
+                    } else {
+                        assert_eq!(compiled.any[0].len(), 1);
+                    }
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn sql_and_row_decisions_agree_for_all_predicates_and_empty_rules() {

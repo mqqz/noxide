@@ -201,14 +201,14 @@ impl Transaction {
                 .iter()
                 .filter(|f| matches!(f.kind, noxide_protocol::FieldKind::Account { .. }))
             {
-                let expression = self.parent_expression(&field.name)?;
+                let expression = self.field_expression(&field.name)?;
                 for (suffix, columns) in [("i", ""), ("t", "tenant,")] {
                     self.execute(&format!("CREATE INDEX nx_a_{storage:x}_{}_{suffix} ON nx_records(resource, ({expression}), {columns}created_seq) WHERE resource={storage}", field.name), &[]).await?;
                 }
             }
             if let Some(field) = crate::manifest::parent_field(resource) {
                 let storage = self.storage_key(&resource.name).await?;
-                let expression = self.parent_expression(&field.name)?;
+                let expression = self.field_expression(&field.name)?;
                 self.execute(&format!("CREATE INDEX nx_parent_{storage} ON nx_records(resource, ({expression}), created_seq) WHERE resource={storage}"), &[]).await?;
                 for column in ["owner", "tenant"] {
                     self.execute(&format!("CREATE INDEX nx_parent_{storage}_{column} ON nx_records(resource, ({expression}), {column}, created_seq) WHERE resource={storage}"),&[]).await?;
@@ -229,7 +229,7 @@ impl Transaction {
                 };
                 let child_storage = self.storage_key(&child.name).await?;
                 let parent_storage = self.storage_key(parent).await?;
-                let expression = self.parent_expression(&field.name)?;
+                let expression = self.field_expression(&field.name)?;
                 let missing = self.fetch::<1>(&format!("SELECT CAST(child.id AS TEXT) FROM (SELECT id,{expression} AS parent_id FROM nx_records WHERE resource=$1) child WHERE NOT EXISTS (SELECT 1 FROM nx_records parent WHERE parent.resource=$2 AND CAST(parent.id AS TEXT)=child.parent_id) LIMIT 1"), &[child_storage.into(), parent_storage.into()]).await?;
                 ensure!(missing.is_empty(), "migration would orphan a child record");
             }
