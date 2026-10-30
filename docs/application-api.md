@@ -788,9 +788,10 @@ query parameters; admission rejects destinations that declare them.
 
 The form-urlencoded query string is limited to 1,024 bytes. Missing, unknown,
 duplicate, malformed or noncanonical parameters return the same 404 response as
-an unknown route before database or session lookup. Valid values without matches
-render a normal empty list. Parameter values are never logged by the host. A
-public parameter filter on an unprojected Boolean or Choice field effectively
+an unknown route before database or session lookup. These rejections still consume
+the circuit budget and require request admission; exhausted capacity returns the
+standard busy response. Valid values without matches render a normal empty list.
+Parameter values are never logged by the host. A public parameter filter on an unprojected Boolean or Choice field effectively
 reveals that field: callers can try each value. `disclose` approves that inference
 without projecting the field. The [public articles example](../examples/public-articles/src/lib.rs)
 includes a category route with these host checks.
