@@ -199,11 +199,13 @@ pub mod forum {
             (fields.submit("Submit reply"))
         }
     }
-    fn reply_create(submission: Submission<CreateReply>) -> ActionResult<CreateReply> {
+    fn reply_create(
+        submission: Submission<CreateReply>,
+    ) -> Result<Execute<CreateReply>, ActionError<CreateReply>> {
         if submission.input().body.trim().is_empty() {
             return Err(CreateReply::body.error("Enter a message."));
         }
-        submission.apply()
+        Ok(submission.execute())
     }
     fn reply_anonymous_layout(fields: FormFields<CreateAnonymousReply>) -> FormLayout {
         form! {
@@ -213,11 +215,11 @@ pub mod forum {
     }
     fn reply_anonymous(
         submission: Submission<CreateAnonymousReply>,
-    ) -> ActionResult<CreateAnonymousReply> {
+    ) -> Result<Execute<CreateAnonymousReply>, ActionError<CreateAnonymousReply>> {
         if submission.input().body.trim().is_empty() {
             return Err(CreateAnonymousReply::body.error("Enter a message."));
         }
-        submission.apply()
+        Ok(submission.execute())
     }
     fn reply_edit_layout(fields: FormFields<EditReply>) -> FormLayout {
         form! {
@@ -225,11 +227,13 @@ pub mod forum {
             (fields.submit("Save changes"))
         }
     }
-    fn reply_edit(submission: Submission<EditReply>) -> ActionResult<EditReply> {
+    fn reply_edit(
+        submission: Submission<EditReply>,
+    ) -> Result<Execute<EditReply>, ActionError<EditReply>> {
         if submission.input().body.trim().is_empty() {
             return Err(EditReply::body.error("Enter a message."));
         }
-        submission.apply()
+        Ok(submission.execute())
     }
     fn reply_secret_layout(fields: FormFields<EditReplyWithSecret>) -> FormLayout {
         form! {
@@ -239,11 +243,11 @@ pub mod forum {
     }
     fn reply_secret(
         submission: Submission<EditReplyWithSecret>,
-    ) -> ActionResult<EditReplyWithSecret> {
+    ) -> Result<Execute<EditReplyWithSecret>, ActionError<EditReplyWithSecret>> {
         if submission.input().body.trim().is_empty() {
             return Err(EditReplyWithSecret::body.error("Enter a message."));
         }
-        submission.apply()
+        Ok(submission.execute())
     }
     fn reply_moderate_layout(fields: FormFields<ModerateReply>) -> FormLayout {
         form! {
@@ -258,14 +262,16 @@ pub mod forum {
             (fields.submit("Submit thread"))
         }
     }
-    fn thread_create(submission: Submission<CreateThread>) -> ActionResult<CreateThread> {
+    fn thread_create(
+        submission: Submission<CreateThread>,
+    ) -> Result<Execute<CreateThread>, ActionError<CreateThread>> {
         if submission.input().title.trim().is_empty() {
             return Err(CreateThread::title.error("Enter a title."));
         }
         if submission.input().body.trim().is_empty() {
             return Err(CreateThread::body.error("Enter a message."));
         }
-        submission.apply()
+        Ok(submission.execute())
     }
     fn thread_anonymous_layout(fields: FormFields<CreateAnonymousThread>) -> FormLayout {
         form! {
@@ -276,14 +282,14 @@ pub mod forum {
     }
     fn thread_anonymous(
         submission: Submission<CreateAnonymousThread>,
-    ) -> ActionResult<CreateAnonymousThread> {
+    ) -> Result<Execute<CreateAnonymousThread>, ActionError<CreateAnonymousThread>> {
         if submission.input().title.trim().is_empty() {
             return Err(CreateAnonymousThread::title.error("Enter a title."));
         }
         if submission.input().body.trim().is_empty() {
             return Err(CreateAnonymousThread::body.error("Enter a message."));
         }
-        submission.apply()
+        Ok(submission.execute())
     }
     fn thread_edit_layout(fields: FormFields<EditThread>) -> FormLayout {
         form! {
@@ -292,14 +298,16 @@ pub mod forum {
             (fields.submit("Save changes"))
         }
     }
-    fn thread_edit(submission: Submission<EditThread>) -> ActionResult<EditThread> {
+    fn thread_edit(
+        submission: Submission<EditThread>,
+    ) -> Result<Execute<EditThread>, ActionError<EditThread>> {
         if submission.input().title.trim().is_empty() {
             return Err(EditThread::title.error("Enter a title."));
         }
         if submission.input().body.trim().is_empty() {
             return Err(EditThread::body.error("Enter a message."));
         }
-        submission.apply()
+        Ok(submission.execute())
     }
     fn thread_secret_layout(fields: FormFields<EditWithSecret>) -> FormLayout {
         form! {
@@ -308,14 +316,16 @@ pub mod forum {
             (fields.submit("Save changes"))
         }
     }
-    fn thread_secret(submission: Submission<EditWithSecret>) -> ActionResult<EditWithSecret> {
+    fn thread_secret(
+        submission: Submission<EditWithSecret>,
+    ) -> Result<Execute<EditWithSecret>, ActionError<EditWithSecret>> {
         if submission.input().title.trim().is_empty() {
             return Err(EditWithSecret::title.error("Enter a title."));
         }
         if submission.input().body.trim().is_empty() {
             return Err(EditWithSecret::body.error("Enter a message."));
         }
-        submission.apply()
+        Ok(submission.execute())
     }
     fn thread_moderate_layout(fields: FormFields<ModerateThread>) -> FormLayout {
         form! {

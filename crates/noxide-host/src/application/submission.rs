@@ -28,7 +28,7 @@ impl Application {
             .await
             .map_err(|_| RequestError::Busy)?;
         let op = manifest::action(&self.manifest, action)
-            .and_then(|a| manifest::operation(&self.manifest, a.operation))
+            .and_then(|a| manifest::operation(&self.manifest, a.steps[0].operation))
             .map_err(|_| RequestError::InvalidRequest)?;
         let _anonymous_write = self.anonymous_write(manifest::anonymous_action(op)).await?;
         let _database = self
@@ -156,10 +156,7 @@ impl Application {
             }
             if let Some(target) = target {
                 let Some(stored) = self.authorized_target(&mut tx, a, &target, &principal, capability).await? else { return render::unavailable(&self.presentation, &self.manifest).map(navigation::Prepared::ready); };
-                if stored.revision != target.revision && manifest::operation(&self.manifest, a.operation)?.kind == OperationKind::Create {
-                    return render::unavailable(&self.presentation, &self.manifest).map(navigation::Prepared::ready);
-                }
-                if stored.revision != target.revision && !unknown {
+                if a.revision == Revision::Exact && stored.revision != target.revision && !unknown {
                     return self.conflict(a, &session, now, target, &stored, input).map(navigation::Prepared::ready);
                 }
             } else {
@@ -219,33 +216,29 @@ impl Application {
                 tx.rollback().await?;
                 return Ok((None, navigation::Prepared::ready(response)));
             };
-            if stored.revision != target.revision {
-                if manifest::operation(&self.manifest, a.operation)?.kind == OperationKind::Create {
-                    let response = render::unavailable(&self.presentation, &self.manifest)?;
-                    tx.rollback().await?;
-                    return Ok((None, navigation::Prepared::ready(response)));
-                }
+            if a.revision == Revision::Exact && stored.revision != target.revision {
                 let response = self.conflict(a, &session, now, target.clone(), &stored, input)?;
                 tx.rollback().await?;
                 return Ok((None, navigation::Prepared::ready(response)));
             }
             Some(stored)
         } else {
-            self.authorize_create(a, &principal)?;
+            if self.authorize_create(a, &principal).is_err() {
+                let response = render::unavailable(&self.presentation, &self.manifest)?;
+                tx.rollback().await?;
+                return Ok((None, navigation::Prepared::ready(response)));
+            }
             None
         };
-        if matches!(a.redirect, Redirect::Reference { .. }) {
-            budget.parent_redirect_attempt(
-                manifest::reference_resource(
-                    &self.manifest,
-                    manifest::operation(&self.manifest, a.operation)?.resource,
-                )?
-                .is_some_and(|resource| resource.gate.is_some()),
-            )?;
-        }
-        let parent_destination = self
-            .capture_destination(&mut tx, a, record.as_ref())
-            .await?;
+        let destination_route = manifest::route(&self.manifest, a.redirect.route())?;
+        let gated_destination = destination_route
+            .resource
+            .map(|id| manifest::resource(&self.manifest, id))
+            .transpose()?
+            .is_some_and(|resource| resource.gate.is_some());
+        budget.parent_redirect_attempt(gated_destination)?;
+        let signed_target = target.clone();
+        let original = record.clone();
         let response_principal = principal.clone();
         let inspection = a.inspect.as_ref().map(|inspect| {
             let stored = record
@@ -280,17 +273,15 @@ impl Application {
             manifest: self.manifest.clone(),
             principal,
             request: request.clone(),
-            outcome: None,
             capability_grant: if manifest::is_capability(manifest::operation(
                 &self.manifest,
-                a.operation,
+                a.steps[0].operation,
             )?) {
                 target.clone()
             } else {
                 None
             },
             grant: target,
-            record,
             calls: budget.database_calls,
             cursor: None,
             more: None,
@@ -356,51 +347,81 @@ impl Application {
             effects.tx.rollback().await?;
             return Ok((None, navigation::Prepared::ready(response)));
         }
-        let public_create = manifest::is_public(manifest::operation(&self.manifest, a.operation)?)
-            && manifest::operation(&self.manifest, a.operation)?.kind == OperationKind::Create;
-        if public_create {
-            match (&effects.outcome, &outcome) {
-                (
-                    Some(ResponseIntent::Created {
-                        resource: actual_resource,
-                        id: actual_id,
-                        ..
-                    }),
-                    ResponseIntent::Created { resource, id, .. },
-                ) => ensure!(
-                    resource == actual_resource && id == actual_id,
-                    "create outcome differs"
-                ),
-                _ => anyhow::bail!("public create outcome differs"),
+        ensure!(
+            outcome == ResponseIntent::Execute,
+            "invalid action decision"
+        );
+        let outcomes = match effects.execute_transaction(a).await {
+            Ok(outcomes) => outcomes,
+            Err(error) => {
+                budget.database_calls = effects.calls;
+                effects.tx.rollback().await?;
+                if error.is::<repository::ReferenceUnavailable>() {
+                    return Ok((
+                        None,
+                        navigation::Prepared::ready(render::unavailable(
+                            &self.presentation,
+                            &self.manifest,
+                        )?),
+                    ));
+                }
+                if let Some(guard) = error.downcast_ref::<repository::GuardFailure>() {
+                    let errors = Fields::from([(guard.input.clone(), guard.message.clone())]);
+                    let rendered = render::recovery(
+                        &self.presentation,
+                        &self.manifest,
+                        action,
+                        &FormCredentials {
+                            csrf: csrf.into(),
+                            submission: submission.into(),
+                            values: Fields::new(),
+                        },
+                        input,
+                        render::Recovery::Rejected {
+                            errors: &errors,
+                            message: "Review the highlighted fields.",
+                        },
+                    )?;
+                    return Ok((None, navigation::Prepared::ready(rendered)));
+                }
+                return Err(error);
             }
-        } else {
-            ensure!(
-                effects.outcome.as_ref() == Some(&outcome),
-                "action outcome differs from granted mutation"
-            );
-        }
-        let receipt = if public_create {
-            let Some(ResponseIntent::Created { resource, id, .. }) = &effects.outcome else {
-                anyhow::bail!("public create outcome")
-            };
-            serde_json::to_string(&EditReceipt {
-                resource: *resource,
-                id: *id,
-                cap_version: 1,
-                key_id: self.keys.signing_edit_key()?,
-            })?
-        } else {
-            serde_json::to_string(&outcome)?
         };
-        let receipt = if parent_destination.is_some() {
-            serde_json::to_string(&navigation::SemanticReceipt {
-                version: 1,
-                outcome: serde_json::from_str(&receipt)?,
-                destination: parent_destination,
-            })?
-        } else {
-            receipt
-        };
+        budget.database_calls = effects.calls;
+        let destination = self
+            .capture_destination(
+                &mut effects.tx,
+                a,
+                signed_target.as_ref(),
+                original.as_ref(),
+                &outcomes,
+            )
+            .await?;
+        let handover = outcomes
+            .iter()
+            .zip(&a.steps)
+            .find_map(|(outcome, step)| {
+                let operation = manifest::operation(&self.manifest, step.operation).ok()?;
+                (manifest::is_public(operation) && operation.kind == OperationKind::Create)
+                    .then_some(outcome)
+            })
+            .map(|outcome| -> Result<EditReceipt> {
+                Ok(EditReceipt {
+                    resource: outcome.resource,
+                    id: outcome.id,
+                    incarnation: outcome.incarnation.clone(),
+                    cap_version: 1,
+                    key_id: self.keys.signing_edit_key()?,
+                })
+            })
+            .transpose()?;
+        let receipt = serde_json::to_string(&navigation::SemanticReceipt {
+            version: 1,
+            outcomes,
+            source: a.redirect.source.clone(),
+            destination,
+            handover,
+        })?;
         let response = self
             .prepare_response(&mut effects.tx, a, None, &receipt, &response_principal)
             .await?;
@@ -417,9 +438,27 @@ impl Application {
 }
 
 pub(super) fn input_digest(action: &Action, input: &Fields) -> Result<String> {
+    ensure!(
+        input.len() == action.inputs.len(),
+        "unexpected digest input"
+    );
+    let input: Fields = action
+        .inputs
+        .iter()
+        .map(|schema| {
+            let value = input
+                .get(&schema.name)
+                .ok_or_else(|| anyhow::anyhow!("missing digest input"))?;
+            Ok((
+                schema.name.clone(),
+                schema.canonical(value).map_err(anyhow::Error::msg)?,
+            ))
+        })
+        .collect::<Result<_>>()?;
     Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(serde_json::to_vec(&(
         VERSION,
         action.version,
+        &action.inputs,
         input,
     ))?)))
 }
@@ -433,7 +472,7 @@ impl Application {
     ) -> Result<Option<[String; 2]>> {
         let sql = format!(
             "SELECT subject,contract,input,{} FROM nx_receipts WHERE nonce=$1",
-            tx.bounded_text("outcome", 1024)
+            tx.bounded_text("outcome", 4096)
         );
         let rows = tx.fetch::<4>(&sql, &[nonce.into()]).await?;
         let Some([stored_subject, contract, digest, outcome]) = rows.into_iter().next() else {
@@ -492,20 +531,25 @@ impl Application {
         action: &Action,
         principal: &auth::Principal,
     ) -> Result<()> {
-        let op = manifest::operation(&self.manifest, action.operation)?;
-        ensure!(
-            manifest::is_public(op)
-                || principal.user().is_ok_and(|user| repository::allowed(
-                    &op.policy,
-                    principal,
-                    crate::policy::Row {
-                        owner: &user.id,
-                        tenant: &user.tenant,
-                        fields: &Default::default()
-                    }
-                )),
-            "policy denied"
-        );
+        for step in &action.steps {
+            let op = manifest::operation(&self.manifest, step.operation)?;
+            if op.kind != OperationKind::Create {
+                continue;
+            }
+            ensure!(
+                manifest::is_public(op)
+                    || principal.user().is_ok_and(|user| repository::allowed(
+                        &op.policy,
+                        principal,
+                        crate::policy::Row {
+                            owner: &user.id,
+                            tenant: &user.tenant,
+                            fields: &Default::default()
+                        }
+                    )),
+                repository::ReferenceUnavailable
+            );
+        }
         Ok(())
     }
 }

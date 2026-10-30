@@ -1,1 +1,1 @@
-["contract","deployment",2786829506,null,null,{"scope":null,"via":null,"list":{"order":"created_asc","page_size":3},"id":1175018442,"resource":2206293706,"kind":"list","policy":{"any":[["owner"]]}},"account-id"]
+["contract","deployment",2786829506,null,null,{"bind":null,"scope":null,"via":null,"list":{"order":"created_asc","page_size":3},"id":1175018442,"resource":2206293706,"kind":"list","policy":{"any":[["owner"]]}},"account-id"]

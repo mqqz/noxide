@@ -13,14 +13,10 @@ use super::*;
 #[serde(deny_unknown_fields)]
 pub(super) struct SemanticReceipt {
     pub version: u32,
-    pub outcome: SemanticOutcome,
+    pub outcomes: Vec<MutationOutcome>,
+    pub source: RedirectSource,
     pub destination: Option<ReferenceDestination>,
-}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(untagged)]
-pub(super) enum SemanticOutcome {
-    Edit(EditReceipt),
-    Mutation(ResponseIntent),
+    pub handover: Option<EditReceipt>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,37 +67,66 @@ impl Application {
         &self,
         tx: &mut Transaction,
         action: &Action,
-        stored: Option<&StoredRecord>,
+        signed: Option<&RecordTarget>,
+        original: Option<&StoredRecord>,
+        outcomes: &[MutationOutcome],
     ) -> Result<Option<ReferenceDestination>> {
-        let Redirect::Reference { route, .. } = action.redirect else {
+        let route = manifest::route(&self.manifest, action.redirect.route())?;
+        if route.resource.is_none() {
             return Ok(None);
+        }
+        let (resource, id, incarnation) = match &action.redirect.source {
+            RedirectSource::Signed => {
+                let signed =
+                    signed.ok_or_else(|| anyhow::anyhow!("missing signed navigation source"))?;
+                (signed.resource, signed.id, signed.incarnation.clone())
+            }
+            RedirectSource::Step(index) => {
+                let outcome = outcomes
+                    .get(usize::from(*index))
+                    .ok_or_else(|| anyhow::anyhow!("missing navigation outcome"))?;
+                (outcome.resource, outcome.id, outcome.incarnation.clone())
+            }
+            RedirectSource::Reference { step, field } => {
+                let outcome = outcomes
+                    .get(usize::from(*step))
+                    .ok_or_else(|| anyhow::anyhow!("missing reference outcome"))?;
+                let source = if outcome.kind == MutationKind::Deleted {
+                    original.cloned()
+                } else {
+                    repository::load(tx, &self.manifest, outcome.resource, outcome.id).await?
+                }
+                .ok_or_else(|| anyhow::anyhow!("missing reference source"))?;
+                ensure!(
+                    source.incarnation == outcome.incarnation,
+                    "navigation source changed"
+                );
+                let parent = manifest::reference_resource(&self.manifest, outcome.resource)?
+                    .ok_or_else(|| anyhow::anyhow!("missing reference schema"))?;
+                let id = source
+                    .record
+                    .fields
+                    .get(field)
+                    .ok_or_else(|| anyhow::anyhow!("missing reference value"))?
+                    .parse()?;
+                let destination = repository::load(tx, &self.manifest, parent.id, id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("missing reference destination"))?;
+                (parent.id, id, destination.incarnation)
+            }
         };
-        let op = manifest::operation(&self.manifest, action.operation)?;
-        let parent = manifest::reference_resource(&self.manifest, op.resource)?
-            .ok_or_else(|| anyhow::anyhow!("missing parent"))?;
-        let stored = stored.ok_or_else(|| anyhow::anyhow!("missing relationship snapshot"))?;
-        let field = manifest::reference_field(manifest::resource(&self.manifest, op.resource)?)
-            .expect("validated parent");
-        let id = if op.kind == OperationKind::Create {
-            stored.record.id
-        } else {
-            stored
-                .record
-                .fields
-                .get(&field.name)
-                .ok_or_else(|| anyhow::anyhow!("missing parent ID"))?
-                .parse()?
-        };
-        let parent_record = repository::load(tx, &self.manifest, parent.id, id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("missing parent"))?;
+        ensure!(
+            route.resource == Some(resource),
+            "navigation resource differs"
+        );
         Ok(Some(ReferenceDestination {
-            route,
-            resource: parent.id,
+            route: route.id,
+            resource,
             id,
-            incarnation: parent_record.incarnation,
+            incarnation,
         }))
     }
+
     pub(super) async fn prepare_response(
         &self,
         tx: &mut Transaction,
@@ -110,56 +135,93 @@ impl Application {
         payload: &str,
         principal: &auth::Principal,
     ) -> Result<Prepared> {
-        let decoded = serde_json::from_str::<SemanticReceipt>(payload).ok();
-        let semantic_outcome = decoded
-            .as_ref()
-            .map(|receipt| serde_json::to_string(&receipt.outcome))
-            .transpose()?;
-        let (outcome, destination) = match decoded.as_ref() {
-            Some(receipt) => {
-                ensure!(receipt.version == 1, "invalid receipt version");
-                (
-                    semantic_outcome.as_deref().expect("decoded outcome"),
-                    receipt.destination.as_ref(),
-                )
-            }
-            None => (payload, None),
-        };
-        if !matches!(action.redirect, Redirect::Reference { .. }) {
-            ensure!(destination.is_none(), "unexpected parent destination");
-            return Ok(Prepared::ready(
-                self.receipt_response(tx, action, target, outcome).await?,
-            ));
-        }
-        let destination =
-            destination.ok_or_else(|| anyhow::anyhow!("missing parent destination"))?;
-        let op = manifest::operation(&self.manifest, action.operation)?;
+        let receipt: SemanticReceipt = serde_json::from_str(payload)?;
         ensure!(
-            destination.route == action.redirect.route()
-                && Some(destination.resource)
-                    == manifest::reference_resource(&self.manifest, op.resource)?.map(|p| p.id),
-            "receipt destination differs"
+            receipt.version == 1
+                && receipt.outcomes.len() == action.steps.len()
+                && receipt.source == action.redirect.source,
+            "receipt contract differs"
         );
-        let handover = manifest::is_public(op) && op.kind == OperationKind::Create;
-        let fallback = if handover {
-            let receipt: EditReceipt = serde_json::from_str(outcome)?;
-            ensure!(receipt.resource == op.resource, "receipt resource differs");
-            self.edit_handover(tx, &receipt, None).await?
+        for (outcome, step) in receipt.outcomes.iter().zip(&action.steps) {
+            let op = manifest::operation(&self.manifest, step.operation)?;
+            let kind = match op.kind {
+                OperationKind::Create => MutationKind::Created,
+                OperationKind::Update => MutationKind::Updated,
+                OperationKind::Delete => MutationKind::Deleted,
+                _ => anyhow::bail!("invalid mutation receipt"),
+            };
+            ensure!(
+                outcome.kind == kind
+                    && outcome.resource == op.resource
+                    && outcome.id > 0
+                    && outcome.id <= i64::MAX as u64
+                    && !outcome.incarnation.is_empty()
+                    && outcome.incarnation.len() <= 64,
+                "invalid mutation identity"
+            );
+            if step.target == Target::Signed
+                && let Some(target) = target
+            {
+                ensure!(
+                    outcome.resource == target.resource
+                        && outcome.id == target.id
+                        && outcome.incarnation == target.incarnation,
+                    "receipt signed target differs"
+                );
+            }
+        }
+        let public_create = action.steps.iter().enumerate().find(|(_, step)| {
+            manifest::operation(&self.manifest, step.operation)
+                .is_ok_and(|op| op.kind == OperationKind::Create && manifest::is_public(op))
+        });
+        ensure!(
+            public_create.is_some() == receipt.handover.is_some(),
+            "receipt handover differs"
+        );
+        let handover = receipt.handover.is_some();
+        let fallback = if let Some(edit) = &receipt.handover {
+            let outcome = &receipt.outcomes[public_create.expect("handover operation").0];
+            ensure!(
+                edit.resource == outcome.resource
+                    && edit.id == outcome.id
+                    && edit.incarnation == outcome.incarnation,
+                "handover identity differs"
+            );
+            self.edit_handover(tx, edit, None).await?
         } else {
-            // Validate the original mutation identity before using its receipt.
-            self.receipt(action, target, outcome)?;
             success()
         };
-        let destination = ReferenceDestination {
-            route: destination.route,
-            resource: destination.resource,
-            id: destination.id,
-            incarnation: destination.incarnation.clone(),
-        };
-        Ok(Prepared {
-            fallback,
-            navigation: Some((destination, principal.clone(), handover)),
-        })
+        let route = manifest::route(&self.manifest, action.redirect.route())?;
+        if let Some(destination) = receipt.destination {
+            ensure!(
+                route.resource == Some(destination.resource) && destination.route == route.id,
+                "receipt destination differs"
+            );
+            Ok(Prepared {
+                fallback,
+                navigation: Some((destination, principal.clone(), handover)),
+            })
+        } else {
+            ensure!(route.resource.is_none(), "receipt destination missing");
+            if handover
+                || route.access == Access::Authenticated
+                    && matches!(principal, auth::Principal::Anonymous)
+            {
+                return Ok(Prepared::ready(fallback));
+            }
+            Ok(Prepared::ready(render::render(
+                &ResponseIntent::Redirect(RouteRef {
+                    route: route.id,
+                    target: None,
+                    params: Default::default(),
+                }),
+                &RenderContext {
+                    presentation: &self.presentation,
+                    manifest: Some(&self.manifest),
+                    ..RenderContext::empty()
+                },
+            )?))
+        }
     }
     pub(super) async fn finish_navigation(
         &self,
@@ -251,9 +313,9 @@ mod tests {
         // Current ordinary and reference receipts round-trip.
         // Keys and identifiers are test data.
         for raw in [
-            r#"{"version":1,"outcome":{"resource":7,"id":9,"cap_version":2,"key_id":3},"destination":null}"#,
-            r#"{"version":1,"outcome":{"created":{"resource":7,"id":9,"destination":{"route":4,"target":9}}},"destination":{"route":5,"resource":6,"id":8,"incarnation":"test-incarnation"}}"#,
-            r#"{"version":1,"outcome":{"deleted":{"resource":7,"id":9,"destination":{"route":4,"target":null}}},"destination":null}"#,
+            r#"{"version":1,"outcomes":[{"kind":"created","resource":7,"id":9,"incarnation":"test"}],"source":{"step":0},"destination":null,"handover":{"resource":7,"id":9,"incarnation":"test","cap_version":2,"key_id":3}}"#,
+            r#"{"version":1,"outcomes":[{"kind":"created","resource":7,"id":9,"incarnation":"test"}],"source":{"reference":{"step":0,"field":"thread"}},"destination":{"route":5,"resource":6,"id":8,"incarnation":"test-incarnation"},"handover":null}"#,
+            r#"{"version":1,"outcomes":[{"kind":"deleted","resource":7,"id":9,"incarnation":"test"}],"source":"signed","destination":null,"handover":null}"#,
         ] {
             let receipt: SemanticReceipt = serde_json::from_str(raw).unwrap();
             assert_eq!(
@@ -262,10 +324,10 @@ mod tests {
             );
         }
         for raw in [
-            r#"{"updated":{"resource":7,"id":9,"destination":{"route":4,"target":9}}}"#,
-            r#"{"deleted":{"resource":7,"id":9,"destination":{"route":4,"target":null}}}"#,
+            r#"{"kind":"updated","resource":7,"id":9,"incarnation":"test"}"#,
+            r#"{"kind":"deleted","resource":7,"id":9,"incarnation":"test"}"#,
         ] {
-            let outcome: SemanticOutcome = serde_json::from_str(raw).unwrap();
+            let outcome: MutationOutcome = serde_json::from_str(raw).unwrap();
             assert_eq!(
                 serde_json::to_value(outcome).unwrap(),
                 serde_json::from_str::<serde_json::Value>(raw).unwrap()
@@ -277,7 +339,10 @@ mod tests {
             )
             .is_err()
         );
-        for raw in ["4", r#"{"field":"thread","route":5}"#] {
+        for raw in [
+            r#"{"route":4,"source":"signed"}"#,
+            r#"{"route":5,"source":{"reference":{"step":0,"field":"thread"}}}"#,
+        ] {
             let redirect: Redirect = serde_json::from_str(raw).unwrap();
             assert_eq!(
                 serde_json::to_value(redirect).unwrap(),
@@ -299,9 +364,12 @@ mod tests {
     async fn private_parent_case(db: Database) {
         db.initialize().await.unwrap();
         let mut m = parent_tests::declarations();
-        m.actions[0].redirect = Redirect::Reference {
-            field: "thread".into(),
+        m.actions[0].redirect = Redirect {
             route: 3,
+            source: RedirectSource::Reference {
+                step: 0,
+                field: "thread".into(),
+            },
         };
         let read = &mut m.operations[3];
         read.policy = Policy {
@@ -408,9 +476,10 @@ mod tests {
         let mut m = parent_tests::declarations();
         m.operations.iter_mut().find(|op| op.id == 4).unwrap().id = 6;
         m.routes[2].operations = vec![6, 1];
-        m.actions[0].bind.as_mut().unwrap().eligible = 6;
+        m.operations[2].bind.as_mut().unwrap().eligible = 6;
         for (id, kind) in [(4, OperationKind::Update), (5, OperationKind::Delete)] {
             m.operations.push(Operation {
+                bind: None,
                 scope: None,
                 via: None,
                 filter: Vec::new(),
@@ -425,20 +494,20 @@ mod tests {
                 visibility: None,
                 fields: None,
             });
-            m.actions.push(Action {
-                bind: None,
-                id: id - 2,
-                version: 1,
-                name: "Change reply".into(),
-                operation: id,
-                redirect: Redirect::Reference {
-                    field: "thread".into(),
-                    route: 3,
-                },
-                fields: if id == 4 { vec!["body".into()] } else { vec![] },
-                layout: vec![],
-                inspect: None,
-            });
+            let mut action = fixture::action(
+                id - 2,
+                "Change reply",
+                id,
+                Target::Signed,
+                &m.resources[0],
+                if id == 4 { &["body"] } else { &[] },
+                3,
+            );
+            action.redirect.source = RedirectSource::Reference {
+                step: 0,
+                field: "thread".into(),
+            };
+            m.actions.push(action);
         }
         m.routes[1].forms = vec![2, 3];
         m.routes[1].access = Access::PublicOptional;

@@ -19,6 +19,7 @@ fn manifest() -> Manifest {
             }],
         }],
         operations: vec![Operation {
+            bind: None,
             scope: None,
             via: None,
             filter: Vec::new(),

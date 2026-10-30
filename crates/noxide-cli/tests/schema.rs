@@ -4,7 +4,7 @@ mod support;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use noxide_host::{Application, Database, HostKeys, manifest, runtime::Limits};
-use noxide_protocol::{FieldKind, TextField};
+use noxide_protocol::{Assignment, Change, FieldKind, Input, TextField, Value};
 use std::path::Path;
 
 async fn cli(args: &[&Path], command: &str) -> std::process::Output {
@@ -45,7 +45,17 @@ async fn schema_drafts_require_backfills_and_apply_the_approved_target() {
         optional: false,
         initial: None,
     });
-    target.actions[0].fields.push("completed".into());
+    target.actions[0].inputs.push(Input {
+        name: "completed".into(),
+        label: "Completed".into(),
+        max_bytes: 8,
+        kind: FieldKind::Boolean,
+        optional: false,
+    });
+    target.actions[0].steps[0].assign.push(Assignment {
+        field: "completed".into(),
+        change: Change::Set(Value::Input("completed".into())),
+    });
     let old = root.join("old.json");
     let new = root.join("new.json");
     let migration = root.join("001.json");

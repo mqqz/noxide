@@ -4,7 +4,7 @@ use crate::{
     Application, Database, HostKeys, RequestError, database::Transaction, manifest,
     runtime::Limits, test_support as fixture,
 };
-use noxide_protocol::Fields;
+use noxide_protocol::{Fields, MutationKind, MutationOutcome};
 use std::{
     sync::{
         Arc,
@@ -156,7 +156,7 @@ async fn stored_bounds(db: &Database) {
         label: "Extra".into(),
         max_bytes: 4096,
     });
-    m.actions[0].fields.push("extra".into());
+    crate::test_support::add_input(&mut m.actions[0], &m.resources[0], "extra");
     let fields = Fields::from([
         ("body".into(), "\\".repeat(4096)),
         ("extra".into(), "\"".repeat(4096)),
@@ -201,10 +201,9 @@ async fn stored_bounds(db: &Database) {
             input: Fields::new(),
             inspection: None,
         },
-        outcome: None,
         grant: None,
         capability_grant: None,
-        record: None,
+
         calls: 50,
         cursor: None,
         more: None,
@@ -376,10 +375,12 @@ async fn revocation(db: &Database) {
             .unwrap()
             .contains("_submission")
     );
-    assert!(
+    assert_eq!(
         app.submit(&session, 1, &later, &csrf, input.clone())
             .await
-            .is_err()
+            .unwrap()
+            .status,
+        404
     );
     assert_eq!(
         app.submit(&session, 1, &submission, &csrf, input.clone())
@@ -492,13 +493,14 @@ async fn faults(db: Database) {
         .unwrap();
     tx.execute("DELETE FROM nx_records", &[]).await.unwrap();
     tx.commit().await.unwrap();
-    assert_eq!(
-        restarted
-            .submit(&session, 1, &submission, &csrf, input)
-            .await
-            .unwrap()
-            .location,
-        recovered.location
+    let missing_destination = restarted
+        .submit(&session, 1, &submission, &csrf, input)
+        .await
+        .unwrap();
+    assert_eq!(missing_destination.status, 200);
+    assert!(
+        missing_destination.location.is_none(),
+        "receipt recovery must recheck destination existence"
     );
     assert_eq!(counts(&db).await, (0, 2));
     let old = restarted
@@ -591,7 +593,6 @@ async fn record_mutation_state(db: &Database) -> (Vec<[String; 5]>, Vec<[String;
 }
 
 async fn record_mutation_failures(db: Database) {
-    use noxide_protocol::{ResponseIntent, RouteRef};
     db.initialize().await.unwrap();
     db.create_account("alice", "private test password", "")
         .await
@@ -760,34 +761,28 @@ async fn record_mutation_failures(db: Database) {
                         ("tag".into(), "protected tag".into())
                     ])
                 );
-                ResponseIntent::Updated {
+                MutationOutcome {
+                    kind: MutationKind::Updated,
                     resource: 1,
                     id: 42,
-                    destination: RouteRef {
-                        params: Default::default(),
-                        route: 2,
-                        target: Some(42),
-                    },
+                    incarnation: incarnation.clone(),
                 }
             } else {
                 assert!(
                     committed.0.is_empty(),
                     "hard deletion must remove the target"
                 );
-                ResponseIntent::Deleted {
+                MutationOutcome {
+                    kind: MutationKind::Deleted,
                     resource: 1,
                     id: 42,
-                    destination: RouteRef {
-                        params: Default::default(),
-                        route: 1,
-                        target: None,
-                    },
+                    incarnation: incarnation.clone(),
                 }
             };
-            assert_eq!(
-                serde_json::from_str::<ResponseIntent>(&committed.1[0][1]).unwrap(),
-                expected
-            );
+            let receipt: serde_json::Value = serde_json::from_str(&committed.1[0][1]).unwrap();
+            let outcomes: Vec<MutationOutcome> =
+                serde_json::from_value(receipt["outcomes"].clone()).unwrap();
+            assert_eq!(outcomes, vec![expected]);
             let restarted = record_application(&db, &keys).await;
             let recovery = restarted
                 .recover_form(&session, action, &submission, &csrf, &input, true)

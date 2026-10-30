@@ -18,7 +18,7 @@ pub(super) fn form(
         input
             .keys()
             .chain(errors.keys())
-            .all(|name| action.fields.contains(name)),
+            .all(|name| action.inputs.iter().any(|input| &input.name == name)),
         "unexpected form field"
     );
     out.push(&format!(
@@ -34,15 +34,16 @@ pub(super) fn form(
     ] {
         hidden(out, name, value)?;
     }
-    if crate::manifest::is_capability(crate::manifest::operation(m, action.operation)?) {
+    if crate::manifest::is_capability(crate::manifest::operation(m, action.steps[0].operation)?) {
         out.push(&format!("<label>Edit secret<input type=\"password\" name=\"{}\" autocomplete=\"off\" maxlength=\"128\" required></label>", presentation.capability_field))?;
     }
-    let default_button =
-        if crate::manifest::operation(m, action.operation)?.kind == OperationKind::Delete {
-            "Delete record"
-        } else {
-            &action.name
-        };
+    let default_button = if crate::manifest::operation(m, action.steps[0].operation)?.kind
+        == OperationKind::Delete
+    {
+        "Delete record"
+    } else {
+        &action.name
+    };
     let default_layout;
     let layout = if action.layout.is_empty() {
         default_layout = fields
@@ -115,7 +116,7 @@ pub(super) fn hidden(out: &mut Buffer, name: &str, value: &str) -> Result<()> {
 fn render_field(
     out: &mut Buffer,
     action: &Action,
-    field: &TextField,
+    field: &Input,
     requested: &Control,
     input: &Fields,
     readonly: bool,
@@ -165,7 +166,7 @@ fn render_field(
         // preserve submitted bytes, including invalid numeric input.
         control = Control::Textarea { rows: 4 };
     }
-    let invalid = validate && crate::manifest::validate_value(field, value).is_err();
+    let invalid = validate && field.canonical(value).is_err();
     let error = errors.get(&field.name);
     let id = format!("field-{}-{}-{}", action.id, instance, field.name);
     let error_id = format!("error-{}-{}-{}", action.id, instance, field.name);

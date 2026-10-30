@@ -25,7 +25,7 @@ interface. Type opacity prevents common mistakes; it cannot authorize a guest.
 The host independently rejects forged manifests and undeclared or out-of-scope
 runtime operations.
 
-Form layout generation is convenience. The host owns CSRF, input canonicalization,
+Form layout generation uses action inputs, independently of resource fields. The host owns CSRF, input canonicalization,
 writable-field checks, approved action binding, credential issuance, escaping,
 headers and final Document IR validation. Navigation presentation is separate from
 host authorization of the destination and credential handover.
@@ -33,9 +33,12 @@ host authorization of the destination and credential handover.
 ## Mutation and navigation lifecycle
 
 `application/submission.rs` binds the current principal and approved action,
-canonicalizes input, checks target and relationships, and executes mutation and
-receipt persistence atomically. `application/navigation.rs` owns the existing
-`SemanticReceipt`, `SemanticOutcome`, `Prepared`, response preparation and
+canonicalizes action inputs and checks the signed target revision requirement.
+It runs the guest decision with no storage imports, then invokes the declared step
+executor in `repository.rs`. The executor authorizes each step against current
+transaction state and derives every outcome. All mutations and their receipt
+persist atomically. `application/navigation.rs` owns the existing
+`SemanticReceipt` and `Prepared`, response preparation and
 post-commit destination resolution. Required response preparation happens before
 commit; delivery waits for confirmed commitment or a verified committed receipt.
 An unknown commit outcome uses receipt recovery, never an assumed success or a
@@ -73,3 +76,5 @@ The [refactor validation record](refactor-validation.md) lists executed commands
 and checks that still require CI infrastructure.
 
 See [declarative queries](queries.md) for the staged query design and compatibility contract.
+
+See [declared action transactions](transactions.md) for the transaction contract and implementation boundaries.

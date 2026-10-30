@@ -129,16 +129,7 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
     let (doc, status) = match intent {
         ResponseIntent::Page(d) => (d, 200),
         ResponseIntent::NotFound(d) => (d, 404),
-        ResponseIntent::Redirect(dest)
-        | ResponseIntent::Created {
-            destination: dest, ..
-        }
-        | ResponseIntent::Updated {
-            destination: dest, ..
-        }
-        | ResponseIntent::Deleted {
-            destination: dest, ..
-        } => {
+        ResponseIntent::Redirect(dest) => {
             let m = context
                 .manifest
                 .ok_or_else(|| anyhow::anyhow!("no routes"))?;
@@ -149,7 +140,9 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
                 anonymous_cookie: None,
             });
         }
-        ResponseIntent::Rejected { .. } => anyhow::bail!("rejection requires action context"),
+        ResponseIntent::Execute | ResponseIntent::Rejected { .. } => {
+            anyhow::bail!("rejection requires action context")
+        }
     };
     ensure!(
         doc.title.len() <= 128
@@ -380,7 +373,7 @@ pub(crate) fn recovery(
             "Your changes were not saved. Review the current values before submitting again.",
             409,
             false,
-            if crate::manifest::operation(m, a.operation)?.kind == OperationKind::Delete {
+            if crate::manifest::operation(m, a.steps[0].operation)?.kind == OperationKind::Delete {
                 "Delete current version"
             } else {
                 "Save these changes"
@@ -410,22 +403,28 @@ pub(crate) fn recovery(
         && !current.is_empty()
     {
         out.push("<section aria-label=\"Current values\"><h2>Current values</h2>")?;
-        let resource =
-            crate::manifest::resource(m, crate::manifest::operation(m, a.operation)?.resource)?;
+
         for (name, value) in *current {
-            let field = resource
-                .fields
-                .iter()
-                .find(|f| &f.name == name)
-                .ok_or_else(|| anyhow::anyhow!("unknown current field"))?;
+            let label = if let Some(input) = a.inputs.iter().find(|input| &input.name == name) {
+                &input.label
+            } else {
+                let resource = crate::manifest::signed_resource(m, a)?
+                    .ok_or_else(|| anyhow::anyhow!("missing current resource"))?;
+                &crate::manifest::resource(m, resource)?
+                    .fields
+                    .iter()
+                    .find(|field| &field.name == name)
+                    .ok_or_else(|| anyhow::anyhow!("unknown current field"))?
+                    .label
+            };
             out.push("<p>")?;
-            out.text(&field.label)?;
+            out.text(label)?;
             out.push("</p><pre>\n")?;
             out.text(value)?;
             out.push("</pre>")?;
         }
         out.push("</section>")?;
-        if !a.fields.is_empty() {
+        if !a.inputs.is_empty() {
             out.push("<h2>Your changes</h2>")?;
         }
     }
@@ -513,10 +512,16 @@ mod tests {
     ) -> String {
         let mut manifest = crate::test_support::manifest();
         manifest.resources[0].fields = fields;
-        manifest.actions[0].fields = manifest.resources[0]
+        manifest.actions[0].inputs = manifest.resources[0]
             .fields
             .iter()
-            .map(|field| field.name.clone())
+            .map(|field| Input {
+                name: field.name.clone(),
+                label: field.label.clone(),
+                kind: field.kind.clone(),
+                optional: field.optional,
+                max_bytes: field.max_bytes,
+            })
             .collect();
         manifest.actions[0].layout = layout;
         let mut out = Buffer(String::new());

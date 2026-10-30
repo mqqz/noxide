@@ -39,6 +39,7 @@ fn declarations() -> Manifest {
     }
     for (id, kind) in [(4, OperationKind::Update), (5, OperationKind::Delete)] {
         m.operations.push(Operation {
+            bind: None,
             scope: None,
             via: None,
             filter: Vec::new(),
@@ -54,31 +55,26 @@ fn declarations() -> Manifest {
             fields: None,
         });
     }
-    m.actions[0]
-        .fields
-        .extend(["published".into(), "private".into()]);
-    m.actions.push(Action {
-        bind: None,
-        id: 2,
-        version: 1,
-        name: "Edit".into(),
-        operation: 4,
-        redirect: noxide_protocol::Redirect::Page(2),
-        fields: vec!["body".into(), "private".into()],
-        layout: vec![],
-        inspect: None,
-    });
-    m.actions.push(Action {
-        bind: None,
-        id: 3,
-        version: 1,
-        name: "Delete".into(),
-        operation: 5,
-        redirect: noxide_protocol::Redirect::Page(1),
-        fields: vec![],
-        layout: vec![],
-        inspect: None,
-    });
+    fixture::add_input(&mut m.actions[0], &m.resources[0], "published");
+    fixture::add_input(&mut m.actions[0], &m.resources[0], "private");
+    m.actions.push(fixture::action(
+        2,
+        "Edit",
+        4,
+        Target::Signed,
+        &m.resources[0],
+        &["body", "private"],
+        2,
+    ));
+    m.actions.push(fixture::action(
+        3,
+        "Delete",
+        5,
+        Target::Signed,
+        &m.resources[0],
+        &[],
+        1,
+    ));
     for r in &mut m.routes {
         r.access = Access::PublicOptional;
     }
@@ -109,24 +105,10 @@ fn component_with_redirect(forged: bool) -> Vec<u8> {
     let kind = br#"{"version":3,"kind":{"#.len() + 1;
     let action = br#"{"version":3,"kind":{"action":"#.len();
     let route = br#"{"version":3,"kind":{"route":"#.len();
-    let offset = br#"{"resource":1,"id":"#.len();
-    let digits = format!(
-        "i32.const {offset} local.set $i block $end loop $digit local.get $i call $result i32.wrap_i64 i32.const 255 i32.and local.tee $c i32.const 44 i32.eq br_if $end local.get $c i64.extend_i32_u i32.const 1 call $emit local.get $i i32.const 1 i32.add local.set $i br $digit end end"
-    );
-    let created = format!(
-        "{} {digits} {} {digits} {}",
-        emit(br#"{"created":{"resource":1,"id":"#),
-        emit(br#", "destination":{"route":2,"target":"#),
-        emit(b"}}}")
-    );
-    let created = if forged {
-        format!(
-            "{} {digits} {}",
-            emit(br#"{"created":{"resource":1,"id":"#),
-            emit(br#","destination":{"route":999,"target":null}}}"#)
-        )
+    let decision = if forged {
+        emit(br#"{"created":{"resource":1,"id":1,"destination":{"route":999,"target":null}}}"#)
     } else {
-        created
+        emit(br#""execute""#)
     };
     wat::parse_str(format!(r#"(component
       (import "noxide:application/host@0.1.0" (instance $h
@@ -147,10 +129,7 @@ fn component_with_redirect(forged: bool) -> Vec<u8> {
           i32.const {kind} call $request i32.wrap_i64 i32.const 255 i32.and i32.const 97 i32.eq
           if
             i32.const {action} call $request i32.wrap_i64 i32.const 255 i32.and i32.const 48 i32.sub i32.const 2 i32.add local.set $op
-            local.get $op i64.const 0 call $invoke local.set $len
-            local.get $op i32.const 3 i32.eq if {created} else
-              i32.const 0 local.set $i block $end loop $copy local.get $i local.get $len i32.ge_u br_if $end local.get $i call $result i32.const 1 call $emit local.get $i i32.const 1 i32.add local.set $i br $copy end end
-            end
+            {decision}
           else i32.const {route} call $request i32.wrap_i64 i32.const 255 i32.and i32.const 49 i32.eq if {page1} else {page2} end end))
       (core instance $i (instantiate $m (with "h" (instance (export "emit" (func $emit)) (export "request" (func $request)) (export "invoke" (func $invoke)) (export "result" (func $result))))))
       (func (export "handle") (canon lift (core func $i "handle"))))"#)).unwrap()
@@ -330,23 +309,26 @@ async fn lifecycle(db: Database) {
     let edit_token = token(&edit, 2);
     let edit_csrf = fixture::hidden(text(&edit), "_csrf");
     let changed = Fields::from([("body".into(), "changed".into())]);
-    assert!(
-        app.submit_with_capability(
-            &cookie,
-            2,
-            &edit_token,
-            &edit_csrf,
-            changed.clone(),
-            Some(&old)
-        )
-        .await
-        .is_err()
-    );
-    assert!(
-        app.submit_with_capability(&cookie, 2, &edit_token, &edit_csrf, changed.clone(), None)
+    let before_denied = rows(&db).await;
+    for supplied in [Some(old.as_str()), None] {
+        let denied = app
+            .submit_with_capability(
+                &cookie,
+                2,
+                &edit_token,
+                &edit_csrf,
+                changed.clone(),
+                supplied,
+            )
             .await
-            .is_err()
-    );
+            .unwrap();
+        assert_eq!(denied.status, 404);
+        assert_eq!(
+            rows(&db).await,
+            before_denied,
+            "denied capability creates no mutation or receipt"
+        );
+    }
     assert_eq!(
         app.submit_with_capability(
             &cookie,
@@ -430,6 +412,68 @@ async fn lifecycle(db: Database) {
     assert!(!snapshot.contains(&cookie));
 }
 #[tokio::test]
+async fn capability_denial_reincarnation_and_missing_target_are_indistinguishable() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Database::sqlite(temp.path().join("capability-unavailable.db"));
+    let app = app(db.clone()).await;
+    let m = declarations();
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    let storage = tx.storage_resource(&m, 1).await.unwrap();
+    tx.allocate_creation().await.unwrap();
+    tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version,created_seq) VALUES($1,42,NULL,'','{\"body\":\"original\",\"published\":\"true\",\"private\":\"hidden\"}','original',1,1,(SELECT value FROM nx_creation_counter WHERE singleton=1))", &[storage.into()]).await.unwrap();
+    tx.commit().await.unwrap();
+    let secret = app
+        .keys
+        .edit_secret(app.keys.signing_edit_key().unwrap(), storage as u32, 42, 1)
+        .unwrap();
+    let page = app.view_page(None, 2, Some(42), None).await.unwrap();
+    let cookie = page.anonymous_cookie.clone().unwrap();
+    let submission = token(&page, 2);
+    let csrf = fixture::hidden(text(&page), "_csrf");
+    let input = Fields::from([("body".into(), "must not commit".into())]);
+    let mut unavailable = None;
+    for case in ["wrong", "absent", "replaced", "missing"] {
+        if matches!(case, "replaced" | "missing") {
+            let mut tx = db
+                .begin(Instant::now() + Duration::from_secs(2))
+                .await
+                .unwrap();
+            let sql = if case == "replaced" {
+                "UPDATE nx_records SET incarnation='replacement' WHERE id=42"
+            } else {
+                "DELETE FROM nx_records WHERE id=42"
+            };
+            tx.execute(sql, &[]).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+        let before = rows(&db).await;
+        let supplied = match case {
+            "wrong" => Some("wrong"),
+            "absent" => None,
+            _ => Some(secret.as_str()),
+        };
+        let response = app
+            .submit_with_capability(&cookie, 2, &submission, &csrf, input.clone(), supplied)
+            .await
+            .unwrap();
+        assert_eq!(response.status, 404, "{case}");
+        assert_eq!(
+            rows(&db).await,
+            before,
+            "{case} must leave no mutation or receipt"
+        );
+        if let Some(body) = &unavailable {
+            assert_eq!(&response.body, body, "{case}");
+        } else {
+            unavailable = Some(response.body);
+        }
+    }
+}
+
+#[tokio::test]
 async fn sqlite_anonymous_receipts_capability_rotation_and_secret_scrubbing() {
     let temp = tempfile::tempdir().unwrap();
     lifecycle(Database::sqlite(temp.path().join("anonymous.db"))).await;
@@ -504,7 +548,7 @@ fn capability_policies_are_standalone_mutations_and_never_ordinary_authority() {
 }
 
 #[tokio::test]
-async fn public_create_ignores_guest_redirect_and_requires_an_edit_signing_key() {
+async fn public_create_rejects_guest_outcomes_and_requires_an_edit_signing_key() {
     let temp = tempfile::tempdir().unwrap();
     let db = Database::sqlite(temp.path().join("redirect.db"));
     db.initialize().await.unwrap();
@@ -526,13 +570,17 @@ async fn public_create_ignores_guest_redirect_and_requires_an_edit_signing_key()
         ("body".into(), "hello".into()),
         ("published".into(), "true".into()),
     ]);
-    let handover = app
-        .submit(&cookie, 1, &token(&page, 1), &csrf, input)
-        .await
-        .unwrap();
-    assert_eq!(handover.status, 200);
-    assert!(handover.location.is_none());
-    assert!(text(&handover).contains("/notes/"));
+    let before = rows(&db).await;
+    assert!(
+        app.submit(&cookie, 1, &token(&page, 1), &csrf, input)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        rows(&db).await,
+        before,
+        "a guest-produced outcome cannot commit"
+    );
     let mut legacy = serde_json::to_value(HostKeys::generate().unwrap()).unwrap();
     legacy.as_object_mut().unwrap().remove("edit_keys");
     let keys: HostKeys = serde_json::from_value(legacy).unwrap();
@@ -809,6 +857,7 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
         let mut m = declarations();
         if inspect {
             m.operations.push(Operation {
+                bind: None,
                 scope: None,
                 via: None,
                 filter: Vec::new(),
@@ -872,7 +921,7 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
             )
             .await;
         if inspect {
-            assert!(result.is_err());
+            assert_eq!(result.unwrap().status, 404);
         } else {
             let rejection = result.unwrap();
             assert_eq!(rejection.status, 422);
@@ -932,10 +981,9 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
             manifest: Arc::new(m),
             principal: crate::auth::Principal::Anonymous,
             request,
-            outcome: None,
             grant: Some(grant),
             capability_grant: None,
-            record: Some(record),
+
             calls: 16,
             cursor: None,
             more: None,
@@ -1605,7 +1653,10 @@ async fn sqlite_initial_fields_reject_clients_and_stale_contracts() {
     for public in [true, false] {
         let mut m = declarations();
         m.resources[0].fields[1].initial = Some("true".into());
-        m.actions[0].fields.retain(|f| f != "published");
+        m.actions[0].inputs.retain(|f| f.name != "published");
+        m.actions[0].steps[0]
+            .assign
+            .retain(|a| a.field != "published");
         if !public {
             m.operations[2].policy.any = vec![vec![Predicate::Owner]];
         }

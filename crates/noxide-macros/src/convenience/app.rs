@@ -427,8 +427,8 @@ mod app_policy_tests {
         assert_eq!(output.matches("Predicate :: Owner").count(), 3);
         assert_eq!(output.matches("Predicate :: Public").count(), 1);
         assert_eq!(output.matches("Predicate :: Capability").count(), 2);
-        assert_eq!(output.matches("Redirect :: Reference").count(), 3);
-        assert_eq!(output.matches("Redirect :: Page").count(), 4);
+        assert_eq!(output.matches("RedirectSource :: Reference").count(), 3);
+        assert_eq!(output.matches("RedirectSource :: Step").count(), 4);
     }
 
     #[test]

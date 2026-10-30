@@ -22,11 +22,11 @@ fn declarations() -> Manifest {
         initial: None,
         max_bytes: 43,
     });
-    m.actions[0].fields.push("recipient".into());
+    crate::test_support::add_input(&mut m.actions[0], &m.resources[0], "recipient");
     let mut reviewer = m.resources[0].fields[1].clone();
     reviewer.name = "recipient_tenant".into();
     m.resources[0].fields.push(reviewer);
-    m.actions[0].fields.push("recipient_tenant".into());
+    crate::test_support::add_input(&mut m.actions[0], &m.resources[0], "recipient_tenant");
     for op in &mut m.operations[..2] {
         op.policy.any.push(vec![Predicate::PrincipalIs {
             field: "recipient".into(),
@@ -78,10 +78,9 @@ fn effects(tx: Transaction, m: &Manifest, id: &str, action: bool, recipient: &st
             inspection: None,
             available_forms: vec![],
         },
-        outcome: None,
         grant: None,
         capability_grant: None,
-        record: None,
+
         calls: 64,
         cursor: None,
         more: None,
@@ -118,7 +117,7 @@ async fn contract(db: Database, descending: bool) {
             .await
             .unwrap();
         let mut e = effects(tx, &m, &alice, true, target);
-        assert!(e.invoke(3, 0).await.is_err());
+        assert!(e.execute_transaction(&m.actions[0]).await.is_err());
         e.tx.rollback().await.unwrap();
     }
     for principal in [
@@ -135,7 +134,7 @@ async fn contract(db: Database, descending: bool) {
             .unwrap();
         let mut e = effects(tx, &m, &alice, true, &bob);
         e.principal = principal;
-        assert!(e.invoke(3, 0).await.is_err());
+        assert!(e.execute_transaction(&m.actions[0]).await.is_err());
         e.tx.rollback().await.unwrap();
     }
     let tx = db
@@ -146,7 +145,7 @@ async fn contract(db: Database, descending: bool) {
     e.request
         .input
         .insert("recipient_tenant".into(), eve.clone());
-    assert!(e.invoke(3, 0).await.is_err());
+    assert!(e.execute_transaction(&m.actions[0]).await.is_err());
     assert_eq!(
         e.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_records", &[])
             .await
@@ -161,7 +160,12 @@ async fn contract(db: Database, descending: bool) {
             .await
             .unwrap();
         let mut e = effects(tx, &m, &alice, true, if i == 0 { &alice } else { &bob });
-        let record: Record = serde_json::from_slice(&e.invoke(3, 0).await.unwrap()).unwrap();
+        let outcomes = e.execute_transaction(&m.actions[0]).await.unwrap();
+        let record = repository::load(&mut e.tx, &m, 1, outcomes[0].id)
+            .await
+            .unwrap()
+            .unwrap()
+            .record;
         ids.push(record.id);
         e.tx.commit().await.unwrap();
     }
@@ -335,7 +339,7 @@ async fn contract(db: Database, descending: bool) {
         .await
         .unwrap();
     let mut e = effects(tx, &m, &alice, true, &racing);
-    e.invoke(3, 0).await.unwrap();
+    e.execute_transaction(&m.actions[0]).await.unwrap();
     let (created, disabled) = tokio::join!(e.tx.commit(), db.disable_account(&racing));
     created.unwrap();
     disabled.unwrap();
@@ -344,7 +348,7 @@ async fn contract(db: Database, descending: bool) {
         .await
         .unwrap();
     let mut e = effects(tx, &m, &alice, true, &racing);
-    assert!(e.invoke(3, 0).await.is_err());
+    assert!(e.execute_transaction(&m.actions[0]).await.is_err());
     e.tx.rollback().await.unwrap();
     db.disable_account(&bob).await.unwrap();
     let tx = db
@@ -352,7 +356,7 @@ async fn contract(db: Database, descending: bool) {
         .await
         .unwrap();
     let mut e = effects(tx, &m, &alice, true, &bob);
-    assert!(e.invoke(3, 0).await.is_err());
+    assert!(e.execute_transaction(&m.actions[0]).await.is_err());
     e.tx.rollback().await.unwrap();
     db.delete_account(&bob).await.unwrap();
     let mut tx = db
@@ -477,7 +481,7 @@ async fn filtered_lists(db: Database) {
         initial: None,
         max_bytes: 5,
     });
-    m.actions[0].fields.push("archived".into());
+    crate::test_support::add_input(&mut m.actions[0], &m.resources[0], "archived");
     m.operations[0].filter.push(Condition {
         field: "archived".into(),
         equals: Operand::Literal("false".into()),
@@ -862,7 +866,7 @@ fn preview_declarations() -> Manifest {
         initial: None,
         max_bytes: 3900,
     });
-    m.actions[0].fields.push("extra".into());
+    crate::test_support::add_input(&mut m.actions[0], &m.resources[0], "extra");
     m.operations[0].list.as_mut().unwrap().page_size = 10;
     for id in 4..=6 {
         let mut preview = m.operations[0].clone();
@@ -1011,7 +1015,7 @@ fn preview_parameter_declarations() -> Manifest {
             initial: None,
             max_bytes: 5,
         });
-        m.actions[0].fields.push(name.into());
+        crate::test_support::add_input(&mut m.actions[0], &m.resources[0], name);
     }
     m.routes[0].params.push("flag".into());
     m.routes[0].path = "/previews".into();
@@ -1053,6 +1057,18 @@ fn preview_parameter_declarations() -> Manifest {
 }
 #[test]
 fn host_rejects_incompatible_preview_parameter_domains() {
+    let sync_inputs = |m: &mut Manifest| {
+        for input in &mut m.actions[0].inputs {
+            let field = m.resources[0]
+                .fields
+                .iter()
+                .find(|field| field.name == input.name)
+                .unwrap();
+            input.kind = field.kind.clone();
+            input.optional = field.optional;
+            input.max_bytes = field.max_bytes;
+        }
+    };
     let choice = |keys: &[&str]| FieldKind::Choice {
         variants: keys
             .iter()
@@ -1105,6 +1121,7 @@ fn host_rejects_incompatible_preview_parameter_domains() {
         let mut m = preview_parameter_declarations();
         m.resources[0].fields[4].kind = kind.clone();
         m.resources[0].fields[5].kind = kind;
+        sync_inputs(&mut m);
         manifest::validate(&m).unwrap();
     }
     let mut m = preview_parameter_declarations();
@@ -1117,6 +1134,7 @@ fn host_rejects_incompatible_preview_parameter_domains() {
         "{error}"
     );
     m.resources[0].fields[5].optional = true;
+    sync_inputs(&mut m);
     manifest::validate(&m).unwrap();
     let empty = Fields::from([("flag".into(), String::new())]);
     for route in [1, 3] {
@@ -1133,6 +1151,7 @@ fn host_rejects_incompatible_preview_parameter_domains() {
         );
     }
     m.resources[0].fields[4].optional = false;
+    sync_inputs(&mut m);
     manifest::validate(&m).unwrap();
     m.resources[0].fields[4].optional = true;
     m.resources[0].fields[5].optional = false;
@@ -1141,12 +1160,13 @@ fn host_rejects_incompatible_preview_parameter_domains() {
     field.name = "required_flag".into();
     field.optional = false;
     m.resources[0].fields.push(field);
-    m.actions[0].fields.push("required_flag".into());
+    crate::test_support::add_input(&mut m.actions[0], &m.resources[0], "required_flag");
     m.operations[4].filter.push(Condition {
         field: "required_flag".into(),
         equals: Operand::Param("flag".into()),
     });
     for _ in 0..2 {
+        sync_inputs(&mut m);
         manifest::validate(&m).unwrap();
         assert!(
             crate::routing::resolve(
