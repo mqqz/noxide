@@ -769,6 +769,8 @@ fn items(mut available: Query<CategoryItems>) -> Page {
 ```
 
 Parameters are explicitly declared and required, with at most four per route.
+The index route `/` must remain unparameterized for host-owned login, home
+navigation and recovery links. Put required list parameters on a separate route.
 Every declaration must be used and every query parameter must be declared on
 each route that uses it. Uses must agree on Boolean or Choice kind, including
 identical choice variants. They cannot carry account IDs. `Query::param(name)`
