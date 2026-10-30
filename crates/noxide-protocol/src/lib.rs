@@ -37,6 +37,8 @@ pub enum Container {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RouteRef {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
     pub route: u32,
     pub target: Option<u64>,
 }
@@ -285,6 +287,7 @@ pub struct Condition {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operand {
     Literal(String),
+    Param(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -318,6 +321,8 @@ impl Access {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Route {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<String>,
     pub id: u32,
     pub path: String,
     /// A record route addresses exactly one declared resource.
@@ -394,6 +399,8 @@ pub enum RequestKind {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RequestView {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
     pub version: u32,
     pub kind: RequestKind,
     pub target: Option<u64>,

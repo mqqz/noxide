@@ -747,3 +747,44 @@ Both execution paths bind literal values in SQL and check selection again on
 stored rows. Residual policies retain bounded scans and possible short/empty
 pages with continuation. See the [query design](architecture/queries.md) for the
 planned parameter disclosure rules and index lifecycle.
+
+## Required route parameters
+
+Declare URL parameters on the page and bind them in list filters:
+
+```rust
+#[query(list(Item), allow = public, visible(listed = true),
+        filter(category = param(category)), disclose(category), fields(title))]
+struct CategoryItems;
+
+#[page(path = "/items", params(category), access = public)]
+fn items(mut available: Query<CategoryItems>) -> Page {
+    let category = available.param("category").expect("bound category").to_owned();
+    Page::new("Items", html! { main {
+        h1 { (&category) }
+        @for item in available.fetch() { p { (&item.title) } }
+    } })
+}
+```
+
+Parameters are explicitly declared and required, with at most four per route.
+Every declaration must be used and every query parameter must be declared on
+each route that uses it. Uses must agree on Boolean or Choice kind, including
+identical choice variants. They cannot carry account IDs. `Query::param(name)`
+returns the host's canonical read-only value; `fetch()` still takes no arguments.
+
+Generated helpers accept Boolean or Choice values, for example
+`routes::items(Category::Books)`, and build canonical parameters. Record targets
+retain their existing checks and precede parameters in the helper arguments.
+The host validates both target and exact parameter set, including links in
+Document IR. Next-page URLs retain sorted canonical parameters before `cursor`.
+A cursor for books cannot be used for games or another authenticated account.
+
+The form-urlencoded query string is limited to 1,024 bytes. Missing, unknown,
+duplicate, malformed or noncanonical parameters return the same 404 response as
+an unknown route before database or session lookup. Valid values without matches
+render a normal empty list. Parameter values are never logged by the host. A
+public parameter filter on an unprojected Boolean or Choice field effectively
+reveals that field: callers can try each value. `disclose` approves that inference
+without projecting the field. The [public articles example](../examples/public-articles/src/lib.rs)
+includes a category route with these host checks.

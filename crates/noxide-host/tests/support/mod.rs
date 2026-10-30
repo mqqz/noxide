@@ -59,6 +59,7 @@ pub fn manifest() -> Manifest {
         ],
         routes: vec![
             Route {
+                params: Vec::new(),
                 access: noxide_protocol::Access::Authenticated,
                 id: 1,
                 path: "/".into(),
@@ -67,6 +68,7 @@ pub fn manifest() -> Manifest {
                 forms: vec![1],
             },
             Route {
+                params: Vec::new(),
                 access: noxide_protocol::Access::Authenticated,
                 id: 2,
                 path: "/notes/{note}".into(),

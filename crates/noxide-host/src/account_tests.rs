@@ -49,6 +49,7 @@ fn effects(tx: Transaction, m: &Manifest, id: &str, action: bool, recipient: &st
             roles: vec![],
         }),
         request: RequestView {
+            params: Default::default(),
             version: VERSION,
             kind: if action {
                 RequestKind::Action(1)
@@ -579,188 +580,211 @@ async fn filtered_lists(db: Database) {
         }
         tx.rollback().await.unwrap();
     }
-    for descending in [false, true] {
-        m.operations[0].list.as_mut().unwrap().order = if descending {
-            ListOrder::CreatedDesc
+    for parameterized in [false, true] {
+        m.operations[0].filter[0].equals = if parameterized {
+            Operand::Param("flag".into())
         } else {
-            ListOrder::CreatedAsc
+            Operand::Literal("false".into())
         };
-        for tenant in [false, true] {
-            m.operations[0].policy.any[1] = vec![Predicate::PrincipalIs {
-                field: "recipient".into(),
-            }];
-            if tenant {
-                m.operations[0].policy.any[1].push(Predicate::SameTenant);
-            }
-            m.operations[1].policy = m.operations[0].policy.clone();
-            for (id, single) in [(&bob, false), (&alice, true)] {
-                let mut selected = m.clone();
-                if single {
-                    selected.operations[0].policy.any = vec![vec![Predicate::Owner]];
-                    selected.operations[1].policy = selected.operations[0].policy.clone();
+        m.routes[0].params = if parameterized {
+            vec!["flag".into()]
+        } else {
+            vec![]
+        };
+        for descending in [false, true] {
+            m.operations[0].list.as_mut().unwrap().order = if descending {
+                ListOrder::CreatedDesc
+            } else {
+                ListOrder::CreatedAsc
+            };
+            for tenant in [false, true] {
+                m.operations[0].policy.any[1] = vec![Predicate::PrincipalIs {
+                    field: "recipient".into(),
+                }];
+                if tenant {
+                    m.operations[0].policy.any[1].push(Predicate::SameTenant);
                 }
-                db.reconcile_query_indexes(&selected).await.unwrap();
-                let tx = db
-                    .begin(Instant::now() + Duration::from_secs(10))
-                    .await
-                    .unwrap();
-                let mut tx = tx;
-                for requirement in crate::query_plan::required_indexes(&selected).unwrap() {
-                    let mut predicates = vec!["resource=$1 AND resource=1".to_owned()];
-                    let mut values = vec!["1".to_owned()];
-                    let mut types = vec!["bigint"];
-                    for column in &requirement.columns {
-                        let (expression, value) = match column {
-                            crate::policy::IndexColumn::Owner => ("owner".into(), alice.as_str()),
-                            crate::policy::IndexColumn::Tenant => ("tenant".into(), "team"),
-                            crate::policy::IndexColumn::Field(field) => (
-                                tx.field_expression(field).unwrap(),
-                                if field == "archived" {
-                                    "false"
-                                } else {
-                                    bob.as_str()
-                                },
-                            ),
-                        };
-                        values.push(format!("'{value}'"));
-                        types.push("text");
-                        predicates.push(format!("{expression}=${}", values.len()));
+                m.operations[1].policy = m.operations[0].policy.clone();
+                for (id, single) in [(&bob, false), (&alice, true)] {
+                    let mut selected = m.clone();
+                    if single {
+                        selected.operations[0].policy.any = vec![vec![Predicate::Owner]];
+                        selected.operations[1].policy = selected.operations[0].policy.clone();
                     }
-                    values.push(if descending {
-                        i64::MAX.to_string()
-                    } else {
-                        "0".into()
-                    });
-                    types.push("bigint");
-                    let direction = if descending { "DESC" } else { "ASC" };
-                    let comparison = if descending { "<" } else { ">" };
-                    let sql = format!(
-                        "SELECT id FROM nx_records WHERE {} AND created_seq{comparison}${} ORDER BY nx_records.created_seq {direction} LIMIT 21",
-                        predicates.join(" AND "),
-                        values.len()
-                    );
-                    let plan = match &db {
-                        Database::Sqlite(_) => {
-                            let mut literal = sql.clone();
-                            for (i, value) in values.iter().enumerate().rev() {
-                                literal = literal.replace(&format!("${}", i + 1), value);
-                            }
-                            tx.explain(&literal).await.unwrap().join("\n")
+                    db.reconcile_query_indexes(&selected).await.unwrap();
+                    let tx = db
+                        .begin(Instant::now() + Duration::from_secs(10))
+                        .await
+                        .unwrap();
+                    let mut tx = tx;
+                    for requirement in crate::query_plan::required_indexes(&selected).unwrap() {
+                        let mut predicates = vec!["resource=$1 AND resource=1".to_owned()];
+                        let mut values = vec!["1".to_owned()];
+                        let mut types = vec!["bigint"];
+                        for column in &requirement.columns {
+                            let (expression, value) = match column {
+                                crate::policy::IndexColumn::Owner => {
+                                    ("owner".into(), alice.as_str())
+                                }
+                                crate::policy::IndexColumn::Tenant => ("tenant".into(), "team"),
+                                crate::policy::IndexColumn::Field(field) => (
+                                    tx.field_expression(field).unwrap(),
+                                    if field == "archived" {
+                                        "false"
+                                    } else {
+                                        bob.as_str()
+                                    },
+                                ),
+                            };
+                            values.push(format!("'{value}'"));
+                            types.push("text");
+                            predicates.push(format!("{expression}=${}", values.len()));
                         }
-                        Database::Postgres(_) => {
-                            tx.execute("SET LOCAL plan_cache_mode=force_generic_plan", &[])
-                                .await
-                                .unwrap();
-                            tx.execute(
-                                &format!("PREPARE filtered_plan({}) AS {sql}", types.join(",")),
-                                &[],
-                            )
-                            .await
-                            .unwrap();
-                            let plan = tx
-                                .fetch::<1>(
-                                    &format!("EXPLAIN EXECUTE filtered_plan({})", values.join(",")),
+                        values.push(if descending {
+                            i64::MAX.to_string()
+                        } else {
+                            "0".into()
+                        });
+                        types.push("bigint");
+                        let direction = if descending { "DESC" } else { "ASC" };
+                        let comparison = if descending { "<" } else { ">" };
+                        let sql = format!(
+                            "SELECT id FROM nx_records WHERE {} AND created_seq{comparison}${} ORDER BY nx_records.created_seq {direction} LIMIT 21",
+                            predicates.join(" AND "),
+                            values.len()
+                        );
+                        let plan = match &db {
+                            Database::Sqlite(_) => {
+                                let mut literal = sql.clone();
+                                for (i, value) in values.iter().enumerate().rev() {
+                                    literal = literal.replace(&format!("${}", i + 1), value);
+                                }
+                                tx.explain(&literal).await.unwrap().join("\n")
+                            }
+                            Database::Postgres(_) => {
+                                tx.execute("SET LOCAL plan_cache_mode=force_generic_plan", &[])
+                                    .await
+                                    .unwrap();
+                                tx.execute(
+                                    &format!("PREPARE filtered_plan({}) AS {sql}", types.join(",")),
                                     &[],
                                 )
                                 .await
-                                .unwrap()
-                                .into_iter()
-                                .map(|[line]| line)
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            tx.execute("DEALLOCATE filtered_plan", &[]).await.unwrap();
-                            plan
-                        }
-                    };
-                    assert!(plan.contains(&requirement.name(1)), "{plan}");
-                    assert!(
-                        !plan.contains("Sort") && !plan.contains("TEMP B-TREE"),
-                        "{plan}"
-                    );
-                }
-                let mut e = effects(tx, &selected, id, false, "");
-                let mut ids = Vec::new();
-                loop {
-                    let rows: Vec<Record> =
-                        serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
-                    assert_eq!(rows.len(), (100 - ids.len()).min(20));
-                    for row in rows {
-                        assert_eq!(row.fields["archived"], "false");
+                                .unwrap();
+                                let plan = tx
+                                    .fetch::<1>(
+                                        &format!(
+                                            "EXPLAIN EXECUTE filtered_plan({})",
+                                            values.join(",")
+                                        ),
+                                        &[],
+                                    )
+                                    .await
+                                    .unwrap()
+                                    .into_iter()
+                                    .map(|[line]| line)
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                tx.execute("DEALLOCATE filtered_plan", &[]).await.unwrap();
+                                plan
+                            }
+                        };
+                        assert!(plan.contains(&requirement.name(1)), "{plan}");
                         assert!(
-                            repository::read_resource(
-                                &mut e.tx,
-                                &selected,
-                                &e.principal,
-                                &selected.operations[1],
-                                row.id
-                            )
-                            .await
-                            .unwrap()
-                            .is_some()
+                            !plan.contains("Sort") && !plan.contains("TEMP B-TREE"),
+                            "{plan}"
                         );
-                        ids.push(row.id);
                     }
-                    if e.more.is_none() {
-                        break;
+                    let mut e = effects(tx, &selected, id, false, "");
+                    if parameterized {
+                        e.request.params.insert("flag".into(), "false".into());
                     }
-                    e.cursor = e.more;
+                    let mut ids = Vec::new();
+                    loop {
+                        let rows: Vec<Record> =
+                            serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+                        assert_eq!(rows.len(), (100 - ids.len()).min(20));
+                        for row in rows {
+                            assert_eq!(row.fields["archived"], "false");
+                            assert!(
+                                repository::read_resource(
+                                    &mut e.tx,
+                                    &selected,
+                                    &e.principal,
+                                    &selected.operations[1],
+                                    row.id
+                                )
+                                .await
+                                .unwrap()
+                                .is_some()
+                            );
+                            ids.push(row.id);
+                        }
+                        if e.more.is_none() {
+                            break;
+                        }
+                        e.cursor = e.more;
+                    }
+                    let expected: Vec<_> = if descending {
+                        (1..=100).rev().map(|i| i * 10).collect()
+                    } else {
+                        (1..=100).map(|i| i * 10).collect()
+                    };
+                    assert_eq!(ids, expected);
+                    assert!(
+                        repository::read_resource(
+                            &mut e.tx,
+                            &selected,
+                            &e.principal,
+                            &selected.operations[1],
+                            1
+                        )
+                        .await
+                        .unwrap()
+                        .is_some()
+                    );
+                    assert!(
+                        repository::read_resource(
+                            &mut e.tx,
+                            &selected,
+                            &e.principal,
+                            &selected.operations[1],
+                            1001
+                        )
+                        .await
+                        .unwrap()
+                        .is_none()
+                    );
+                    e.tx.rollback().await.unwrap();
                 }
-                let expected: Vec<_> = if descending {
-                    (1..=100).rev().map(|i| i * 10).collect()
-                } else {
-                    (1..=100).map(|i| i * 10).collect()
-                };
-                assert_eq!(ids, expected);
-                assert!(
-                    repository::read_resource(
-                        &mut e.tx,
-                        &selected,
-                        &e.principal,
-                        &selected.operations[1],
-                        1
-                    )
-                    .await
-                    .unwrap()
-                    .is_some()
-                );
-                assert!(
-                    repository::read_resource(
-                        &mut e.tx,
-                        &selected,
-                        &e.principal,
-                        &selected.operations[1],
-                        1001
-                    )
-                    .await
-                    .unwrap()
-                    .is_none()
-                );
-                e.tx.rollback().await.unwrap();
             }
+            let mut residual = m.clone();
+            residual.operations[0].policy.any = vec![vec![
+                Predicate::Owner,
+                Predicate::PrincipalIs {
+                    field: "recipient".into(),
+                },
+            ]];
+            let tx = db
+                .begin(Instant::now() + Duration::from_secs(10))
+                .await
+                .unwrap();
+            let mut e = effects(tx, &residual, &alice, false, "");
+            if parameterized {
+                e.request.params.insert("flag".into(), "false".into());
+            }
+            let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+            assert!(rows.is_empty());
+            assert!(
+                e.more.is_some(),
+                "residual bound must not report a false end"
+            );
+            e.cursor = e.more;
+            let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+            assert!(rows.is_empty());
+            assert!(e.more.is_none());
+            e.tx.rollback().await.unwrap();
         }
-        let mut residual = m.clone();
-        residual.operations[0].policy.any = vec![vec![
-            Predicate::Owner,
-            Predicate::PrincipalIs {
-                field: "recipient".into(),
-            },
-        ]];
-        let tx = db
-            .begin(Instant::now() + Duration::from_secs(10))
-            .await
-            .unwrap();
-        let mut e = effects(tx, &residual, &alice, false, "");
-        let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
-        assert!(rows.is_empty());
-        assert!(
-            e.more.is_some(),
-            "residual bound must not report a false end"
-        );
-        e.cursor = e.more;
-        let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
-        assert!(rows.is_empty());
-        assert!(e.more.is_none());
-        e.tx.rollback().await.unwrap();
     }
     db.reconcile_query_indexes(&base).await.unwrap();
     let mut tx = db

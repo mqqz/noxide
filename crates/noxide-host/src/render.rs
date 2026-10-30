@@ -456,6 +456,7 @@ pub(crate) fn unavailable(presentation: &crate::Presentation, m: &Manifest) -> R
                 Instruction::Text("This record is no longer available for this action.".into()),
                 Instruction::Link {
                     destination: RouteRef {
+                        params: Default::default(),
                         route: m
                             .routes
                             .iter()
@@ -676,6 +677,7 @@ mod tests {
 
     fn record_route(path: &str) -> Route {
         Route {
+            params: Vec::new(),
             access: noxide_protocol::Access::Authenticated,
             id: 1,
             path: path.into(),
@@ -707,6 +709,7 @@ mod tests {
             resolve(
                 &manifest,
                 &RouteRef {
+                    params: Default::default(),
                     route: 1,
                     target: Some(81)
                 }
@@ -718,6 +721,7 @@ mod tests {
             resolve(
                 &manifest,
                 &RouteRef {
+                    params: Default::default(),
                     route: 1,
                     target: None
                 }
@@ -797,6 +801,7 @@ mod link_tests {
         };
         let begin = Instruction::BeginLink {
             destination: RouteRef {
+                params: Default::default(),
                 route: 1,
                 target: None,
             },

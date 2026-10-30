@@ -95,14 +95,21 @@ pub(crate) fn expand_query(
     let policy = policy_tokens(&declaration.policy, &declaration.resource);
     let vis = &item.vis;
     let output_name = format_ident!("{name}Record");
-    let filters: Vec<_> = declaration.filter.iter().map(|(field, value)| {
+    let filters: Vec<_> = declaration.filter.iter().map(|(field, value)| -> syn::Result<Tokens> {
         let hash = stable_id(&field.to_string());
-        quote!({
+        let operand = if let syn::Expr::Call(call) = value && matches!(call.func.as_ref(), syn::Expr::Path(path) if path.path.is_ident("param")) {
+            if call.args.len() != 1 { return Err(syn::Error::new(value.span(), "param requires one name")); }
+            let syn::Expr::Path(path) = &call.args[0] else { return Err(syn::Error::new(value.span(), "param requires a name")); };
+            let name = path.path.get_ident().ok_or_else(|| syn::Error::new(value.span(), "param requires a name"))?.to_string();
+            quote!(::noxide::__private::Operand::Param(#name.into()))
+        } else {
+            quote!({ let value: &<#resource as ::noxide::FieldSpec<#hash>>::Value = &(#value); ::noxide::__private::Operand::Literal(::noxide::FieldValue::encode(value)) })
+        };
+        Ok(quote!({
             const _: () = assert!(<<#resource as ::noxide::FieldSpec<#hash>>::Value as ::noxide::FieldValue>::FILTERABLE, "filter requires boolean or choice");
-            let value: &<#resource as ::noxide::FieldSpec<#hash>>::Value = &(#value);
-            ::noxide::__private::Condition { field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into(), equals: ::noxide::__private::Operand::Literal(::noxide::FieldValue::encode(value)) }
-        })
-    }).collect();
+            ::noxide::__private::Condition { field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into(), equals: #operand }
+        }))
+    }).collect::<syn::Result<_>>()?;
     let disclosures: Vec<_> = declaration
         .disclose
         .iter()

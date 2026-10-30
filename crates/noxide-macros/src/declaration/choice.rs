@@ -84,6 +84,7 @@ pub(crate) fn expand_choice(input: DeriveInput) -> syn::Result<Tokens> {
                 fragment.text(match self { #(#rendering),* });
             }
         }
+        impl ::noxide::ParamValue for #name {}
         impl ::noxide::FieldValue for #name {
             const FILTERABLE: bool = true;
             const OPTIONAL: bool = false;

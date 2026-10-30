@@ -103,6 +103,7 @@ pub fn match_path(route: &Route, path: &str) -> Option<Option<u64>> {
 pub fn resolve(m: &Manifest, reference: &RouteRef) -> Result<String> {
     let route = crate::manifest::route(m, reference.route)?;
     let segments = path_segments(route)?;
+    crate::manifest::validate_params(m, route, &reference.params)?;
     ensure!(
         route.resource.is_some() == reference.target.is_some(),
         "invalid route target"
@@ -125,6 +126,12 @@ pub fn resolve(m: &Manifest, reference: &RouteRef) -> Result<String> {
     }
     if path.is_empty() {
         path.push('/');
+    }
+    if !reference.params.is_empty() {
+        path.push('?');
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query.extend_pairs(&reference.params);
+        path.push_str(&query.finish());
     }
     Ok(path)
 }

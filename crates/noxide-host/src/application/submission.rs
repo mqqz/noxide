@@ -144,7 +144,8 @@ impl Application {
                 let response = if expected.as_ref() == Some(digest) { self.prepare_response(&mut tx, a, target.as_ref(), outcome, &principal).await.or_else(|_| self.committed_recovery(a, submission, csrf, input))? } else {
                     let mut response = render::render(&ResponseIntent::Page(Document::new("Form already used", vec![
                         Instruction::Text("This form already committed different input. Return home to start a new form.".into()),
-                        Instruction::Link { destination: RouteRef { route: self.manifest.routes.iter().find(|r| r.path == "/").expect("index route").id, target: None }, text: "Return home".into() },
+                        Instruction::Link { destination: RouteRef { params: Default::default(),
+route: self.manifest.routes.iter().find(|r| r.path == "/").expect("index route").id, target: None }, text: "Return home".into() },
                     ])), &RenderContext { presentation: &self.presentation, manifest: Some(&self.manifest), ..RenderContext::empty() })?;
                     response.status = 409; navigation::Prepared::ready(response)
                 };
@@ -243,6 +244,7 @@ impl Application {
                 .collect()
         });
         let request = RequestView {
+            params: Default::default(),
             available_forms: Vec::new(),
             version: VERSION,
             kind: RequestKind::Action(action),

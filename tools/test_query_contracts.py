@@ -31,7 +31,8 @@ def main():
                 f'[package]\nname={json.dumps(package)}\nversion="0.0.0"\nedition="2024"\n'
                 f'[dependencies]\nnoxide={{path={json.dumps(str(ROOT / "crates/noxide"))}}}\n[workspace]\n')
             (project / "src").mkdir()
-            frozen = GOLDEN / "private-inbox.rs" if key == "example-private-inbox" else source
+            snapshot = GOLDEN / (name + ".rs")
+            frozen = snapshot if example and snapshot.exists() else source
             (project / "src/lib.rs").write_bytes(frozen.read_bytes())
             (project / "src/main.rs").write_text(f'fn main() {{ print!("{{}}", {package}::noxide_manifest()); }}\n')
             value = subprocess.check_output(

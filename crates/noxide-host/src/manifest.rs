@@ -42,11 +42,16 @@ fn validate_selection(m: &Manifest, op: &Operation) -> Result<()> {
             matches!(field.kind, FieldKind::Boolean | FieldKind::Choice { .. }),
             "invalid filter kind"
         );
-        let Operand::Literal(value) = &condition.equals;
-        ensure!(
-            field.canonical(value).is_ok_and(|v| v == *value),
-            "noncanonical filter value"
-        );
+        match &condition.equals {
+            Operand::Literal(value) => ensure!(
+                field.canonical(value).is_ok_and(|v| v == *value),
+                "noncanonical filter value"
+            ),
+            Operand::Param(name) => ensure!(
+                identifier(name) && name != "cursor",
+                "invalid filter parameter"
+            ),
+        }
         ensure!(
             op.visibility
                 .as_ref()
@@ -67,6 +72,73 @@ fn validate_selection(m: &Manifest, op: &Operation) -> Result<()> {
         disclosed.len() == op.disclose.len() && disclosed == inferred,
         "invalid filter disclosure"
     );
+    Ok(())
+}
+
+pub(crate) fn parameter_fields<'a>(
+    m: &'a Manifest,
+    route: &Route,
+) -> Result<std::collections::BTreeMap<&'a str, &'a TextField>> {
+    let mut fields = std::collections::BTreeMap::new();
+    for id in &route.operations {
+        let op = operation(m, *id)?;
+        let resource = resource(m, op.resource)?;
+        for condition in &op.filter {
+            if let Operand::Param(name) = &condition.equals {
+                ensure!(route.params.contains(name), "undeclared route parameter");
+                let field = resource
+                    .fields
+                    .iter()
+                    .find(|f| f.name == condition.field)
+                    .ok_or_else(|| anyhow::anyhow!("unknown filter field"))?;
+                if let Some(previous) = fields.insert(name.as_str(), field) {
+                    ensure!(previous.kind == field.kind, "inconsistent parameter kind");
+                }
+            }
+        }
+    }
+    Ok(fields)
+}
+fn validate_route_params(m: &Manifest, route: &Route) -> Result<()> {
+    let names: BTreeSet<_> = route.params.iter().collect();
+    ensure!(
+        route.params.len() <= 4
+            && names.len() == route.params.len()
+            && names
+                .iter()
+                .all(|name| identifier(name) && name.as_str() != "cursor"),
+        "invalid route parameters"
+    );
+    let fields = parameter_fields(m, route)?;
+    ensure!(fields.len() == route.params.len(), "unused route parameter");
+    Ok(())
+}
+pub(crate) fn validate_params(m: &Manifest, route: &Route, values: &Fields) -> Result<()> {
+    ensure!(
+        values.len() == route.params.len()
+            && route.params.iter().all(|name| values.contains_key(name)),
+        "invalid route parameters"
+    );
+    for id in &route.operations {
+        let op = operation(m, *id)?;
+        let resource = resource(m, op.resource)?;
+        for condition in &op.filter {
+            if let Operand::Param(name) = &condition.equals {
+                let field = resource
+                    .fields
+                    .iter()
+                    .find(|f| f.name == condition.field)
+                    .ok_or_else(|| anyhow::anyhow!("unknown filter field"))?;
+                let value = values
+                    .get(name)
+                    .ok_or_else(|| anyhow::anyhow!("missing route parameter"))?;
+                ensure!(
+                    field.canonical(value).is_ok_and(|v| v == *value),
+                    "invalid route parameter"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -319,6 +391,7 @@ pub fn validate(m: &Manifest) -> Result<()> {
     let mut paths = BTreeSet::new();
     crate::query_plan::required_indexes(m)?;
     for r in &m.routes {
+        validate_route_params(m, r)?;
         crate::render::validate_path(r)?;
         ensure!(paths.insert(&r.path), "duplicate route path");
         for other in &m.routes {
