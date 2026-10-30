@@ -102,7 +102,8 @@ Admission in `manifest.rs` rejects the manifest unless all of these hold:
 - Each field is assigned at most once per step. A create assigns every writable
   stored field, including its reference. An update assigns a nonempty subset of
   ordinary fields. No step assigns owner, tenant, ID, incarnation, revision,
-  fields with initial values, account fields on update, or a reference field on update.
+  account fields on update, or a reference field on update. Fields with initial
+  values cannot be assigned on create; authorized updates may change them.
 - `Value::Input` names a declared input whose domain fits (see Inputs).
   `Value::Constant` is valid for the field's schema. `Value::SignedTarget` and
   `Value::Created(n)` assign only reference fields of the matching target
