@@ -901,6 +901,7 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
             route: 2,
         };
         let request = RequestView {
+            params: Default::default(),
             version: VERSION,
             kind: RequestKind::Action(2),
             target: Some(42),
@@ -1465,7 +1466,7 @@ async fn custom_presentation_contract(db: Database) {
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::SEE_OTHER
+            StatusCode::NOT_FOUND
         );
     }
     let response = router.clone().oneshot(get("/join", "")).await.unwrap();

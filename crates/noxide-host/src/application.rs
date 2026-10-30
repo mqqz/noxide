@@ -27,28 +27,84 @@ use std::{
 use tokio::time::{Instant, timeout_at};
 
 fn cursor_scope(
-    contract: &str,
-    deployment: &str,
+    identity: (&str, &str),
     route: u32,
     target: Option<u64>,
     parent_incarnation: Option<String>,
     list: Option<&Operation>,
     subject: &str,
+    params: &Fields,
 ) -> serde_json::Result<String> {
-    serde_json::to_string(&(
-        contract,
-        deployment,
-        route,
-        target,
-        parent_incarnation,
-        list,
-        subject,
-    ))
+    let (contract, deployment) = identity;
+    if params.is_empty() {
+        serde_json::to_string(&(
+            contract,
+            deployment,
+            route,
+            target,
+            parent_incarnation,
+            list,
+            subject,
+        ))
+    } else {
+        serde_json::to_string(&(
+            contract,
+            deployment,
+            route,
+            target,
+            parent_incarnation,
+            list,
+            subject,
+            params,
+        ))
+    }
 }
 
 #[cfg(test)]
 mod query_compatibility_tests {
     use super::*;
+
+    #[test]
+    fn cursor_scopes_bind_canonical_parameters_and_account() {
+        let params = Fields::from([("category".into(), "books".into())]);
+        let scope = cursor_scope(
+            ("contract", "deployment"),
+            1,
+            None,
+            None,
+            None,
+            "alice",
+            &params,
+        )
+        .unwrap();
+        let other = Fields::from([("category".into(), "games".into())]);
+        assert_ne!(
+            scope,
+            cursor_scope(
+                ("contract", "deployment"),
+                1,
+                None,
+                None,
+                None,
+                "alice",
+                &other
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            scope,
+            cursor_scope(
+                ("contract", "deployment"),
+                1,
+                None,
+                None,
+                None,
+                "bob",
+                &params
+            )
+            .unwrap()
+        );
+    }
 
     #[test]
     fn cursor_scope_strings_are_unchanged() {
@@ -79,13 +135,13 @@ mod query_compatibility_tests {
                 .find(|r| r.operations.contains(&list.id))
                 .unwrap();
             let scope = cursor_scope(
-                "contract",
-                "deployment",
+                ("contract", "deployment"),
                 route.id,
                 parented.then_some(42),
                 parented.then(|| "parent-incarnation".into()),
                 Some(list),
                 "account-id",
+                &Fields::new(),
             )
             .unwrap();
             assert_eq!(
@@ -835,6 +891,7 @@ impl Application {
                 render::resolve(
                     &self.manifest,
                     &RouteRef {
+                        params: Default::default(),
                         route,
                         target: Some(receipt.id),
                     },
@@ -1258,6 +1315,26 @@ impl Application {
         target: Option<u64>,
         cursor: Option<&str>,
     ) -> std::result::Result<Rendered, RequestError> {
+        self.view_page_parameters(
+            cookie,
+            anonymous_cookie,
+            route,
+            target,
+            cursor,
+            Fields::new(),
+        )
+        .await
+    }
+
+    pub(crate) async fn view_page_parameters(
+        &self,
+        cookie: Option<&str>,
+        anonymous_cookie: Option<&str>,
+        route: u32,
+        target: Option<u64>,
+        cursor: Option<&str>,
+        params: Fields,
+    ) -> std::result::Result<Rendered, RequestError> {
         let _request = self
             .admission_limits
             .requests()
@@ -1273,7 +1350,11 @@ impl Application {
         if cursor.is_some_and(|c| c.len() > 4096) {
             return Err(RequestError::InvalidCursor);
         }
-        let reference = RouteRef { route, target };
+        let reference = RouteRef {
+            params: params.clone(),
+            route,
+            target,
+        };
         render::resolve(&self.manifest, &reference).map_err(|_| RequestError::InvalidRequest)?;
         let deadline = Instant::now() + self.runtime.limits().wall_time;
         timeout_at(deadline, async {
@@ -1306,7 +1387,7 @@ impl Application {
                 } else {None}
             } else {None};
             let subject=principal.user().map(|u|u.id.as_str()).unwrap_or("");
-            let scope=cursor_scope(&self.contract,&self.deployment,route,target,parent_incarnation,list,subject).map_err(|_|RequestError::Rejected)?;
+            let scope=cursor_scope((&self.contract,&self.deployment),route,target,parent_incarnation,list,subject,&params).map_err(|_|RequestError::Rejected)?;
             // A fixed-size digest binds every approved setting without exposing it in URLs.
             let scope=URL_SAFE_NO_PAD.encode(Sha256::digest(scope.as_bytes()));
             let cursor = cursor.map(|encoded| {
@@ -1320,7 +1401,8 @@ impl Application {
             } else { (None,None) };
             let forms = self.forms(&mut tx, route, target, session.as_ref(), anonymous.as_ref(), &principal, now).await.map_err(|_| RequestError::Rejected)?;
             let request = RequestView {
-                available_forms: forms
+                params: params.clone(),
+available_forms: forms
                     .iter()
                     .filter_map(|(id, form)| form.as_ref().map(|_| *id))
                     .collect(),
@@ -1370,7 +1452,8 @@ impl Application {
             }
             let next_page = effects.more.map(|after| {
                 let (_,encoded)=self.keys.issue(TokenKind::Cursor {scope:scope.clone(),after},"",now,900).map_err(|_|RequestError::Rejected)?;
-                Ok(format!("{}?cursor={encoded}",crate::routing::resolve(&self.manifest,&reference).expect("validated route")))
+                let path = crate::routing::resolve(&self.manifest,&reference).expect("validated route");
+                Ok(format!("{path}{}cursor={encoded}", if params.is_empty() { "?" } else { "&" }))
             }).transpose()?;
             let mut rendered = render::render(
                 &response,

@@ -1,8 +1,8 @@
 # Declarative queries
 
 This is the implementation plan for a small approved query vocabulary, starting
-at main `9917660`. Increments 0–4 record compatibility, compile list plans, add descending order,
-literal equality selection and operator-reconciled indexes; later
+at main `9917660`. Increments 0–5 record compatibility, compile list plans, add descending order,
+equality selection, operator-reconciled indexes and required route parameters; later
 increments below are planned behavior until their implementation and validation land.
 
 Any approved query has a statically known shape, bounded execution, independently

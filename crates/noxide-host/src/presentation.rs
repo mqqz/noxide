@@ -146,6 +146,7 @@ impl Presentation {
                         "invalid action path segment"
                     );
                     let action = Route {
+                        params: Vec::new(),
                         path: format!("{path}/{{action}}"),
                         resource: Some(1),
                         ..route.clone()
@@ -320,6 +321,7 @@ mod registration_endpoint_tests {
         }
         let mut m = manifest;
         m.routes.push(noxide_protocol::Route {
+            params: Vec::new(),
             id: 3,
             path: "/register".into(),
             resource: None,

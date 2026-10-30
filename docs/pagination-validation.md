@@ -134,3 +134,19 @@ The broad PostgreSQL suite exhausted the disposable cluster's default predicate
 lock capacity. The successful rerun uses 512 connections,
 `max_pred_locks_per_transaction=512`, and `max_locks_per_transaction=256`.
 These are local test-cluster settings, not production sizing recommendations.
+
+## Host-bound parameter validation
+
+Increment 5 runs the filtered owner/account cases with both literal and parameter
+operands, in both orders on SQLite and PostgreSQL. Forged route declarations and
+links cover required names, duplicate/reserved/unused names, kind disagreements,
+missing disclosure and target validation. A router test uses a signed session and
+an unusable database path: invalid parameter inputs still return the unknown-route
+404 before session/database lookup. Existing session admission remains enforced
+for valid requests. Empty parameter maps preserve all original scope goldens;
+nonempty scopes bind canonical values and account identity.
+
+The category example was built and exercised through real HTTP for canonical
+links, pagination, cross-value cursor rejection, and matching 404 responses for
+invalid inputs. The full workspace suite with PostgreSQL, instrumented SQLite
+suite, compatibility producers and SDK compile cases passed on 2026-10-30.

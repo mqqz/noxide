@@ -84,6 +84,7 @@ fn public_query_decodes_only_projected_fields() {
     assert_eq!(optional::definition().access, Access::PublicOptional);
     assert_eq!(private::definition().access, Access::Authenticated);
     let request = noxide::RequestView {
+        params: Default::default(),
         version: noxide::__private::VERSION,
         kind: noxide::RequestKind::Route(index::id()),
         target: None,

@@ -43,6 +43,7 @@ fn manifest() -> Manifest {
             list: None,
         }],
         routes: vec![Route {
+            params: Vec::new(),
             id: 1,
             path: "/".into(),
             resource: None,

@@ -215,6 +215,7 @@ impl Application {
             Ok(Some(render::resolve(
                 &self.manifest,
                 &RouteRef {
+                    params: Default::default(),
                     route: destination.route,
                     target: Some(destination.id),
                 },

@@ -77,6 +77,7 @@ pub(crate) fn declarations() -> Manifest {
     m.routes[0].access = Access::Public;
     m.routes[1].access = Access::Public;
     m.routes.push(Route {
+        params: Vec::new(),
         id: 3,
         path: "/threads/{thread}".into(),
         resource: Some(2),
@@ -126,6 +127,7 @@ async fn effects(db: &Database, m: &Manifest, route: u32, target: u64) -> Effect
         plans: crate::query_plan::compile_all(m).unwrap(),
         principal: Principal::Anonymous,
         request: RequestView {
+            params: Default::default(),
             version: VERSION,
             kind: RequestKind::Route(route),
             target: Some(target),

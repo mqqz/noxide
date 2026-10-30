@@ -20,18 +20,23 @@ impl<R> FromRequest for Id<R> {
     }
 }
 pub struct Query<Q> {
+    params: std::collections::BTreeMap<String, String>,
     context: Context,
     marker: PhantomData<Q>,
 }
 impl<Q: QueryType> FromRequest for Query<Q> {
-    fn from_request(_: &RequestView) -> Self {
+    fn from_request(request: &RequestView) -> Self {
         Self {
+            params: request.params.clone(),
             context: Context { _private: () },
             marker: PhantomData,
         }
     }
 }
 impl<Q: QueryType> Query<Q> {
+    pub fn param(&self, name: &str) -> Option<&str> {
+        self.params.get(name).map(String::as_str)
+    }
     pub fn fetch(&mut self) -> Vec<Q::Output>
     where
         Q: ListQuery,

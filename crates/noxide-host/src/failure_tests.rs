@@ -185,6 +185,7 @@ async fn stored_bounds(db: &Database) {
             roles: vec![],
         }),
         request: RequestView {
+            params: Default::default(),
             available_forms: Vec::new(),
             version: VERSION,
             kind: RequestKind::Route(1),
@@ -754,6 +755,7 @@ async fn record_mutation_failures(db: Database) {
                     resource: 1,
                     id: 42,
                     destination: RouteRef {
+                        params: Default::default(),
                         route: 2,
                         target: Some(42),
                     },
@@ -767,6 +769,7 @@ async fn record_mutation_failures(db: Database) {
                     resource: 1,
                     id: 42,
                     destination: RouteRef {
+                        params: Default::default(),
                         route: 1,
                         target: None,
                     },

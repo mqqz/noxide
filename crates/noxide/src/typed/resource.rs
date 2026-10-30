@@ -180,3 +180,7 @@ impl FieldValue for AccountId {
         value.parse().expect("host account identity")
     }
 }
+
+pub trait ParamValue: FieldValue {}
+impl ParamValue for bool {}
+impl<T: ParamValue> ParamValue for Option<T> {}

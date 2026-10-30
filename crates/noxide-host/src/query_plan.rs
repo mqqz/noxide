@@ -80,10 +80,11 @@ impl ListPlan {
         &self,
         tx: &crate::database::Transaction,
         params: &mut Vec<crate::database::Param>,
+        values: &noxide_protocol::Fields,
     ) -> Result<String> {
         let mut sql = String::new();
         for condition in &self.selection {
-            let noxide_protocol::Operand::Literal(value) = &condition.equals;
+            let value = operand_value(&condition.equals, values)?;
             params.push(value.as_str().into());
             sql.push_str(&format!(
                 " AND {}=${}",
@@ -93,9 +94,13 @@ impl ListPlan {
         }
         Ok(sql)
     }
-    pub(crate) fn check_selection(&self, fields: &noxide_protocol::Fields) -> Result<()> {
+    pub(crate) fn check_selection(
+        &self,
+        fields: &noxide_protocol::Fields,
+        values: &noxide_protocol::Fields,
+    ) -> Result<()> {
         for condition in &self.selection {
-            let noxide_protocol::Operand::Literal(value) = &condition.equals;
+            let value = operand_value(&condition.equals, values)?;
             ensure!(
                 fields.get(&condition.field) == Some(value),
                 "selection invariant"
@@ -198,6 +203,18 @@ pub(crate) fn required_indexes(m: &Manifest) -> Result<Vec<IndexRequirement>> {
         .collect())
 }
 
+fn operand_value<'a>(
+    operand: &'a noxide_protocol::Operand,
+    values: &'a noxide_protocol::Fields,
+) -> Result<&'a String> {
+    match operand {
+        noxide_protocol::Operand::Literal(value) => Ok(value),
+        noxide_protocol::Operand::Param(name) => values
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("missing query parameter")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -228,6 +245,7 @@ mod tests {
                 })
                 .collect();
             m.routes.push(Route {
+                params: Vec::new(),
                 id: op.id,
                 path: format!("/shape{mask}"),
                 resource: None,

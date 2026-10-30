@@ -238,7 +238,7 @@ impl Effects {
                 params.len()
             );
         }
-        let selection = plan.selection_sql(&self.tx, &mut params)?;
+        let selection = plan.selection_sql(&self.tx, &mut params, &self.request.params)?;
         let mut records = Vec::new();
         let mut last = self.cursor;
         self.more = None;
@@ -256,7 +256,7 @@ impl Effects {
             let rows = self.tx.fetch::<5>(&sql, &page_params).await?;
             let count = rows.len();
             for [seq, id, owner, tenant, fields] in rows {
-                plan.check_selection(&serde_json::from_str(&fields)?)?;
+                plan.check_selection(&serde_json::from_str(&fields)?, &self.request.params)?;
                 ensure!(
                     allowed(
                         &op.policy,
@@ -313,7 +313,7 @@ impl Effects {
             let clause =
                 crate::policy::sql(&self.tx, &scan_policy, &self.principal, &mut scan_params)
                     .join(" OR ");
-            let selection = plan.selection_sql(&self.tx, &mut scan_params)?;
+            let selection = plan.selection_sql(&self.tx, &mut scan_params, &self.request.params)?;
             let mut parent_clause = String::new();
             if let Some(parent) = &plan.parent {
                 let target = self
@@ -394,7 +394,7 @@ impl Effects {
                 last = Some(seq);
                 continue;
             }
-            plan.check_selection(&stored.record.fields)?;
+            plan.check_selection(&stored.record.fields, &self.request.params)?;
             let mut record = stored.record;
             record.fields = self.visible_fields(op, record.fields)?;
             if records.len() == size || !append_prefix(&mut records, record)? {
@@ -598,6 +598,7 @@ impl Effects {
                     resource: op.resource,
                     id,
                     destination: RouteRef {
+                        params: Default::default(),
                         route: manifest::action(&self.manifest, action)?.redirect.route(),
                         target: Some(id),
                     },
@@ -684,6 +685,7 @@ impl Effects {
                         resource: op.resource,
                         id: grant.id,
                         destination: RouteRef {
+                            params: Default::default(),
                             route: a.redirect.route(),
                             target: Some(grant.id),
                         },
@@ -706,6 +708,7 @@ impl Effects {
                         resource: op.resource,
                         id: grant.id,
                         destination: RouteRef {
+                            params: Default::default(),
                             route: a.redirect.route(),
                             target: None,
                         },

@@ -79,6 +79,7 @@ fn declarations() -> Manifest {
         });
     }
     m.routes.push(Route {
+        params: Vec::new(),
         id: 3,
         path: "/private".into(),
         resource: None,
@@ -268,6 +269,7 @@ fn effects(
         plans: crate::query_plan::compile_all(m).unwrap(),
         principal,
         request: RequestView {
+            params: Default::default(),
             version: VERSION,
             kind: RequestKind::Route(route),
             target,
@@ -541,6 +543,7 @@ async fn public_request_flows(db: Database) {
     let mut m = declarations();
     m.routes[0].access = Access::PublicOptional;
     m.routes.push(Route {
+        params: Vec::new(),
         id: 4,
         path: "/public".into(),
         resource: None,
