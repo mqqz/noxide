@@ -665,6 +665,7 @@ async fn postgres_relationships_pagination_forms_and_migrations() {
     for case in [
         "redirect",
         "prefix",
+        "prefix_desc",
         "parents",
         "forms",
         "integrity",
@@ -687,7 +688,8 @@ async fn postgres_relationships_pagination_forms_and_migrations() {
         case_url.set_path(&format!("/{name}"));
         let db = Database::postgres(case_url.as_str()).unwrap();
         match case {
-            "prefix" => chronological_prefix_case(db).await,
+            "prefix" => chronological_prefix_case(db, false).await,
+            "prefix_desc" => chronological_prefix_case(db, true).await,
             "redirect" => redirect_case(db).await,
             "parents" => parents_case(db, false).await,
             "forms" => forms_case(db, false).await,
@@ -829,89 +831,95 @@ async fn index_scope_case(db: Database, sqlite: bool) {
             .await
             .unwrap();
     }
-    for (filter, index) in [
-        (
-            format!("resource={storage} AND owner='alice'"),
-            "nx_records_owner".to_owned(),
-        ),
-        (
-            format!("resource={storage} AND tenant='team'"),
-            "nx_records_tenant".to_owned(),
-        ),
-        (
-            format!("resource={storage} AND {expression}='10' AND owner='alice'"),
-            format!("nx_parent_{storage}_owner"),
-        ),
-        (
-            format!("resource={storage} AND {expression}='10' AND tenant='team'"),
-            format!("nx_parent_{storage}_tenant"),
-        ),
-    ] {
-        let query = format!(
-            "SELECT id FROM nx_records WHERE {filter} AND created_seq>0 ORDER BY nx_records.created_seq LIMIT 3"
-        );
-        let plan = e.tx.explain(&query).await.unwrap();
-        // PostgreSQL may prefer the equally ordered global owner/tenant
-        // index on tiny fixtures. Require an ordered indexed seek, while
-        // allowing that legitimate cost-based choice.
-        let alternative = if index.ends_with("_owner") {
-            "nx_records_owner"
-        } else {
-            "nx_records_tenant"
-        };
-        assert!(
-            plan.iter()
-                .any(|line| line.contains(&index) || line.contains(alternative)),
-            "{index}: {plan:?}"
-        );
-        assert!(
-            !plan
-                .iter()
-                .any(|line| line.contains("Sort") || line.contains("TEMP B-TREE")),
-            "{plan:?}"
-        );
-    }
-    if !sqlite {
-        // Generic prepared plans retain an ordered seek. Cost estimates on
-        // tiny fixtures may prefer the global creation index.
-        let storage = e.tx.storage_resource(&renamed, 1).await.unwrap();
-        let expression = e.tx.field_expression("parent_thread").unwrap();
-        e.tx.execute("SET LOCAL plan_cache_mode=force_generic_plan", &[])
-            .await
-            .unwrap();
-        e.tx.execute("SET LOCAL enable_seqscan=off", &[])
-            .await
-            .unwrap();
-        e.tx.execute(&format!("PREPARE parent_index_scope(bigint,text,bigint) AS SELECT id FROM nx_records WHERE resource=$1 AND resource={storage} AND {expression}=$2 AND created_seq>$3 ORDER BY nx_records.created_seq ASC LIMIT 3"), &[]).await.unwrap();
-        let plan =
-            e.tx.fetch::<1>(
-                &format!("EXPLAIN EXECUTE parent_index_scope({storage},'10',0)"),
-                &[],
-            )
-            .await
-            .unwrap();
-        assert!(
-            plan.iter()
-                .any(|line| line[0].contains(&format!("nx_parent_{storage}"))
-                    || line[0].contains("nx_records_created")),
-            "{plan:?}"
-        );
-        assert!(
-            !plan.iter().any(|line| line[0].contains("Sort")),
-            "{plan:?}"
-        );
-        e.tx.execute("DEALLOCATE parent_index_scope", &[])
-            .await
-            .unwrap();
+    for direction in ["ASC", "DESC"] {
+        for (filter, index) in [
+            (
+                format!("resource={storage} AND owner='alice'"),
+                "nx_records_owner".to_owned(),
+            ),
+            (
+                format!("resource={storage} AND tenant='team'"),
+                "nx_records_tenant".to_owned(),
+            ),
+            (
+                format!("resource={storage} AND {expression}='10' AND owner='alice'"),
+                format!("nx_parent_{storage}_owner"),
+            ),
+            (
+                format!("resource={storage} AND {expression}='10' AND tenant='team'"),
+                format!("nx_parent_{storage}_tenant"),
+            ),
+        ] {
+            let query = format!(
+                "SELECT id FROM nx_records WHERE {filter} AND created_seq>0 ORDER BY nx_records.created_seq {direction} LIMIT 3"
+            );
+            let plan = e.tx.explain(&query).await.unwrap();
+            // PostgreSQL may prefer the equally ordered global owner/tenant
+            // index on tiny fixtures. Require an ordered indexed seek, while
+            // allowing that legitimate cost-based choice.
+            let alternative = if index.ends_with("_owner") {
+                "nx_records_owner"
+            } else {
+                "nx_records_tenant"
+            };
+            assert!(
+                plan.iter()
+                    .any(|line| line.contains(&index) || line.contains(alternative)),
+                "{index}: {plan:?}"
+            );
+            assert!(
+                !plan
+                    .iter()
+                    .any(|line| line.contains("Sort") || line.contains("TEMP B-TREE")),
+                "{plan:?}"
+            );
+        }
+        if !sqlite {
+            // Generic prepared plans retain an ordered seek. Cost estimates on
+            // tiny fixtures may prefer the global creation index.
+            let storage = e.tx.storage_resource(&renamed, 1).await.unwrap();
+            let expression = e.tx.field_expression("parent_thread").unwrap();
+            e.tx.execute("SET LOCAL plan_cache_mode=force_generic_plan", &[])
+                .await
+                .unwrap();
+            e.tx.execute("SET LOCAL enable_seqscan=off", &[])
+                .await
+                .unwrap();
+            e.tx.execute(&format!("PREPARE parent_index_scope(bigint,text,bigint) AS SELECT id FROM nx_records WHERE resource=$1 AND resource={storage} AND {expression}=$2 AND created_seq>$3 ORDER BY nx_records.created_seq {direction} LIMIT 3"), &[]).await.unwrap();
+            let plan =
+                e.tx.fetch::<1>(
+                    &format!("EXPLAIN EXECUTE parent_index_scope({storage},'10',0)"),
+                    &[],
+                )
+                .await
+                .unwrap();
+            assert!(
+                plan.iter()
+                    .any(|line| line[0].contains(&format!("nx_parent_{storage}"))
+                        || line[0].contains("nx_records_created")),
+                "{plan:?}"
+            );
+            assert!(
+                !plan.iter().any(|line| line[0].contains("Sort")),
+                "{plan:?}"
+            );
+            e.tx.execute("DEALLOCATE parent_index_scope", &[])
+                .await
+                .unwrap();
+        }
     }
     e.tx.rollback().await.unwrap();
 }
 
-async fn chronological_prefix_case(db: Database) {
+async fn chronological_prefix_case(db: Database, descending: bool) {
     db.initialize().await.unwrap();
     let mut m = declarations();
     m.operations[0].list = Some(ListSettings {
-        order: ListOrder::CreatedAsc,
+        order: if descending {
+            ListOrder::CreatedDesc
+        } else {
+            ListOrder::CreatedAsc
+        },
         page_size: 20,
     });
     m.resources[0].fields.push(TextField {
@@ -959,11 +967,25 @@ async fn chronological_prefix_case(db: Database) {
     let bytes = e.invoke(1, 0).await.unwrap();
     assert!(bytes.len() <= MAX_RESULT_BYTES);
     let rows: Vec<Record> = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [2, 4, 6]);
+    assert_eq!(
+        rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        if descending {
+            vec![12, 10, 8]
+        } else {
+            vec![2, 4, 6]
+        }
+    );
     e.cursor = e.more.take();
     assert!(e.cursor.is_some());
     let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
-    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [8, 10, 12]);
+    assert_eq!(
+        rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        if descending {
+            vec![6, 4, 2]
+        } else {
+            vec![8, 10, 12]
+        }
+    );
     assert!(e.more.is_none());
     e.tx.rollback().await.unwrap();
     // Visibility changes behind the cursor do not turn live continuation into a snapshot.
@@ -980,7 +1002,14 @@ async fn chronological_prefix_case(db: Database) {
     tx.commit().await.unwrap();
     let mut e = effects(&db, &m, 3, 10).await;
     let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
-    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [4, 6, 8]);
+    assert_eq!(
+        rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        if descending {
+            vec![12, 10, 8]
+        } else {
+            vec![4, 6, 8]
+        }
+    );
     let after = e.more;
     e.tx.rollback().await.unwrap();
     let mut tx = db
@@ -1005,13 +1034,26 @@ async fn chronological_prefix_case(db: Database) {
     let mut e = effects(&db, &m, 3, 10).await;
     e.cursor = after;
     let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
-    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [10, 12, 99]);
+    assert_eq!(
+        rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        if descending {
+            vec![6, 4, 2]
+        } else {
+            vec![10, 12, 99]
+        }
+    );
     e.tx.rollback().await.unwrap();
 }
 #[tokio::test]
 async fn sqlite_chronological_byte_prefix_and_late_visibility() {
     let tmp = tempfile::tempdir().unwrap();
-    chronological_prefix_case(Database::sqlite(tmp.path().join("prefix.db"))).await;
+    chronological_prefix_case(Database::sqlite(tmp.path().join("prefix.db")), false).await;
+}
+
+#[tokio::test]
+async fn sqlite_descending_byte_prefix_and_live_insertion() {
+    let tmp = tempfile::tempdir().unwrap();
+    chronological_prefix_case(Database::sqlite(tmp.path().join("descending.db")), true).await;
 }
 
 #[tokio::test]

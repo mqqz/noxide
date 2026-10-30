@@ -208,8 +208,10 @@ impl Effects {
         &mut self,
         op: &Operation,
         storage_resource: i64,
-        size: usize,
+        plan: &crate::query_plan::ListPlan,
     ) -> Result<Vec<u8>> {
+        let size = plan.limit as usize;
+        let direction = plan.direction();
         let mut params = vec![Param::Number(storage_resource)];
         let mut clauses = crate::policy::sql(&self.tx, &op.policy, &self.principal, &mut params);
         if manifest::is_public(op) {
@@ -236,22 +238,21 @@ impl Effects {
                 params.len()
             );
         }
-        params.push(Param::Number(self.cursor.unwrap_or(0) as i64));
         let mut records = Vec::new();
-        let mut last = self.cursor.unwrap_or(0);
+        let mut last = self.cursor;
         self.more = None;
         // At most three bounded stored rows per database transfer. The
         // approved page size bounds both iterations and total row work.
         'page: while records.len() < size {
             let batch = (size - records.len()).min(3);
-            *params.last_mut().expect("cursor") = Param::Number(last as i64);
+            let mut page_params = params.clone();
+            let keyset = plan.keyset(last, &mut page_params);
             let sql = format!(
-                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND ({}){parent_clause} AND created_seq>${} ORDER BY nx_records.created_seq ASC LIMIT {batch}",
+                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND ({}){parent_clause}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT {batch}",
                 self.tx.bounded_text("fields", 20_000),
-                clauses.join(" OR "),
-                params.len()
+                clauses.join(" OR ")
             );
-            let rows = self.tx.fetch::<5>(&sql, &params).await?;
+            let rows = self.tx.fetch::<5>(&sql, &page_params).await?;
             let count = rows.len();
             for [seq, id, owner, tenant, fields] in rows {
                 ensure!(
@@ -272,20 +273,21 @@ impl Effects {
                     fields: self.visible_fields(op, serde_json::from_str(&fields)?)?,
                 };
                 if !append_prefix(&mut records, record)? {
-                    self.more = Some(last);
+                    self.more = last;
                     break 'page;
                 }
-                last = seq.parse()?;
+                last = Some(seq.parse()?);
             }
             if count < batch {
                 break;
             }
         }
         if self.more.is_none() && records.len() == size {
-            *params.last_mut().expect("cursor") = Param::Number(last as i64);
-            let next=self.tx.fetch::<1>(&format!("SELECT CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND ({}){parent_clause} AND created_seq>${} ORDER BY nx_records.created_seq ASC LIMIT 1",clauses.join(" OR "),params.len()),&params).await?;
+            let mut page_params = params.clone();
+            let keyset = plan.keyset(last, &mut page_params);
+            let next=self.tx.fetch::<1>(&format!("SELECT CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND ({}){parent_clause}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT 1",clauses.join(" OR ")),&page_params).await?;
             if !next.is_empty() {
-                self.more = Some(last);
+                self.more = last;
             }
         }
         Ok(serde_json::to_vec(&records)?)
@@ -294,11 +296,13 @@ impl Effects {
         &mut self,
         op: &Operation,
         storage_resource: i64,
-        size: usize,
+        plan: &crate::query_plan::ListPlan,
         scans: &[crate::policy::ScanRule],
     ) -> Result<Vec<u8>> {
+        let size = plan.limit as usize;
+        let direction = plan.direction();
         let mut candidates = std::collections::BTreeMap::new();
-        let mut boundary = u64::MAX;
+        let mut boundary = if plan.descending() { 0 } else { u64::MAX };
         let mut bounded_more = false;
         for scan in scans {
             let exact = scan.exact;
@@ -307,19 +311,23 @@ impl Effects {
             let clause =
                 crate::policy::sql(&self.tx, &scan_policy, &self.principal, &mut scan_params)
                     .join(" OR ");
-            scan_params.push(Param::Number(self.cursor.unwrap_or(0) as i64));
+            let keyset = plan.keyset(self.cursor, &mut scan_params);
             let limit = if exact {
                 size + 1
             } else {
                 (256 / op.policy.any.len()).min(64)
             };
             let sql = format!(
-                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({clause}) AND created_seq>${} ORDER BY nx_records.created_seq ASC LIMIT {limit}",
-                scan_params.len()
+                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({clause}){keyset} ORDER BY nx_records.created_seq {direction} LIMIT {limit}"
             );
             let rows = self.tx.fetch::<2>(&sql, &scan_params).await?;
             if !exact && rows.len() == limit {
-                boundary = boundary.min(rows.last().expect("nonempty")[0].parse()?);
+                let last = rows.last().expect("nonempty")[0].parse()?;
+                boundary = if plan.descending() {
+                    boundary.max(last)
+                } else {
+                    boundary.min(last)
+                };
                 bounded_more = true;
             }
             for [seq, id] in rows {
@@ -327,10 +335,19 @@ impl Effects {
             }
         }
         let mut records = Vec::new();
-        let mut last = self.cursor.unwrap_or(0);
+        let mut last = self.cursor;
         self.more = None;
-        for (seq, id) in candidates {
-            if seq > boundary {
+        let ordered: Box<dyn Iterator<Item = (u64, u64)> + Send> = if plan.descending() {
+            Box::new(candidates.into_iter().rev())
+        } else {
+            Box::new(candidates.into_iter())
+        };
+        for (seq, id) in ordered {
+            if if plan.descending() {
+                seq < boundary
+            } else {
+                seq > boundary
+            } {
                 break;
             }
             let stored = load(&mut self.tx, &self.manifest, op.resource, id)
@@ -345,7 +362,7 @@ impl Effects {
                     fields: &stored.record.fields,
                 },
             ) {
-                last = seq;
+                last = Some(seq);
                 continue;
             }
             if let Some(field) =
@@ -357,14 +374,14 @@ impl Effects {
                     .and_then(|v| v.parse::<u64>().ok())
                     != self.request.target
             {
-                last = seq;
+                last = Some(seq);
                 continue;
             }
             if records.len() == size || !append_prefix(&mut records, stored.record)? {
-                self.more = Some(last);
+                self.more = last;
                 break;
             }
-            last = seq;
+            last = Some(seq);
         }
         if self.more.is_none() && bounded_more {
             self.more = Some(boundary);
@@ -693,9 +710,6 @@ impl Effects {
                     plan.operation == op.id && plan.selection.is_empty(),
                     "invalid list plan"
                 );
-                match plan.order {
-                    ListOrder::CreatedAsc => {}
-                }
                 if let Some(parent) = manifest::parent_resource(&self.manifest, op.resource)? {
                     let id = self
                         .request
@@ -718,12 +732,10 @@ impl Effects {
                 }
                 match &plan.strategy {
                     crate::policy::ListStrategy::Single => {
-                        self.list_single(&op, storage_resource, plan.limit as usize)
-                            .await?
+                        self.list_single(&op, storage_resource, &plan).await?
                     }
                     crate::policy::ListStrategy::Merge(scans) => {
-                        self.list_merge(&op, storage_resource, plan.limit as usize, scans)
-                            .await?
+                        self.list_merge(&op, storage_resource, &plan, scans).await?
                     }
                 }
             }

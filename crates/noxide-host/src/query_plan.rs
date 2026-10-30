@@ -41,3 +41,26 @@ pub(crate) fn compile_all(m: &Manifest) -> Result<BTreeMap<u32, Arc<ListPlan>>> 
         .map(|op| Ok((op.id, Arc::new(compile(m, op)?))))
         .collect()
 }
+
+impl ListPlan {
+    pub(crate) fn descending(&self) -> bool {
+        self.order == ListOrder::CreatedDesc
+    }
+    pub(crate) fn direction(&self) -> &'static str {
+        if self.descending() { "DESC" } else { "ASC" }
+    }
+    pub(crate) fn keyset(
+        &self,
+        after: Option<u64>,
+        params: &mut Vec<crate::database::Param>,
+    ) -> String {
+        after.map_or_else(String::new, |after| {
+            params.push((after as i64).into());
+            format!(
+                " AND created_seq{}${}",
+                if self.descending() { "<" } else { ">" },
+                params.len()
+            )
+        })
+    }
+}

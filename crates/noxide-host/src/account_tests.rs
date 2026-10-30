@@ -77,7 +77,7 @@ fn effects(tx: Transaction, m: &Manifest, id: &str, action: bool, recipient: &st
         more: None,
     }
 }
-async fn contract(db: Database) {
+async fn contract(db: Database, descending: bool) {
     db.initialize().await.unwrap();
     let alice = db
         .create_account("alice", "inbox test password", "team")
@@ -91,7 +91,10 @@ async fn contract(db: Database) {
         .create_account("eve", "inbox test password", "other")
         .await
         .unwrap();
-    let m = declarations();
+    let mut m = declarations();
+    if descending {
+        m.operations[0].list.as_mut().unwrap().order = ListOrder::CreatedDesc;
+    }
     manifest::validate(&m).unwrap();
     let mut tx = db
         .begin(Instant::now() + Duration::from_secs(30))
@@ -183,6 +186,7 @@ async fn contract(db: Database) {
         .await
         .unwrap();
     tx.execute("ANALYZE nx_records", &[]).await.unwrap();
+    let direction = if descending { "DESC" } else { "ASC" };
     for (column, id, index) in [
         ("owner".to_owned(), &alice, "nx_records_owner"),
         (
@@ -192,7 +196,7 @@ async fn contract(db: Database) {
         ),
     ] {
         let sql = format!(
-            "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT) FROM nx_records WHERE resource=1 AND {column}='{id}' AND created_seq>0 ORDER BY nx_records.created_seq ASC LIMIT 21"
+            "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT) FROM nx_records WHERE resource=1 AND {column}='{id}' AND created_seq>0 ORDER BY nx_records.created_seq {direction} LIMIT 21"
         );
         let plan = tx.explain(&sql).await.unwrap().join("\n");
         assert!(plan.contains(index), "{plan}");
@@ -219,6 +223,7 @@ async fn contract(db: Database) {
             .unwrap();
         let mut e = effects(tx, &m, id, false, "");
         let mut seen = std::collections::BTreeSet::new();
+        let mut previous = None;
         loop {
             let records: Vec<Record> =
                 serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
@@ -226,6 +231,15 @@ async fn contract(db: Database) {
                 assert_eq!(records.len(), 20);
             }
             for record in records {
+                if let Some(previous) = previous {
+                    let index = ids.iter().position(|id| *id == record.id).unwrap();
+                    assert!(if descending {
+                        index < previous
+                    } else {
+                        index > previous
+                    });
+                }
+                previous = ids.iter().position(|id| *id == record.id);
                 assert!(seen.insert(record.id));
             }
             if e.more.is_none() {
@@ -264,7 +278,11 @@ async fn contract(db: Database) {
     e.cursor = Some(first);
     let page: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
     assert!(page.is_empty());
-    assert!(e.more.unwrap() > first);
+    assert!(if descending {
+        e.more.unwrap() < first
+    } else {
+        e.more.unwrap() > first
+    });
     e.tx.commit().await.unwrap();
     let mut tx = db
         .begin_read(Instant::now() + Duration::from_secs(5))
@@ -373,11 +391,24 @@ fn admission_rejects_forged_account_authority() {
 #[tokio::test]
 async fn sqlite_account_bindings_and_full_pages() {
     let tmp = tempfile::tempdir().unwrap();
-    contract(Database::sqlite(tmp.path().join("accounts.db"))).await;
+    contract(Database::sqlite(tmp.path().join("accounts.db")), false).await;
 }
 #[tokio::test]
 #[ignore = "requires NOXIDE_TEST_POSTGRES"]
 async fn postgres_account_bindings_and_full_pages() {
+    postgres_case(false).await;
+}
+#[tokio::test]
+async fn sqlite_descending_account_pages() {
+    let tmp = tempfile::tempdir().unwrap();
+    contract(Database::sqlite(tmp.path().join("descending.db")), true).await;
+}
+#[tokio::test]
+#[ignore = "requires NOXIDE_TEST_POSTGRES"]
+async fn postgres_descending_account_pages() {
+    postgres_case(true).await;
+}
+async fn postgres_case(descending: bool) {
     use sqlx::Connection;
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
@@ -394,7 +425,7 @@ async fn postgres_account_bindings_and_full_pages() {
         .unwrap();
     let mut case = url::Url::parse(&url).unwrap();
     case.set_path(&name);
-    contract(Database::postgres(case.as_str()).unwrap()).await;
+    contract(Database::postgres(case.as_str()).unwrap(), descending).await;
     sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
         .execute(&mut admin)
         .await

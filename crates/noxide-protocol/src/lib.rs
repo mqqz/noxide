@@ -275,6 +275,7 @@ pub struct ListSettings {
 #[serde(rename_all = "snake_case")]
 pub enum ListOrder {
     CreatedAsc,
+    CreatedDesc,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -105,10 +105,13 @@ def main():
             retained_target = headers["location"]
         status, _, html = bob.request("GET", "/")
         assert status == 200 and html.count("Open message") == 20
+        assert "Cursor message 19" in html and "Cursor message 0" in html
+        assert "private &lt;script&gt;message&lt;/script&gt;" not in html
         cursor = unescape(re.search(r'href="([^"]*cursor=[^"]+)"', html).group(1))
         assert eve.request("GET", cursor)[0] != 200
         status, _, html = bob.request("GET", cursor)
         assert status == 200 and html.count("Open message") == 1
+        assert "private &lt;script&gt;message&lt;/script&gt;" in html
 
         _, _, html = alice.request("GET", target)
         assert alice.submit(html, actions["delete"])[0] == 303
