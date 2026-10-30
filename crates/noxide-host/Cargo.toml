@@ -31,6 +31,7 @@ url = "2"
 query-metrics = []
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 libsqlite3-sys = "0.30.1"
 tempfile = "3"
 wat = "1"
