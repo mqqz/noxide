@@ -17,6 +17,142 @@ fn declarations() -> Manifest {
     m
 }
 #[test]
+fn host_rejects_parameterized_mutation_redirects() {
+    let boolean = |name: &str| TextField {
+        name: name.into(),
+        label: name.into(),
+        kind: FieldKind::Boolean,
+        optional: false,
+        initial: None,
+        max_bytes: 5,
+    };
+    let reject = |m: &Manifest| {
+        let error = manifest::parse(&serde_json::to_vec(m).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("mutation redirect requires an unparameterized route"),
+            "{error}"
+        );
+    };
+    for kind in [OperationKind::Create, OperationKind::Update] {
+        let mut m = crate::test_support::manifest();
+        m.resources[0].fields.push(boolean("published"));
+        m.actions[0].fields.push("published".into());
+        m.operations[2].kind = kind.clone();
+        m.resources.push(Resource {
+            id: 2,
+            name: "children".into(),
+            fields: vec![
+                TextField {
+                    name: "note".into(),
+                    label: "Note".into(),
+                    max_bytes: 20,
+                    optional: false,
+                    initial: None,
+                    kind: FieldKind::Parent {
+                        resource: "notes".into(),
+                        visible: Visibility {
+                            field: "published".into(),
+                            equals: "true".into(),
+                        },
+                        create_when: Visibility {
+                            field: "published".into(),
+                            equals: "true".into(),
+                        },
+                    },
+                },
+                boolean("flag"),
+            ],
+        });
+        let mut list = m.operations[0].clone();
+        list.id = 4;
+        list.resource = 2;
+        list.filter.push(Condition {
+            field: "flag".into(),
+            equals: Operand::Param("flag".into()),
+        });
+        m.operations.push(list);
+        m.routes[1].params.push("flag".into());
+        m.routes[1].operations.push(4);
+        m.routes.push(Route {
+            id: 3,
+            path: "/plain/{note}".into(),
+            resource: Some(1),
+            operations: vec![2],
+            forms: vec![],
+            access: Access::Authenticated,
+            params: vec![],
+        });
+        if kind == OperationKind::Update {
+            m.routes[0].forms.clear();
+            m.routes[1].forms.push(1);
+        }
+        m.actions[0].redirect = Redirect::Page(3);
+        manifest::validate(&m).unwrap();
+        m.actions[0].redirect = Redirect::Page(2);
+        reject(&m);
+    }
+    let mut m = crate::test_support::manifest();
+    m.resources[0].fields.push(boolean("flag"));
+    m.operations[0].filter.push(Condition {
+        field: "flag".into(),
+        equals: Operand::Param("flag".into()),
+    });
+    m.routes[0].params.push("flag".into());
+    m.routes[0].forms.clear();
+    m.routes[1].forms.push(1);
+    m.operations[2].kind = OperationKind::Delete;
+    m.actions[0].fields.clear();
+    m.routes.push(Route {
+        id: 3,
+        path: "/all".into(),
+        resource: None,
+        operations: vec![],
+        forms: vec![],
+        access: Access::Authenticated,
+        params: vec![],
+    });
+    m.actions[0].redirect = Redirect::Page(3);
+    manifest::validate(&m).unwrap();
+    m.actions[0].redirect = Redirect::Page(1);
+    reject(&m);
+
+    for kind in [
+        OperationKind::Create,
+        OperationKind::Update,
+        OperationKind::Delete,
+    ] {
+        let mut m = declarations();
+        m.routes.push(Route {
+            id: 4,
+            path: "/plain/{thread}".into(),
+            resource: Some(2),
+            operations: vec![4],
+            forms: vec![],
+            access: Access::Public,
+            params: vec![],
+        });
+        m.operations[2].kind = kind.clone();
+        if kind != OperationKind::Create {
+            m.operations[2].policy = Policy {
+                any: vec![vec![Predicate::Owner]],
+            };
+            m.routes[2].forms.clear();
+            m.routes[1].forms.push(1);
+            m.routes[1].access = Access::PublicOptional;
+        }
+        if kind == OperationKind::Delete {
+            m.actions[0].fields.clear();
+        }
+        m.actions[0].redirect = Redirect::Parent { parent: 4 };
+        manifest::validate(&m).unwrap();
+        m.actions[0].redirect = Redirect::Parent { parent: 3 };
+        reject(&m);
+    }
+}
+
+#[test]
 fn host_rejects_forged_route_parameters() {
     let m = declarations();
     manifest::validate(&m).unwrap();

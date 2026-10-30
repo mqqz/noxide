@@ -591,6 +591,10 @@ pub fn validate(m: &Manifest) -> Result<()> {
         }
         validate_layout(m, a)?;
         let r = route(m, a.redirect.route())?;
+        ensure!(
+            r.params.is_empty(),
+            "mutation redirect requires an unparameterized route"
+        );
         if matches!(a.redirect, Redirect::Parent { .. }) {
             ensure!(
                 r.operations

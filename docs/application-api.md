@@ -781,6 +781,10 @@ The host validates both target and exact parameter set, including links in
 Document IR. Next-page URLs retain sorted canonical parameters before `cursor`.
 A cursor for books cannot be used for games or another authenticated account.
 
+Choose an unparameterized destination for create, update and delete redirects,
+including `redirect(parent(...))`. Redirect declarations do not bind required
+query parameters; admission rejects destinations that declare them.
+
 The form-urlencoded query string is limited to 1,024 bytes. Missing, unknown,
 duplicate, malformed or noncanonical parameters return the same 404 response as
 an unknown route before database or session lookup. Valid values without matches
