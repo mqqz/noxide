@@ -691,6 +691,46 @@ async fn local_requests_skip_circuit_budget_but_obey_partitions() {
 }
 
 #[tokio::test]
+async fn invalid_query_parameters_obey_circuit_and_request_admission() {
+    let (_temp, app) = application().await;
+    let challenge = app.login_challenge().await.unwrap();
+    let session = app
+        .login(
+            &challenge.cookie,
+            &challenge.csrf,
+            "alice",
+            "admission test password",
+        )
+        .await
+        .unwrap();
+    let session_database = fill(&app.admission_limits.session_check.database).await;
+    let database = fill(&app.admission_limits.database).await;
+    for _ in 0..5 {
+        assert_eq!(
+            identity_get(app.clone(), "/?unknown=value", &session, Peer::Circuit(104))
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    assert_eq!(app.admission_limits.circuit_millitokens(104), 0);
+    assert_eq!(
+        identity_get(app.clone(), "/?unknown=value", &session, Peer::Circuit(104))
+            .await
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let requests = fill(&app.admission_limits.requests).await;
+    assert_eq!(
+        identity_get(app.clone(), "/?unknown=value", &session, Peer::Local)
+            .await
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    drop((requests, database, session_database));
+}
+
+#[tokio::test]
 async fn runtime_concurrency_below_global_cap_returns_busy_at_admission() {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
