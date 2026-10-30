@@ -41,6 +41,16 @@ jobs:
         run: |
           cargo fmt --all --check
           rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs examples/forum/src/lib.rs examples/private-inbox/src/lib.rs
+      - name: Cache Rust dependencies and workspace builds
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ github.job }}-default-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ github.job }}-default-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci.yml') }}-
       - name: Fetch locked framework dependencies
         run: cargo fetch --locked
       - name: Check example lockfiles
@@ -89,27 +99,78 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Cache Rust dependencies and workspace builds
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ github.job }}-default-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ github.job }}-default-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci.yml') }}-
       - name: Fetch locked framework dependencies
         run: cargo fetch --locked
-      - name: Check formatting
-        run: |
-          cargo fmt --all --check
-          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs examples/forum/src/lib.rs examples/private-inbox/src/lib.rs
-      - name: Lint all framework targets
-        run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-      - name: Test SQLite and PostgreSQL
-        # Include ignored provider tests. The crash worker is invoked by its
-        # parent test; the browser fixture runs in the application job below.
-        # Avoid overlapping CPU-heavy provider stress tests with tests that
-        # exercise short production deadlines on shared CI runners. Each
-        # concurrency test still creates its own concurrent requests.
+      - name: Test ordinary framework crates concurrently
+        run: cargo test --workspace --exclude noxide-host --locked --offline -- --include-ignored --test-threads=2 --skip interrupting_a_build_terminates_its_executor
+      - name: Test CLI executor shutdown in isolation
+        run: cargo test -p noxide-cli --test build --locked --offline interrupting_a_build_terminates_its_executor -- --exact --test-threads=1
+      - name: Test host and providers in isolation
+        # Host tests mix production deadlines, database contention and stress.
+        # Keep this boundary serial; concurrency tests create their own requests.
         run: >-
-          cargo test --workspace --locked --offline --
+          cargo test -p noxide-host --locked --offline --
           --include-ignored --test-threads=1
           --skip failure_tests::crash_worker
           --skip postgres_nojs_browser_flow
           --skip postgres_typed_forms_browser_flow
+      - name: Check documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked --offline
+
+  query-metrics:
+    name: Query index work
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:18.4
+        env:
+          POSTGRES_USER: noxide
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: noxide_ci
+          # Concurrent GET tests open more than the default 100 connections.
+          POSTGRES_INITDB_ARGS: --set=max_connections=512
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U noxide -d noxide_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      NOXIDE_TEST_POSTGRES: postgresql://noxide:ci-only-password@127.0.0.1:5432/noxide_ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Cache Rust dependencies and workspace builds
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ github.job }}-default-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ github.job }}-default-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci.yml') }}-
+      - name: Fetch locked framework dependencies
+        run: cargo fetch --locked
       - name: Measure inbox index work
         env:
           LIBSQLITE3_FLAGS: SQLITE_ENABLE_STMT_SCANSTATUS
@@ -118,21 +179,79 @@ jobs:
           cargo test -p noxide-host --features query-metrics --locked --offline --lib postgres_account_bindings_and_full_pages -- --ignored --nocapture
           cargo test -p noxide-host --features query-metrics --locked --offline --lib sqlite_filtered_account_and_single_lists -- --nocapture
           cargo test -p noxide-host --features query-metrics --locked --offline --lib postgres_filtered_account_and_single_lists -- --ignored --nocapture
-      - name: Check documentation
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --no-deps --locked --offline
-      - name: Test build input validation
-        run: |
-          python3 tools/test_build_inputs.py
-          python3 tools/test_build_local.py
-          python3 tools/test_dependencies.py
-          python3 tools/test_lifecycle_http.py
-      - name: Lint CI bootstrap
-        run: shellcheck tools/ci/setup-vm.sh
+
+  host-cli:
+    name: Build shared host CLI
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust and Wasm standard library
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown
+      - name: Cache Rust dependencies and workspace builds
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ github.job }}-default-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ github.job }}-default-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci.yml') }}-
+      - name: Fetch locked framework dependencies
+        run: cargo fetch --locked
+      - name: Build trusted host CLI
+        run: cargo build -p noxide-cli --locked --offline
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: host-cli
+          path: target/debug/noxide
+          retention-days: 1
+
+  packaged-cli:
+    name: Packaged CLI lifecycle
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust and Wasm standard library
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown
+      - name: Cache Rust dependencies and workspace builds
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ github.job }}-default-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ github.job }}-default-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci.yml') }}-
+      - name: Fetch locked framework dependencies
+        run: cargo fetch --locked
+      - name: Test detached CLI archive and full project lifecycle
+        run: python3 tools/test_cli_package.py --lifecycle --output "$RUNNER_TEMP/noxide-ci/cli-package"
+      - name: Upload lifecycle diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: packaged-cli-diagnostics
+          path: ${{ runner.temp }}/noxide-ci/**/*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
   application:
-    name: Packaged SDK and browser
+    name: Application (${{ matrix.suite }})
+    needs: host-cli
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [sdk, examples]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -167,20 +286,33 @@ jobs:
           "$driver" --version
           firefox --version
           echo "NOXIDE_GECKODRIVER=$driver" >> "$GITHUB_ENV"
+      - name: Cache Rust dependencies and workspace builds
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ github.job }}-${{ matrix.suite }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ github.job }}-${{ matrix.suite }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci.yml') }}-
       - name: Fetch locked framework dependencies
         run: cargo fetch --locked
-      - name: Build trusted host CLI
-        run: cargo build -p noxide-cli --locked --offline
-      - name: Test installed CLI project lifecycle
-        run: python3 tools/test_lifecycle.py --output "$RUNNER_TEMP/noxide-ci/lifecycle"
-      - name: Test CLI source archive outside the workspace
-        run: python3 tools/test_cli_package.py --output "$RUNNER_TEMP/noxide-ci/cli-package"
+      - name: Download host CLI
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: host-cli
+          path: target/debug
+      - name: Make CLI executable
+        run: chmod +x target/debug/noxide
       - name: Test textarea newline preservation in Firefox
+        if: matrix.suite == 'sdk'
         run: |
           python3 tools/test_render_browser.py \
             --geckodriver "$NOXIDE_GECKODRIVER" \
             --output "$RUNNER_TEMP/noxide-ci/render"
       - name: Build application from SDK archives locally
+        if: matrix.suite == 'sdk'
         run: |
           python3 tools/test_sdk_package.py \
             --local \
@@ -194,10 +326,12 @@ jobs:
           echo "NOXIDE_TEST_COMPONENT=$RUNNER_TEMP/noxide-ci/sdk/private_notes.component.wasm" >> "$GITHUB_ENV"
           echo "NOXIDE_TEST_MANIFEST=$RUNNER_TEMP/noxide-ci/sdk/manifest.json" >> "$GITHUB_ENV"
       - name: Check query contracts and typed filters
+        if: matrix.suite == 'sdk'
         run: |
           python3 tools/test_query_contracts.py
           python3 tools/test_query_filters.py
       - name: Test typed SDK and compile failures locally
+        if: matrix.suite == 'sdk'
         run: |
           python3 tools/test_sdk_api.py \
             --local \
@@ -215,6 +349,7 @@ jobs:
             --tasks --custom-presentation --geckodriver "$NOXIDE_GECKODRIVER" \
             --output "$RUNNER_TEMP/noxide-ci/task-browser"
       - name: Build and test the public application
+        if: matrix.suite == 'examples'
         run: |
           python3 tools/build_vm.py \
             --local \
@@ -229,6 +364,7 @@ jobs:
             --manifest "$RUNNER_TEMP/noxide-ci/public/manifest.json" \
             --output "$RUNNER_TEMP/noxide-ci/public-http"
       - name: Build and test the private inbox
+        if: matrix.suite == 'examples'
         run: |
           target/debug/noxide build --framework "$PWD" \
             --app examples/private-inbox --output "$RUNNER_TEMP/noxide-ci/inbox"
@@ -243,6 +379,7 @@ jobs:
             --postgres "${NOXIDE_TEST_POSTGRES%/*}/noxide_inbox" \
             --geckodriver "$NOXIDE_GECKODRIVER"
       - name: Build and test the forum
+        if: matrix.suite == 'examples'
         run: |
           target/debug/noxide build --framework "$PWD" \
             --app examples/forum --name forum \
@@ -251,6 +388,7 @@ jobs:
             --bundle "$RUNNER_TEMP/noxide-ci/forum" \
             --output "$RUNNER_TEMP/noxide-ci/forum-http"
       - name: Test NoJS browser flow with SQLite
+        if: matrix.suite == 'sdk'
         run: |
           python3 tools/test_browser.py \
             --component "$NOXIDE_TEST_COMPONENT" \
@@ -258,6 +396,7 @@ jobs:
             --geckodriver "$NOXIDE_GECKODRIVER" \
             --output "$RUNNER_TEMP/noxide-ci/browser-sqlite"
       - name: Test NoJS browser flow with PostgreSQL
+        if: matrix.suite == 'sdk'
         run: |
           mkdir -p "$RUNNER_TEMP/noxide-ci/postgres"
           TMPDIR="$RUNNER_TEMP/noxide-ci/postgres" \
@@ -267,7 +406,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: application-diagnostics
+          name: application-${{ matrix.suite }}-diagnostics
           retention-days: 7
           if-no-files-found: ignore
           include-hidden-files: true # Failed PostgreSQL fixtures use .tmp directories.
@@ -292,6 +431,16 @@ jobs:
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target wasm32-unknown-unknown
       - name: Install VM prerequisites
         run: bash tools/ci/setup-vm.sh
+      - name: Cache Rust dependencies and workspace builds
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ github.job }}-default-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ github.job }}-default-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/ci.yml') }}-
       - name: Fetch locked framework dependencies
         run: cargo fetch --locked
       - name: Test hostile build scripts and procedural macros
