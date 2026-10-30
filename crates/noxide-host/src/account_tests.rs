@@ -490,6 +490,16 @@ async fn filtered_lists(db: Database) {
         .await
         .unwrap();
     tx.bind_schema(&base).await.unwrap();
+    if matches!(&db, Database::Postgres(_)) {
+        // This disposable planner fixture runs ANALYZE explicitly below.
+        // Background vacuum must not contend with its repeated index swaps.
+        tx.execute(
+            "ALTER TABLE nx_records SET (autovacuum_enabled = false)",
+            &[],
+        )
+        .await
+        .unwrap();
+    }
     tx.commit().await.unwrap();
     let mut tx = db
         .begin(Instant::now() + Duration::from_secs(5))
