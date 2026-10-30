@@ -31,6 +31,7 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
     let mut keys = BTreeSet::new();
     let mut hashes = BTreeSet::new();
     let mut identity = false;
+    let mut accounts = 0;
     let name = &input.ident;
     for field in &fields.named {
         let rust_name = field.ident.as_ref().expect("named field");
@@ -64,6 +65,17 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
         if parent.is_none() {
             validate_field_type(ty, false)?;
         }
+        let account = matches!(ty, syn::Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "AccountId"));
+        if account {
+            accounts += 1;
+            if accounts > 4 {
+                return Err(syn::Error::new(
+                    ty.span(),
+                    "at most four account fields per resource",
+                ));
+            }
+        }
+        let mut scope = false;
         let mut initial = None;
         let mut visible = None;
         let mut create_when = None;
@@ -84,6 +96,14 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
             ));
         }
         attrs[0].parse_nested_meta(|meta| {
+            if meta.path.is_ident("scope") {
+                let value: Ident = meta.value()?.parse()?;
+                if scope || !account || value != "same_tenant" {
+                    return Err(meta.error("account fields require scope = same_tenant"));
+                }
+                scope = true;
+                return Ok(());
+            }
             if meta.path.is_ident("initial") {
                 if initial.is_some() {
                     return Err(meta.error("duplicate initial value"));
@@ -127,6 +147,12 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
             }
             Ok(())
         })?;
+        if account && !scope {
+            return Err(syn::Error::new(
+                ty.span(),
+                "AccountId requires scope = same_tenant",
+            ));
+        }
         let field_key = key(
             field_key.unwrap_or_else(|| LitStr::new(&rust_name.to_string(), rust_name.span()))
         )?;
@@ -166,7 +192,17 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
                 "labels must contain 1 to 128 bytes without control characters",
             ));
         }
-        let bounds = if let Some(parent) = parent {
+        let bounds = if account {
+            if min.is_some() || max.is_some() || visible.is_some() || create_when.is_some() {
+                return Err(syn::Error::new(
+                    ty.span(),
+                    "account fields accept only scope and presentation options",
+                ));
+            }
+            quote!(::noxide::FieldKind::Account {
+                scope: ::noxide::__private::AccountScope::SameTenant
+            })
+        } else if let Some(parent) = parent {
             if min.is_some() || max.is_some() {
                 return Err(syn::Error::new(
                     ty.span(),

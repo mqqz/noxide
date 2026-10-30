@@ -1243,6 +1243,7 @@ dependencies = [
  "hmac",
  "hyper",
  "hyper-util",
+ "libsqlite3-sys",
  "noxide-protocol",
  "rand",
  "serde",

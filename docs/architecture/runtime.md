@@ -603,3 +603,34 @@ waiting; the runtime semaphore independently protects direct runtime calls.
 At create commit, the host inserts admitted field initial values after binding any parent and before validating the complete stored record. Clients cannot submit these fields. Initial values are contract metadata, excluded from migration schema identity; update actions retain their declared authority.
 
 See [architecture layers](layers.md) for SDK lowering and host lifecycle ownership.
+
+### Account identity and bindings
+
+Accounts use host-generated 256-bit CSPRNG identities; login names are separate
+credential lookup values. Primary keys reject identity collisions, and allocation
+retries with fresh entropy. Sessions, roles, ownership, and invitation redemption
+reference identities. Disablement advances the epoch and removes sessions;
+authentication rejects inactive accounts. Deletion also removes login name,
+password hash, tenant membership, and roles, retaining a minimal identity
+tombstone. Owner and invite references remain intact. Normal operations never
+physically delete identity rows or reactivate tombstones.
+
+Backups include identity rows and tombstones. A restore restores account state:
+it can undo deletion or disablement. This is not a guarantee of globally unique
+reservation history across historical restores. The storage format is replaced
+directly for this pre-release change; older layouts are rejected, not migrated.
+
+Account-reference creation validates the active creator and every target in the
+insertion transaction. Lifecycle operations write the same identity rows;
+SQLite serializes writers, and PostgreSQL serializable retries repeat request
+authentication and eligibility checks within the request deadline. Binding
+requires matching nonempty host-authoritative tenants. Historical references
+remain after target disablement or deletion; new bindings fail. Account removal
+does not cascade into application records or change another principal's rights.
+
+Host admission admits `principal_is` only on read/list policies and account
+fields. The host examines every atom in the normalized OR-of-ANDs policy, then
+uses shared identity binding for stored-row checks and parameterized SQL.
+Application declarations and SDK types are not authorization evidence. Account
+fields have per-resource expression indexes; the inbox merges ordered owner and
+recipient scans. Residual-policy scans are bounded separately from result count.

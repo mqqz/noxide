@@ -66,7 +66,7 @@ pub(crate) fn expand_query(
     };
     let name = &item.ident;
     let resource = &declaration.resource;
-    let policy = policy_tokens(&declaration.policy);
+    let policy = policy_tokens(&declaration.policy, &declaration.resource);
     let vis = &item.vis;
     let output_name = format_ident!("{name}Record");
     let (projection, output, decode, visibility, fields) = if public {

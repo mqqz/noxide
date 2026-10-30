@@ -169,7 +169,7 @@ async fn stored_bounds(db: &Database) {
     tx.bind_schema(&m).await.unwrap();
     for id in [2_i64, 9, 10, 99, 100, 101] {
         tx.allocate_creation().await.unwrap();
-        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,$1,'alice','',$2,'fixture-incarnation',1,(SELECT value FROM nx_creation_counter WHERE singleton=1))",
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,$1,(SELECT id FROM nx_accounts WHERE login_name='alice'),'',$2,'fixture-incarnation',1,(SELECT value FROM nx_creation_counter WHERE singleton=1))",
             &[id.into(), serde_json::to_string(&fields).unwrap().into()],
         )
         .await
@@ -179,7 +179,7 @@ async fn stored_bounds(db: &Database) {
         tx,
         manifest: Arc::new(m),
         principal: Principal::User(crate::auth::User {
-            id: "alice".into(),
+            id: crate::test_account(db, "alice").await,
             tenant: String::new(),
             roles: vec![],
         }),
@@ -291,7 +291,7 @@ async fn revocation(db: &Database) {
         .await
         .unwrap();
     tx.execute(
-        "INSERT INTO nx_roles(principal,name,tenant) VALUES('alice','writer','')",
+        "INSERT INTO nx_roles(principal,name,tenant) VALUES((SELECT id FROM nx_accounts WHERE login_name='alice'),'writer','')",
         &[],
     )
     .await
@@ -344,7 +344,7 @@ async fn revocation(db: &Database) {
                 .await
                 .unwrap();
             tx.execute(
-                "DELETE FROM nx_roles WHERE principal='alice' AND name='writer'",
+                "DELETE FROM nx_roles WHERE principal=(SELECT id FROM nx_accounts WHERE login_name='alice') AND name='writer'",
                 &[],
             )
             .await
@@ -382,7 +382,7 @@ async fn revocation(db: &Database) {
         .begin(std::time::Instant::now() + Duration::from_secs(2))
         .await
         .unwrap();
-    tx.execute("UPDATE nx_accounts SET epoch=epoch+1 WHERE id='alice'", &[])
+    tx.execute("UPDATE nx_accounts SET epoch=epoch+1 WHERE id=(SELECT id FROM nx_accounts WHERE login_name='alice')", &[])
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -590,7 +590,7 @@ async fn record_mutation_failures(db: Database) {
         .await
         .unwrap();
     tx.execute(
-        "INSERT INTO nx_roles(principal,name,tenant) VALUES('alice','writer','')",
+        "INSERT INTO nx_roles(principal,name,tenant) VALUES((SELECT id FROM nx_accounts WHERE login_name='alice'),'writer','')",
         &[],
     )
     .await
@@ -609,7 +609,7 @@ async fn record_mutation_failures(db: Database) {
             tx.execute("DELETE FROM nx_receipts", &[]).await.unwrap();
             let incarnation = format!("fault-{action}-{case}");
             tx.allocate_creation().await.unwrap();
-            tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,42,'alice','','{\"body\":\"original\",\"tag\":\"protected tag\"}',$1,1,(SELECT value FROM nx_creation_counter WHERE singleton=1))",
+            tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,42,(SELECT id FROM nx_accounts WHERE login_name='alice'),'','{\"body\":\"original\",\"tag\":\"protected tag\"}',$1,1,(SELECT value FROM nx_creation_counter WHERE singleton=1))",
                 &[incarnation.clone().into()],
             )
             .await
@@ -736,7 +736,10 @@ async fn record_mutation_failures(db: Database) {
             let expected = if action == 2 {
                 assert_eq!(committed.0.len(), 1);
                 let [owner, tenant, fields, stored_incarnation, revision] = &committed.0[0];
-                assert_eq!((owner.as_str(), tenant.as_str()), ("alice", ""));
+                assert_eq!(
+                    (owner.as_str(), tenant.as_str()),
+                    (crate::test_account(&db, "alice").await.as_str(), "")
+                );
                 assert_eq!(stored_incarnation, &incarnation);
                 assert_eq!(revision, "2", "a retry must advance the revision only once");
                 assert_eq!(

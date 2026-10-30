@@ -99,6 +99,12 @@ pub(crate) fn validate_field_type(ty: &Type, inside_option: bool) -> syn::Result
         };
         return validate_field_type(inner, true);
     }
+    if inside_option && segment.ident == "AccountId" {
+        return Err(syn::Error::new(
+            ty.span(),
+            "account references must be required",
+        ));
+    }
     if !matches!(segment.arguments, syn::PathArguments::None)
         || matches!(
             segment.ident.to_string().as_str(),

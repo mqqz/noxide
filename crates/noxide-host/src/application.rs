@@ -196,6 +196,55 @@ impl Application {
         .with_wasm_capacity(self.runtime.limits().concurrency);
         Ok(self)
     }
+    /// Authenticate host-owned account content through normal request admission.
+    /// Scheduling preflight must never authorize a response.
+    pub(crate) async fn account_identity(
+        &self,
+        cookie: &str,
+    ) -> std::result::Result<String, RequestError> {
+        let _request = self
+            .admission_limits
+            .requests()
+            .request()
+            .await
+            .map_err(|_| RequestError::Busy)?;
+        let _database = self
+            .admission_limits
+            .database()
+            .acquire()
+            .await
+            .map_err(|_| RequestError::Busy)?;
+        let deadline = Instant::now() + self.runtime.limits().wall_time;
+        timeout_at(deadline, async {
+            let mut tx = self
+                .database
+                .begin_read(deadline.into_std())
+                .await
+                .map_err(|_| RequestError::Busy)?;
+            self.admission(&mut tx, false)
+                .await
+                .map_err(RequestError::database)?;
+            let wall = security::now().map_err(|_| RequestError::Rejected)?;
+            let now = security::observe_clock_read(&mut tx, wall, &self.clock)
+                .await
+                .map_err(RequestError::database)?;
+            self.clock.fetch_max(now, Ordering::Relaxed);
+            let (_, principal) = self
+                .route_identity(&mut tx, &Access::Authenticated, Some(cookie), now)
+                .await?
+                .ok_or(RequestError::Authentication)?;
+            let id = principal
+                .user()
+                .map_err(|_| RequestError::Authentication)?
+                .id
+                .clone();
+            tx.commit().await.map_err(RequestError::database)?;
+            Ok(id)
+        })
+        .await
+        .map_err(|_| RequestError::Busy)?
+    }
+
     pub(crate) async fn session_candidate(
         &self,
         cookie: &str,
@@ -664,7 +713,15 @@ impl Application {
         if let Some(inspection) = &action.inspect {
             let op = manifest::operation(&self.manifest, inspection.operation)?;
             ensure!(
-                repository::allowed(&op.policy, principal, &stored.owner, &stored.tenant),
+                repository::allowed(
+                    &op.policy,
+                    principal,
+                    crate::policy::Row {
+                        owner: &stored.owner,
+                        tenant: &stored.tenant,
+                        fields: &stored.record.fields
+                    }
+                ),
                 "inspection policy denied"
             );
         }
@@ -836,7 +893,15 @@ impl Application {
     ) -> Result<bool> {
         let op = manifest::operation(&self.manifest, action.operation)?;
         let permitted = |op: &Operation| {
-            repository::allowed(&op.policy, principal, &stored.owner, &stored.tenant)
+            repository::allowed(
+                &op.policy,
+                principal,
+                crate::policy::Row {
+                    owner: &stored.owner,
+                    tenant: &stored.tenant,
+                    fields: &stored.record.fields,
+                },
+            )
         };
         let route = manifest::route(&self.manifest, route)?;
         let readable = route
@@ -922,7 +987,15 @@ impl Application {
             let credentials = if op.kind == OperationKind::Create {
                 if manifest::is_public(op)
                     || principal.user().is_ok_and(|user| {
-                        repository::allowed(&op.policy, principal, &user.id, &user.tenant)
+                        repository::allowed(
+                            &op.policy,
+                            principal,
+                            crate::policy::Row {
+                                owner: &user.id,
+                                tenant: &user.tenant,
+                                fields: &Default::default(),
+                            },
+                        )
                     })
                 {
                     if let Some(parent) = manifest::parent_resource(&self.manifest, op.resource)? {
@@ -1253,6 +1326,99 @@ mod clock_tests {
     use super::*;
     use crate::test_support as fixture;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn account_endpoint_obeys_persisted_clock_after_memory_reset() {
+        use axum::{
+            body::{Body, to_bytes},
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::sqlite(temp.path().join("account-clock.db"));
+        db.initialize().await.unwrap();
+        let id = db
+            .create_account("alice", "clock regression password", "team")
+            .await
+            .unwrap();
+        let m = fixture::manifest();
+        let app = Arc::new(
+            Application::new(
+                &fixture::component(None),
+                &serde_json::to_vec(&m).unwrap(),
+                manifest::digest(&m).unwrap(),
+                db.clone(),
+                HostKeys::generate().unwrap(),
+                Limits::default(),
+            )
+            .unwrap(),
+        );
+        app.activate().await.unwrap();
+        let wall = security::now().unwrap();
+        let (valid, signed) = app.keys.issue(TokenKind::Session, &id, wall, 3600).unwrap();
+        let (expiring, short) = app
+            .keys
+            .issue(TokenKind::Session, &id, wall - 60, 75)
+            .unwrap();
+        let mut tx = db
+            .begin(std::time::Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+        for token in [&valid, &expiring] {
+            tx.execute(
+                "INSERT INTO nx_sessions(id,principal,epoch,expires) VALUES($1,$2,1,$3)",
+                &[
+                    token.nonce.as_str().into(),
+                    id.as_str().into(),
+                    token.expires.into(),
+                ],
+            )
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+        let router = crate::http::router(
+            app.clone(),
+            crate::http::Origin::parse("http://localhost:8080").unwrap(),
+        );
+        for (advance, cookie, accepted) in [
+            (0, &signed, true),
+            (30, &short, false),
+            (120, &signed, false),
+        ] {
+            let mut tx = db
+                .begin(std::time::Instant::now() + Duration::from_secs(5))
+                .await
+                .unwrap();
+            tx.execute(
+                "UPDATE nx_clock SET observed=$1 WHERE singleton=1",
+                &[(wall + advance).into()],
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            // A restarted process has no in-memory watermark to protect it.
+            app.clock.store(0, Ordering::Relaxed);
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/account")
+                        .header("host", "localhost:8080")
+                        .header("cookie", format!("session={cookie}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status() == StatusCode::OK, accepted);
+            let body = to_bytes(response.into_body(), 65536).await.unwrap();
+            assert_eq!(
+                String::from_utf8(body.to_vec()).unwrap().contains(&id),
+                accepted
+            );
+        }
+    }
 
     async fn read_advance(app: &Application, now: i64) {
         let mut tx = app

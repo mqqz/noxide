@@ -361,10 +361,10 @@ For applications declaring role policies, provision only the required assignment
 Choose the grant line matching the predicate declared by that application:
 
 ```sh
-noxide role grant CONFIG.json alice moderator --global
-noxide role grant CONFIG.json alice moderator --tenant team1
-noxide role list CONFIG.json alice
-noxide role revoke CONFIG.json alice moderator --global
+noxide role grant CONFIG.json ACCOUNT_ID moderator --global
+noxide role grant CONFIG.json ACCOUNT_ID moderator --tenant team1
+noxide role list CONFIG.json ACCOUNT_ID
+noxide role revoke CONFIG.json ACCOUNT_ID moderator --global
 ```
 
 Grant/revoke require exactly one scope flag. Tenant grants require the account's
@@ -667,3 +667,23 @@ New accounts use the existing identifier rules and a password of 12–256 bytes.
 They start with an empty tenant, epoch 1 and no roles. All responses retain
 `Cache-Control: no-store`; the registration form includes a browser-bound
 challenge and CSRF value.
+
+### Stable account identities
+
+`noxide account CONFIG LOGIN PASSWORD_FILE [TENANT]` prints the generated account
+ID. Supply that ID, rather than the login name, to role-management commands.
+Operator-only lifecycle commands are:
+
+```sh
+noxide account-lookup CONFIG LOGIN
+noxide account-disable CONFIG ACCOUNT_ID
+noxide account-enable CONFIG ACCOUNT_ID
+noxide account-delete CONFIG ACCOUNT_ID
+```
+
+Disable/delete invalidate sessions. Delete retains an identity tombstone while
+removing authentication data; it neither deletes owned application records nor
+revokes other accounts' access to them. Deleted accounts cannot be enabled.
+Restoring an older database restores older account state and may undo deletions.
+Tenant changes are unsupported; provision a nonempty tenant at creation for
+account-reference applications. `/account` shows a signed-in user's own ID.

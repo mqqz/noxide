@@ -126,6 +126,7 @@ fn render_field(
     let mut control = match requested {
         Control::Auto => match &field.kind {
             FieldKind::Text => Control::Textarea { rows: 4 },
+            FieldKind::Account { .. } => Control::TextInput,
             FieldKind::Boolean if !field.optional => Control::Checkbox,
             FieldKind::Boolean | FieldKind::Choice { .. } => Control::Select,
             FieldKind::Integer { .. } => Control::TextInput,
@@ -140,8 +141,11 @@ fn render_field(
                 Control::Textarea { .. } | Control::TextInput,
                 FieldKind::Text,
                 _
-            ) | (Control::TextInput, FieldKind::Integer { .. }, _)
-                | (Control::Checkbox, FieldKind::Boolean, false)
+            ) | (
+                Control::TextInput,
+                FieldKind::Integer { .. } | FieldKind::Account { .. },
+                _
+            ) | (Control::Checkbox, FieldKind::Boolean, false)
                 | (Control::Select, FieldKind::Choice { .. }, _)
                 | (Control::Select, FieldKind::Boolean, true)
         ),
@@ -274,7 +278,7 @@ fn render_field(
             out.text(error)?;
         } else {
             out.text(&match &field.kind {
-                FieldKind::Text => format!(
+                FieldKind::Text | FieldKind::Account { .. } => format!(
                     "Enter {}at most {} UTF-8 bytes.",
                     if field.optional {
                         ""

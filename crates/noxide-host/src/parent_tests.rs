@@ -1415,7 +1415,7 @@ async fn parent_read_authority_matches_normal_get_and_excludes_list_authority() 
         .unwrap();
     let storage = tx.storage_resource(&m, 2).await.unwrap();
     tx.execute(
-        "INSERT INTO nx_accounts(id,password,tenant,epoch) VALUES('alice','unused','one',1)",
+        "INSERT INTO nx_accounts(id,password,tenant,state,epoch) VALUES('alice','unused','one','active',1)",
         &[],
     )
     .await

@@ -791,9 +791,12 @@ async fn identity_provider_checks(db: Database) {
         .begin(std::time::Instant::now() + Duration::from_secs(2))
         .await
         .unwrap();
-    tx.execute("UPDATE nx_accounts SET epoch=epoch+1 WHERE id='alice'", &[])
-        .await
-        .unwrap();
+    tx.execute(
+        "UPDATE nx_accounts SET epoch=epoch+1 WHERE login_name='alice'",
+        &[],
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     let verified = fill(&app.admission_limits.verified.requests).await;
     assert_eq!(

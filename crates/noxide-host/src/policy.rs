@@ -1,5 +1,8 @@
 //! Principal binding is shared by row checks and parameterized query filtering.
-use crate::{auth::Principal, database::Param};
+use crate::{
+    auth::Principal,
+    database::{Param, Transaction},
+};
 use noxide_protocol::{Policy, Predicate};
 
 enum Condition<'a> {
@@ -7,12 +10,17 @@ enum Condition<'a> {
     Deny,
     Owner(&'a str),
     Tenant(&'a str),
+    Account { field: &'a str, id: &'a str },
 }
 
-fn bind<'a>(predicate: &Predicate, principal: &'a Principal) -> Condition<'a> {
+fn bind<'a>(predicate: &'a Predicate, principal: &'a Principal) -> Condition<'a> {
     match (principal, predicate) {
         (_, Predicate::Public) => Condition::Allow,
         (_, Predicate::Capability) | (Principal::Anonymous, _) => Condition::Deny,
+        (Principal::User(user), Predicate::PrincipalIs { field }) => Condition::Account {
+            field,
+            id: &user.id,
+        },
         (Principal::User(user), Predicate::Owner) => Condition::Owner(&user.id),
         (Principal::User(user), Predicate::SameTenant) => {
             if user.tenant.is_empty() {
@@ -46,18 +54,29 @@ fn bind<'a>(predicate: &Predicate, principal: &'a Principal) -> Condition<'a> {
         }
     }
 }
-pub(crate) fn allowed(policy: &Policy, principal: &Principal, owner: &str, tenant: &str) -> bool {
+pub(crate) struct Row<'a> {
+    pub owner: &'a str,
+    pub tenant: &'a str,
+    pub fields: &'a noxide_protocol::Fields,
+}
+pub(crate) fn allowed(policy: &Policy, principal: &Principal, row: Row<'_>) -> bool {
     policy.any.iter().any(|rule| {
         !rule.is_empty()
             && rule.iter().all(|p| match bind(p, principal) {
+                Condition::Account { field, id } => row.fields.get(field).is_some_and(|v| v == id),
                 Condition::Allow => true,
                 Condition::Deny => false,
-                Condition::Owner(value) => owner == value,
-                Condition::Tenant(value) => tenant == value,
+                Condition::Owner(value) => row.owner == value,
+                Condition::Tenant(value) => row.tenant == value,
             })
     })
 }
-pub(crate) fn sql(policy: &Policy, principal: &Principal, params: &mut Vec<Param>) -> Vec<String> {
+pub(crate) fn sql(
+    tx: &Transaction,
+    policy: &Policy,
+    principal: &Principal,
+    params: &mut Vec<Param>,
+) -> Vec<String> {
     if policy.any.is_empty() {
         return vec!["1=0".into()];
     }
@@ -71,6 +90,14 @@ pub(crate) fn sql(policy: &Policy, principal: &Principal, params: &mut Vec<Param
             let terms: Vec<_> = rule
                 .iter()
                 .map(|p| match bind(p, principal) {
+                    Condition::Account { field, id } => {
+                        params.push(id.into());
+                        format!(
+                            "{}=${}",
+                            tx.parent_expression(field).expect("admitted account field"),
+                            params.len()
+                        )
+                    }
                     Condition::Allow => "1=1".into(),
                     Condition::Deny => "1=0".into(),
                     condition => {
@@ -100,6 +127,12 @@ mod tests {
         let mut db = sqlx::SqliteConnection::connect("sqlite::memory:")
             .await
             .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let host = crate::Database::sqlite(tmp.path().join("policy.db"));
+        let tx = host
+            .begin(std::time::Instant::now() + std::time::Duration::from_secs(30))
+            .await
+            .unwrap();
         let principals = [
             Principal::Anonymous,
             Principal::User(User {
@@ -118,6 +151,9 @@ mod tests {
             Predicate::Capability,
             Predicate::Owner,
             Predicate::SameTenant,
+            Predicate::PrincipalIs {
+                field: "recipient".into(),
+            },
             Predicate::Role {
                 name: "editor".into(),
                 tenant_scoped: true,
@@ -147,9 +183,9 @@ mod tests {
                 for owner in ["alice", "bob", ""] {
                     for tenant in ["one", "two", ""] {
                         let mut params = vec![Param::from(owner), Param::from(tenant)];
-                        let clauses = sql(policy, principal, &mut params);
+                        let clauses = sql(&tx, policy, principal, &mut params);
                         let statement = format!(
-                            "SELECT ({}) FROM (SELECT $1 AS owner, $2 AS tenant)",
+                            "SELECT ({}) FROM (SELECT $1 AS owner, $2 AS tenant, '{{\"recipient\":\"bob\"}}' AS fields)",
                             clauses.join(" OR ")
                         );
                         let mut query = sqlx::query(&statement);
@@ -161,7 +197,21 @@ mod tests {
                         }
                         let row = query.fetch_one(&mut db).await.unwrap();
                         let actual: i64 = row.get(0);
-                        assert_eq!(actual != 0, allowed(policy, principal, owner, tenant));
+                        assert_eq!(
+                            actual != 0,
+                            allowed(
+                                policy,
+                                principal,
+                                crate::policy::Row {
+                                    owner,
+                                    tenant,
+                                    fields: &noxide_protocol::Fields::from([(
+                                        "recipient".into(),
+                                        "bob".into()
+                                    )])
+                                }
+                            )
+                        );
                     }
                 }
             }

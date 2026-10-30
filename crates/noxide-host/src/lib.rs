@@ -7,7 +7,7 @@ pub mod schema;
 pub use database::Database;
 mod auth;
 mod operator_roles;
-pub use auth::Registration;
+pub use auth::{Registration, account_id};
 pub use operator_roles::{RoleAssignment, RoleScope};
 mod security;
 pub use security::HostKeys;
@@ -40,3 +40,13 @@ mod routing;
 
 #[cfg(test)]
 mod parent_tests;
+
+#[cfg(test)]
+mod account_tests;
+
+#[cfg(test)]
+async fn test_account(db: &Database, login: &str) -> String {
+    db.account_id(login)
+        .await
+        .unwrap_or_else(|_| "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into())
+}

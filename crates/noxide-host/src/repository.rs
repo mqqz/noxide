@@ -148,7 +148,15 @@ fn read_allowed(
         "invalid read binding"
     );
     manifest::validate_fields(manifest::resource(m, op.resource)?, &stored.record.fields)?;
-    if !allowed(&op.policy, principal, &stored.owner, &stored.tenant) {
+    if !allowed(
+        &op.policy,
+        principal,
+        crate::policy::Row {
+            owner: &stored.owner,
+            tenant: &stored.tenant,
+            fields: &stored.record.fields,
+        },
+    ) {
         return Ok(false);
     }
     if manifest::is_public(op) {
@@ -320,12 +328,43 @@ impl Effects {
                 };
                 if let Some(user) = user {
                     ensure!(
-                        allowed(&op.policy, &self.principal, &user.id, &user.tenant),
+                        allowed(
+                            &op.policy,
+                            &self.principal,
+                            crate::policy::Row {
+                                owner: &user.id,
+                                tenant: &user.tenant,
+                                fields: &Default::default()
+                            }
+                        ),
                         "policy denied"
                     );
                 }
                 let resource = manifest::resource(&self.manifest, op.resource)?;
                 manifest::validate_fields(resource, &input)?;
+                if resource
+                    .fields
+                    .iter()
+                    .any(|f| matches!(f.kind, FieldKind::Account { .. }))
+                {
+                    let creator = self.principal.user()?;
+                    let rows = self.tx.fetch::<1>("SELECT tenant FROM nx_accounts WHERE id=$1 AND state='active' AND tenant<>''", &[creator.id.as_str().into()]).await?;
+                    let tenant = rows
+                        .first()
+                        .ok_or_else(|| anyhow::anyhow!("account binding unavailable"))?;
+                    ensure!(tenant[0] == creator.tenant, "account binding unavailable");
+                    for field in resource
+                        .fields
+                        .iter()
+                        .filter(|f| matches!(f.kind, FieldKind::Account { .. }))
+                    {
+                        let id = input
+                            .get(&field.name)
+                            .ok_or_else(|| anyhow::anyhow!("account binding unavailable"))?;
+                        ensure!(!self.tx.fetch::<1>("SELECT id FROM nx_accounts WHERE id=$1 AND state='active' AND tenant=$2", &[id.as_str().into(), tenant[0].as_str().into()]).await?.is_empty(), "account binding unavailable");
+                    }
+                }
+
                 if let Some(user) = user {
                     let used=self.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM (SELECT id FROM nx_records WHERE resource=$1 AND owner=$2 LIMIT 10000) AS quota",&[Param::Number(storage_resource),user.id.as_str().into()]).await?;
                     ensure!(used[0][0].parse::<usize>()? < 10_000, "record quota");
@@ -393,7 +432,15 @@ impl Effects {
                     );
                 } else {
                     ensure!(
-                        allowed(&op.policy, &self.principal, &stored.owner, &stored.tenant),
+                        allowed(
+                            &op.policy,
+                            &self.principal,
+                            crate::policy::Row {
+                                owner: &stored.owner,
+                                tenant: &stored.tenant,
+                                fields: &stored.record.fields
+                            }
+                        ),
                         "policy denied"
                     );
                 }
@@ -411,6 +458,16 @@ impl Effects {
                         .ok_or_else(|| anyhow::anyhow!("record revision exhausted"))?;
                     let mut fields = stored.record.fields.clone();
                     fields.extend(self.request.input.clone());
+                    for field in manifest::resource(&self.manifest, op.resource)?
+                        .fields
+                        .iter()
+                        .filter(|f| matches!(f.kind, FieldKind::Account { .. }))
+                    {
+                        fields.insert(
+                            field.name.clone(),
+                            stored.record.fields[&field.name].clone(),
+                        );
+                    }
                     manifest::validate_fields(
                         manifest::resource(&self.manifest, op.resource)?,
                         &fields,
@@ -459,7 +516,8 @@ impl Effects {
             )?,
             OperationKind::List => {
                 let mut params = vec![Param::Number(storage_resource)];
-                let mut clauses = crate::policy::sql(&op.policy, &self.principal, &mut params);
+                let mut clauses =
+                    crate::policy::sql(&self.tx, &op.policy, &self.principal, &mut params);
                 if manifest::is_public(&op) {
                     clauses = vec![
                         self.visibility_clause(&op, &mut params)?
@@ -494,6 +552,117 @@ impl Effects {
                 }
                 let size = op.list.as_ref().map_or(3, |s| s.page_size) as usize;
                 params.push(Param::Number(self.cursor.unwrap_or(0) as i64));
+                if op
+                    .policy
+                    .any
+                    .iter()
+                    .flatten()
+                    .any(|p| matches!(p, Predicate::PrincipalIs { .. }))
+                {
+                    let mut candidates = std::collections::BTreeMap::new();
+                    let mut boundary = u64::MAX;
+                    let mut bounded_more = false;
+                    for rule in &op.policy.any {
+                        let identities = rule
+                            .iter()
+                            .filter(|p| {
+                                matches!(p, Predicate::Owner | Predicate::PrincipalIs { .. })
+                            })
+                            .count();
+                        // One identity equality plus optional tenant equality has
+                        // an ordered composite index. Multiple equalities need a
+                        // bounded residual-filter scan instead.
+                        let exact = identities <= 1 && parent_clause.is_empty();
+                        let scan_rule = if exact {
+                            rule.clone()
+                        } else {
+                            rule.iter()
+                                .find(|p| {
+                                    matches!(p, Predicate::PrincipalIs { .. } | Predicate::Owner)
+                                })
+                                .cloned()
+                                .into_iter()
+                                .collect::<Vec<_>>()
+                        };
+                        let scan_policy = Policy {
+                            any: vec![if scan_rule.is_empty() {
+                                vec![Predicate::Public]
+                            } else {
+                                scan_rule
+                            }],
+                        };
+                        let mut scan_params = vec![Param::Number(storage_resource)];
+                        let clause = crate::policy::sql(
+                            &self.tx,
+                            &scan_policy,
+                            &self.principal,
+                            &mut scan_params,
+                        )
+                        .join(" OR ");
+                        scan_params.push(Param::Number(self.cursor.unwrap_or(0) as i64));
+                        let limit = if exact {
+                            size + 1
+                        } else {
+                            (256 / op.policy.any.len()).min(64)
+                        };
+                        let sql = format!(
+                            "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({clause}) AND created_seq>${} ORDER BY nx_records.created_seq ASC LIMIT {limit}",
+                            scan_params.len()
+                        );
+                        let rows = self.tx.fetch::<2>(&sql, &scan_params).await?;
+                        if !exact && rows.len() == limit {
+                            boundary = boundary.min(rows.last().expect("nonempty")[0].parse()?);
+                            bounded_more = true;
+                        }
+                        for [seq, id] in rows {
+                            candidates.insert(seq.parse::<u64>()?, id.parse::<u64>()?);
+                        }
+                    }
+                    let mut records = Vec::new();
+                    let mut last = self.cursor.unwrap_or(0);
+                    self.more = None;
+                    for (seq, id) in candidates {
+                        if seq > boundary {
+                            break;
+                        }
+                        let stored = load(&mut self.tx, &self.manifest, op.resource, id)
+                            .await?
+                            .ok_or_else(|| anyhow::anyhow!("record disappeared"))?;
+                        if !allowed(
+                            &op.policy,
+                            &self.principal,
+                            crate::policy::Row {
+                                owner: &stored.owner,
+                                tenant: &stored.tenant,
+                                fields: &stored.record.fields,
+                            },
+                        ) {
+                            last = seq;
+                            continue;
+                        }
+                        if let Some(field) =
+                            manifest::parent_field(manifest::resource(&self.manifest, op.resource)?)
+                            && stored
+                                .record
+                                .fields
+                                .get(&field.name)
+                                .and_then(|v| v.parse::<u64>().ok())
+                                != self.request.target
+                        {
+                            last = seq;
+                            continue;
+                        }
+                        if records.len() == size || !append_prefix(&mut records, stored.record)? {
+                            self.more = Some(last);
+                            break;
+                        }
+                        last = seq;
+                    }
+                    if self.more.is_none() && bounded_more {
+                        self.more = Some(boundary);
+                    }
+                    return Ok(serde_json::to_vec(&records)?);
+                }
                 let mut records = Vec::new();
                 let mut last = self.cursor.unwrap_or(0);
                 self.more = None;
@@ -512,7 +681,15 @@ impl Effects {
                     let count = rows.len();
                     for [seq, id, owner, tenant, fields] in rows {
                         ensure!(
-                            allowed(&op.policy, &self.principal, &owner, &tenant),
+                            allowed(
+                                &op.policy,
+                                &self.principal,
+                                crate::policy::Row {
+                                    owner: &owner,
+                                    tenant: &tenant,
+                                    fields: &serde_json::from_str(&fields)?
+                                }
+                            ),
                             "policy invariant"
                         );
                         let record = Record {
@@ -579,25 +756,68 @@ mod tests {
             tenant: "one".into(),
             roles: vec![("admin".into(), "one".into())],
         });
-        assert!(!allowed(&Policy { any: vec![] }, &alice, "alice", "one"));
+        assert!(!allowed(
+            &Policy { any: vec![] },
+            &alice,
+            crate::policy::Row {
+                owner: "alice",
+                tenant: "one",
+                fields: &Default::default()
+            }
+        ));
         assert!(!allowed(
             &Policy { any: vec![vec![]] },
             &alice,
-            "alice",
-            "one"
+            crate::policy::Row {
+                owner: "alice",
+                tenant: "one",
+                fields: &Default::default()
+            }
         ));
         let owner = Policy {
             any: vec![vec![Predicate::Owner]],
         };
-        assert!(allowed(&owner, &alice, "alice", "one"));
-        assert!(!allowed(&owner, &alice, "bob", "one"));
+        assert!(allowed(
+            &owner,
+            &alice,
+            crate::policy::Row {
+                owner: "alice",
+                tenant: "one",
+                fields: &Default::default()
+            }
+        ));
+        assert!(!allowed(
+            &owner,
+            &alice,
+            crate::policy::Row {
+                owner: "bob",
+                tenant: "one",
+                fields: &Default::default()
+            }
+        ));
         let role = Policy {
             any: vec![vec![Predicate::Role {
                 name: "admin".into(),
                 tenant_scoped: true,
             }]],
         };
-        assert!(allowed(&role, &alice, "bob", "one"));
-        assert!(!allowed(&role, &alice, "bob", "two"));
+        assert!(allowed(
+            &role,
+            &alice,
+            crate::policy::Row {
+                owner: "bob",
+                tenant: "one",
+                fields: &Default::default()
+            }
+        ));
+        assert!(!allowed(
+            &role,
+            &alice,
+            crate::policy::Row {
+                owner: "bob",
+                tenant: "two",
+                fields: &Default::default()
+            }
+        ));
     }
 }

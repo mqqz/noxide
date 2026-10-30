@@ -68,7 +68,8 @@ async fn roles_cli_approved_scope_relative_paths_and_usage() {
     let elsewhere = tempfile::tempdir().unwrap();
     let db = noxide_host::Database::sqlite(root.path().join("runtime.db"));
     db.initialize().await.unwrap();
-    db.create_account("alice", "private test password", "one")
+    let alice = db
+        .create_account("alice", "private test password", "one")
         .await
         .unwrap();
     let m = manifest();
@@ -85,7 +86,7 @@ async fn roles_cli_approved_scope_relative_paths_and_usage() {
         ("moderator", vec!["--global"]),
         ("editor", vec!["--tenant", "one"]),
     ] {
-        let mut args = vec!["alice", role];
+        let mut args = vec![&alice, role];
         args.extend(flags);
         for expected in [": changed", ": unchanged"] {
             let o = run(elsewhere.path(), &config, "grant", &args).await;
@@ -94,25 +95,25 @@ async fn roles_cli_approved_scope_relative_paths_and_usage() {
             assert!(o.stderr.is_empty());
         }
     }
-    let o = run(elsewhere.path(), &config, "list", &["alice"]).await;
+    let o = run(elsewhere.path(), &config, "list", &[&alice]).await;
     assert!(o.status.success());
     assert_eq!(
         String::from_utf8(o.stdout).unwrap(),
         "ROLE\tSCOPE\tTENANT\neditor\ttenant\tone\nmoderator\tglobal\t-\n"
     );
     for args in [
-        vec!["alice", "moderator"],
-        vec!["alice", "moderator", "--global", "--global"],
-        vec!["alice", "moderator", "--global", "--tenant", "one"],
-        vec!["alice", "moderator", "--tenant", ""],
-        vec!["alice", "moderator", "--tenant"],
-        vec!["alice", "moderator", "--unknown"],
-        vec!["alice", "moderator", "--global", "extra"],
+        vec![&alice, "moderator"],
+        vec![&alice, "moderator", "--global", "--global"],
+        vec![&alice, "moderator", "--global", "--tenant", "one"],
+        vec![&alice, "moderator", "--tenant", ""],
+        vec![&alice, "moderator", "--tenant"],
+        vec![&alice, "moderator", "--unknown"],
+        vec![&alice, "moderator", "--global", "extra"],
         vec!["missing", "moderator", "--global"],
-        vec!["alice", "editor", "--global"],
-        vec!["alice", "moderator", "--tenant", "one"],
-        vec!["alice", "editor", "--tenant", "two"],
-        vec!["alice", "absent", "--global"],
+        vec![&alice, "editor", "--global"],
+        vec![&alice, "moderator", "--tenant", "one"],
+        vec![&alice, "editor", "--tenant", "two"],
+        vec![&alice, "absent", "--global"],
         vec!["bad-user", "moderator", "--global"],
     ] {
         let o = run(elsewhere.path(), &config, "grant", &args).await;
@@ -126,7 +127,7 @@ async fn roles_cli_approved_scope_relative_paths_and_usage() {
         elsewhere.path(),
         &config,
         "grant",
-        &["alice", "moderator", "--global"],
+        &[&alice, "moderator", "--global"],
     )
     .await;
     assert!(!o.status.success());
@@ -134,7 +135,7 @@ async fn roles_cli_approved_scope_relative_paths_and_usage() {
     // Neither listing nor revocation requires the old manifest or application.
     std::fs::remove_file(root.path().join("manifest.json")).unwrap();
     assert!(
-        run(elsewhere.path(), &config, "list", &["alice"])
+        run(elsewhere.path(), &config, "list", &[&alice])
             .await
             .status
             .success()
@@ -144,30 +145,30 @@ async fn roles_cli_approved_scope_relative_paths_and_usage() {
             elsewhere.path(),
             &config,
             "revoke",
-            &["alice", "moderator", "--global"],
+            &[&alice, "moderator", "--global"],
         )
         .await;
         assert!(o.status.success());
         assert!(String::from_utf8_lossy(&o.stdout).contains(expected));
     }
-    assert_eq!(db.list_roles("alice").await.unwrap().len(), 1);
+    assert_eq!(db.list_roles(&alice).await.unwrap().len(), 1);
     assert!(
         run(
             elsewhere.path(),
             &config,
             "revoke",
-            &["alice", "editor", "--tenant", "one"]
+            &[&alice, "editor", "--tenant", "one"]
         )
         .await
         .status
         .success()
     );
-    let o = run(elsewhere.path(), &config, "list", &["alice"]).await;
+    let o = run(elsewhere.path(), &config, "list", &[&alice]).await;
     assert!(o.status.success());
     assert_eq!(o.stdout, b"ROLE\tSCOPE\tTENANT\n");
     cfg["database"] = serde_json::json!({"postgres":"postgresql://secret_user:private_password@remote.invalid/database"});
     std::fs::write(&config, serde_json::to_vec(&cfg).unwrap()).unwrap();
-    let o = run(elsewhere.path(), &config, "list", &["alice"]).await;
+    let o = run(elsewhere.path(), &config, "list", &[&alice]).await;
     assert!(!o.status.success());
     let e = String::from_utf8_lossy(&o.stderr);
     assert!(!e.contains("private_password"));

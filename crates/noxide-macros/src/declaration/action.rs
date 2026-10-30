@@ -56,6 +56,17 @@ pub(crate) fn expand_action(
     item: syn::ItemStruct,
 ) -> syn::Result<Tokens> {
     marker(&item)?;
+    if declaration
+        .policy
+        .iter()
+        .flatten()
+        .any(|p| matches!(p, PolicyAtom::PrincipalIs(_)))
+    {
+        return Err(syn::Error::new(
+            item.span(),
+            "principal_is requires read or list",
+        ));
+    }
     if declaration.visible.is_some()
         || (declaration
             .policy
@@ -125,7 +136,7 @@ pub(crate) fn expand_action(
     let controls_name = format_ident!("{name}Controls");
     let original_name = format_ident!("{name}Original");
     let resource = &declaration.resource;
-    let policy = policy_tokens(&declaration.policy);
+    let policy = policy_tokens(&declaration.policy, &declaration.resource);
     let version = declaration.version;
     let names = &declaration.fields;
     let hashes: Vec<_> = names
@@ -187,7 +198,13 @@ pub(crate) fn expand_action(
     } else {
         quote!(())
     };
+    let immutable_check = if declaration.kind == "update" {
+        quote!(const _: () = { #(assert!(!<#values as ::noxide::FieldValue>::IMMUTABLE, "account fields are immutable");)* };)
+    } else {
+        Tokens::new()
+    };
     Ok(quote! {
+        #immutable_check
         #item
         #original
         #vis struct #input_name { #(pub #names: #values),* }

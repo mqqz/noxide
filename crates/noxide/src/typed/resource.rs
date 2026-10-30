@@ -73,6 +73,7 @@ pub trait FieldSpec<const KEY: u32> {
     const KEY: &'static str;
 }
 pub trait FieldValue: Sized {
+    const IMMUTABLE: bool = false;
     const OPTIONAL: bool = false;
     fn kind() -> FieldKind;
     fn encode(&self) -> String;
@@ -143,5 +144,36 @@ impl<T: FieldValue> FieldValue for Option<T> {
         } else {
             Some(T::decode(value))
         }
+    }
+}
+
+/// Stable account identity. Parsing grants no authority and does not check eligibility.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AccountId(String);
+impl std::str::FromStr for AccountId {
+    type Err = &'static str;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if noxide_protocol::account_id(value) {
+            Ok(Self(value.into()))
+        } else {
+            Err("invalid account identity")
+        }
+    }
+}
+impl std::fmt::Display for AccountId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl FieldValue for AccountId {
+    const IMMUTABLE: bool = true;
+    fn kind() -> FieldKind {
+        panic!("account fields require explicit scope = same_tenant")
+    }
+    fn encode(&self) -> String {
+        self.0.clone()
+    }
+    fn decode(value: &str) -> Self {
+        value.parse().expect("host account identity")
     }
 }

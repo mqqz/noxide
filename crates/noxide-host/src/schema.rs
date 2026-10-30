@@ -186,6 +186,10 @@ pub(crate) fn transition(
                 value,
             } => {
                 let destination = field(resource(&target, key)?, name)?.clone();
+                ensure!(
+                    !matches!(destination.kind, FieldKind::Account { .. }),
+                    "account bindings require creation of a new record"
+                );
                 destination.canonical(value).map_err(anyhow::Error::msg)?;
                 let r = current
                     .iter_mut()
@@ -318,6 +322,9 @@ pub(crate) fn transition(
 }
 
 fn same_kind(a: &FieldKind, b: &FieldKind) -> bool {
+    if let (FieldKind::Account { scope: a }, FieldKind::Account { scope: b }) = (a, b) {
+        return a == b;
+    }
     matches!(
         (a, b),
         (FieldKind::Text, FieldKind::Text)
@@ -334,6 +341,26 @@ mod tests {
 
     fn source() -> Vec<Resource> {
         crate::test_support::manifest().resources
+    }
+
+    #[test]
+    fn account_constraints_can_change_without_converting_identity() {
+        let mut source = source();
+        source[0].fields[0].kind = FieldKind::Account {
+            scope: noxide_protocol::AccountScope::SameTenant,
+        };
+        source[0].fields[0].max_bytes = 1024;
+        let mut target = source.clone();
+        target[0].fields[0].max_bytes = 43;
+        let change = MigrationOp::ChangeField {
+            resource: "notes".into(),
+            field: "body".into(),
+        };
+        transition(&source, &target, std::slice::from_ref(&change)).unwrap();
+        let mut text = source.clone();
+        text[0].fields[0].kind = FieldKind::Text;
+        assert!(transition(&text, &target, std::slice::from_ref(&change)).is_err());
+        assert!(transition(&source, &text, &[change]).is_err());
     }
 
     #[test]

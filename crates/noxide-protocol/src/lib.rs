@@ -119,6 +119,7 @@ pub enum Predicate {
     Capability,
     Owner,
     SameTenant,
+    PrincipalIs { field: String },
     Role { name: String, tenant_scoped: bool },
 }
 
@@ -148,12 +149,47 @@ fn required_initial<'de, D: serde::Deserializer<'de>>(
     Option::<String>::deserialize(deserializer)
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountScope {
+    SameTenant,
+}
+
+pub fn account_id(value: &str) -> bool {
+    // 32 bytes in unpadded base64url: 42 full digits and two residual bits.
+    value.len() == 43
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && matches!(
+            value.as_bytes()[42],
+            b'A' | b'E'
+                | b'I'
+                | b'M'
+                | b'Q'
+                | b'U'
+                | b'Y'
+                | b'c'
+                | b'g'
+                | b'k'
+                | b'o'
+                | b's'
+                | b'w'
+                | b'0'
+                | b'4'
+                | b'8'
+        )
+}
+
 /// Portable scalar schemas. Values cross the boundary in canonical text form.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum FieldKind {
     #[default]
     Text,
+    Account {
+        scope: AccountScope,
+    },
     Boolean,
     Parent {
         resource: String,
@@ -357,6 +393,12 @@ impl TextField {
             return Ok(String::new());
         }
         let value = match &self.kind {
+            FieldKind::Account { .. } => {
+                if !account_id(input) {
+                    return Err("invalid account reference".into());
+                }
+                input.to_owned()
+            }
             FieldKind::Text => {
                 let value = input.replace("\r\n", "\n").replace('\r', "\n");
                 if value.is_empty()

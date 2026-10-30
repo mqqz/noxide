@@ -374,6 +374,15 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     }
     if request.method() == axum::http::Method::GET {
+        if path == presentation.account_path {
+            let session =
+                cookie(request.headers(), &presentation.session_cookie).unwrap_or_default();
+            return match gateway.app.account_identity(&session).await {
+                Ok(id) if crate::account_id(&id) => ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], format!("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Your account</title><nav><a href=\"/\">Home</a></nav><main><h1>Your account ID</h1><p>Share this ID with someone who needs to address you.</p><code>{id}</code></main></html>")).into_response(),
+                Ok(_) => redirect(&presentation.login_path),
+                Err(e) => error(e, &presentation.login_path),
+            };
+        }
         if path == presentation.registration_path {
             return match gateway.app.login_challenge().await {
                 Err(e) => error(e, &presentation.login_path),

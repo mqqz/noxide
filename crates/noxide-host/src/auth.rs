@@ -43,9 +43,14 @@ pub(crate) struct User {
 
 impl Database {
     /// Operator-only provisioning; never linked into an application component.
-    pub async fn create_account(&self, id: &str, password: &str, tenant: &str) -> Result<()> {
+    pub async fn create_account(
+        &self,
+        login_name: &str,
+        password: &str,
+        tenant: &str,
+    ) -> Result<String> {
         ensure!(
-            crate::manifest::identifier(id)
+            crate::manifest::identifier(login_name)
                 && (tenant.is_empty() || crate::manifest::identifier(tenant)),
             "invalid account scope"
         );
@@ -65,31 +70,28 @@ impl Database {
             .begin(std::time::Instant::now() + std::time::Duration::from_secs(5))
             .await?;
         tx.check_storage().await?;
-        tx.execute(
-            "INSERT INTO nx_accounts(id,password,tenant,epoch) VALUES($1,$2,$3,1)",
-            &[id.into(), hash.into(), tenant.into()],
-        )
-        .await?;
-        tx.commit().await
+        let account = insert_account(&mut tx, login_name, &hash, tenant).await?;
+        tx.commit().await?;
+        Ok(account)
     }
 }
 
 pub(crate) async fn login(
     tx: &mut Transaction,
     keys: &HostKeys,
-    id: &str,
+    login_name: &str,
     password: &str,
     now: i64,
     permits: crate::runtime::limiter::HashPermits,
 ) -> Result<String> {
     ensure!(
-        crate::manifest::identifier(id) && password.len() <= 256,
+        crate::manifest::identifier(login_name) && password.len() <= 256,
         "invalid credentials"
     );
     let rows = tx
-        .fetch::<3>(
-            "SELECT password,tenant,CAST(epoch AS TEXT) FROM nx_accounts WHERE id=$1",
-            &[id.into()],
+        .fetch::<4>(
+            "SELECT password,tenant,CAST(epoch AS TEXT),id FROM nx_accounts WHERE login_name=$1 AND state='active'",
+            &[login_name.into()],
         )
         .await?;
     let row = rows.first();
@@ -116,12 +118,12 @@ pub(crate) async fn login(
     })
     .await??;
     let row = row.ok_or_else(|| anyhow::anyhow!("invalid credentials"))?;
-    let (token, signed) = keys.issue(TokenKind::Session, id, now, 3600)?;
+    let (token, signed) = keys.issue(TokenKind::Session, &row[3], now, 3600)?;
     tx.execute(
         "INSERT INTO nx_sessions(id,principal,epoch,expires) VALUES($1,$2,$3,$4)",
         &[
             token.nonce.into(),
-            id.into(),
+            row[3].as_str().into(),
             Param::Number(row[2].parse()?),
             Param::Number(token.expires),
         ],
@@ -155,7 +157,7 @@ pub(crate) async fn authenticate(
     if token.kind != TokenKind::Session {
         return Err(AuthError::Invalid);
     }
-    let rows=tx.fetch::<2>("SELECT a.id,a.tenant FROM nx_sessions s JOIN nx_accounts a ON a.id=s.principal WHERE s.id=$1 AND s.principal=$2 AND s.epoch=a.epoch AND s.expires>$3",&[token.nonce.as_str().into(),token.subject.as_str().into(),Param::Number(now)]).await.map_err(|_| AuthError::Unavailable)?;
+    let rows=tx.fetch::<2>("SELECT a.id,a.tenant FROM nx_sessions s JOIN nx_accounts a ON a.id=s.principal WHERE s.id=$1 AND s.principal=$2 AND s.epoch=a.epoch AND a.state='active' AND s.expires>$3",&[token.nonce.as_str().into(),token.subject.as_str().into(),Param::Number(now)]).await.map_err(|_| AuthError::Unavailable)?;
     let row = rows.first().ok_or(AuthError::Invalid)?;
     let roles = tx
         .fetch::<2>(
@@ -222,7 +224,7 @@ fn invite_hash(code: &str) -> [u8; 32] {
 pub(crate) async fn register(
     tx: &mut Transaction,
     mode: Registration,
-    id: &str,
+    login_name: &str,
     password: &str,
     invite: Option<&str>,
     now: i64,
@@ -230,7 +232,7 @@ pub(crate) async fn register(
 ) -> Result<()> {
     ensure!(
         mode != Registration::Closed
-            && crate::manifest::identifier(id)
+            && crate::manifest::identifier(login_name)
             && (12..=256).contains(&password.len()),
         "registration failed"
     );
@@ -250,17 +252,193 @@ pub(crate) async fn register(
     .await??;
     // The account and redemption are one atomic unit. Insert first to satisfy
     // redeemed_by's immediate foreign key; failed redemption rolls it back.
-    tx.execute(
-        "INSERT INTO nx_accounts(id,password,tenant,epoch) VALUES($1,$2,'',1)",
-        &[id.into(), hash.into()],
-    )
-    .await?;
+    let account = insert_account(tx, login_name, &hash, "").await?;
     if mode == Registration::Invite {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         let hash = URL_SAFE_NO_PAD.encode(invite_hash(
             invite.ok_or_else(|| anyhow::anyhow!("registration failed"))?,
         ));
-        ensure!(tx.execute("UPDATE nx_invites SET redeemed_at=$1,redeemed_by=$2 WHERE code_hash=$3 AND redeemed_at IS NULL AND expires>$1",&[now.into(),id.into(),hash.into()]).await? == 1,"registration failed");
+        ensure!(tx.execute("UPDATE nx_invites SET redeemed_at=$1,redeemed_by=$2 WHERE code_hash=$3 AND redeemed_at IS NULL AND expires>$1",&[now.into(),account.into(),hash.into()]).await? == 1,"registration failed");
     }
     Ok(())
+}
+
+/// Canonical opaque account identities contain 256 bits of host entropy.
+pub fn account_id(value: &str) -> bool {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .is_ok_and(|bytes| bytes.len() == 32 && URL_SAFE_NO_PAD.encode(bytes) == value)
+}
+
+async fn insert_account(
+    tx: &mut Transaction,
+    login: &str,
+    hash: &str,
+    tenant: &str,
+) -> Result<String> {
+    for _ in 0..4 {
+        let id = crate::security::random_id()?;
+        if tx.execute("INSERT INTO nx_accounts(id,login_name,password,tenant,state,epoch) VALUES($1,$2,$3,$4,'active',1) ON CONFLICT(id) DO NOTHING", &[id.as_str().into(), login.into(), hash.into(), tenant.into()]).await? == 1 {
+            return Ok(id);
+        }
+    }
+    anyhow::bail!("account identity allocation failed")
+}
+
+impl Database {
+    /// Trusted operator lookup; deliberately absent from the guest interface.
+    pub async fn account_id(&self, login: &str) -> Result<String> {
+        let mut tx = self
+            .begin_read(std::time::Instant::now() + std::time::Duration::from_secs(5))
+            .await?;
+        tx.check_storage().await?;
+        let rows = tx
+            .fetch::<1>(
+                "SELECT id FROM nx_accounts WHERE login_name=$1 AND state<>'deleted'",
+                &[login.into()],
+            )
+            .await?;
+        let id = rows
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("account not found"))?[0]
+            .clone();
+        tx.commit().await?;
+        Ok(id)
+    }
+    pub async fn disable_account(&self, id: &str) -> Result<()> {
+        self.account_state(id, "disabled").await
+    }
+    pub async fn enable_account(&self, id: &str) -> Result<()> {
+        self.account_state(id, "active").await
+    }
+    pub async fn delete_account(&self, id: &str) -> Result<()> {
+        self.account_state(id, "deleted").await
+    }
+
+    async fn account_state(&self, id: &str, state: &str) -> Result<()> {
+        ensure!(account_id(id), "invalid account identity");
+        let mut tx = self
+            .begin(std::time::Instant::now() + std::time::Duration::from_secs(5))
+            .await?;
+        tx.check_storage().await?;
+        ensure!(tx.execute("UPDATE nx_accounts SET state=$2,epoch=epoch+1 WHERE id=$1 AND state<>'deleted' AND epoch<9223372036854775807", &[id.into(), state.into()]).await? == 1, "account unavailable");
+        tx.execute("DELETE FROM nx_sessions WHERE principal=$1", &[id.into()])
+            .await?;
+        if state == "deleted" {
+            tx.execute("DELETE FROM nx_roles WHERE principal=$1", &[id.into()])
+                .await?;
+            tx.execute(
+                "UPDATE nx_accounts SET login_name=NULL,password=NULL,tenant='' WHERE id=$1",
+                &[id.into()],
+            )
+            .await?;
+        }
+        tx.commit().await
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    async fn contract(db: Database) {
+        db.initialize().await.unwrap();
+        db.initialize().await.unwrap();
+        let id = db
+            .create_account("alice", "identity test password", "team")
+            .await
+            .unwrap();
+        assert!(account_id(&id));
+        assert_ne!(id, "alice");
+        assert_eq!(db.account_id("alice").await.unwrap(), id);
+        db.grant_role(&id, "writer", crate::RoleScope::Global)
+            .await
+            .unwrap();
+        let mut tx = db
+            .begin(std::time::Instant::now() + std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        tx.execute(
+            "INSERT INTO nx_sessions(id,principal,epoch,expires) VALUES('session',$1,1,123)",
+            &[id.as_str().into()],
+        )
+        .await
+        .unwrap();
+        tx.execute("INSERT INTO nx_invites(code_hash,issuer,expires,redeemed_at,redeemed_by) VALUES('invite','operator',123,1,$1)", &[id.as_str().into()]).await.unwrap();
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,1,$1,'team','{}','test',1,1)", &[id.as_str().into()]).await.unwrap();
+        assert_eq!(tx.execute("INSERT INTO nx_accounts(id,login_name,password,tenant,state,epoch) VALUES($1,'collision','unused','team','active',1) ON CONFLICT(id) DO NOTHING", &[id.as_str().into()]).await.unwrap(), 0);
+        tx.commit().await.unwrap();
+        db.disable_account(&id).await.unwrap();
+        assert_eq!(db.list_roles(&id).await.unwrap().len(), 1);
+        db.enable_account(&id).await.unwrap();
+        db.delete_account(&id).await.unwrap();
+        assert!(db.account_id("alice").await.is_err());
+        assert!(db.enable_account(&id).await.is_err());
+        let other = db
+            .create_account("alice", "identity test password", "team")
+            .await
+            .unwrap();
+        assert_ne!(id, other);
+        let mut tx = db
+            .begin(std::time::Instant::now() + std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(
+            tx.fetch::<1>("SELECT owner FROM nx_records", &[])
+                .await
+                .unwrap()[0][0],
+            id
+        );
+        assert_eq!(
+            tx.fetch::<1>("SELECT redeemed_by FROM nx_invites", &[])
+                .await
+                .unwrap()[0][0],
+            id
+        );
+        for table in ["nx_roles", "nx_sessions"] {
+            assert_eq!(
+                tx.fetch::<1>(&format!("SELECT CAST(COUNT(*) AS TEXT) FROM {table}"), &[])
+                    .await
+                    .unwrap()[0][0],
+                "0"
+            );
+        }
+        assert_eq!(tx.fetch::<4>("SELECT state,COALESCE(login_name,''),COALESCE(password,''),tenant FROM nx_accounts WHERE id=$1", &[id.as_str().into()]).await.unwrap(), [["deleted", "", "", ""]]);
+        assert!(
+            tx.execute("DELETE FROM nx_accounts WHERE id=$1", &[id.into()])
+                .await
+                .is_err()
+        );
+        tx.rollback().await.unwrap();
+    }
+    #[tokio::test]
+    async fn sqlite_identity_lifecycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        contract(Database::sqlite(tmp.path().join("identity.db"))).await;
+    }
+    #[tokio::test]
+    #[ignore = "requires NOXIDE_TEST_POSTGRES"]
+    async fn postgres_identity_lifecycle() {
+        use sqlx::Connection;
+        let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+        let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+        let name = format!(
+            "nx_identity_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sqlx::query(&format!("CREATE DATABASE {name}"))
+            .execute(&mut admin)
+            .await
+            .unwrap();
+        let mut case = url::Url::parse(&url).unwrap();
+        case.set_path(&name);
+        contract(Database::postgres(case.as_str()).unwrap()).await;
+        sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+            .execute(&mut admin)
+            .await
+            .unwrap();
+    }
 }

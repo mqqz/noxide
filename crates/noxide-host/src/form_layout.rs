@@ -78,8 +78,10 @@ pub(crate) fn validate(m: &Manifest, action: &Action, layout: &[FormInstruction]
                 ensure!(
                     match control {
                         Control::Auto => true,
-                        Control::TextInput =>
-                            matches!(f.kind, FieldKind::Text | FieldKind::Integer { .. }),
+                        Control::TextInput => matches!(
+                            f.kind,
+                            FieldKind::Text | FieldKind::Account { .. } | FieldKind::Integer { .. }
+                        ),
                         Control::Textarea { rows } =>
                             matches!(f.kind, FieldKind::Text) && (1..=40).contains(rows),
                         Control::Checkbox => f.kind == FieldKind::Boolean && !f.optional,
