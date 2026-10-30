@@ -36,6 +36,62 @@ Keeping the guest inside the write transaction preserves the existing locking
 approach. Additional steps lengthen lock duration, especially for SQLite's single
 writer, so all steps share the existing request deadline and work budgets.
 
+## Core action and bindings
+
+The host separates three parts of an action:
+
+- The core owns authorized inputs and target, inspection, mutation steps, step
+  outcomes, captured navigation source and receipt replay semantics.
+- The web form binding owns form presentation, CSRF and submission credentials,
+  response mapping, conflict and rejection forms, recovery and handover delivery.
+- The response expresses success, validation errors and an optional destination.
+
+This is an in-process implementation boundary. The wire `Action`, manifest,
+request and response schemas, protocol version, approval digests, signed token
+format and receipt JSON intentionally remain unchanged. The SDK and macros keep
+the existing action declaration.
+
+`application/action.rs::attempt_action` consumes `ActionCore` and returns an
+`Attempt` without rendering. `Submitter` groups the cookie, submission token and
+CSRF proof; verification still happens inside the write transaction. Signed
+targets retain their issuing route: a permitted read operation on that route is
+core authority, not a form presentation detail. Edit capabilities retain their
+existing mutation authority, while inspection still requires read permission.
+
+The core issues an anonymous edit capability as a transactional effect and records
+its handover identity in the receipt. Only delivery of the secret on the handover
+page belongs to the binding. `submission.rs` prepares the response with the open
+transaction, then calls the core receipt-write helper, checks the deadline and
+commits. This preserves response preparation before receipt persistence and
+commit. Replay keeps its committed-recovery fallback; unknown commit outcomes
+stay in receipt recovery. Rendering settled outcomes performs no database work,
+so the core rolls back before returning them. These boundaries describe the
+implementation; they do not prove audited security or transport anonymity.
+
+### Deferred until a second invocation style exists
+
+A concrete operator CLI or non-browser client should motivate any further split.
+The following are deferred:
+
+- Split the wire manifest into actions and `forms: Vec<FormBinding { action,
+  layout, destination }>`, with routes referencing forms, allowing several forms
+  per action. Bindings must remain covered by the manifest digest and approval.
+- Introduce `TargetGrant` with a private constructor: either read-authorized via
+  a declared read operation (currently the issuing route), or an edit capability.
+  A new binding must never accept a raw target ID.
+- Declare the target's read operation on the action, next to inspection, instead
+  of deriving that requirement from the issuing route.
+- Separate SDK control and redirect traits while retaining the ergonomic single
+  `#[action(..., redirect = ...)]` declaration.
+
+Any new binding must supply its own origin or CSRF-equivalent proof and replay
+key source. Its admission checks and adversarial tests must enforce the same
+request, database and WASM permits, deadline, fuel, database-call budgets and
+anonymous-write limits. The host must map outcomes to responses without raw
+response output. External-network and logging authority must remain unchanged,
+preserving anonymity defaults. Every authorization check must use the core
+executor; a new binding must not introduce a second authorization system.
+
 ## Protocol shape
 
 ```rust
@@ -141,8 +197,8 @@ agreed to a price shown there. A stock guard protects inventory, not the accepte
 price. The order and stock example below uses `Identity` only because it stores no
 price and the stock count is guarded.
 
-The pre-execution check in `prepare()` applies the action's declared requirement.
-A stale `Exact` target produces the existing 409 conflict form. Reference
+The pre-execution check in `attempt_action()` applies the action's declared
+requirement. A stale `Exact` target produces the existing 409 conflict form. Reference
 eligibility no longer compares revisions; identity plus current eligibility,
 gate and create policy inside the transaction is the binding requirement.
 

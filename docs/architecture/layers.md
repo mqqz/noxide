@@ -32,17 +32,34 @@ host authorization of the destination and credential handover.
 
 ## Mutation and navigation lifecycle
 
-`application/submission.rs` binds the current principal and approved action,
-canonicalizes action inputs and checks the signed target revision requirement.
-It runs the guest decision with no storage imports, then invokes the declared step
-executor in `repository.rs`. The executor authorizes each step against current
-transaction state and derives every outcome. All mutations and their receipt
-persist atomically. `application/navigation.rs` owns the existing
-`SemanticReceipt` and `Prepared`, response preparation and
-post-commit destination resolution. Required response preparation happens before
-commit; delivery waits for confirmed commitment or a verified committed receipt.
-An unknown commit outcome uses receipt recovery, never an assumed success or a
-fresh mutation.
+`application/action.rs` owns a core action attempt: identity resolution inside the
+write transaction, receipt claim, target authorization, revision checks, authorized
+inspection, guest decision, step execution, destination capture and anonymous edit
+handover issuance. It returns a presentation-free outcome: a pending commit,
+matching receipt replay, or a settled unavailable, conflict, guest rejection or
+guard rejection. Missing, reincarnated and unauthorized targets share one
+unavailable outcome with no cause. `ActionCore` projects execution fields from the
+approved action; it carries the navigation source and destination resource. The
+destination route ID is retained as an opaque receipt identity to preserve receipt
+serialization. It carries no form presentation.
+
+`application/submission.rs` is the web form binding. It owns admission, input
+canonicalization and digesting, the shared retry budget, response mapping, the
+commit loop and recovery. Its preparation function maps settled outcomes to forms
+and asks `application/navigation.rs` to prepare a pending commit or replay response
+inside the open transaction. The core receipt-write helper runs after response
+preparation, retaining the order: prepare response, write receipt, check deadline,
+commit. The WASM admission permit remains held through preparation and receipt
+persistence. The step executor in `repository.rs` authorizes every step against
+current transaction state and derives its outcome. Mutations, handover issuance
+and the receipt persist atomically.
+
+`application/navigation.rs` retains `SemanticReceipt`, `Prepared`, transactional
+destination capture, response preparation and bounded post-commit destination
+resolution. Delivery waits for confirmed commitment or a verified committed
+receipt. An unknown commit outcome uses receipt recovery, never an assumed success
+or a fresh mutation. See [Core action and bindings](transactions.md#core-action-and-bindings)
+for the boundary and requirements for any future binding.
 
 After commitment, parent navigation checks the captured parent incarnation and
 fresh read authority within its budget. It cannot rerun mutation handlers or turn
