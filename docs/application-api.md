@@ -7,7 +7,7 @@ authorization, form validation, HTML serialization, and transaction commitment.
 Start with [private-notes](../examples/private-notes/src/lib.rs) for text CRUD, or
 [task-board](../examples/task-board/src/lib.rs) for integers, choices, optional
 values, checkboxes, and custom form layouts. The [forum](../examples/forum/README.md)
-exercises parent relationships, public and anonymous posting, and moderation.
+exercises typed references, public and anonymous posting, and moderation.
 
 Use `noxide::prelude::*` for the common declarations and rendering types, or
 import individual names as the examples do.
@@ -80,9 +80,9 @@ creates, updates, and deletes, in one block or across blocks. Names must be uniq
 across the module, including explicit actions. Each action retains its own policy,
 fields, redirect, hooks, layout, and `Form<Action>` route binding. Create and update
 require separate `fields(...)` lists. Every entry requires `redirect(page_name)`
-or the typed parent destination `redirect(parent(page_name))`. Omitted
+or the typed reference destination `redirect(reference(field, page_name))`. Omitted
 operations generate nothing. Existing host rules require create to name every writable
-ordinary stored field (parent references are host-bound) and ordinary create/update
+ordinary stored field (references are host-bound) and ordinary create/update
 redirects to target a record page. Adding a writable field
 therefore requires updating create explicitly before admission succeeds. An optional `allow = ...` forwards to the existing
 policy parser; otherwise the resource must be marked `owner`. For example:
@@ -172,7 +172,7 @@ Rust declarations. Declaration order, Rust module names, labels, and enum displa
 labels do not change the stored schema. Changing a persistent key requires an
 explicit migration.
 
-Supported values are bounded `String`, `bool`, `i64`, parent references using `Id<T>`, unit enums deriving `Choice`,
+Supported values are bounded `String`, `bool`, `i64`, references using `Id<T>`, unit enums deriving `Choice`,
 and one layer of `Option<T>`. Enum variants require stable `#[choice(key = "…",
 label = "…")]` declarations. Strings require `max_bytes`; integers may declare
 `min` and `max`. Every resource has exactly one `#[id] Id<Self>` field. IDs convey
@@ -500,110 +500,75 @@ change preserves access.
 The [declarative query design](architecture/queries.md) describes selection,
 ordering, parameters and previews, with compatibility and execution constraints.
 
-A child resource can declare one required, immutable parent ID:
+A resource may declare one required, immutable reference using `Id<T>`. A plain
+reference has no visibility relationship to its target:
 
 ```rust
-#[derive(Resource)]
-#[resource(key = "replies", owner)]
-struct Reply {
-    #[id]
-    id: Id<Self>,
-    #[field(visible(published = true), create_when(locked = false))]
-    thread: Id<Thread>,
-    #[field(max_bytes = 4096)]
-    body: String,
-    #[field(initial = false)]
-    published: bool,
-}
+product: Id<Product>,
+```
 
-#[query(list(Reply), allow = public, visible(published = true), fields(body))]
-struct ThreadReplies;
+The forum adds a gate to its reference:
 
-#[action(create(Reply), fields(body), allow = owner, redirect = show_reply)]
+```rust
+#[field(visible(published = true), create_when(locked = false))]
+thread: Id<Thread>,
+
+#[action(create(Reply), fields(body),
+         bind(thread = target, eligible = PublicThread),
+         allow = owner, redirect = show_reply)]
 struct CreateReply;
 ```
 
-`Thread` must declare the referenced boolean or choice fields. Both parent
-predicates are explicit, operator-approved authority: `visible(...)` gates public
-child reads and lists; `create_when(...)` additionally gates child creation.
-These predicates do not replace the child operation's policy or public visibility
-predicate. Private child queries retain their declared policies, so a moderator
-can inspect replies beneath a hidden thread. Locking a thread prevents new replies;
-it does not revoke existing reply-edit authority.
+These are declaration fragments; declare the resources and eligible query first.
+Every reference create explicitly declares `bind(...)`. The eligible query must
+be a read of the target on every page carrying the form. At submission the host
+checks the signed target identity, revision and incarnation, source create policy,
+the eligible read's complete authorization and visibility, and both gate predicates
+inside the write transaction. Eligibility is not rechecked after creation.
 
-Put `Query<ThreadReplies>` and `Form<CreateReply>` on a record page whose target
-is `Id<Thread>`, alongside a read query for that thread. `fetch()` then lists only
-that thread's replies. The host binds the parent from the page into the signed
-submission token. Omit `thread` from every action's writable fields; client or guest
-attempts to supply or change it are rejected. Creation rechecks the parent,
-visibility, and creation predicate in the write transaction. A changed parent
-revision requires form recovery; a hidden, locked, missing, or replaced parent
-cannot accept the stale submission.
+A gate's `visible` condition hides public source reads and lists; `create_when`
+additionally blocks new records. Private operations retain their declared policy.
+Locking a thread leaves existing reply reads, edits and deletion unaffected.
+Missing targets hide public gated records. A gate target cannot itself have a gate.
 
-These checks are a host security invariant. Parent validation and child insertion
-share a write transaction: SQLite serializes writers with `BEGIN IMMEDIATE`;
-PostgreSQL uses serializable isolation. Overlapping creation and moderation may
-serialize in either order; this does not promise that a moderation commit cancels
-an already-running request. A public read started after the visibility change
-commits must hide the child, including direct child URLs. An in-flight read can
-finish using its earlier snapshot. Missing parents fail closed for public reads.
-Parent deletion checks for children in the same transaction as deletion.
+References have no initial value, are absent from forms and action writable fields,
+and cannot appear in filters or disclosures. Attempts to submit or update one fail.
+A list can declare `scope(thread)` to select the page's thread. Lists of gated
+resources receive this scope automatically in SDK lowering; host admission requires
+it explicitly in the manifest. Ungated references also support unscoped collection
+lists, so an order list survives loss of access to a product.
 
-The relationship tests cover immutable updates, hidden and missing parents,
-previously issued forms after locking, rejected deletion and orphaning migrations,
-and concurrent parent changes committed before child mutation checks. They run
-against SQLite, with the same cases available in the opt-in PostgreSQL suite.
-Keep these predicates restricted to the declared boolean or choice equality
-checks; this API does not provide arbitrary predicates or graph authorization.
+Deleting a target with any referencing record is rejected, including records the
+caller cannot see. Whoever may create a referencing record can thereby block the
+target's deletion. Creation and deletion share transactional integrity checks;
+migrations reject orphaning, adding references to existing resources and changing
+their target. The host manages reference indexes on both backends.
 
-A record page may contain one paginated list and bounded previews, each scoped
-to its parent target. Declare
-`order = created_asc, page_size = 20` on a list query to request up to 20 records.
-Use `order = created_desc` for newest first. Both orders use immutable creation
-sequence keysets; the first page has no continuation predicate. New inserts appear
-on a fresh descending page, not on later pages behind its cursor. Deletions and
-visibility changes remain live; pagination is not a snapshot. The private inbox
-uses descending order on the same bounded account merge path.
-Defaults are ascending creation order and three records; approved page sizes are
-1 through 20. The host applies policy, visibility, parent scope and selection in SQL.
+Follow is a separate read grant:
 
-Creation order uses a globally unique, immutable host sequence, separate from
-application fields and random record IDs. A transactional counter prevents a later
-allocation from committing ahead of an earlier allocation still holding its lock.
-Rollback restores the counter. The global counter serializes creations across
-resources; transaction deadlines still apply under contention.
+```rust
+#[query(list(Order), allow = owner, page_size = 20)]
+struct MyOrders;
+#[query(read(Product), allow = public, visible(available = true),
+        fields(name, price), via(MyOrders.product))]
+struct OrderProduct;
 
-Pages return a strict prefix fitting the actual serialized result budget. A byte
-limit can shorten a page; the next page resumes after its last returned record.
-Rows are never skipped to fit later rows. A first record that cannot fit produces
-a controlled failure. Host-generated next links retain the concrete record URL.
-The repository-result budget is separate from the complete Document IR budget.
-Choose page sizes that leave room for parent content, forms, markup, and JSON
-escaping at maximum field lengths. The forum renders full reply bodies with a
-six-record public limit; its moderator list renders only links and requests 20.
+let orders = my_orders.fetch();
+let products = order_product.follow_many(&orders)?;
+```
 
-Opaque authenticated cursors expire after 15 minutes and are bound to the approved
-query, deployment, caller context, and parent scope. They grant no authority;
-every page rechecks current authorization and visibility. Invalid or expired
-cursors produce a restart link, including after deployment changes.
+The source must return the reference field. The follow must share a route with
+its source and accepts only that query's output type. The host resolves references
+from provenance for records actually returned during this request, independently
+of guest copies. It checks target policy, visibility, gates and projection on every
+follow. Reading an order alone reveals only its projected product ID.
 
-Traversal is live, not a snapshot. Later creations may appear on subsequent
-pages; deleted and hidden records disappear. Publishing an older record behind
-the cursor does not add it to the remaining traversal: restart to see it.
-This experimental storage layout requires fresh databases; existing layouts are
-rejected rather than assigned an invented historical order.
-
-See [pagination validation](pagination-validation.md) for regression coverage,
-query-plan checks, and local contention measurements.
-
-The initial relationship model has one level: a parent cannot itself have a
-parent. Child collection queries require their parent route; global child lists,
-joins, arbitrary filters, and multiple independent cursors are not exposed.
-The host creates a parent lookup index for SQLite and PostgreSQL. Deleting a
-parent with children is rejected. Schema changes rebuild the relationship indexes
-and validate all references within the bounded migration transaction; an orphaned
-reference rolls the migration back. Renaming a parent resource also requires
-updating the child's declared parent resource through the schema workflow.
+A follow runs once per request with at most 20 inputs. Batched distinct target reads
+preserve input order and duplicates; missing and denied targets both produce `None`.
+The complete positional vector is returned or the request fails within existing
+call, deadline and shared list-result byte budgets. Follow results cannot be followed
+again. See the [reference model](architecture/references.md) and
+[shop fixture](../tools/fixtures/sdk/shop.rs).
 
 The [forum example](../examples/forum/README.md) exercises public threads,
 account-owned and edit-secret replies, editing, thread locks, and moderation.
@@ -628,35 +593,35 @@ remains a separate operator-selected backfill for existing rows.
 
 Contract review follow-up: the CLI currently prints approval and schema hashes, without a human-readable policy summary. A future summary should list each initial field and value together with every update action that can write it and that action’s policy. Until then, inspect the full approved manifest.
 
-### Redirecting to a parent
+### Redirecting through a reference
 
-A child mutation can declare a parent page as its destination:
+A mutation can declare its reference target page as the destination:
 
 ```rust
-create PostReply { fields(body), redirect(parent(thread)) }
+create PostReply { fields(body), bind(thread = target, eligible = PublicThread), redirect(reference(thread, thread)) }
 ```
 
 The same destination syntax works for update and delete. The named page must
-address the child's declared parent resource and provide its applicable read
-operation. The host captures the immutable parent identity, including its
+address the reference target resource and provide its applicable read
+operation. The host captures the immutable target identity, including its
 incarnation, from the validated relationship. Submitted identifiers and guest
 URLs cannot select the destination.
 
-The host commits the mutation and its recovery receipt before resolving parent
+The host commits the mutation and its recovery receipt before resolving reference
 navigation. It applies the destination's normal resource read authorization to
-the current principal without executing the destination page handler. A child's
-edit secret does not confer access to a private parent. Missing, replaced, or
-unreadable parents, navigation timeouts, and post-commit lookup failures produce
+the current principal without executing the destination page handler. A source's
+edit secret does not confer access to a private target. Missing, replaced, or
+unreadable targets, navigation timeouts, and post-commit lookup failures produce
 a generic mutation-success response. They do not undo the mutation or invite a
 new submission. Link presence can reveal whether navigation is currently allowed;
-the fallback does not identify the parent or explain why access is unavailable.
+the fallback does not identify the target or explain why access is unavailable.
 
 Anonymous creation first displays the original edit secret, with an optional
 “Continue to thread” link. Save the secret before continuing. The host never
 automatically redirects past this handover. If delivery is interrupted, retain
 the original form's recovery information and replay that submission to recover
 the same receipt and secret; replay does not create another record or generate
-a replacement secret. Each replay evaluates parent visibility again, including
+a replacement secret. Each replay evaluates target visibility again, including
 after the child has been deleted.
 
 The [architecture layers](architecture/layers.md) describe explicit SDK declarations,
@@ -733,7 +698,7 @@ struct InboxMessages;
 ```
 
 These are declaration sketches; declare the resources and choices first. Values
-must encode canonically for the declared field. Account, parent, text and integer
+must encode canonically for the declared field. Account, reference, text and integer
 fields are ineligible, and a filter cannot repeat the public visibility field.
 `filter` is list-only. It selects among accessible records and never grants access:
 a sold item disappears from the available list but remains readable through an
@@ -784,7 +749,7 @@ Document IR. Next-page URLs retain sorted canonical parameters before `cursor`.
 A cursor for books cannot be used for games or another authenticated account.
 
 Choose an unparameterized destination for create, update and delete redirects,
-including `redirect(parent(...))`. Redirect declarations do not bind required
+including `redirect(reference(field, page))`. Redirect declarations do not bind required
 query parameters; admission rejects destinations that declare them.
 
 The form-urlencoded query string is limited to 1,024 bytes. Missing, unknown,
@@ -821,7 +786,7 @@ with only previews also ignores `cursor` after strict query-string validation.
 Truncation is true on row or byte limits, a positive look-ahead, or a bounded
 residual scan. The host renders a checked “See all” link only when truncated and
 `see_all` names a route with an equivalent full list: same resource, policy,
-visibility and selection, with declared parameters drawn from the preview page.
+visibility, scope and selection, with declared parameters drawn from the preview page.
 Parameter kinds must match across both routes, including Choice variants. The
 destination must accept every canonical source value, including empty values
 allowed by optional resource fields. The link retains canonical values and
