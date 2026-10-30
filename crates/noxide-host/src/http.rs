@@ -274,7 +274,7 @@ fn decode_form(bytes: &[u8]) -> Result<BTreeMap<String, String>> {
     let mut result = BTreeMap::new();
     let mut decoded_bytes = 0;
     for pair in bytes.split(|b| *b == b'&') {
-        ensure!(result.len() < 12, "field count");
+        ensure!(result.len() < 35, "field count");
         let Some(at) = pair.iter().position(|b| *b == b'=') else {
             anyhow::bail!("field missing value")
         };
@@ -1157,6 +1157,16 @@ mod tests {
             .is_err()
         );
     }
+    #[test]
+    fn form_parser_bounds_transaction_inputs_and_host_controls() {
+        let form = (0..35)
+            .map(|index| format!("field{index}=x"))
+            .collect::<Vec<_>>()
+            .join("&");
+        assert_eq!(decode_form(form.as_bytes()).unwrap().len(), 35);
+        assert!(decode_form(format!("{form}&extra=x").as_bytes()).is_err());
+    }
+
     #[test]
     fn origin_has_no_clearnet_default() {
         assert!(Origin::parse("https://example.com").is_err());
