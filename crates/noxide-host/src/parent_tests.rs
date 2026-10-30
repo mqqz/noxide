@@ -292,9 +292,15 @@ async fn mutation_case(db: Database) {
         ("body".into(), "edited".into()),
         ("thread".into(), "20".into()),
     ]);
-    assert!(e.execute_transaction(&m.actions[1]).await.is_err());
+    assert!(
+        e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[1]).unwrap())
+            .await
+            .is_err()
+    );
     e.request.input.remove("thread");
-    e.execute_transaction(&m.actions[1]).await.unwrap();
+    e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[1]).unwrap())
+        .await
+        .unwrap();
     e.tx.commit().await.unwrap();
     let mut e = effects(&db, &m, 2, 12).await;
     let stored = crate::repository::load(&mut e.tx, &m, 1, 12)
@@ -388,11 +394,14 @@ async fn concurrent_case(db: Database) {
             ]);
             e.grant = Some(grant);
             assert!(
-                e.execute_transaction(&child_manifest.actions[0])
-                    .await
-                    .unwrap_err()
-                    .to_string()
-                    .contains("reference unavailable")
+                e.execute_transaction(
+                    crate::application::ActionCore::of(&child_manifest, &child_manifest.actions[0])
+                        .unwrap()
+                )
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("reference unavailable")
             );
             e.tx.rollback().await.unwrap();
         });
@@ -634,7 +643,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         roles: vec![("moderator".into(), "".into())],
     });
     assert!(
-        e.execute_transaction(&m.actions[1])
+        e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[1]).unwrap())
             .await
             .unwrap_err()
             .to_string()
@@ -1991,7 +2000,7 @@ async fn follow_case(db: Database) {
         route: 3,
     });
     assert!(
-        e.execute_transaction(&m.actions[0])
+        e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
             .await
             .unwrap_err()
             .is::<crate::repository::ReferenceUnavailable>(),

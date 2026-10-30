@@ -66,16 +66,15 @@ impl Application {
     pub(super) async fn capture_destination(
         &self,
         tx: &mut Transaction,
-        action: &Action,
+        action: ActionCore<'_>,
         signed: Option<&RecordTarget>,
         original: Option<&StoredRecord>,
         outcomes: &[MutationOutcome],
     ) -> Result<Option<ReferenceDestination>> {
-        let route = manifest::route(&self.manifest, action.redirect.route())?;
-        if route.resource.is_none() {
+        if action.destination_resource.is_none() {
             return Ok(None);
         }
-        let (resource, id, incarnation) = match &action.redirect.source {
+        let (resource, id, incarnation) = match action.source {
             RedirectSource::Signed => {
                 let signed =
                     signed.ok_or_else(|| anyhow::anyhow!("missing signed navigation source"))?;
@@ -116,11 +115,11 @@ impl Application {
             }
         };
         ensure!(
-            route.resource == Some(resource),
+            action.destination_resource == Some(resource),
             "navigation resource differs"
         );
         Ok(Some(ReferenceDestination {
-            route: route.id,
+            route: action.destination_route,
             resource,
             id,
             incarnation,
@@ -619,7 +618,11 @@ mod tests {
                 &submission,
                 &csrf,
                 &input,
-                &super::super::submission::input_digest(&m.actions[0], &input).unwrap(),
+                &super::super::submission::input_digest(
+                    ActionCore::of(&m, &m.actions[0]).unwrap(),
+                    &input,
+                )
+                .unwrap(),
                 None,
                 &mut budget,
             )
