@@ -2,12 +2,11 @@
 //!
 //! Only the reserved maintenance task calls `tick`, after the normal deployment
 //! fence. Requests consume a fixed durable snapshot through `Freshness::attempt`.
-//! Root activation, schema, maintenance permits and HTTP wiring are deliberately
-//! separate integration work; declaring this module does not enable expiry.
-use crate::{
-    database::{Database, Transaction},
-    security,
-};
+//! Startup and the one maintenance service publish confirmed ticks. Resource
+//! expiry declarations/enforcement are separate and remain unavailable.
+#[cfg(test)]
+use crate::database::Database;
+use crate::{database::Transaction, security};
 use anyhow::{Result, ensure};
 use noxide_protocol::time::Timestamp;
 use std::{
@@ -44,6 +43,7 @@ async fn read(tx: &mut Transaction) -> Result<DurableClock> {
 pub(crate) struct CommittedTick {
     clock: DurableClock,
     started: Instant,
+    pub(crate) credential_seconds: i64,
 }
 
 /// Consume and commit a bounded, generation-fenced maintenance transaction.
@@ -92,6 +92,7 @@ async fn tick_sampled(
     Ok(CommittedTick {
         clock: next,
         started,
+        credential_seconds: seconds,
     })
 }
 
@@ -102,6 +103,7 @@ pub(crate) struct HeartbeatObservation {
     started: Instant,
 }
 
+#[cfg(test)]
 impl HeartbeatObservation {
     /// Caller holds reserved maintenance capacity. The monotonic observation
     /// time precedes BEGIN so a delayed database response cannot extend a lease.
@@ -165,10 +167,12 @@ impl Freshness {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn observe(&self, observation: HeartbeatObservation) -> Result<()> {
         self.observe_at(observation, Instant::now())
     }
 
+    #[cfg(test)]
     fn observe_at(&self, observation: HeartbeatObservation, now: Instant) -> Result<()> {
         let mut state = self
             .0
@@ -257,6 +261,10 @@ fn validate_progress(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AttemptTime(Timestamp);
 impl AttemptTime {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "P07 temporal consumers are not enabled yet")
+    )]
     pub(crate) const fn timestamp(self) -> Timestamp {
         self.0
     }

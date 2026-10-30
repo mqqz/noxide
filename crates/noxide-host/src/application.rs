@@ -2,6 +2,7 @@ mod action;
 pub(crate) use action::ActionCore;
 use action::{ExecutionBudget, input_digest};
 mod capabilities;
+mod clock;
 mod navigation;
 mod submission;
 use crate::{
@@ -207,6 +208,9 @@ pub struct Application {
     generation: OnceLock<String>,
     clock: AtomicI64,
     checkpointed: AtomicI64,
+    lifecycle_clock: crate::lifecycle_clock::Freshness,
+    maintenance: tokio::sync::Semaphore,
+    maintenance_running: std::sync::atomic::AtomicBool,
     pub(crate) admission_limits: AdmissionLimits,
     #[cfg(test)]
     pub(crate) postcommit_barrier:
@@ -429,61 +433,6 @@ impl Application {
 
     /// Validate persisted schema compatibility before accepting any traffic.
     /// Data requests repeat this fence inside their transaction.
-    pub async fn activate(&self) -> Result<()> {
-        let _request = self
-            .admission_limits
-            .requests()
-            .request()
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        let _database = self
-            .admission_limits
-            .database()
-            .acquire()
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        if self
-            .manifest
-            .operations
-            .iter()
-            .any(manifest::anonymous_action)
-        {
-            self.keys.signing_edit_key()?;
-        }
-        self.presentation.validate(&self.manifest)?;
-        let mut tx = self
-            .database
-            .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
-            .await?;
-        tx.check_storage().await?;
-        tx.bind_schema(&self.manifest).await?;
-        let generation = tx
-            .deployment(&self.deployment, self.keys.incarnation(), true)
-            .await?;
-        ensure!(
-            self.generation.get().is_none_or(|g| g == &generation),
-            "application generation retired"
-        );
-        let rows = tx
-            .fetch::<1>(
-                "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
-                &[],
-            )
-            .await?;
-        let observed = rows
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("clock missing"))?[0]
-            .parse()?;
-        tx.commit().await?;
-        self.clock.fetch_max(observed, Ordering::Relaxed);
-        self.checkpointed.fetch_max(observed, Ordering::Relaxed);
-        ensure!(
-            self.generation.get_or_init(|| generation.clone()) == &generation,
-            "concurrent activation differs"
-        );
-        Ok(())
-    }
-
     async fn admission(&self, tx: &mut Transaction, activate: bool) -> Result<()> {
         tx.check_storage().await?;
         tx.check_schema(&self.manifest).await?;
@@ -506,6 +455,7 @@ impl Application {
         Ok(effective)
     }
 
+    #[cfg(test)]
     pub(crate) async fn checkpoint_clock(&self) -> Result<()> {
         let m = self.clock.load(Ordering::Relaxed);
         if m <= self.checkpointed.load(Ordering::Relaxed) {
@@ -513,8 +463,7 @@ impl Application {
         }
         let deadline = Instant::now() + security::CLOCK_CHECKPOINT_BEGIN_DEADLINE;
         timeout_at(deadline, async {
-            let _request = self.admission_limits.requests().request().await?;
-            let _database = self.admission_limits.database().acquire().await?;
+            let _maintenance = self.maintenance.try_acquire()?;
             let mut tx = self.database.begin(deadline.into_std()).await?;
             self.admission(&mut tx, false).await?;
             tx.execute(
@@ -527,18 +476,6 @@ impl Application {
             Ok(())
         })
         .await?
-    }
-
-    pub(crate) async fn checkpoint_clocks(&self) {
-        let mut ticks = tokio::time::interval_at(
-            Instant::now() + security::CLOCK_CHECKPOINT_INTERVAL,
-            security::CLOCK_CHECKPOINT_INTERVAL,
-        );
-        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            ticks.tick().await;
-            let _ = self.checkpoint_clock().await;
-        }
     }
 
     fn submission_contract(&self) -> String {
@@ -590,6 +527,9 @@ impl Application {
             generation: OnceLock::new(),
             clock: AtomicI64::new(0),
             checkpointed: AtomicI64::new(0),
+            lifecycle_clock: crate::lifecycle_clock::Freshness::default(),
+            maintenance: tokio::sync::Semaphore::new(1),
+            maintenance_running: std::sync::atomic::AtomicBool::new(false),
             admission_limits,
             #[cfg(test)]
             postcommit_barrier: std::sync::Mutex::new(None),
@@ -1696,7 +1636,10 @@ mod clock_tests {
             .begin(std::time::Instant::now() + Duration::from_secs(2))
             .await
             .unwrap();
-        security::observe_clock(&mut tx, 10_000).await.unwrap();
+        let activated_wall = security::now().unwrap();
+        security::observe_clock(&mut tx, activated_wall)
+            .await
+            .unwrap();
         tx.commit().await.unwrap();
         let m = fixture::manifest();
         let app = Application::new(
@@ -1709,7 +1652,7 @@ mod clock_tests {
         )
         .unwrap();
         app.activate().await.unwrap();
-        assert_eq!(app.checkpointed.load(Ordering::Relaxed), 10_000);
+        assert!(app.checkpointed.load(Ordering::Relaxed) >= activated_wall);
         let mut writer = db
             .begin(std::time::Instant::now() + Duration::from_secs(2))
             .await
@@ -1720,7 +1663,7 @@ mod clock_tests {
             .unwrap();
         writer.rollback().await.unwrap();
 
-        let high = security::now().unwrap();
+        let high = app.checkpointed.load(Ordering::Relaxed) + 1;
         read_advance(&app, high).await;
         app.checkpoint_clock().await.unwrap();
         assert_eq!(app.checkpointed.load(Ordering::Relaxed), high);

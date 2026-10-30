@@ -369,8 +369,6 @@ pub(crate) async fn observe_clock(tx: &mut Transaction, now: i64) -> Result<i64>
     Ok(now.max(previous))
 }
 
-pub(crate) const CLOCK_CHECKPOINT_INTERVAL: std::time::Duration =
-    std::time::Duration::from_secs(60);
 pub(crate) const CLOCK_CHECKPOINT_BEGIN_DEADLINE: std::time::Duration =
     std::time::Duration::from_millis(200);
 

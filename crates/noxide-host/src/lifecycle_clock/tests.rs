@@ -8,7 +8,11 @@ fn clock(ms: i64, version: i64) -> DurableClock {
     }
 }
 fn committed(clock: DurableClock, started: Instant) -> CommittedTick {
-    CommittedTick { clock, started }
+    CommittedTick {
+        clock,
+        started,
+        credential_seconds: clock.watermark.unix_seconds_floor(),
+    }
 }
 fn observed(clock: DurableClock, started: Instant) -> HeartbeatObservation {
     HeartbeatObservation { clock, started }
@@ -269,25 +273,6 @@ fn restart_and_delayed_own_tick_require_new_confirmed_fresh_progress() {
 
 async fn fixture(database: &Database) {
     database.initialize().await.unwrap();
-    let mut tx = database
-        .begin(Instant::now() + Duration::from_secs(2))
-        .await
-        .unwrap();
-    // Isolated fixture only, until C allocates the production migration. Real
-    // Database/Transaction/security methods are exercised against both providers.
-    tx.execute(
-        "ALTER TABLE nx_clock ADD COLUMN lifecycle_ms BIGINT NOT NULL DEFAULT 0",
-        &[],
-    )
-    .await
-    .unwrap();
-    tx.execute(
-        "ALTER TABLE nx_clock ADD COLUMN lifecycle_version BIGINT NOT NULL DEFAULT 0",
-        &[],
-    )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
 }
 
 async fn sample_tick(

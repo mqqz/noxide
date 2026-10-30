@@ -135,7 +135,7 @@ impl From<Duration> for i64 {
 impl TryFrom<std::time::Duration> for Duration {
     type Error = TimeError;
     fn try_from(value: std::time::Duration) -> Result<Self, Self::Error> {
-        if value.subsec_nanos() % 1_000_000 != 0 {
+        if !value.subsec_nanos().is_multiple_of(1_000_000) {
             return Err(TimeError::PrecisionLoss);
         }
         Self::try_from(i64::try_from(value.as_millis()).map_err(|_| TimeError::Overflow)?)

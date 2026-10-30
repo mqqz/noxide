@@ -1,7 +1,7 @@
 # Lifecycle time
 
-Status: P06 leaf implementation, awaiting root/schema/startup/maintenance integration
-and independent review. No resource expiry capability is enabled by this slice.
+Status: P06 clock integration implemented, awaiting independent review and final
+acceptance evidence. Resource expiry declarations/enforcement remain P07 work.
 
 `noxide-protocol/src/time.rs` defines distinct `Timestamp` and `Duration` types.
 Both store nonnegative signed 64-bit whole milliseconds. A timestamp is UTC since
@@ -12,12 +12,18 @@ fraction. Feature admission must impose its own duration horizon. Existing
 credential timestamps, signatures, TTLs and rollback tolerance retain seconds.
 Execution deadlines and heartbeat freshness use monotonic `Instant`, never UTC.
 
-The lifecycle clock extends the existing `nx_clock` row with `lifecycle_ms` and
+Storage version 11 extends the existing `nx_clock` row with `lifecycle_ms` and
 `lifecycle_version`. The database admits one active deployment through the
 `nx_deployment` singleton and generation fence; the watermark belongs to that
 deployment's database. Activating a replacement deployment retains this history.
 It must not select an older watermark. Independent active deployments need
 independent databases under the existing deployment contract.
+
+A version 10 database is rejected with an explicit migration requirement. No
+automatic conversion or reset is implemented. Use a new empty disposable or
+development database for version 11; preserve operator data and arrange a reviewed
+migration before upgrading an existing deployment. Rejection leaves its old
+clock and records unchanged.
 
 A bounded maintenance transaction, fenced against the current generation,
 reuses `security::observe_clock_read` and `security::observe_clock`. Checked named
@@ -32,15 +38,27 @@ provides no freshness evidence; another successful tick can establish progress.
 
 Before serving temporal operations each process must complete a durable startup
 tick. It then ticks about once per second using reserved capacity, independent
-of application request and worker permits. The tick transaction and permit wait
-share a short monotonic deadline; missed intervals skip backlog. Unavailable
+of application request and worker permits. Activation shares one two-second
+monotonic deadline across validation, schema/deployment binding, tick and commit.
+The one existing server maintenance service then uses a 200ms nonresetting
+deadline for admission, connection, fencing, tick, commit and awaited cleanup.
+A dedicated one-slot maintenance semaphore has no queue; every tick opens its own
+private provider connection, outside the request/session/Wasm lanes. There is no
+shared connection pool to exhaust. SQLite maintenance connections use a zero busy
+wait; a failed BEGIN waits for the SQLx worker close acknowledgement before
+returning. Ordinary request connections retain their existing busy timeout.
+This reserves host admission and connection
+capacity; external database locks or server-wide connection exhaustion can still
+prevent progress, bounded by the deadline. Missed intervals skip backlog. Unavailable
 capacity, failed startup, stale progress or inconsistent durable state make
 temporal operations unavailable. They do not become guest policy rejections.
 
 The process-local `Freshness` guard expires five monotonic seconds after observed
 progress. Repeated reads of the same version update neither the progress time
-nor its lease. Optional heartbeat observations use a separate bounded read-only
-transaction, timed before BEGIN; an old request snapshot cannot renew freshness.
+nor its lease. Production processes publish only their own confirmed maintenance
+ticks. The tested optional independent heartbeat observer is not enabled in the
+production service. Its separate read-only transaction is timed before BEGIN;
+an old request snapshot cannot renew freshness.
 A response taking five seconds cannot establish freshness. After a stale period,
 the first unseen version is only a baseline because it might already be old;
 a subsequent greater version proves a commit after the previous snapshot. Its
@@ -66,14 +84,20 @@ jobs, or undo previously observed expiry. The future jobs/effects package must
 pause durable queues at recovery and require explicit operator resumption; P06
 does not add placeholder queue tables or enable workers.
 
-The leaf tests use the real database transaction/security code with test-only
-schema columns and fake wall samples. They cover units and arithmetic, durable
-watermarks, backward clocks, restarts, fixed attempt values, read-only requests,
-version exhaustion, real credential recovery and freshness transitions. Temporary
-verification module declarations do not prove production integration. Production
-schema migration, startup fail-closed behavior, reserved maintenance under load,
-multi-process/provider contention, cancellation and exact integrated-SHA tests
-remain integration gates. P07 must enforce resource expiry on every ordinary
+The clock tests initialize the production schema and use real provider
+transactions/security code, with fake wall/monotonic points only in tests. They
+cover units and arithmetic, durable watermarks, backward clocks, restarts, fixed
+attempt values, read-only requests, version exhaustion, credential recovery,
+freshness, startup unknown commits, saturated request lanes, maintenance capacity
+loss, cancellation and service drain. The service remains active through HTTP
+request drain, then aborts and joins; listener errors/cancellation abort it too.
+Only one service may own an application at a time. Retired generations cannot
+tick or obtain temporal attempt time.
+
+The internal temporal-attempt accessor is ready for later consumers; no current
+resource path declares expiry. Independent review and exact final integrated-SHA
+provider/load/recovery evidence remain acceptance requirements. P07 must enforce
+resource expiry on every ordinary
 read/list/follow/search/aggregate/inspection/download/mutation path. Expiry does
 not release inventory or delete records, and receipt replay does not rerun
 original temporal guards. Current delivery authorization still applies.

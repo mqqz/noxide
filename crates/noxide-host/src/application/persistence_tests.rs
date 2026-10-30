@@ -320,24 +320,38 @@ async fn clock_rollback_and_recovery(db: Database) {
     use crate::security::{self, TokenKind};
     let old = app(db.clone(), fixture::manifest()).await;
     // The exact tolerance boundary is deterministic and independent of the
-    // machine's clock. The persisted time can only increase during requests.
+    // machine's clock after its startup tick. Persisted time only increases.
+    let high_water = security::now().unwrap() + 30;
     let mut tx = db
         .begin(Instant::now() + Duration::from_secs(2))
         .await
         .unwrap();
     assert_eq!(
-        security::observe_clock(&mut tx, 10_000).await.unwrap(),
-        10_000
+        security::observe_clock(&mut tx, high_water).await.unwrap(),
+        high_water
     );
     assert_eq!(
-        security::observe_clock(&mut tx, 9_940).await.unwrap(),
-        10_000
+        security::observe_clock(&mut tx, high_water - 60)
+            .await
+            .unwrap(),
+        high_water
     );
-    assert!(security::observe_clock(&mut tx, 9_939).await.is_err());
+    assert!(
+        security::observe_clock(&mut tx, high_water - 61)
+            .await
+            .is_err()
+    );
     assert!(security::observe_clock(&mut tx, -1).await.is_err());
-    let (_, expired_at_high_water) = old.keys.issue(TokenKind::Login, "", 9_900, 80).unwrap();
-    assert!(old.keys.verify(&expired_at_high_water, 9_940).is_ok());
-    assert!(old.keys.verify(&expired_at_high_water, 10_000).is_err());
+    let (_, expired_at_high_water) = old
+        .keys
+        .issue(TokenKind::Login, "", high_water - 100, 80)
+        .unwrap();
+    assert!(
+        old.keys
+            .verify(&expired_at_high_water, high_water - 60)
+            .is_ok()
+    );
+    assert!(old.keys.verify(&expired_at_high_water, high_water).is_err());
     tx.commit().await.unwrap();
     let wall = security::now().unwrap();
     let future = wall + 30;
@@ -446,6 +460,7 @@ async fn clock_rollback_and_recovery(db: Database) {
         .begin(Instant::now() + Duration::from_secs(2))
         .await
         .unwrap();
+    let lifecycle_before = tx.fetch::<2>("SELECT CAST(lifecycle_ms AS TEXT),CAST(lifecycle_version AS TEXT) FROM nx_clock WHERE singleton=1", &[]).await.unwrap();
     tx.execute("DELETE FROM nx_clock", &[]).await.unwrap();
     tx.commit().await.unwrap();
     assert!(db.recover_clock(&fresh).await.is_err());
@@ -455,8 +470,8 @@ async fn clock_rollback_and_recovery(db: Database) {
         .await
         .unwrap();
     tx.execute(
-        "INSERT INTO nx_clock(singleton,observed) VALUES(1,$1)",
-        &[high.into()],
+        "INSERT INTO nx_clock(singleton,observed,lifecycle_ms,lifecycle_version) VALUES(1,$1,$2,$3)",
+        &[high.into(), lifecycle_before[0][0].parse::<i64>().unwrap().into(), lifecycle_before[0][1].parse::<i64>().unwrap().into()],
     )
     .await
     .unwrap();
@@ -1003,10 +1018,10 @@ async fn server_checkpoints_read_advances(db: Database) {
         .await
         .unwrap();
     });
-    // Exercise the production 60-second timer without changing dependencies or
+    // Exercise the production one-second timer without changing dependencies or
     // introducing a configurable checkpoint interval solely for tests.
     tokio::time::timeout(
-        security::CLOCK_CHECKPOINT_INTERVAL + Duration::from_secs(5),
+        crate::lifecycle_clock::TICK_INTERVAL + Duration::from_secs(5),
         async {
             loop {
                 let mut tx = db

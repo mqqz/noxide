@@ -21,6 +21,9 @@ pub enum Database {
     Postgres(PgConnectOptions),
 }
 
+#[cfg(test)]
+tokio::task_local! {pub(crate) static MAINTENANCE_CLOSE_PROBE: Arc<AtomicBool>;}
+
 pub(crate) enum Backend {
     Sqlite(sqlx::SqliteConnection),
     Postgres(sqlx::PgConnection),
@@ -102,20 +105,27 @@ impl Database {
         Ok(Self::Postgres(options))
     }
     pub(crate) async fn begin(&self, deadline: Instant) -> Result<Transaction> {
-        tokio::time::timeout_at(deadline.into(), self.connect(deadline, false, false)).await?
+        tokio::time::timeout_at(deadline.into(), self.connect(deadline, false, false, false))
+            .await?
     }
     pub(crate) async fn begin_read(&self, deadline: Instant) -> Result<Transaction> {
-        tokio::time::timeout_at(deadline.into(), self.connect(deadline, false, true)).await?
+        tokio::time::timeout_at(deadline.into(), self.connect(deadline, false, true, false)).await?
+    }
+    /// Clock-only private connection. SQLite must never queue a busy worker
+    /// beyond the maintenance attempt: its BEGIN IMMEDIATE fails without waiting.
+    pub(crate) async fn begin_maintenance(&self, deadline: Instant) -> Result<Transaction> {
+        tokio::time::timeout_at(deadline.into(), self.connect(deadline, false, false, true)).await?
     }
     async fn begin_schema(&self) -> Result<Transaction> {
         let deadline = Instant::now() + Duration::from_secs(60);
-        tokio::time::timeout_at(deadline.into(), self.connect(deadline, true, false)).await?
+        tokio::time::timeout_at(deadline.into(), self.connect(deadline, true, false, false)).await?
     }
     async fn connect(
         &self,
         deadline: Instant,
         exclusive: bool,
         read_only: bool,
+        maintenance: bool,
     ) -> Result<Transaction> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let backend = match self {
@@ -139,7 +149,15 @@ impl Database {
                         "SQLite database must be private (mode 0600)"
                     );
                 }
-                let mut cx = sqlx::SqliteConnection::connect_with(options).await?;
+                let options = if maintenance {
+                    options
+                        .clone()
+                        .busy_timeout(Duration::ZERO)
+                        .optimize_on_close(false, None)
+                } else {
+                    options.clone()
+                };
+                let mut cx = sqlx::SqliteConnection::connect_with(&options).await?;
                 let flag = cancelled.clone();
                 cx.lock_handle().await?.set_progress_handler(1000, move || {
                     !flag.load(Ordering::Relaxed) && Instant::now() < deadline
@@ -159,13 +177,25 @@ impl Database {
                         .execute(&mut cx)
                         .await?;
                 }
-                sqlx::query(if read_only {
+                let begin = sqlx::query(if read_only {
                     "BEGIN DEFERRED"
                 } else {
                     "BEGIN IMMEDIATE"
                 })
                 .execute(&mut cx)
-                .await?;
+                .await;
+                if let Err(error) = begin {
+                    if maintenance {
+                        // Await the SQLx worker's shutdown acknowledgement before
+                        // returning a failed lock attempt. No busy query remains.
+                        cx.close().await?;
+                        #[cfg(test)]
+                        let _ = MAINTENANCE_CLOSE_PROBE.try_with(|probe| {
+                            probe.store(true, Ordering::Release);
+                        });
+                    }
+                    return Err(error.into());
+                }
                 Backend::Sqlite(cx)
             }
             Self::Postgres(options) => {
@@ -248,7 +278,8 @@ impl Database {
 
     /// Recover from a large clock correction with a fresh host-key incarnation.
     /// Stop serving first. Old processes, sessions and forms are retired together
-    /// with the clock reset; receipts and application records are preserved.
+    /// with the credential-seconds reset; receipts and application records are
+    /// preserved. Lifecycle milliseconds/version never reset or revive expiry.
     pub async fn recover_clock(&self, keys: &crate::HostKeys) -> Result<()> {
         let mut tx = self
             .begin(Instant::now() + Duration::from_secs(300))
@@ -444,7 +475,7 @@ impl Transaction {
         ).await?;
         ensure!(
             rows.as_slice() == [["1".to_owned(), STORAGE_VERSION.to_string()]],
-            "unsupported framework storage version"
+            "unsupported framework storage version; storage 11 requires an explicit reviewed migration or a new empty database; existing data is unchanged"
         );
         Ok(())
     }
@@ -716,7 +747,7 @@ pub(crate) fn retryable(error: &anyhow::Error) -> bool {
     )
 }
 
-const STORAGE_VERSION: i64 = 10;
+const STORAGE_VERSION: i64 = 11;
 const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
     (
         "nx_resource_catalog",
@@ -796,7 +827,12 @@ const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
     ),
     (
         "nx_clock",
-        &[("singleton", "BIGINT"), ("observed", "BIGINT")],
+        &[
+            ("singleton", "BIGINT"),
+            ("observed", "BIGINT"),
+            ("lifecycle_ms", "BIGINT"),
+            ("lifecycle_version", "BIGINT"),
+        ],
     ),
     (
         "nx_deployment",
@@ -815,7 +851,7 @@ const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
 
 const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS nx_storage (singleton BIGINT PRIMARY KEY CHECK(singleton=1), version BIGINT NOT NULL)",
-    "INSERT INTO nx_storage(singleton,version) VALUES(1,10)",
+    "INSERT INTO nx_storage(singleton,version) VALUES(1,11)",
     "CREATE TABLE IF NOT EXISTS nx_resource_catalog (storage_id BIGINT PRIMARY KEY, resource_key TEXT NOT NULL UNIQUE)",
     "CREATE TABLE IF NOT EXISTS nx_schema_definition (singleton BIGINT PRIMARY KEY CHECK(singleton=1), definition TEXT NOT NULL, history TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS nx_accounts (id TEXT PRIMARY KEY, login_name TEXT UNIQUE, password TEXT, tenant TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','disabled','deleted')), epoch BIGINT NOT NULL)",
@@ -830,11 +866,11 @@ const SCHEMA: &[&str] = &[
     "CREATE INDEX nx_records_owner_tenant ON nx_records(resource,owner,tenant,created_seq)",
     "CREATE INDEX IF NOT EXISTS nx_records_tenant ON nx_records(resource,tenant,created_seq)",
     "CREATE TABLE IF NOT EXISTS nx_receipts (nonce TEXT PRIMARY KEY, subject TEXT NOT NULL, contract TEXT NOT NULL, action BIGINT NOT NULL, input TEXT NOT NULL, outcome TEXT NOT NULL, expires BIGINT NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS nx_clock (singleton BIGINT PRIMARY KEY, observed BIGINT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS nx_clock (singleton BIGINT PRIMARY KEY, observed BIGINT NOT NULL, lifecycle_ms BIGINT NOT NULL, lifecycle_version BIGINT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS nx_deployment (singleton BIGINT PRIMARY KEY, contract TEXT NOT NULL, incarnation TEXT NOT NULL, generation TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS nx_receipts_expiry ON nx_receipts(expires)",
     "CREATE INDEX IF NOT EXISTS nx_sessions_expiry ON nx_sessions(expires)",
-    "INSERT INTO nx_clock(singleton,observed) VALUES(1,0) ON CONFLICT(singleton) DO NOTHING",
+    "INSERT INTO nx_clock(singleton,observed,lifecycle_ms,lifecycle_version) VALUES(1,0,0,0) ON CONFLICT(singleton) DO NOTHING",
 ];
 
 #[cfg(test)]

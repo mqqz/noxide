@@ -1,7 +1,4 @@
-// This path inclusion also exercises the leaf before central root registration.
-#[path = "../src/time.rs"]
-mod time;
-use time::{Duration, TimeError, Timestamp};
+use noxide_protocol::time::{Duration, TimeError, Timestamp};
 
 #[test]
 fn seconds_and_milliseconds_have_explicit_checked_boundaries() {

@@ -1,5 +1,7 @@
 //! Versioned semantic protocol shared by the guest SDK and trusted host.
 
+pub mod time;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
