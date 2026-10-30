@@ -51,6 +51,31 @@ class AssetTransport(unittest.TestCase):
         with self.assertRaises(ValueError):assets.from_tar(out.getvalue())
 
 class PublicSourceSnapshot(unittest.TestCase):
+    def test_public_target_asset_is_preserved_ordinary_targets_stay_excluded(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            for name,data in [('public/target/site.css',b'p{color:red}'),('target/debug/build-output',b'ordinary artifact'),('src/target/cache',b'nested artifact')]:
+                path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data)
+            image=build_vm.Image();build_vm.source_files(image,root,'src',public_assets=True)
+            self.assertEqual(set(image.files),{'src/public/target/site.css'})
+            self.assertEqual(image.files['src/public/target/site.css'][0],b'p{color:red}')
+            image=build_vm.Image();build_vm.source_files(image,root,'src')
+            self.assertEqual(image.files,{})
+    def test_public_target_retains_public_limits_and_unsafe_entry_rejection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);parent=root/'public/target';parent.mkdir(parents=True)
+            asset=parent/'site.css';asset.write_bytes(b'ab')
+            with mock.patch('build_vm.MAX_PUBLIC_SINGLE',1),self.assertRaisesRegex(ValueError,'public source asset budget'):
+                build_vm.source_files(build_vm.Image(),root,'src',public_assets=True)
+            asset.unlink();asset.symlink_to('/etc/passwd')
+            with self.assertRaisesRegex(ValueError,'hidden or linked'):
+                build_vm.source_files(build_vm.Image(),root,'src',public_assets=True)
+            asset.unlink();(parent/'.private').write_bytes(b'private')
+            with self.assertRaisesRegex(ValueError,'hidden or linked'):
+                build_vm.source_files(build_vm.Image(),root,'src',public_assets=True)
+            (parent/'.private').unlink();(parent/'bad name.css').write_bytes(b'bad')
+            with self.assertRaisesRegex(ValueError,'public source asset budget or name'):
+                build_vm.source_files(build_vm.Image(),root,'src',public_assets=True)
     def test_asset_budget_is_separate_and_paths_stay_no_follow(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);(root/'public').mkdir();(root/'lib.rs').write_bytes(b'12345678');(root/'public/pixel.png').write_bytes(b'asset bytes')

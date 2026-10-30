@@ -11,8 +11,8 @@ import struct
 import zlib
 from pathlib import Path
 import tempfile
-from build_assets import MAX_ARCHIVE, from_tar
-from build_vm import Image, artifact, check_build_status, run_vm, command
+from build_assets import MAX_ARCHIVE, MAGIC, from_tar
+from build_vm import Image, artifact, check_build_status, run_vm, command, source_files
 from build_recipe import INIT, emission
 
 
@@ -35,6 +35,7 @@ def main():
     (args.output/'regular.declarations.json').write_text(json.dumps(declarations,indent=2))
     cases={
         'regular':('mkdir public\ncp /src/fixtures/* public/\n',True),
+        'source-target':('cp -r /src/examples/private-notes/. .\ntest ! -e target/build-output\n',True),
         'symlink':('mkdir public\nln -s /src/secret public/leak.css\n',False),
         'linked-root':('ln -s /src public\n',False),
         'fifo':('mkdir public\nmkfifo public/pipe.css\n',False),
@@ -51,6 +52,14 @@ def main():
         image.add('src/secret',b'VM-only inert canary')
         if name=='regular':
             for filename,(_,data) in payloads.items():image.add('src/fixtures/'+filename,data)
+        if name=='source-target':
+            with tempfile.TemporaryDirectory(prefix='noxide-asset-source-') as source:
+                root=Path(source);(root/'public/target').mkdir(parents=True);(root/'target').mkdir()
+                (root/'public/target/site.css').write_bytes(b'p{color:red}')
+                (root/'target/build-output').write_bytes(b'ordinary build output')
+                source_files(image,root,'src/examples/private-notes',public_assets=True)
+            assert 'src/examples/private-notes/public/target/site.css' in image.files
+            assert 'src/examples/private-notes/target/build-output' not in image.files
         build='set -eu\nmkdir -p /tmp/work/examples/private-notes\ncd /tmp/work/examples/private-notes\nprintf "version = 4\\n" > Cargo.lock\nprintf "{}" > /tmp/work/noxide-contract.json\n'+fixture
         image.add('build-command',build.encode())
         image.add('init',INIT.replace(emission(),emission(check=True,metadata=True)).encode(),0o755)
@@ -64,6 +73,9 @@ def main():
             print(name+': rejected',flush=True)
         else:
             if not accepted:raise AssertionError(name+': hostile export accepted')
+            if name=='source-target':
+                entry=b'target/site.css';content=b'p{color:red}'
+                assert pack==MAGIC+struct.pack('<H',1)+struct.pack('<HI',len(entry),len(content))+entry+content
             (args.output/(name+'.pack')).write_bytes(pack)
             print(name+': exported bounded canonical asset pack',flush=True)
 

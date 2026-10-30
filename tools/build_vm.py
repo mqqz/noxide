@@ -137,7 +137,12 @@ def source_files(image, root, prefix, public_assets=False):
                     raise ValueError("source entry limit")
         for name in sorted(names):
             before = os.stat(name, dir_fd=directory, follow_symlinks=False)
-            if stat.S_ISDIR(before.st_mode) and name in ("target", ".git", ".cargo"):
+            child = f"{relative}/{name}" if relative else name
+            is_public = public_assets and child.startswith("public/")
+            # `target` is a valid public asset component, not a build directory
+            # inside that namespace. All other source exclusions remain in force.
+            if stat.S_ISDIR(before.st_mode) and (name in (".git", ".cargo")
+                    or (name == "target" and not is_public)):
                 continue
             # VCS ignore rules have no build meaning. Starters may contain one,
             # but it is never read or transported into the VM.
@@ -145,7 +150,6 @@ def source_files(image, root, prefix, public_assets=False):
                 continue
             if name.startswith(".") or stat.S_ISLNK(before.st_mode):
                 raise ValueError("hidden or linked source input")
-            child = f"{relative}/{name}" if relative else name
             count += 1
             if count > 2048:
                 raise ValueError("source entry limit")
@@ -158,7 +162,6 @@ def source_files(image, root, prefix, public_assets=False):
                 continue
             if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
                 raise ValueError("application source must contain regular files")
-            is_public = public_assets and child.startswith("public/")
             if is_public:
                 public_count += 1
                 public_total += before.st_size
