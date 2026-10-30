@@ -326,7 +326,7 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
             .strip_prefix(&format!("{}/", app.presentation.action_path))
             .and_then(|s| s.parse().ok())
             .and_then(|id| crate::manifest::action(&app.manifest, id).ok())
-            .and_then(|a| crate::manifest::operation(&app.manifest, a.operation).ok())
+            .and_then(|a| crate::manifest::operation(&app.manifest, a.steps[0].operation).ok())
             .is_some_and(crate::manifest::anonymous_action)
     {
         RequestClass::AnonymousAction
@@ -753,7 +753,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     };
     let op = match crate::manifest::action(&gateway.app.manifest, action)
-        .and_then(|a| crate::manifest::operation(&gateway.app.manifest, a.operation))
+        .and_then(|a| crate::manifest::operation(&gateway.app.manifest, a.steps[0].operation))
     {
         Ok(op) => op,
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
@@ -861,7 +861,7 @@ mod tests {
             label: "Extra".into(),
             max_bytes: 4096,
         });
-        m.actions[0].fields.push("extra".into());
+        fixture::add_input(&mut m.actions[0], &m.resources[0], "extra");
         let app = app(Database::sqlite(temp.path().join("forms.db")), m).await;
         let challenge = app.login_challenge().await.unwrap();
         let session = app
@@ -1273,7 +1273,7 @@ mod parent_redirect_disconnect_tests {
             .await
             .unwrap();
         let receipt: serde_json::Value = serde_json::from_str(&row[0][0]).unwrap();
-        let outcome: serde_json::Value = receipt["outcome"].clone();
+        let outcome: serde_json::Value = receipt["handover"].clone();
         let original = app
             .keys
             .edit_secret(

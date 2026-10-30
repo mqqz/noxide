@@ -17,6 +17,51 @@ impl std::fmt::Display for ReferenceUnavailable {
 }
 impl std::error::Error for ReferenceUnavailable {}
 
+#[derive(Debug)]
+pub(crate) struct GuardFailure {
+    pub input: String,
+    pub message: String,
+}
+impl std::fmt::Display for GuardFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("transaction guard rejected")
+    }
+}
+impl std::error::Error for GuardFailure {}
+
+#[derive(Debug)]
+pub(crate) struct ConditionalConflict;
+impl std::fmt::Display for ConditionalConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("conditional write conflict")
+    }
+}
+impl std::error::Error for ConditionalConflict {}
+
+fn adjust(
+    current: i64,
+    amount: i64,
+    min: i64,
+    max: i64,
+    increase: bool,
+    rejection: &GuardRejection,
+) -> Result<i64> {
+    let value = if increase {
+        current.checked_add(amount)
+    } else {
+        current.checked_sub(amount)
+    };
+    value
+        .filter(|value| (min..=max).contains(value))
+        .ok_or_else(|| {
+            GuardFailure {
+                input: rejection.input.clone(),
+                message: rejection.message.clone(),
+            }
+            .into()
+        })
+}
+
 pub(crate) const MAX_LIST_DATABASE_CALLS: usize = 4096;
 
 pub(crate) struct Effects {
@@ -33,10 +78,8 @@ pub(crate) struct Effects {
     pub plans: std::collections::BTreeMap<u32, Arc<crate::query_plan::ListPlan>>,
     pub principal: Principal,
     pub request: RequestView,
-    pub outcome: Option<ResponseIntent>,
     pub grant: Option<RecordTarget>,
     pub capability_grant: Option<RecordTarget>,
-    pub record: Option<StoredRecord>,
     pub calls: u32,
     pub cursor: Option<u64>,
     pub more: Option<u64>,
@@ -61,6 +104,7 @@ fn append_prefix(
     Ok(false)
 }
 
+#[derive(Clone)]
 pub(crate) struct StoredRecord {
     pub record: Record,
     pub owner: String,
@@ -165,7 +209,7 @@ pub(crate) async fn read_resource(
     }
     Ok(Some(record))
 }
-fn read_allowed(
+pub(crate) fn read_allowed(
     m: &Manifest,
     principal: &Principal,
     op: &Operation,
@@ -253,6 +297,359 @@ pub(crate) async fn authorize_page_resource(
 }
 
 impl Effects {
+    pub(crate) async fn execute_transaction(
+        &mut self,
+        action: &Action,
+    ) -> Result<Vec<MutationOutcome>> {
+        ensure!(
+            self.request.kind == RequestKind::Action(action.id),
+            "transaction outside action"
+        );
+        manifest::validate_input(&self.manifest, action, &self.request.input)?;
+        let mut outcomes = Vec::with_capacity(action.steps.len());
+        for step in &action.steps {
+            ensure!(self.calls > 0, "database call budget");
+            self.calls -= 1;
+            let op = manifest::operation(&self.manifest, step.operation)?.clone();
+            let stored = match step.target {
+                Target::None => None,
+                Target::Signed => {
+                    let grant = self.grant.as_ref().ok_or(ReferenceUnavailable)?;
+                    ensure!(grant.resource == op.resource, ReferenceUnavailable);
+                    let stored = load(&mut self.tx, &self.manifest, op.resource, grant.id)
+                        .await?
+                        .ok_or(ReferenceUnavailable)?;
+                    ensure!(
+                        stored.incarnation == grant.incarnation,
+                        ReferenceUnavailable
+                    );
+                    Some(stored)
+                }
+            };
+            self.authorize_step(&op, stored.as_ref())?;
+            let mut values = Fields::new();
+            for assignment in &step.assign {
+                let value = match &assignment.change {
+                    Change::Set(value) => match value {
+                        Value::Input(name) => self
+                            .request
+                            .input
+                            .get(name)
+                            .ok_or_else(|| anyhow::anyhow!("missing transaction input"))?
+                            .clone(),
+                        Value::Constant(value) => value.clone(),
+                        Value::SignedTarget => self
+                            .grant
+                            .as_ref()
+                            .ok_or(ReferenceUnavailable)?
+                            .id
+                            .to_string(),
+                        Value::Created(index) => {
+                            let created = outcomes
+                                .get(usize::from(*index))
+                                .ok_or_else(|| anyhow::anyhow!("missing created result"))?;
+                            let created: &MutationOutcome = created;
+                            ensure!(
+                                created.kind == MutationKind::Created,
+                                "result is not a create"
+                            );
+                            created.id.to_string()
+                        }
+                    },
+                    Change::Decrease { by, rejection } | Change::Increase { by, rejection } => {
+                        let record = stored
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("adjustment requires target"))?;
+                        let resource = manifest::resource(&self.manifest, op.resource)?;
+                        let field = resource
+                            .fields
+                            .iter()
+                            .find(|f| f.name == assignment.field)
+                            .ok_or_else(|| anyhow::anyhow!("unknown adjustment field"))?;
+                        let FieldKind::Integer {
+                            min: Some(min),
+                            max: Some(max),
+                        } = field.kind
+                        else {
+                            anyhow::bail!("unbounded adjustment")
+                        };
+                        let current: i64 = record
+                            .record
+                            .fields
+                            .get(&assignment.field)
+                            .ok_or_else(|| anyhow::anyhow!("missing adjustment field"))?
+                            .parse()?;
+                        let amount: i64 = self
+                            .request
+                            .input
+                            .get(by)
+                            .ok_or_else(|| anyhow::anyhow!("missing adjustment amount"))?
+                            .parse()?;
+                        ensure!(amount > 0, "invalid adjustment amount");
+                        adjust(
+                            current,
+                            amount,
+                            min,
+                            max,
+                            matches!(assignment.change, Change::Increase { .. }),
+                            rejection,
+                        )?
+                        .to_string()
+                    }
+                };
+                ensure!(
+                    values.insert(assignment.field.clone(), value).is_none(),
+                    "duplicate assignment"
+                );
+            }
+            let outcome = match op.kind {
+                OperationKind::Create => self.create_step(&op, step, values, &outcomes).await?,
+                OperationKind::Update => {
+                    self.update_step(&op, stored.as_ref().ok_or(ReferenceUnavailable)?, values)
+                        .await?
+                }
+                OperationKind::Delete => {
+                    self.delete_step(&op, stored.as_ref().ok_or(ReferenceUnavailable)?)
+                        .await?
+                }
+                _ => anyhow::bail!("transaction requires mutation"),
+            };
+            outcomes.push(outcome);
+            #[cfg(test)]
+            crate::failure_tests::after_effect(&mut self.tx).await?;
+        }
+        Ok(outcomes)
+    }
+
+    fn authorize_step(&self, op: &Operation, stored: Option<&StoredRecord>) -> Result<()> {
+        if op.kind == OperationKind::Create {
+            if manifest::is_public(op) {
+                return Ok(());
+            }
+            let user = self.principal.user().map_err(|_| ReferenceUnavailable)?;
+            ensure!(
+                allowed(
+                    &op.policy,
+                    &self.principal,
+                    crate::policy::Row {
+                        owner: &user.id,
+                        tenant: &user.tenant,
+                        fields: &Fields::new(),
+                    }
+                ),
+                ReferenceUnavailable
+            );
+        } else {
+            let stored = stored.ok_or(ReferenceUnavailable)?;
+            if manifest::is_capability(op) {
+                let grant = self.grant.as_ref().ok_or(ReferenceUnavailable)?;
+                ensure!(
+                    self.capability_grant.as_ref() == Some(grant) && stored.cap_version.is_some(),
+                    ReferenceUnavailable
+                );
+            } else {
+                ensure!(
+                    allowed(
+                        &op.policy,
+                        &self.principal,
+                        crate::policy::Row {
+                            owner: &stored.owner,
+                            tenant: &stored.tenant,
+                            fields: &stored.record.fields,
+                        }
+                    ),
+                    ReferenceUnavailable
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn create_step(
+        &mut self,
+        op: &Operation,
+        step: &Step,
+        mut fields: Fields,
+        outcomes: &[MutationOutcome],
+    ) -> Result<MutationOutcome> {
+        let m = self.manifest.clone();
+        let resource = manifest::resource(&m, op.resource)?;
+        if let Some(parent) = manifest::reference_resource(&m, op.resource)? {
+            let reference = manifest::reference_field(resource).expect("admitted reference");
+            let id: u64 = fields
+                .get(&reference.name)
+                .ok_or(ReferenceUnavailable)?
+                .parse()?;
+            let stored = load(&mut self.tx, &m, parent.id, id)
+                .await?
+                .ok_or(ReferenceUnavailable)?;
+            let assignment = step
+                .assign
+                .iter()
+                .find(|a| a.field == reference.name)
+                .ok_or_else(|| anyhow::anyhow!("missing reference assignment"))?;
+            let expected_incarnation = match &assignment.change {
+                Change::Set(Value::SignedTarget) => {
+                    let grant = self.grant.as_ref().ok_or(ReferenceUnavailable)?;
+                    ensure!(
+                        grant.resource == parent.id && grant.id == id,
+                        ReferenceUnavailable
+                    );
+                    &grant.incarnation
+                }
+                Change::Set(Value::Created(index)) => {
+                    let outcome = outcomes
+                        .get(usize::from(*index))
+                        .ok_or(ReferenceUnavailable)?;
+                    ensure!(
+                        outcome.kind == MutationKind::Created
+                            && outcome.resource == parent.id
+                            && outcome.id == id,
+                        ReferenceUnavailable
+                    );
+                    &outcome.incarnation
+                }
+                _ => anyhow::bail!("invalid reference assignment"),
+            };
+            ensure!(
+                &stored.incarnation == expected_incarnation,
+                ReferenceUnavailable
+            );
+            let bind = op
+                .bind
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("missing binding eligibility"))?;
+            let eligible = manifest::operation(&m, bind.eligible)?;
+            ensure!(
+                read_resource(&mut self.tx, &m, &self.principal, eligible, id)
+                    .await?
+                    .is_some()
+                    && manifest::gate_permits(resource, &stored.record.fields, true),
+                ReferenceUnavailable
+            );
+        }
+        for field in &resource.fields {
+            if let Some(value) = &field.initial {
+                ensure!(
+                    fields.insert(field.name.clone(), value.clone()).is_none(),
+                    "initial value cannot be assigned"
+                );
+            }
+        }
+        manifest::validate_fields(resource, &fields)?;
+        let public = manifest::is_public(op);
+        let user = if public {
+            None
+        } else {
+            Some(self.principal.user()?)
+        };
+        if resource
+            .fields
+            .iter()
+            .any(|f| matches!(f.kind, FieldKind::Account { .. }))
+        {
+            let creator = self.principal.user()?;
+            let rows = self
+                .tx
+                .fetch::<1>(
+                    "SELECT tenant FROM nx_accounts WHERE id=$1 AND state='active' AND tenant<>''",
+                    &[creator.id.as_str().into()],
+                )
+                .await?;
+            let tenant = rows
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("account binding unavailable"))?;
+            ensure!(tenant[0] == creator.tenant, "account binding unavailable");
+            for field in resource
+                .fields
+                .iter()
+                .filter(|f| matches!(f.kind, FieldKind::Account { .. }))
+            {
+                let id = fields
+                    .get(&field.name)
+                    .ok_or_else(|| anyhow::anyhow!("account binding unavailable"))?;
+                ensure!(!self.tx.fetch::<1>("SELECT id FROM nx_accounts WHERE id=$1 AND state='active' AND tenant=$2", &[id.as_str().into(), tenant[0].as_str().into()]).await?.is_empty(), "account binding unavailable");
+            }
+        }
+        let storage_resource = self.tx.storage_resource(&m, op.resource).await?;
+        if let Some(user) = user {
+            let used = self.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM (SELECT id FROM nx_records WHERE resource=$1 AND owner=$2 LIMIT 10000) AS quota", &[storage_resource.into(), user.id.as_str().into()]).await?;
+            ensure!(used[0][0].parse::<usize>()? < 10_000, "record quota");
+        }
+        let id = crate::security::record_id()?;
+        let incarnation = crate::security::random_id()?;
+        let created_seq = self.tx.allocate_creation().await?;
+        if public {
+            self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version,created_seq) VALUES($1,$2,NULL,'',$3,$4,1,1,$5)", &[storage_resource.into(), (id as i64).into(), serde_json::to_string(&fields)?.into(), incarnation.as_str().into(), created_seq.into()]).await?;
+        } else {
+            let user = user.expect("authorized private creation");
+            self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,$3,$4,$5,$6,1,$7)", &[storage_resource.into(), (id as i64).into(), user.id.as_str().into(), user.tenant.as_str().into(), serde_json::to_string(&fields)?.into(), incarnation.as_str().into(), created_seq.into()]).await?;
+        }
+        Ok(MutationOutcome {
+            kind: MutationKind::Created,
+            resource: op.resource,
+            id,
+            incarnation,
+        })
+    }
+
+    async fn update_step(
+        &mut self,
+        op: &Operation,
+        stored: &StoredRecord,
+        assignments: Fields,
+    ) -> Result<MutationOutcome> {
+        let mut fields = stored.record.fields.clone();
+        fields.extend(assignments);
+        manifest::validate_fields(manifest::resource(&self.manifest, op.resource)?, &fields)?;
+        let next = stored
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("record revision exhausted"))?;
+        let storage_resource = self
+            .tx
+            .storage_resource(&self.manifest, op.resource)
+            .await?;
+        let changed = self.tx.execute("UPDATE nx_records SET fields=$5,revision=$6 WHERE resource=$1 AND id=$2 AND incarnation=$3 AND revision=$4", &[storage_resource.into(), (stored.record.id as i64).into(), stored.incarnation.as_str().into(), stored.revision.into(), serde_json::to_string(&fields)?.into(), next.into()]).await?;
+        ensure!(changed == 1, ConditionalConflict);
+        Ok(MutationOutcome {
+            kind: MutationKind::Updated,
+            resource: op.resource,
+            id: stored.record.id,
+            incarnation: stored.incarnation.clone(),
+        })
+    }
+
+    async fn delete_step(
+        &mut self,
+        op: &Operation,
+        stored: &StoredRecord,
+    ) -> Result<MutationOutcome> {
+        for child in &self.manifest.resources {
+            if manifest::reference_resource(&self.manifest, child.id)?
+                .is_some_and(|p| p.id == op.resource)
+            {
+                let field = manifest::reference_field(child).expect("admitted reference");
+                let storage = self.tx.storage_resource(&self.manifest, child.id).await?;
+                let expression = self.tx.field_expression(&field.name)?;
+                let rows = self.tx.fetch::<1>(&format!("SELECT CAST(id AS TEXT) FROM nx_records WHERE resource={storage} AND {expression}=$1 LIMIT 1"), &[stored.record.id.to_string().into()]).await?;
+                ensure!(rows.is_empty(), "parent has children");
+            }
+        }
+        let storage_resource = self
+            .tx
+            .storage_resource(&self.manifest, op.resource)
+            .await?;
+        let changed = self.tx.execute("DELETE FROM nx_records WHERE resource=$1 AND id=$2 AND incarnation=$3 AND revision=$4", &[storage_resource.into(), (stored.record.id as i64).into(), stored.incarnation.as_str().into(), stored.revision.into()]).await?;
+        ensure!(changed == 1, ConditionalConflict);
+        Ok(MutationOutcome {
+            kind: MutationKind::Deleted,
+            resource: op.resource,
+            id: stored.record.id,
+            incarnation: stored.incarnation.clone(),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn next_request(&mut self) {
         self.invoked.clear();
@@ -543,11 +940,19 @@ impl Effects {
     }
 
     pub(crate) fn follow_source(&mut self, resource: u32, id: u64) -> Result<()> {
+        ensure!(
+            matches!(self.request.kind, RequestKind::Route(_)),
+            "storage import during action"
+        );
         ensure!(self.follow_sources.len() < 20, "follow source budget");
         self.follow_sources.push((resource, id));
         Ok(())
     }
     pub(crate) async fn follow(&mut self, operation: u32) -> Result<Vec<u8>> {
+        ensure!(
+            matches!(self.request.kind, RequestKind::Route(_)),
+            "storage import during action"
+        );
         ensure!(self.calls > 0, "database call budget");
         self.calls -= 1;
         let op = manifest::operation(&self.manifest, operation)?.clone();
@@ -702,19 +1107,7 @@ impl Effects {
                 );
                 ensure!(self.invoked.insert(operation), "operation already invoked");
             }
-            RequestKind::Action(id) => {
-                let action = manifest::action(&self.manifest, *id)?;
-                ensure!(
-                    action.operation == operation
-                        && matches!(
-                            op.kind,
-                            OperationKind::Create | OperationKind::Update | OperationKind::Delete
-                        )
-                        && target == 0
-                        && self.outcome.is_none(),
-                    "operation outside action grant"
-                );
-            }
+            RequestKind::Action(_) => anyhow::bail!("storage import during action"),
         }
         if op.kind == OperationKind::List {
             self.charge_list_calls(1)?;
@@ -724,261 +1117,8 @@ impl Effects {
             .storage_resource(&self.manifest, op.resource)
             .await?;
         let value = match op.kind {
-            OperationKind::Create => {
-                let mut input = self.request.input.clone();
-                let source_resource = manifest::resource(&self.manifest, op.resource)?;
-                if let Some(parent) = manifest::reference_resource(&self.manifest, op.resource)? {
-                    let field =
-                        manifest::reference_field(manifest::resource(&self.manifest, op.resource)?)
-                            .expect("parent field");
-                    let grant = self
-                        .grant
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("missing parent grant"))?;
-                    ensure!(
-                        grant.resource == parent.id && self.request.target == Some(grant.id),
-                        "invalid parent grant"
-                    );
-                    let stored = load(&mut self.tx, &self.manifest, parent.id, grant.id)
-                        .await?
-                        .ok_or(ReferenceUnavailable)?;
-                    let action_id = match self.request.kind {
-                        RequestKind::Action(id) => id,
-                        _ => anyhow::bail!("missing action"),
-                    };
-                    let bind = manifest::action(&self.manifest, action_id)?
-                        .bind
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("missing binding"))?;
-                    let eligible = manifest::operation(&self.manifest, bind.eligible)?;
-                    ensure!(
-                        read_resource(
-                            &mut self.tx,
-                            &self.manifest,
-                            &self.principal,
-                            eligible,
-                            grant.id
-                        )
-                        .await?
-                        .is_some(),
-                        ReferenceUnavailable
-                    );
-                    ensure!(
-                        stored.incarnation == grant.incarnation
-                            && stored.revision == grant.revision
-                            && manifest::gate_permits(source_resource, &stored.record.fields, true),
-                        ReferenceUnavailable
-                    );
-                    ensure!(
-                        input
-                            .insert(field.name.clone(), grant.id.to_string())
-                            .is_none(),
-                        "parent cannot be submitted"
-                    );
-                } else {
-                    ensure!(self.grant.is_none(), "creation has no existing target");
-                }
-                for field in &manifest::resource(&self.manifest, op.resource)?.fields {
-                    if let Some(value) = &field.initial {
-                        ensure!(
-                            input.insert(field.name.clone(), value.clone()).is_none(),
-                            "initial value cannot be submitted"
-                        );
-                    }
-                }
-                let public = manifest::is_public(&op);
-                let user = if public {
-                    None
-                } else {
-                    Some(self.principal.user()?)
-                };
-                if let Some(user) = user {
-                    ensure!(
-                        allowed(
-                            &op.policy,
-                            &self.principal,
-                            crate::policy::Row {
-                                owner: &user.id,
-                                tenant: &user.tenant,
-                                fields: &Default::default()
-                            }
-                        ),
-                        "policy denied"
-                    );
-                }
-                let resource = manifest::resource(&self.manifest, op.resource)?;
-                manifest::validate_fields(resource, &input)?;
-                if resource
-                    .fields
-                    .iter()
-                    .any(|f| matches!(f.kind, FieldKind::Account { .. }))
-                {
-                    let creator = self.principal.user()?;
-                    let rows = self.tx.fetch::<1>("SELECT tenant FROM nx_accounts WHERE id=$1 AND state='active' AND tenant<>''", &[creator.id.as_str().into()]).await?;
-                    let tenant = rows
-                        .first()
-                        .ok_or_else(|| anyhow::anyhow!("account binding unavailable"))?;
-                    ensure!(tenant[0] == creator.tenant, "account binding unavailable");
-                    for field in resource
-                        .fields
-                        .iter()
-                        .filter(|f| matches!(f.kind, FieldKind::Account { .. }))
-                    {
-                        let id = input
-                            .get(&field.name)
-                            .ok_or_else(|| anyhow::anyhow!("account binding unavailable"))?;
-                        ensure!(!self.tx.fetch::<1>("SELECT id FROM nx_accounts WHERE id=$1 AND state='active' AND tenant=$2", &[id.as_str().into(), tenant[0].as_str().into()]).await?.is_empty(), "account binding unavailable");
-                    }
-                }
-
-                if let Some(user) = user {
-                    let used=self.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM (SELECT id FROM nx_records WHERE resource=$1 AND owner=$2 LIMIT 10000) AS quota",&[Param::Number(storage_resource),user.id.as_str().into()]).await?;
-                    ensure!(used[0][0].parse::<usize>()? < 10_000, "record quota");
-                }
-                let id = crate::security::record_id()?;
-                let record = Record {
-                    resource: op.resource,
-                    id,
-                    fields: input,
-                };
-                let created_seq = self.tx.allocate_creation().await?;
-                if public {
-                    self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version,created_seq) VALUES($1,$2,NULL,'',$3,$4,1,1,$5)", &[storage_resource.into(), (id as i64).into(), serde_json::to_string(&record.fields)?.into(), crate::security::random_id()?.into(),created_seq.into()]).await?;
-                } else {
-                    let user = user.expect("private creation requires user");
-                    self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,$3,$4,$5,$6,1,$7)",&[
-                    Param::Number(storage_resource),Param::Number(id as i64),user.id.clone().into(),user.tenant.clone().into(),serde_json::to_string(&record.fields)?.into(), crate::security::random_id()?.into(),created_seq.into()
-                ]).await?;
-                }
-                #[cfg(test)]
-                crate::failure_tests::after_effect(&mut self.tx).await?;
-                let RequestKind::Action(action) = self.request.kind else {
-                    anyhow::bail!("missing action")
-                };
-                self.outcome = Some(ResponseIntent::Created {
-                    resource: op.resource,
-                    id,
-                    destination: RouteRef {
-                        params: Default::default(),
-                        route: manifest::action(&self.manifest, action)?.redirect.route(),
-                        target: Some(id),
-                    },
-                });
-                serde_json::to_vec(&record)?
-            }
-            OperationKind::Update | OperationKind::Delete => {
-                if !manifest::is_capability(&op) {
-                    self.principal.user()?;
-                }
-                let RequestKind::Action(action) = self.request.kind else {
-                    anyhow::bail!("missing action")
-                };
-                let a = manifest::action(&self.manifest, action)?;
-                let grant = self
-                    .grant
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("missing target grant"))?;
-                let stored = self
-                    .record
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("missing target snapshot"))?;
-                ensure!(
-                    grant.resource == op.resource
-                        && self.request.target == Some(grant.id)
-                        && stored.record.resource == grant.resource
-                        && stored.record.id == grant.id
-                        && stored.incarnation == grant.incarnation
-                        && stored.revision == grant.revision,
-                    "target outside grant"
-                );
-                if manifest::is_capability(&op) {
-                    ensure!(
-                        self.capability_grant.as_ref() == Some(grant)
-                            && stored.cap_version.is_some(),
-                        "missing verified capability grant"
-                    );
-                } else {
-                    ensure!(
-                        allowed(
-                            &op.policy,
-                            &self.principal,
-                            crate::policy::Row {
-                                owner: &stored.owner,
-                                tenant: &stored.tenant,
-                                fields: &stored.record.fields
-                            }
-                        ),
-                        "policy denied"
-                    );
-                }
-                manifest::validate_input(&self.manifest, a, &self.request.input)?;
-                let mut params = vec![
-                    Param::Number(storage_resource),
-                    Param::Number(grant.id as i64),
-                    grant.incarnation.as_str().into(),
-                    grant.revision.into(),
-                ];
-                let outcome = if op.kind == OperationKind::Update {
-                    let next = grant
-                        .revision
-                        .checked_add(1)
-                        .ok_or_else(|| anyhow::anyhow!("record revision exhausted"))?;
-                    let mut fields = stored.record.fields.clone();
-                    fields.extend(self.request.input.clone());
-                    for field in manifest::resource(&self.manifest, op.resource)?
-                        .fields
-                        .iter()
-                        .filter(|f| matches!(f.kind, FieldKind::Account { .. }))
-                    {
-                        fields.insert(
-                            field.name.clone(),
-                            stored.record.fields[&field.name].clone(),
-                        );
-                    }
-                    manifest::validate_fields(
-                        manifest::resource(&self.manifest, op.resource)?,
-                        &fields,
-                    )?;
-                    params.push(serde_json::to_string(&fields)?.into());
-                    params.push(next.into());
-                    ensure!(self.tx.execute("UPDATE nx_records SET fields=$5,revision=$6 WHERE resource=$1 AND id=$2 AND incarnation=$3 AND revision=$4", &params).await? == 1, "record changed");
-                    ResponseIntent::Updated {
-                        resource: op.resource,
-                        id: grant.id,
-                        destination: RouteRef {
-                            params: Default::default(),
-                            route: a.redirect.route(),
-                            target: Some(grant.id),
-                        },
-                    }
-                } else {
-                    for child in &self.manifest.resources {
-                        if manifest::reference_resource(&self.manifest, child.id)?
-                            .is_some_and(|p| p.id == op.resource)
-                        {
-                            let field = manifest::reference_field(child).expect("parent");
-                            let child_storage =
-                                self.tx.storage_resource(&self.manifest, child.id).await?;
-                            let expression = self.tx.field_expression(&field.name)?;
-                            let rows = self.tx.fetch::<1>(&format!("SELECT CAST(id AS TEXT) FROM nx_records WHERE resource={child_storage} AND {expression}=$1 LIMIT 1"), &[grant.id.to_string().into()]).await?;
-                            ensure!(rows.is_empty(), "parent has children");
-                        }
-                    }
-                    ensure!(self.tx.execute("DELETE FROM nx_records WHERE resource=$1 AND id=$2 AND incarnation=$3 AND revision=$4", &params).await? == 1, "record changed");
-                    ResponseIntent::Deleted {
-                        resource: op.resource,
-                        id: grant.id,
-                        destination: RouteRef {
-                            params: Default::default(),
-                            route: a.redirect.route(),
-                            target: None,
-                        },
-                    }
-                };
-                #[cfg(test)]
-                crate::failure_tests::after_effect(&mut self.tx).await?;
-                self.outcome = Some(outcome.clone());
-                serde_json::to_vec(&outcome)?
+            OperationKind::Create | OperationKind::Update | OperationKind::Delete => {
+                anyhow::bail!("mutation outside declared transaction")
             }
             OperationKind::Read => serde_json::to_vec(
                 &read_resource(&mut self.tx, &self.manifest, &self.principal, &op, target).await?,
@@ -1122,6 +1262,37 @@ impl Effects {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transaction_adjustments_guard_overflow_and_both_bounds() {
+        let rejection = GuardRejection {
+            input: "quantity".into(),
+            message: "Not enough stock".into(),
+        };
+        for (current, amount, min, max, increase) in [
+            (i64::MAX, 1, i64::MIN, i64::MAX, true),
+            (i64::MIN, 1, i64::MIN, i64::MAX, false),
+            (5, 6, 0, 10, false),
+            (5, 6, 0, 10, true),
+        ] {
+            let error = adjust(current, amount, min, max, increase, &rejection).unwrap_err();
+            let guard = error
+                .downcast_ref::<GuardFailure>()
+                .expect("declared rejection");
+            assert_eq!(guard.input, rejection.input);
+            assert_eq!(guard.message, rejection.message);
+        }
+        assert_eq!(adjust(5, 5, 0, 10, false, &rejection).unwrap(), 0);
+        assert_eq!(adjust(5, 5, 0, 10, true, &rejection).unwrap(), 10);
+        assert_eq!(
+            adjust(i64::MIN, i64::MAX, i64::MIN, i64::MAX, true, &rejection).unwrap(),
+            -1
+        );
+        assert_eq!(
+            adjust(i64::MAX, i64::MAX, i64::MIN, i64::MAX, false, &rejection).unwrap(),
+            0
+        );
+    }
+
     #[test]
     fn byte_prefix_counts_protocol_framing_and_fails_on_first_row_overflow() {
         let mut record = Record {

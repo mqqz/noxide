@@ -78,21 +78,7 @@ pub enum ResponseIntent {
     Page(Document),
     NotFound(Document),
     Redirect(RouteRef),
-    Created {
-        resource: u32,
-        id: u64,
-        destination: RouteRef,
-    },
-    Updated {
-        resource: u32,
-        id: u64,
-        destination: RouteRef,
-    },
-    Deleted {
-        resource: u32,
-        id: u64,
-        destination: RouteRef,
-    },
+    Execute,
     Rejected {
         field_errors: Fields,
         message: String,
@@ -255,6 +241,7 @@ pub enum OperationKind {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
+    pub bind: Option<Bind>,
     pub scope: Option<String>,
     pub via: Option<Via>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -350,34 +337,122 @@ pub struct Route {
     pub access: Access,
 }
 
-/// Host-resolved action navigation. Ordinary page IDs retain their wire format.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(untagged, deny_unknown_fields)]
-pub enum Redirect {
-    Page(u32),
-    Reference { field: String, route: u32 },
+#[serde(deny_unknown_fields)]
+pub struct Redirect {
+    pub route: u32,
+    pub source: RedirectSource,
 }
 impl Redirect {
     pub fn route(&self) -> u32 {
-        match self {
-            Self::Page(route) | Self::Reference { route, .. } => *route,
-        }
+        self.route
     }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum RedirectSource {
+    Signed,
+    Step(u8),
+    Reference { step: u8, field: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Action {
-    pub bind: Option<Bind>,
-    pub layout: Vec<FormInstruction>,
     pub id: u32,
     pub version: u32,
     pub name: String,
-    pub operation: u32,
+    pub layout: Vec<FormInstruction>,
     pub redirect: Redirect,
-    /// Every listed field is required; all other application fields are rejected.
-    pub fields: Vec<String>,
     pub inspect: Option<Inspection>,
+    pub inputs: Vec<Input>,
+    pub revision: Revision,
+    pub steps: Vec<Step>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum MutationKind {
+    Created,
+    Updated,
+    Deleted,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MutationOutcome {
+    pub kind: MutationKind,
+    pub resource: u32,
+    pub id: u64,
+    pub incarnation: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Input {
+    pub name: String,
+    pub label: String,
+    pub kind: FieldKind,
+    pub optional: bool,
+    pub max_bytes: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Step {
+    pub operation: u32,
+    pub target: Target,
+    pub assign: Vec<Assignment>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Target {
+    None,
+    Signed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Assignment {
+    pub field: String,
+    pub change: Change,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Change {
+    Set(Value),
+    Decrease {
+        by: String,
+        rejection: GuardRejection,
+    },
+    Increase {
+        by: String,
+        rejection: GuardRejection,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Value {
+    Input(String),
+    Constant(String),
+    SignedTarget,
+    Created(u8),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GuardRejection {
+    pub input: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Revision {
+    Exact,
+    Identity,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -431,58 +506,76 @@ pub struct RequestView {
 impl TextField {
     /// Host-defined canonical scalar encoding; optional absence is the empty string.
     pub fn canonical(&self, input: &str) -> Result<String, String> {
-        if self.optional && input.is_empty() {
-            return Ok(String::new());
-        }
-        let value = match &self.kind {
-            FieldKind::Account { .. } => {
-                if !account_id(input) {
-                    return Err("invalid account reference".into());
-                }
-                input.to_owned()
-            }
-            FieldKind::Text => {
-                let value = input.replace("\r\n", "\n").replace('\r', "\n");
-                if value.is_empty()
-                    || value
-                        .chars()
-                        .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
-                {
-                    return Err("Enter text.".into());
-                }
-                value
-            }
-            FieldKind::Boolean => match input {
-                "true" | "on" => "true".into(),
-                "false" => "false".into(),
-                _ => return Err("Choose true or false.".into()),
-            },
-            FieldKind::Reference { .. } => {
-                let id = input.parse::<u64>().map_err(|_| "invalid reference ID")?;
-                if id == 0 || id > i64::MAX as u64 || id.to_string() != input {
-                    return Err("invalid reference ID".into());
-                }
-                id.to_string()
-            }
-            FieldKind::Integer { min, max } => {
-                let value: i64 = input.parse().map_err(|_| "Enter a whole number.")?;
-                if min.is_some_and(|min| value < min) || max.is_some_and(|max| value > max) {
-                    return Err("Number is outside the permitted range.".into());
-                }
-                value.to_string()
-            }
-            FieldKind::Choice { variants } => {
-                if !variants.iter().any(|variant| variant.key == input) {
-                    return Err("Choose a listed value.".into());
-                }
-                input.into()
-            }
-        };
-        if value.len() > self.max_bytes as usize {
-            return Err(format!("Use at most {} UTF-8 bytes.", self.max_bytes));
-        }
-        Ok(value)
+        canonical_scalar(&self.kind, self.optional, self.max_bytes, input)
     }
+}
+
+impl Input {
+    pub fn canonical(&self, input: &str) -> Result<String, String> {
+        if matches!(self.kind, FieldKind::Reference { .. }) {
+            return Err("invalid input kind".into());
+        }
+        canonical_scalar(&self.kind, self.optional, self.max_bytes, input)
+    }
+}
+
+fn canonical_scalar(
+    kind: &FieldKind,
+    optional: bool,
+    max_bytes: u32,
+    input: &str,
+) -> Result<String, String> {
+    if optional && input.is_empty() {
+        return Ok(String::new());
+    }
+    let value = match kind {
+        FieldKind::Account { .. } => {
+            if !account_id(input) {
+                return Err("invalid account reference".into());
+            }
+            input.to_owned()
+        }
+        FieldKind::Text => {
+            let value = input.replace("\r\n", "\n").replace('\r', "\n");
+            if value.is_empty()
+                || value
+                    .chars()
+                    .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+            {
+                return Err("Enter text.".into());
+            }
+            value
+        }
+        FieldKind::Boolean => match input {
+            "true" | "on" => "true".into(),
+            "false" => "false".into(),
+            _ => return Err("Choose true or false.".into()),
+        },
+        FieldKind::Reference { .. } => {
+            let id = input.parse::<u64>().map_err(|_| "invalid reference ID")?;
+            if id == 0 || id > i64::MAX as u64 || id.to_string() != input {
+                return Err("invalid reference ID".into());
+            }
+            id.to_string()
+        }
+        FieldKind::Integer { min, max } => {
+            let value: i64 = input.parse().map_err(|_| "Enter a whole number.")?;
+            if min.is_some_and(|min| value < min) || max.is_some_and(|max| value > max) {
+                return Err("Number is outside the permitted range.".into());
+            }
+            value.to_string()
+        }
+        FieldKind::Choice { variants } => {
+            if !variants.iter().any(|variant| variant.key == input) {
+                return Err("Choose a listed value.".into());
+            }
+            input.into()
+        }
+    };
+    if value.len() > max_bytes as usize {
+        return Err(format!("Use at most {} UTF-8 bytes.", max_bytes));
+    }
+    Ok(value)
 }
 
 /// Stable contract identifier grammar, shared by producers and the host.
@@ -498,6 +591,50 @@ pub fn identifier(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transaction_input_canonicalization_enforces_quantity_and_byte_bounds() {
+        let quantity = Input {
+            name: "quantity".into(),
+            label: "Quantity".into(),
+            kind: FieldKind::Integer {
+                min: Some(1),
+                max: Some(10),
+            },
+            optional: false,
+            max_bytes: 20,
+        };
+        for invalid in ["0", "-1", "11", "9223372036854775808", ""] {
+            assert!(quantity.canonical(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(quantity.canonical("+01").unwrap(), "1");
+        let body = Input {
+            name: "body".into(),
+            label: "Body".into(),
+            kind: FieldKind::Text,
+            optional: false,
+            max_bytes: 4,
+        };
+        assert_eq!(body.canonical("a\r\nb").unwrap(), "a\nb");
+        assert!(body.canonical("ééé").is_err());
+        let reference = Input {
+            kind: FieldKind::Reference {
+                resource: "product".into(),
+            },
+            optional: true,
+            ..body.clone()
+        };
+        assert!(reference.canonical("").is_err());
+        let account = Input {
+            kind: FieldKind::Account {
+                scope: AccountScope::SameTenant,
+            },
+            max_bytes: 43,
+            ..body
+        };
+        assert!(account.canonical("not-an-account").is_err());
+        assert_eq!(account.canonical(&"A".repeat(43)).unwrap(), "A".repeat(43));
+    }
 
     #[test]
     fn current_protocol_requires_explicit_declarations_and_form_availability() {
@@ -520,10 +657,11 @@ mod tests {
         );
         required::<Action>(
             serde_json::json!({
-                "layout": [], "id": 1, "version": 1, "name": "Create", "operation": 1,
-                "redirect": 1, "fields": ["body"], "inspect": null
+                "layout": [], "id": 1, "version": 1, "name": "Create",
+                "redirect": {"route": 1, "source": {"step": 0}}, "inputs": [], "revision": "exact",
+                "steps": [{"operation": 1, "target": "none", "assign": []}], "inspect": null
             }),
-            &["layout"],
+            &["layout", "inputs", "revision", "steps"],
         );
         required::<RequestView>(
             serde_json::json!({

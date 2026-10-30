@@ -361,6 +361,26 @@ pub fn validate(m: &Manifest) -> Result<()> {
                 "follow source projection hides reference"
             );
         }
+        if let Some(bind) = &op.bind {
+            ensure!(
+                op.kind == OperationKind::Create
+                    && reference_field(r).is_some_and(|field| field.name == bind.field),
+                "bind requires reference create"
+            );
+            let eligible = operation(m, bind.eligible)?;
+            ensure!(
+                eligible.kind == OperationKind::Read
+                    && eligible.via.is_none()
+                    && reference_resource(m, op.resource)?
+                        .is_some_and(|target| target.id == eligible.resource),
+                "invalid binding eligibility"
+            );
+        } else {
+            ensure!(
+                op.kind != OperationKind::Create || reference_field(r).is_none(),
+                "reference create requires bind"
+            );
+        }
         validate_selection(m, op)?;
         if op.kind == OperationKind::List {
             crate::query_plan::compile(m, op)?;
@@ -582,14 +602,20 @@ pub fn validate(m: &Manifest) -> Result<()> {
         }
         for id in &r.forms {
             let a = action(m, *id)?;
-            let op = operation(m, a.operation)?;
-            if op.kind == OperationKind::Create {
-                if let Some(parent) = reference_resource(m, op.resource)? {
-                    ensure!(
-                        r.resource == Some(parent.id),
-                        "reference create requires target route"
-                    );
-                    let bind = a
+            if let Some(target) = signed_resource(m, a)? {
+                ensure!(
+                    r.resource == Some(target),
+                    "mutation form requires its signed target route"
+                );
+            }
+            for step in &a.steps {
+                let op = operation(m, step.operation)?;
+                if step
+                    .assign
+                    .iter()
+                    .any(|assignment| matches!(assignment.change, Change::Set(Value::SignedTarget)))
+                {
+                    let bind = op
                         .bind
                         .as_ref()
                         .ok_or_else(|| anyhow::anyhow!("reference create requires bind"))?;
@@ -598,11 +624,6 @@ pub fn validate(m: &Manifest) -> Result<()> {
                         "binding eligibility must be on form route"
                     );
                 }
-            } else {
-                ensure!(
-                    r.resource == Some(op.resource),
-                    "mutation form requires its record route"
-                );
             }
         }
     }
@@ -613,124 +634,401 @@ pub fn validate(m: &Manifest) -> Result<()> {
         "missing index route"
     );
     for a in &m.actions {
-        ensure!(
-            a.version > 0
-                && !a.name.is_empty()
-                && a.name.len() <= 64
-                && !a.name.chars().any(char::is_control),
-            "invalid action"
-        );
-        let op = operation(m, a.operation)?;
-        let fields = action_fields(m, a)?;
-        let reference = reference_field(resource(m, op.resource)?);
-        if let Some(bind) = &a.bind {
-            ensure!(
-                op.kind == OperationKind::Create && reference.is_some_and(|f| f.name == bind.field),
-                "bind requires reference create"
-            );
-            let eligible = operation(m, bind.eligible)?;
-            ensure!(
-                eligible.kind == OperationKind::Read
-                    && eligible.via.is_none()
-                    && reference_resource(m, op.resource)?
-                        .is_some_and(|r| r.id == eligible.resource),
-                "invalid binding eligibility"
-            );
-        } else {
-            ensure!(
-                op.kind != OperationKind::Create || reference.is_none(),
-                "reference create requires bind"
-            );
-        }
-
-        if op.kind == OperationKind::Update {
-            ensure!(
-                fields
-                    .iter()
-                    .all(|f| !matches!(f.kind, FieldKind::Account { .. })),
-                "account fields are immutable"
-            );
-        }
-
-        ensure!(
-            fields
-                .iter()
-                .all(|f| !matches!(f.kind, FieldKind::Reference { .. })),
-            "reference is host-bound and immutable"
-        );
-        match op.kind {
-            OperationKind::Create => {
-                ensure!(!fields.is_empty(), "create requires writable fields");
-                ensure!(
-                    fields.iter().all(|f| f.initial.is_none()),
-                    "initial value is host-applied"
-                );
-                ensure!(
-                    fields.len()
-                        + resource(m, op.resource)?
-                            .fields
-                            .iter()
-                            .filter(|f| f.initial.is_some())
-                            .count()
-                        + usize::from(reference_resource(m, op.resource)?.is_some())
-                        == resource(m, op.resource)?.fields.len(),
-                    "creation requires every writable field"
-                );
-            }
-            OperationKind::Update => {
-                ensure!(!fields.is_empty(), "update requires writable fields")
-            }
-            OperationKind::Delete => ensure!(fields.is_empty(), "delete has no writable fields"),
-            _ => anyhow::bail!("action must declare a mutation"),
-        }
-        if let Some(inspect) = &a.inspect {
-            let read = operation(m, inspect.operation)?;
-            ensure!(!is_public(read), "inspection cannot use a public operation");
-            ensure!(
-                op.kind != OperationKind::Create
-                    && read.kind == OperationKind::Read
-                    && read.resource == op.resource,
-                "invalid inspection operation"
-            );
-            ensure!(!inspect.fields.is_empty(), "empty inspection");
-            projected_fields(resource(m, op.resource)?, &inspect.fields)?;
-        }
-        validate_layout(m, a)?;
-        let r = route(m, a.redirect.route())?;
-        ensure!(
-            r.params.is_empty(),
-            "mutation redirect requires an unparameterized route"
-        );
-        if let Redirect::Reference { field, .. } = &a.redirect {
-            ensure!(
-                reference.is_some_and(|f| &f.name == field),
-                "redirect requires reference field"
-            );
-            ensure!(
-                r.operations
-                    .iter()
-                    .filter(|id| operation(m, **id)
-                        .is_ok_and(|read| read.kind == OperationKind::Read
-                            && read.via.is_none()
-                            && Some(read.resource) == r.resource))
-                    .count()
-                    == 1,
-                "parent destination requires one unambiguous resource read"
-            );
-        }
-        ensure!(
-            if matches!(a.redirect, Redirect::Reference { .. }) {
-                r.resource == reference_resource(m, op.resource)?.map(|p| p.id)
-                    && r.resource.is_some()
-            } else if op.kind == OperationKind::Delete {
-                r.resource.is_none()
-            } else {
-                r.resource == Some(op.resource)
-            },
-            "invalid outcome route"
-        );
+        validate_action(m, a)?;
     }
     Ok(())
+}
+
+pub(crate) fn signed_resource(m: &Manifest, action: &Action) -> Result<Option<u32>> {
+    let mut signed = None;
+    let mut include = |resource| -> Result<()> {
+        ensure!(
+            signed.is_none_or(|previous| previous == resource),
+            "inconsistent signed target resource"
+        );
+        signed = Some(resource);
+        Ok(())
+    };
+    for step in &action.steps {
+        let op = operation(m, step.operation)?;
+        if step.target == Target::Signed {
+            include(op.resource)?;
+        }
+        for assignment in &step.assign {
+            if assignment.change == Change::Set(Value::SignedTarget) {
+                let target = reference_resource(m, op.resource)?
+                    .ok_or_else(|| anyhow::anyhow!("signed target requires reference"))?;
+                include(target.id)?;
+            }
+        }
+    }
+    if let Some(inspect) = &action.inspect {
+        include(operation(m, inspect.operation)?.resource)?;
+    }
+    Ok(signed)
+}
+
+fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
+    ensure!(
+        a.version > 0
+            && !a.name.is_empty()
+            && a.name.len() <= 64
+            && !a.name.chars().any(char::is_control),
+        "invalid action"
+    );
+    ensure!((1..=4).contains(&a.steps.len()), "transaction step limit");
+    let signed = signed_resource(m, a)?;
+    let mut names = BTreeSet::new();
+    for input in &a.inputs {
+        ensure!(
+            identifier(&input.name) && names.insert(input.name.as_str()),
+            "invalid or duplicate input"
+        );
+        validate_input_schema(input)?;
+    }
+    ensure!(
+        a.inputs
+            .iter()
+            .map(|input| input.max_bytes as usize)
+            .sum::<usize>()
+            <= MAX_INPUT_BYTES,
+        "action input limit"
+    );
+    let mut used = BTreeSet::new();
+    let mut creates = 0;
+    let mut exact = false;
+    for (index, step) in a.steps.iter().enumerate() {
+        let op = operation(m, step.operation)?;
+        let resource = resource(m, op.resource)?;
+        if a.steps.len() > 1 {
+            ensure!(
+                !is_public(op) && !is_capability(op),
+                "multi-step action cannot use public or capability operations"
+            );
+        }
+        match op.kind {
+            OperationKind::Create => {
+                creates += 1;
+                ensure!(creates <= 2, "transaction create limit");
+                ensure!(step.target == Target::None, "create has no target");
+                ensure!(!step.assign.is_empty(), "create requires writable fields");
+            }
+            OperationKind::Update => {
+                ensure!(
+                    step.target == Target::Signed,
+                    "update requires signed target"
+                );
+                ensure!(!step.assign.is_empty(), "update requires writable fields");
+            }
+            OperationKind::Delete => {
+                ensure!(a.steps.len() == 1, "delete must be the only step");
+                ensure!(
+                    step.target == Target::Signed && step.assign.is_empty(),
+                    "delete requires signed target and no assignments"
+                );
+                exact = true;
+            }
+            _ => anyhow::bail!("action must declare a mutation"),
+        }
+        let mut assigned = BTreeSet::new();
+        for assignment in &step.assign {
+            ensure!(assigned.insert(&assignment.field), "duplicate assignment");
+            ensure!(
+                !matches!(
+                    assignment.field.as_str(),
+                    "owner" | "tenant" | "id" | "incarnation" | "revision"
+                ),
+                "protected assignment"
+            );
+            let field = resource
+                .fields
+                .iter()
+                .find(|field| field.name == assignment.field)
+                .ok_or_else(|| anyhow::anyhow!("unknown or protected assignment"))?;
+            ensure!(
+                op.kind != OperationKind::Create || field.initial.is_none(),
+                "initial value is host-applied"
+            );
+            ensure!(
+                op.kind == OperationKind::Create
+                    || !matches!(field.kind, FieldKind::Account { .. }),
+                "account fields are immutable"
+            );
+            ensure!(
+                op.kind != OperationKind::Update
+                    || !matches!(field.kind, FieldKind::Reference { .. }),
+                "reference is immutable"
+            );
+            match &assignment.change {
+                Change::Set(value) => {
+                    exact |= op.kind == OperationKind::Update;
+                    match value {
+                        Value::Input(name) => {
+                            let input = a
+                                .inputs
+                                .iter()
+                                .find(|input| input.name == *name)
+                                .ok_or_else(|| anyhow::anyhow!("undeclared input"))?;
+                            ensure!(
+                                input_fits(input, field),
+                                "input domain does not fit destination"
+                            );
+                            used.insert(name.as_str());
+                        }
+                        Value::Constant(value) => {
+                            ensure!(
+                                !matches!(field.kind, FieldKind::Reference { .. }),
+                                "reference requires a declared target"
+                            );
+                            validate_value(field, value)?;
+                        }
+                        Value::SignedTarget => {
+                            ensure!(
+                                reference_field(resource)
+                                    .is_some_and(|reference| reference.name == field.name),
+                                "signed target requires reference field"
+                            );
+                            ensure!(
+                                reference_resource(m, resource.id)?.map(|target| target.id)
+                                    == signed
+                                    && signed.is_some(),
+                                "wrong signed reference type"
+                            );
+                        }
+                        Value::Created(created) => {
+                            let created = usize::from(*created);
+                            ensure!(
+                                created < index,
+                                "created reference must name an earlier step"
+                            );
+                            let source = operation(m, a.steps[created].operation)?;
+                            ensure!(
+                                source.kind == OperationKind::Create,
+                                "created reference requires create step"
+                            );
+                            ensure!(
+                                reference_field(resource)
+                                    .is_some_and(|reference| reference.name == field.name)
+                                    && reference_resource(m, resource.id)?
+                                        .is_some_and(|target| target.id == source.resource),
+                                "wrong created reference type"
+                            );
+                        }
+                    }
+                }
+                Change::Decrease { by, rejection } | Change::Increase { by, rejection } => {
+                    ensure!(
+                        op.kind == OperationKind::Update && step.target == Target::Signed,
+                        "adjustments require signed update steps"
+                    );
+                    let FieldKind::Integer {
+                        min: Some(min),
+                        max: Some(max),
+                    } = field.kind
+                    else {
+                        anyhow::bail!("adjustment requires bounded integer field");
+                    };
+                    let input = a
+                        .inputs
+                        .iter()
+                        .find(|input| input.name == *by)
+                        .ok_or_else(|| anyhow::anyhow!("undeclared adjustment input"))?;
+                    let FieldKind::Integer {
+                        min: Some(amount_min),
+                        max: Some(amount_max),
+                    } = input.kind
+                    else {
+                        anyhow::bail!("adjustment requires bounded integer input");
+                    };
+                    ensure!(
+                        !input.optional
+                            && amount_min >= 1
+                            && i128::from(amount_max) <= i128::from(max) - i128::from(min),
+                        "invalid adjustment amount domain"
+                    );
+                    ensure!(
+                        names.contains(rejection.input.as_str()),
+                        "undeclared rejection input"
+                    );
+                    ensure!(
+                        !rejection.message.is_empty()
+                            && rejection.message.len() <= 256
+                            && !rejection
+                                .message
+                                .chars()
+                                .any(|c| c.is_control() && !matches!(c, '\n' | '\t')),
+                        "invalid guard rejection message"
+                    );
+                    used.insert(by.as_str());
+                }
+            }
+        }
+        if op.kind == OperationKind::Create {
+            let writable = resource
+                .fields
+                .iter()
+                .filter(|field| field.initial.is_none())
+                .count();
+            ensure!(
+                step.assign.len() == writable,
+                "creation requires every writable field"
+            );
+        }
+    }
+    ensure!(
+        !exact || a.revision == Revision::Exact,
+        "identity revision is weaker than required exact revision"
+    );
+    ensure!(used == names, "unused action input");
+    if let Some(inspect) = &a.inspect {
+        let read = operation(m, inspect.operation)?;
+        ensure!(!is_public(read), "inspection cannot use a public operation");
+        ensure!(
+            read.kind == OperationKind::Read && read.via.is_none() && Some(read.resource) == signed,
+            "invalid inspection operation"
+        );
+        ensure!(!inspect.fields.is_empty(), "empty inspection");
+        projected_fields(resource(m, read.resource)?, &inspect.fields)?;
+    }
+    validate_layout(m, a)?;
+    let destination = route(m, a.redirect.route())?;
+    ensure!(
+        destination.params.is_empty(),
+        "mutation redirect requires an unparameterized route"
+    );
+    if a.steps.len() == 1
+        && operation(m, a.steps[0].operation)?.kind == OperationKind::Delete
+        && matches!(
+            a.redirect.source,
+            RedirectSource::Signed | RedirectSource::Step(0)
+        )
+    {
+        ensure!(
+            destination.resource.is_none(),
+            "delete destination requires collection route"
+        );
+        return Ok(());
+    }
+    let destination_resource = match &a.redirect.source {
+        RedirectSource::Signed => {
+            signed.ok_or_else(|| anyhow::anyhow!("redirect requires signed target"))?
+        }
+        RedirectSource::Step(index) | RedirectSource::Reference { step: index, .. } => {
+            let step = a
+                .steps
+                .get(usize::from(*index))
+                .ok_or_else(|| anyhow::anyhow!("redirect step out of range"))?;
+            let op = operation(m, step.operation)?;
+            if let RedirectSource::Reference { field, .. } = &a.redirect.source {
+                ensure!(
+                    reference_field(resource(m, op.resource)?)
+                        .is_some_and(|reference| reference.name == *field),
+                    "redirect requires reference field"
+                );
+                ensure!(
+                    destination
+                        .operations
+                        .iter()
+                        .filter(|id| operation(m, **id)
+                            .is_ok_and(|read| read.kind == OperationKind::Read
+                                && read.via.is_none()
+                                && Some(read.resource) == destination.resource))
+                        .count()
+                        == 1,
+                    "parent destination requires one unambiguous resource read"
+                );
+                reference_resource(m, op.resource)?
+                    .expect("validated reference")
+                    .id
+            } else if op.kind == OperationKind::Delete {
+                ensure!(
+                    destination.resource.is_none(),
+                    "delete destination requires collection route"
+                );
+                return Ok(());
+            } else {
+                op.resource
+            }
+        }
+    };
+    ensure!(
+        destination.resource == Some(destination_resource),
+        "invalid outcome route"
+    );
+    Ok(())
+}
+
+fn validate_input_schema(input: &Input) -> Result<()> {
+    ensure!(
+        !input.label.is_empty()
+            && input.label.len() <= 128
+            && !input.label.chars().any(char::is_control),
+        "invalid input label"
+    );
+    ensure!(
+        input.max_bytes > 0 && input.max_bytes <= 4096,
+        "input byte limit"
+    );
+    match &input.kind {
+        FieldKind::Text => {}
+        FieldKind::Boolean => ensure!(input.max_bytes >= 5, "boolean input budget"),
+        FieldKind::Integer { min, max } => ensure!(
+            input.max_bytes >= 20 && min.zip(*max).is_none_or(|(min, max)| min <= max),
+            "integer input schema"
+        ),
+        FieldKind::Choice { variants } => {
+            ensure!(
+                !variants.is_empty() && variants.len() <= 32,
+                "choice input limit"
+            );
+            let mut keys = BTreeSet::new();
+            for variant in variants {
+                ensure!(
+                    identifier(&variant.key)
+                        && keys.insert(&variant.key)
+                        && variant.key.len() <= input.max_bytes as usize,
+                    "choice input key"
+                );
+                ensure!(
+                    !variant.label.is_empty()
+                        && variant.label.len() <= 128
+                        && !variant.label.chars().any(char::is_control),
+                    "choice input label"
+                );
+            }
+        }
+        FieldKind::Account { .. } => ensure!(
+            input.max_bytes >= 43 && !input.optional,
+            "account inputs must be required and hold an ID"
+        ),
+        FieldKind::Reference { .. } => anyhow::bail!("invalid input kind"),
+    }
+    Ok(())
+}
+
+fn input_fits(input: &Input, field: &TextField) -> bool {
+    if input.optional && !field.optional {
+        return false;
+    }
+    match (&input.kind, &field.kind) {
+        (FieldKind::Text, FieldKind::Text) => input.max_bytes <= field.max_bytes,
+        (FieldKind::Boolean, FieldKind::Boolean) => true,
+        (FieldKind::Account { scope: input }, FieldKind::Account { scope }) => input == scope,
+        (
+            FieldKind::Integer {
+                min: input_min,
+                max: input_max,
+            },
+            FieldKind::Integer { min, max },
+        ) => {
+            input_min.unwrap_or(i64::MIN) >= min.unwrap_or(i64::MIN)
+                && input_max.unwrap_or(i64::MAX) <= max.unwrap_or(i64::MAX)
+        }
+        (FieldKind::Choice { variants: input }, FieldKind::Choice { variants }) => input
+            .iter()
+            .all(|input| variants.iter().any(|variant| variant.key == input.key)),
+        _ => false,
+    }
 }
 
 pub(crate) fn reference_field(resource: &Resource) -> Option<&TextField> {
@@ -819,18 +1117,25 @@ fn projected_fields<'a>(resource: &'a Resource, names: &[String]) -> Result<Vec<
         .collect()
 }
 
-pub(crate) fn action_fields<'a>(m: &'a Manifest, action: &Action) -> Result<Vec<&'a TextField>> {
-    projected_fields(
-        resource(m, operation(m, action.operation)?.resource)?,
-        &action.fields,
-    )
+pub(crate) fn action_fields<'a>(_m: &Manifest, action: &'a Action) -> Result<Vec<&'a Input>> {
+    Ok(action.inputs.iter().collect())
 }
 
-pub(crate) fn validate_input(m: &Manifest, action: &Action, fields: &Fields) -> Result<()> {
-    let declared = action_fields(m, action)?;
-    ensure!(fields.len() == declared.len(), "unexpected action fields");
-    for field in declared {
-        validate_field(field, fields)?;
+pub(crate) fn validate_input(_m: &Manifest, action: &Action, fields: &Fields) -> Result<()> {
+    ensure!(
+        fields.len() == action.inputs.len(),
+        "unexpected action fields"
+    );
+    for input in &action.inputs {
+        let value = fields
+            .get(&input.name)
+            .ok_or_else(|| anyhow::anyhow!("missing input"))?;
+        ensure!(
+            input
+                .canonical(value)
+                .is_ok_and(|canonical| canonical == *value),
+            "noncanonical action input"
+        );
     }
     Ok(())
 }
@@ -851,7 +1156,9 @@ fn validate_field(f: &TextField, fields: &Fields) -> Result<()> {
 /// Normalize browser input once, before receipt binding and guest execution.
 pub fn canonical_input(m: &Manifest, action: &Action, input: &Fields) -> Result<Fields> {
     ensure!(
-        input.keys().all(|key| action.fields.contains(key)),
+        input
+            .keys()
+            .all(|key| action.inputs.iter().any(|input| input.name == *key)),
         "unexpected action field"
     );
     action_fields(m, action)?
@@ -895,7 +1202,10 @@ mod tests {
         m.resources[0]
             .fields
             .push(field("archived", FieldKind::Boolean, false));
-        m.actions[0].fields.push("archived".into());
+        add_input(
+            &mut m.actions[0],
+            &m.resources[0].fields.last().unwrap().clone(),
+        );
         m.operations[0].filter = vec![Condition {
             field: "archived".into(),
             equals: Operand::Literal("false".into()),
@@ -1000,9 +1310,27 @@ mod tests {
         }
     }
 
+    fn add_input(action: &mut Action, field: &TextField) {
+        action.inputs.push(Input {
+            name: field.name.clone(),
+            label: field.label.clone(),
+            kind: field.kind.clone(),
+            optional: field.optional,
+            max_bytes: field.max_bytes,
+        });
+        action.steps[0].assign.push(Assignment {
+            field: field.name.clone(),
+            change: Change::Set(Value::Input(field.name.clone())),
+        });
+    }
+
     fn schema(fields: Vec<TextField>) -> Manifest {
         let mut manifest = crate::test_support::manifest();
-        manifest.actions[0].fields = fields.iter().map(|field| field.name.clone()).collect();
+        manifest.actions[0].inputs.clear();
+        manifest.actions[0].steps[0].assign.clear();
+        for field in &fields {
+            add_input(&mut manifest.actions[0], field);
+        }
         manifest.resources[0].fields = fields;
         validate(&manifest).unwrap();
         manifest
@@ -1193,6 +1521,7 @@ mod tests {
         manifest.actions[0].layout[0] = layout_field("flag", Control::Checkbox);
         assert!(validate(&manifest).is_err());
         manifest.resources[0].fields[0].optional = false;
+        manifest.actions[0].inputs[0].optional = false;
         validate(&manifest).unwrap();
         manifest.actions[0].layout[0] = layout_field("flag", Control::Select);
         assert!(validate(&manifest).is_err());
@@ -1363,7 +1692,10 @@ mod initial_tests {
         bad.resources[0].fields[1].max_bytes = 3;
         assert!(validate(&bad).is_err());
         bad = m.clone();
-        bad.actions[0].fields.push("published".into());
+        bad.actions[0].steps[0].assign.push(Assignment {
+            field: "published".into(),
+            change: Change::Set(Value::Constant("true".into())),
+        });
         assert!(
             validate(&bad)
                 .unwrap_err()
@@ -1371,7 +1703,8 @@ mod initial_tests {
                 .contains("initial value is host-applied")
         );
         bad = m.clone();
-        bad.actions[0].fields.clear();
+        bad.actions[0].inputs.clear();
+        bad.actions[0].steps[0].assign.clear();
         bad.resources[0].fields.remove(0);
         assert!(
             validate(&bad)
@@ -1399,5 +1732,632 @@ mod initial_tests {
             crate::schema::digest(&m.resources).unwrap(),
             crate::schema::digest(&changed.resources).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+
+    fn field(name: &str, kind: FieldKind, max_bytes: u32) -> TextField {
+        TextField {
+            name: name.into(),
+            label: name.into(),
+            kind,
+            max_bytes,
+            optional: false,
+            initial: None,
+        }
+    }
+    fn set(field: &str, value: Value) -> Assignment {
+        Assignment {
+            field: field.into(),
+            change: Change::Set(value),
+        }
+    }
+    fn declarations() -> Manifest {
+        let mut m = crate::test_support::manifest();
+        m.resources[0].fields = vec![field(
+            "stock",
+            FieldKind::Integer {
+                min: Some(0),
+                max: Some(10),
+            },
+            20,
+        )];
+        m.resources.push(Resource {
+            gate: None,
+            id: 2,
+            name: "orders".into(),
+            fields: vec![
+                field(
+                    "quantity",
+                    FieldKind::Integer {
+                        min: Some(1),
+                        max: Some(10),
+                    },
+                    20,
+                ),
+                field(
+                    "product",
+                    FieldKind::Reference {
+                        resource: "notes".into(),
+                    },
+                    19,
+                ),
+            ],
+        });
+        m.resources.push(Resource {
+            gate: None,
+            id: 3,
+            name: "order_notes".into(),
+            fields: vec![
+                field("body", FieldKind::Text, 200),
+                field(
+                    "order",
+                    FieldKind::Reference {
+                        resource: "orders".into(),
+                    },
+                    19,
+                ),
+            ],
+        });
+        m.operations[2].kind = OperationKind::Update;
+        let mut order_create = m.operations[2].clone();
+        order_create.id = 4;
+        order_create.resource = 2;
+        order_create.kind = OperationKind::Create;
+        order_create.bind = Some(Bind {
+            field: "product".into(),
+            eligible: 2,
+        });
+        let mut order_read = m.operations[1].clone();
+        order_read.id = 5;
+        order_read.resource = 2;
+        let mut note_create = order_create.clone();
+        note_create.id = 6;
+        note_create.resource = 3;
+        note_create.bind = Some(Bind {
+            field: "order".into(),
+            eligible: 5,
+        });
+        let mut note_read = order_read.clone();
+        note_read.id = 7;
+        note_read.resource = 3;
+        m.operations
+            .extend([order_create, order_read, note_create, note_read]);
+        m.routes[0].forms.clear();
+        m.routes[1].forms = vec![1];
+        let mut order_route = m.routes[1].clone();
+        order_route.id = 3;
+        order_route.path = "/orders/{order}".into();
+        order_route.resource = Some(2);
+        order_route.operations = vec![5];
+        order_route.forms.clear();
+        let mut note_route = order_route.clone();
+        note_route.id = 4;
+        note_route.path = "/order_notes/{note}".into();
+        note_route.resource = Some(3);
+        note_route.operations = vec![7];
+        m.routes.extend([order_route, note_route]);
+        let a = &mut m.actions[0];
+        a.inputs = vec![
+            Input {
+                name: "quantity".into(),
+                label: "Quantity".into(),
+                kind: FieldKind::Integer {
+                    min: Some(1),
+                    max: Some(10),
+                },
+                optional: false,
+                max_bytes: 20,
+            },
+            Input {
+                name: "body".into(),
+                label: "Body".into(),
+                kind: FieldKind::Text,
+                optional: false,
+                max_bytes: 200,
+            },
+        ];
+        a.revision = Revision::Identity;
+        a.redirect = Redirect {
+            route: 3,
+            source: RedirectSource::Step(1),
+        };
+        a.steps = vec![
+            Step {
+                operation: 3,
+                target: Target::Signed,
+                assign: vec![Assignment {
+                    field: "stock".into(),
+                    change: Change::Decrease {
+                        by: "quantity".into(),
+                        rejection: GuardRejection {
+                            input: "quantity".into(),
+                            message: "Not enough stock".into(),
+                        },
+                    },
+                }],
+            },
+            Step {
+                operation: 4,
+                target: Target::None,
+                assign: vec![
+                    set("quantity", Value::Input("quantity".into())),
+                    set("product", Value::SignedTarget),
+                ],
+            },
+            Step {
+                operation: 6,
+                target: Target::None,
+                assign: vec![
+                    set("body", Value::Input("body".into())),
+                    set("order", Value::Created(1)),
+                ],
+            },
+        ];
+        validate(&m).unwrap();
+        m
+    }
+
+    #[test]
+    fn transaction_admission_allows_initialized_field_updates_and_account_create_inputs() {
+        let mut initialized = crate::test_support::manifest();
+        initialized.resources[0].fields.push(TextField {
+            name: "published".into(),
+            label: "Published".into(),
+            kind: FieldKind::Boolean,
+            optional: false,
+            initial: Some("false".into()),
+            max_bytes: 5,
+        });
+        validate(&initialized).unwrap();
+        let mut forbidden = initialized.clone();
+        forbidden.actions[0].steps[0]
+            .assign
+            .push(set("published", Value::Constant("true".into())));
+        assert!(
+            validate(&forbidden)
+                .unwrap_err()
+                .to_string()
+                .contains("initial value")
+        );
+        initialized.operations[2].kind = OperationKind::Update;
+        initialized.actions[0].steps[0].target = Target::Signed;
+        initialized.actions[0].steps[0]
+            .assign
+            .push(set("published", Value::Constant("true".into())));
+        initialized.routes[0].forms.clear();
+        initialized.routes[1].forms = vec![1];
+        initialized.actions[0].redirect.source = RedirectSource::Signed;
+        validate(&initialized).unwrap();
+
+        let mut account = crate::test_support::manifest();
+        let recipient = field(
+            "recipient",
+            FieldKind::Account {
+                scope: AccountScope::SameTenant,
+            },
+            43,
+        );
+        account.resources[0].fields.push(recipient.clone());
+        account.actions[0].inputs.push(Input {
+            name: recipient.name.clone(),
+            label: recipient.label.clone(),
+            kind: recipient.kind.clone(),
+            optional: false,
+            max_bytes: 43,
+        });
+        account.actions[0].steps[0]
+            .assign
+            .push(set("recipient", Value::Input("recipient".into())));
+        validate(&account).unwrap();
+        account.operations[2].kind = OperationKind::Update;
+        account.actions[0].steps[0].target = Target::Signed;
+        account.routes[0].forms.clear();
+        account.routes[1].forms = vec![1];
+        account.actions[0].redirect.source = RedirectSource::Signed;
+        assert!(
+            validate(&account)
+                .unwrap_err()
+                .to_string()
+                .contains("account fields are immutable")
+        );
+    }
+
+    #[test]
+    fn transaction_admission_rejects_step_create_and_delete_combinations() {
+        let m = declarations();
+        let mut bad = m.clone();
+        bad.actions[0].steps.clear();
+        assert!(validate(&bad).is_err());
+        let mut bad = m.clone();
+        bad.actions[0].steps = vec![m.actions[0].steps[0].clone(); 5];
+        assert!(validate(&bad).is_err());
+        let mut bad = m.clone();
+        bad.actions[0].steps.push(m.actions[0].steps[2].clone());
+        assert!(
+            validate(&bad)
+                .unwrap_err()
+                .to_string()
+                .contains("create limit")
+        );
+        let mut bad = m.clone();
+        bad.operations[2].kind = OperationKind::Delete;
+        bad.actions[0].steps[0].assign.clear();
+        bad.actions[0].revision = Revision::Exact;
+        assert!(
+            validate(&bad)
+                .unwrap_err()
+                .to_string()
+                .contains("only step")
+        );
+        for (index, target) in [(0, Target::None), (1, Target::Signed)] {
+            let mut bad = m.clone();
+            bad.actions[0].steps[index].target = target;
+            assert!(validate(&bad).is_err());
+        }
+        let mut bad = m.clone();
+        bad.operations[2].kind = OperationKind::Read;
+        assert!(validate(&bad).is_err());
+    }
+
+    #[test]
+    fn transaction_admission_rejects_forward_wrong_and_constant_references() {
+        let m = declarations();
+        for value in [
+            Value::Created(2),
+            Value::Created(3),
+            Value::Created(0),
+            Value::SignedTarget,
+            Value::Constant("1".into()),
+            Value::Input("body".into()),
+        ] {
+            let mut bad = m.clone();
+            bad.actions[0].steps[2].assign[1].change = Change::Set(value);
+            assert!(validate(&bad).is_err());
+        }
+        let mut bad = m.clone();
+        bad.actions[0].steps[2].assign[0].change = Change::Set(Value::Created(1));
+        assert!(validate(&bad).is_err());
+        let mut bad = m.clone();
+        bad.routes[1].operations.clear();
+        assert!(validate(&bad).is_err());
+        let mut bad = m.clone();
+        bad.operations[3].bind.as_mut().unwrap().eligible = 5;
+        assert!(validate(&bad).is_err());
+    }
+
+    #[test]
+    fn transaction_admission_rejects_duplicate_protected_and_missing_assignments() {
+        let m = declarations();
+        let mut bad = m.clone();
+        bad.actions[0].steps[1].assign[1] = bad.actions[0].steps[1].assign[0].clone();
+        assert!(validate(&bad).is_err());
+        for name in [
+            "owner",
+            "tenant",
+            "id",
+            "incarnation",
+            "revision",
+            "missing",
+        ] {
+            let mut bad = m.clone();
+            bad.actions[0].steps[1].assign[0].field = name.into();
+            if name != "missing" {
+                bad.resources[1].fields[0].name = name.into();
+            }
+            assert!(validate(&bad).is_err(), "{name}");
+        }
+        let mut bad = m.clone();
+        bad.resources[1].fields[0].initial = Some("1".into());
+        assert!(validate(&bad).is_err());
+        let mut bad = m.clone();
+        bad.resources[1].fields[0].kind = FieldKind::Account {
+            scope: AccountScope::SameTenant,
+        };
+        bad.resources[1].fields[0].max_bytes = 43;
+        assert!(validate(&bad).is_err());
+        let mut bad = m.clone();
+        bad.actions[0].steps[1].assign.pop();
+        assert!(validate(&bad).is_err());
+        let mut bad = m.clone();
+        bad.actions[0].steps[0].assign.clear();
+        assert!(validate(&bad).is_err());
+        let mut bad = m.clone();
+        bad.actions[0].steps[0].operation = 999;
+        assert!(validate(&bad).is_err());
+        let mut bad = m.clone();
+        bad.operations[3].kind = OperationKind::Update;
+        bad.operations[3].bind = None;
+        bad.actions[0].steps[1].target = Target::Signed;
+        assert!(validate(&bad).is_err());
+    }
+
+    #[test]
+    fn transaction_admission_rejects_undeclared_unused_duplicate_and_invalid_inputs() {
+        let m = declarations();
+        let mut bad = m.clone();
+        bad.actions[0].steps[1].assign[0].change = Change::Set(Value::Input("missing".into()));
+        assert!(validate(&bad).is_err());
+        let mut bad = m.clone();
+        bad.actions[0].inputs.push(Input {
+            name: "unused".into(),
+            ..m.actions[0].inputs[1].clone()
+        });
+        assert!(validate(&bad).is_err());
+        let mut bad = m.clone();
+        bad.actions[0].inputs.push(m.actions[0].inputs[0].clone());
+        assert!(validate(&bad).is_err());
+        for kind in [
+            FieldKind::Account {
+                scope: AccountScope::SameTenant,
+            },
+            FieldKind::Reference {
+                resource: "notes".into(),
+            },
+            FieldKind::Integer {
+                min: Some(10),
+                max: Some(1),
+            },
+            FieldKind::Choice { variants: vec![] },
+        ] {
+            let mut bad = m.clone();
+            bad.actions[0].inputs[1].kind = kind;
+            assert!(validate(&bad).is_err());
+        }
+        for bytes in [0, 201, 4097] {
+            let mut bad = m.clone();
+            bad.actions[0].inputs[1].max_bytes = bytes;
+            assert!(validate(&bad).is_err());
+        }
+        let mut bad = m.clone();
+        bad.actions[0].inputs[1].optional = true;
+        assert!(validate(&bad).is_err());
+    }
+
+    #[test]
+    fn transaction_admission_rejects_create_unbounded_noninteger_and_invalid_adjustments() {
+        let m = declarations();
+        let guard = m.actions[0].steps[0].assign[0].change.clone();
+        let mut bad = m.clone();
+        bad.actions[0].steps[1].assign[0].change = guard;
+        assert!(
+            validate(&bad)
+                .unwrap_err()
+                .to_string()
+                .contains("signed update")
+        );
+        for kind in [
+            FieldKind::Text,
+            FieldKind::Integer {
+                min: None,
+                max: Some(10),
+            },
+            FieldKind::Integer {
+                min: Some(0),
+                max: None,
+            },
+        ] {
+            let mut bad = m.clone();
+            bad.resources[0].fields[0].kind = kind;
+            assert!(validate(&bad).is_err());
+        }
+        for min in [None, Some(0), Some(-1)] {
+            let mut bad = m.clone();
+            bad.actions[0].inputs[0].kind = FieldKind::Integer { min, max: Some(10) };
+            assert!(validate(&bad).is_err());
+        }
+        for max in [None, Some(11)] {
+            let mut bad = m.clone();
+            bad.actions[0].inputs[0].kind = FieldKind::Integer { min: Some(1), max };
+            assert!(validate(&bad).is_err());
+        }
+        let mut bad = m.clone();
+        bad.actions[0].inputs[0].optional = true;
+        assert!(validate(&bad).is_err());
+        let mut bad = m.clone();
+        if let Change::Decrease { rejection, .. } = &mut bad.actions[0].steps[0].assign[0].change {
+            rejection.input = "missing".into();
+        }
+        assert!(validate(&bad).is_err());
+        let mut bad = m.clone();
+        if let Change::Decrease { by, .. } = &mut bad.actions[0].steps[0].assign[0].change {
+            *by = "missing".into();
+        }
+        assert!(validate(&bad).is_err());
+    }
+
+    #[test]
+    fn transaction_admission_checks_revision_and_multistep_authority() {
+        let m = declarations();
+        let mut bad = m.clone();
+        bad.actions[0].steps[0].assign[0].change = Change::Set(Value::Constant("5".into()));
+        assert!(
+            validate(&bad)
+                .unwrap_err()
+                .to_string()
+                .contains("exact revision")
+        );
+        bad.actions[0].revision = Revision::Exact;
+        validate(&bad).unwrap();
+        for predicate in [Predicate::Public, Predicate::Capability] {
+            let mut bad = m.clone();
+            if predicate == Predicate::Public {
+                bad.operations[3].policy.any = vec![vec![predicate]];
+            } else {
+                bad.operations[2].policy.any = vec![vec![predicate]];
+            }
+            assert!(
+                validate(&bad)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("multi-step")
+            );
+        }
+    }
+
+    #[test]
+    fn transaction_input_domains_fit_integer_text_choice_and_optionality() {
+        let integer = field(
+            "quantity",
+            FieldKind::Integer {
+                min: Some(-10),
+                max: Some(10),
+            },
+            20,
+        );
+        let mut input = Input {
+            name: "quantity".into(),
+            label: "Quantity".into(),
+            kind: FieldKind::Integer {
+                min: Some(-5),
+                max: Some(5),
+            },
+            optional: false,
+            max_bytes: 20,
+        };
+        assert!(input_fits(&input, &integer));
+        for kind in [
+            FieldKind::Integer {
+                min: Some(-11),
+                max: Some(5),
+            },
+            FieldKind::Integer {
+                min: Some(-5),
+                max: Some(11),
+            },
+            FieldKind::Integer {
+                min: None,
+                max: Some(5),
+            },
+            FieldKind::Boolean,
+        ] {
+            input.kind = kind;
+            assert!(!input_fits(&input, &integer));
+        }
+        let choice = field(
+            "state",
+            FieldKind::Choice {
+                variants: vec![
+                    ChoiceVariant {
+                        key: "draft".into(),
+                        label: "Draft".into(),
+                    },
+                    ChoiceVariant {
+                        key: "live".into(),
+                        label: "Live".into(),
+                    },
+                ],
+            },
+            20,
+        );
+        input.kind = FieldKind::Choice {
+            variants: vec![ChoiceVariant {
+                key: "draft".into(),
+                label: "Different presentation".into(),
+            }],
+        };
+        assert!(input_fits(&input, &choice));
+        input.kind = FieldKind::Choice {
+            variants: vec![ChoiceVariant {
+                key: "missing".into(),
+                label: "Missing".into(),
+            }],
+        };
+        assert!(!input_fits(&input, &choice));
+        let text = field("body", FieldKind::Text, 20);
+        input.kind = FieldKind::Text;
+        input.max_bytes = 21;
+        assert!(!input_fits(&input, &text));
+        input.max_bytes = 20;
+        input.optional = true;
+        assert!(!input_fits(&input, &text));
+    }
+
+    #[test]
+    fn transaction_adjustment_span_uses_i128_and_inputs_are_shared() {
+        let mut m = declarations();
+        m.resources[0].fields[0].kind = FieldKind::Integer {
+            min: Some(i64::MIN),
+            max: Some(i64::MAX),
+        };
+        m.resources[1].fields[0].kind = FieldKind::Integer {
+            min: Some(1),
+            max: Some(i64::MAX),
+        };
+        m.actions[0].inputs[0].kind = FieldKind::Integer {
+            min: Some(1),
+            max: Some(i64::MAX),
+        };
+        validate(&m).unwrap();
+        let input = canonical_input(
+            &m,
+            &m.actions[0],
+            &Fields::from([
+                ("quantity".into(), "+01".into()),
+                ("body".into(), "note".into()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(input.len(), 2);
+        assert_eq!(input["quantity"], "1");
+        for invalid in ["0", "-1", "9223372036854775808"] {
+            assert!(
+                canonical_input(
+                    &m,
+                    &m.actions[0],
+                    &Fields::from([
+                        ("quantity".into(), invalid.into()),
+                        ("body".into(), "note".into())
+                    ])
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn transaction_digest_covers_input_assignment_constant_order_guard_revision_inspection_redirect()
+     {
+        let m = declarations();
+        let original = digest(&m).unwrap();
+        let changed = |bad: Manifest| assert_ne!(digest(&bad).unwrap(), original);
+        let mut bad = m.clone();
+        bad.actions[0].inputs[1].label = "Order note".into();
+        changed(bad);
+        let mut bad = m.clone();
+        bad.actions[0].steps[1].assign.swap(0, 1);
+        changed(bad);
+        let mut bad = m.clone();
+        bad.actions[0].steps[2].assign[0].change = Change::Set(Value::Constant("note".into()));
+        bad.actions[0].inputs.pop();
+        changed(bad);
+        let mut bad = m.clone();
+        bad.actions[0].steps.swap(0, 1);
+        bad.actions[0].steps[2].assign[1].change = Change::Set(Value::Created(0));
+        bad.actions[0].redirect.source = RedirectSource::Step(0);
+        changed(bad);
+        let mut bad = m.clone();
+        if let Change::Decrease { rejection, .. } = &mut bad.actions[0].steps[0].assign[0].change {
+            rejection.message = "Out of stock".into();
+        }
+        changed(bad);
+        let mut bad = m.clone();
+        bad.actions[0].revision = Revision::Exact;
+        changed(bad);
+        let mut bad = m.clone();
+        bad.actions[0].inspect = Some(Inspection {
+            operation: 2,
+            fields: vec!["stock".into()],
+        });
+        changed(bad);
+        let mut bad = m.clone();
+        bad.actions[0].redirect = Redirect {
+            route: 2,
+            source: RedirectSource::Signed,
+        };
+        changed(bad);
     }
 }

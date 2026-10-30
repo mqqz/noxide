@@ -175,7 +175,10 @@ async fn conformance(
     // An approved replacement must still satisfy the persisted resource schema.
     let mut incompatible = declarations.clone();
     incompatible.resources[0].fields[0].name = "other".into();
-    incompatible.actions[0].fields = vec!["other".into()];
+    incompatible.actions[0].inputs[0].name = "other".into();
+    incompatible.actions[0].steps[0].assign[0].field = "other".into();
+    incompatible.actions[0].steps[0].assign[0].change =
+        noxide_protocol::Change::Set(noxide_protocol::Value::Input("other".into()));
     let replacement = Application::new(
         &support::component(None),
         &serde_json::to_vec(&incompatible).unwrap(),

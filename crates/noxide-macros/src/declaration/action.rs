@@ -115,10 +115,9 @@ pub(crate) fn expand_action(
     let redirect_value = if let Some(field) = &declaration.redirect_reference {
         let resource = &declaration.resource;
         let hash = stable_id(&field.to_string());
-        quote!(::noxide::__private::Redirect::Reference {
-            field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into(), route: #redirect::id() })
+        quote!(::noxide::__private::Redirect { route: #redirect::id(), source: ::noxide::__private::RedirectSource::Reference { step: 0, field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into() } })
     } else {
-        quote!(::noxide::__private::Redirect::Page(#redirect::id()))
+        quote!(::noxide::__private::Redirect { route: #redirect::id(), source: ::noxide::__private::RedirectSource::Step(0) })
     };
     if declaration.inspect.is_some() != !declaration.inspection_fields.is_empty() {
         return Err(syn::Error::new(
@@ -221,6 +220,22 @@ pub(crate) fn expand_action(
     } else {
         Tokens::new()
     };
+    let target = if declaration.kind == "create" {
+        quote!(::noxide::__private::Target::None)
+    } else {
+        quote!(::noxide::__private::Target::Signed)
+    };
+    let reference_assignment = if let Some((field, _)) = &declaration.bind {
+        let hash = stable_id(&field.to_string());
+        quote!(let assign = { let mut assign = assign; assign.push(::noxide::__private::Assignment { field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into(), change: ::noxide::__private::Change::Set(::noxide::__private::Value::SignedTarget) }); assign };)
+    } else {
+        Tokens::new()
+    };
+    let eligibility_operation = declaration
+        .bind
+        .as_ref()
+        .map(|(_, query)| quote!(<#query as ::noxide::QueryType>::operation()))
+        .into_iter();
     Ok(quote! {
         #immutable_check
         #item
@@ -246,21 +261,28 @@ pub(crate) fn expand_action(
             fn controls() -> Self::Controls {
                 #controls_name { #(#names: ::noxide::ControlField::new(#keys)),* }
             }
-            fn operation() -> ::noxide::__private::Operation {
-                ::noxide::__private::Operation { scope: None, via: None,
+            fn operations() -> Vec<::noxide::__private::Operation> {
+                vec![::noxide::__private::Operation { bind: #bind, scope: None, via: None,
                     filter: Vec::new(), disclose: Vec::new(),
                 list: None, visibility: None, fields: None,
                     id: ::noxide::stable_id(concat!("mutation:", module_path!(), "::", stringify!(#name))),
                     resource: <#resource as ::noxide::ResourceType>::definition().id,
                     kind: #kind, policy: #policy,
-                }
+                }, #(#eligibility_operation),*]
             }
             fn definition() -> ::noxide::__private::Action {
-                ::noxide::__private::Action { bind: #bind,
+                let schema = <#resource as ::noxide::ResourceType>::definition();
+                let inputs = vec![#(#keys),*].into_iter().map(|key: &str| {
+                    let field = schema.fields.iter().find(|field| field.name == key).expect("declared action field");
+                    ::noxide::__private::Input { name: field.name.clone(), label: field.label.clone(), kind: field.kind.clone(), optional: field.optional, max_bytes: field.max_bytes }
+                }).collect();
+                let assign = vec![#(::noxide::__private::Assignment { field: #keys.into(), change: ::noxide::__private::Change::Set(::noxide::__private::Value::Input(#keys.into())) }),*];
+                #reference_assignment
+                ::noxide::__private::Action {
                     id: ::noxide::stable_id(concat!("action:", module_path!(), "::", stringify!(#name))),
                     version: #version, name: #label.into(),
-                    operation: <Self as ::noxide::ActionType>::operation().id, redirect: #redirect_value,
-                    fields: vec![#(#keys.into()),*], inspect: #inspection, layout: vec![],
+                    steps: vec![::noxide::__private::Step { operation: <Self as ::noxide::ActionType>::operations()[0].id, target: #target, assign }], redirect: #redirect_value,
+                    inputs, revision: ::noxide::__private::Revision::Exact, inspect: #inspection, layout: vec![],
                 }
             }
             fn inspection() -> Option<::noxide::__private::Operation> { #inspection_operation }

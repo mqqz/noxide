@@ -283,6 +283,8 @@ async fn conformance(db: Database, mut inspect: InspectDb) {
         "twice",
         "target",
         "read",
+        "follow_source",
+        "follow",
         "bad_reject",
         "reject",
     ] {
@@ -479,8 +481,12 @@ async fn inspection_revocation(db: &Database, keys: &[u8], alice: &str, inspect:
         .submit(alice, 2, &completed, &csrf, input.clone())
         .await
         .unwrap();
-    assert_eq!(replay.status, 303);
-    assert_eq!(replay.location, outcome.location);
+    assert_eq!(outcome.status, 303);
+    assert_eq!(replay.status, 200);
+    assert!(
+        replay.location.is_none(),
+        "replay must recheck destination read authority"
+    );
     for token in [stale, pending] {
         let denied = app
             .submit(alice, 2, &token, &csrf, input.clone())
@@ -540,14 +546,24 @@ fn rejects_ambiguous_or_expanded_record_action_contracts() {
 
     for fields in [vec!["owner"], vec!["body", "body"], Vec::new()] {
         let mut m = declarations();
-        m.actions[0].fields = fields.into_iter().map(str::to_owned).collect();
+        m.actions[0].steps[0].assign = fields
+            .into_iter()
+            .map(|field| noxide_protocol::Assignment {
+                field: field.into(),
+                change: noxide_protocol::Change::Set(noxide_protocol::Value::Input("body".into())),
+            })
+            .collect();
         assert!(
             manifest::validate(&m).is_err(),
             "invalid writable projection"
         );
     }
     let mut delete_fields = declarations();
-    delete_fields.actions[1].fields.push("body".into());
+    support::add_input(
+        &mut delete_fields.actions[1],
+        &delete_fields.resources[0],
+        "body",
+    );
     assert!(manifest::validate(&delete_fields).is_err());
 }
 
