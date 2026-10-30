@@ -108,3 +108,14 @@ and PostgreSQL must enforce the same rules within query and output limits.
 
 No safe full inbox is claimed. The safe owner-only subset proves only sent-note
 storage; it does not meet recipient delivery or recipient-read acceptance.
+
+## Implementation follow-up
+
+The blocker analysis above records the original exercise. The implementation in
+[`examples/private-inbox`](../../examples/private-inbox/) now uses `AccountId`,
+explicit `scope = same_tenant`, and `principal_is(recipient)` composed with owner.
+See the [account-reference API](../application-api.md#account-references-and-principal-policies)
+and [identity lifecycle contract](runtime.md#account-identity-and-bindings).
+The original string-recipient sketch remains diagnostic history, not the current
+implementation. Database and real-component validation results must be reported
+separately; a compiled example alone does not prove the acceptance cases.

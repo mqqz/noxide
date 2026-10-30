@@ -40,7 +40,7 @@ jobs:
       - name: Check formatting
         run: |
           cargo fmt --all --check
-          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs examples/forum/src/lib.rs
+          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs examples/forum/src/lib.rs examples/private-inbox/src/lib.rs
       - name: Fetch locked framework dependencies
         run: cargo fetch --locked
       - name: Check example lockfiles
@@ -94,7 +94,7 @@ jobs:
       - name: Check formatting
         run: |
           cargo fmt --all --check
-          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs examples/forum/src/lib.rs
+          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs examples/forum/src/lib.rs examples/private-inbox/src/lib.rs
       - name: Lint all framework targets
         run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
       - name: Test SQLite and PostgreSQL
@@ -109,6 +109,12 @@ jobs:
           --skip failure_tests::crash_worker
           --skip postgres_nojs_browser_flow
           --skip postgres_typed_forms_browser_flow
+      - name: Measure inbox index work
+        env:
+          LIBSQLITE3_FLAGS: SQLITE_ENABLE_STMT_SCANSTATUS
+        run: |
+          cargo test -p noxide-host --features query-metrics --locked --offline --lib sqlite_account_bindings_and_full_pages -- --nocapture
+          cargo test -p noxide-host --features query-metrics --locked --offline --lib postgres_account_bindings_and_full_pages -- --ignored --nocapture
       - name: Check documentation
         env:
           RUSTDOCFLAGS: -D warnings
@@ -214,6 +220,20 @@ jobs:
             --component "$RUNNER_TEMP/noxide-ci/public/public_articles.component.wasm" \
             --manifest "$RUNNER_TEMP/noxide-ci/public/manifest.json" \
             --output "$RUNNER_TEMP/noxide-ci/public-http"
+      - name: Build and test the private inbox
+        run: |
+          target/debug/noxide build --framework "$PWD" \
+            --app examples/private-inbox --output "$RUNNER_TEMP/noxide-ci/inbox"
+          python3 tools/test_private_inbox.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/inbox" \
+            --output "$RUNNER_TEMP/noxide-ci/inbox-http" \
+            --geckodriver "$NOXIDE_GECKODRIVER"
+          psql "$NOXIDE_TEST_POSTGRES" -c 'CREATE DATABASE noxide_inbox'
+          python3 tools/test_private_inbox.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/inbox" \
+            --output "$RUNNER_TEMP/noxide-ci/inbox-postgres" \
+            --postgres "${NOXIDE_TEST_POSTGRES%/*}/noxide_inbox" \
+            --geckodriver "$NOXIDE_GECKODRIVER"
       - name: Build and test the forum
         run: |
           target/debug/noxide build --framework "$PWD" \

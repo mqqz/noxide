@@ -131,3 +131,30 @@ note persistence across rebuilds, compile failure recovery, changed-contract
 rejection, tests, builds, and separate serving approval.
 `tools/test_cli_package.py` builds the source archives outside the workspace,
 relocates those sources, and uses the detached CLI to check a new application.
+
+## Account-reference checks
+
+The host suite tests stable account identities and lifecycle, same-tenant binding,
+SQL/row policy equivalence, historical references, and full inbox pagination on
+SQLite and PostgreSQL. The inbox benchmark includes 100,000 unrelated records.
+`query-metrics` enables test-only SQLite scan-status and PostgreSQL analyzed-plan
+instrumentation:
+
+```sh
+LIBSQLITE3_FLAGS=SQLITE_ENABLE_STMT_SCANSTATUS cargo test -p noxide-host \
+  --features query-metrics --lib sqlite_account_bindings_and_full_pages -- --nocapture
+LIBSQLITE3_FLAGS=SQLITE_ENABLE_STMT_SCANSTATUS cargo test -p noxide-host \
+  --features query-metrics --lib postgres_account_bindings_and_full_pages -- --ignored --nocapture
+```
+
+Set `NOXIDE_TEST_POSTGRES` to a disposable local database with CREATE DATABASE
+permission for the second command. Each ordered owner/recipient scan must examine
+21 records for a 20-record page; the combined upper bound is 42 candidates before
+deduplication, independent of unrelated population. This measures index visits,
+not just returned result count. General residual policies retain the bounded
+short-page fallback.
+
+`tools/test_private_inbox.py` tests the built component through real HTTP,
+including account-ID display, private reads, sender-only deletion, restart/replay,
+and revocation. With `--geckodriver`, it also runs Firefox with JavaScript disabled
+and saves a recipient screenshot. CI runs this on SQLite and PostgreSQL.
