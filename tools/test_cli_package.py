@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--lifecycle', action='store_true', help='Run the full lifecycle with the detached packaged CLI')
     options = parser.parse_args()
     options.output.mkdir(parents=True, exist_ok=False)
     root = options.output.resolve()
@@ -35,6 +36,11 @@ def main():
     detached = root / 'noxide'
     shutil.copy2(root / 'target/debug/noxide', detached)
     sources.rename(root / 'unavailable-source-checkouts')
+    if options.lifecycle:
+        subprocess.run(['python3', str(ROOT / 'tools/test_lifecycle.py'),
+                        '--cli', str(detached), '--output', str(root / 'lifecycle')],
+                       cwd=root, check=True)
+        return
     environment = dict(os.environ, XDG_STATE_HOME=str(root / 'state'), CARGO_HOME=str(root / 'empty-cargo'))
     app = root / 'consumer'
     subprocess.run([str(detached), 'new', str(app)], env=environment, check=True)
