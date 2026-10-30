@@ -182,258 +182,84 @@ impl Application {
         capability: Option<&str>,
         budget: &mut ExecutionBudget,
     ) -> Result<(Option<Transaction>, navigation::Prepared)> {
-        let deadline = budget.deadline;
         let a = manifest::action(&self.manifest, action)?;
-        let mut tx = self.database.begin(deadline.into_std()).await?;
-        self.admission(&mut tx, false).await?;
-        let now = security::now()?;
-        let now = self.observe_clock_write(&mut tx, now).await?;
-        let (token, session, principal) = self
-            .submission_identity(&mut tx, a, cookie, submission, csrf, now)
-            .await?;
-        let target = self.submission_target(&token, a)?;
-        let claimed = tx.execute("INSERT INTO nx_receipts(nonce,subject,contract,action,input,outcome,expires) VALUES($1,$2,$3,$4,$5,'',$6) ON CONFLICT(nonce) DO NOTHING", &[
-            token.nonce.as_str().into(), session.nonce.as_str().into(), self.contract.as_str().into(), Param::Number(action.into()), input_hash.into(), Param::Number(token.expires),
-        ]).await?;
-        if claimed == 0 {
-            let [digest, outcome] = self
-                .load_receipt(&mut tx, &token.nonce, &session.nonce)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("receipt unavailable"))?;
-            ensure!(digest == input_hash, RequestError::InvalidRequest);
-            let response = self
-                .prepare_response(&mut tx, a, target.as_ref(), &outcome, &principal)
-                .await
-                .or_else(|_| self.committed_recovery(a, submission, csrf, input))?;
-            return Ok((Some(tx), response));
-        }
-        let record = if let Some(target) = &target {
-            let Some(stored) = self
-                .authorized_target(&mut tx, a, target, &principal, capability)
-                .await?
-            else {
-                let response = render::unavailable(&self.presentation, &self.manifest)?;
-                tx.rollback().await?;
-                return Ok((None, navigation::Prepared::ready(response)));
-            };
-            if a.revision == Revision::Exact && stored.revision != target.revision {
-                let response = self.conflict(a, &session, now, target.clone(), &stored, input)?;
-                tx.rollback().await?;
-                return Ok((None, navigation::Prepared::ready(response)));
-            }
-            Some(stored)
-        } else {
-            if self.authorize_create(a, &principal).is_err() {
-                let response = render::unavailable(&self.presentation, &self.manifest)?;
-                tx.rollback().await?;
-                return Ok((None, navigation::Prepared::ready(response)));
-            }
-            None
-        };
-        let destination_route = manifest::route(&self.manifest, a.redirect.route())?;
-        let gated_destination = destination_route
-            .resource
-            .map(|id| manifest::resource(&self.manifest, id))
-            .transpose()?
-            .is_some_and(|resource| resource.gate.is_some());
-        budget.parent_redirect_attempt(gated_destination)?;
-        let signed_target = target.clone();
-        let original = record.clone();
-        let response_principal = principal.clone();
-        let inspection = a.inspect.as_ref().map(|inspect| {
-            let stored = record
-                .as_ref()
-                .expect("validated inspection requires a target");
-            inspect
-                .fields
-                .iter()
-                .map(|name| (name.clone(), stored.record.fields[name].clone()))
-                .collect()
-        });
-        let request = RequestView {
-            params: Default::default(),
-            available_forms: Vec::new(),
-            version: VERSION,
-            kind: RequestKind::Action(action),
-            target: target.as_ref().map(|t| t.id),
-            input: input.clone(),
-            inspection,
-        };
-        let effects = Effects {
-            provenance: Default::default(),
-            follow_sources: Vec::new(),
-            invoked: Default::default(),
-            list_bytes: 0,
-            list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
-            result_limit: noxide_protocol::MAX_RESULT_BYTES,
-            truncated: false,
-            see_all: Vec::new(),
-            plans: self.plans.clone(),
-            tx,
-            manifest: self.manifest.clone(),
-            principal,
-            request: request.clone(),
-            capability_grant: if manifest::is_capability(manifest::operation(
-                &self.manifest,
-                a.steps[0].operation,
-            )?) {
-                target.clone()
-            } else {
-                None
-            },
-            grant: target,
-            calls: budget.database_calls,
-            cursor: None,
-            more: None,
-        };
-        let _wasm = self
-            .admission_limits
-            .wasm()
-            .acquire()
-            .await
-            .map_err(|_| RequestError::Busy)?;
         let attempt = self
-            .runtime
-            .run(
-                request,
-                Some(effects),
-                budget.fuel,
-                budget.host_calls,
-                deadline,
+            .attempt_action(
+                cookie, action, submission, csrf, input, input_hash, capability, budget,
             )
             .await;
-        budget.fuel = attempt.fuel_left;
-        budget.host_calls = attempt.calls_left;
-        let mut effects = attempt
-            .effects
-            .ok_or_else(|| anyhow::anyhow!("missing request state"))?;
-        budget.database_calls = effects.calls;
-        let outcome = match attempt.result {
-            Ok(value) => value,
-            Err(error) => {
-                effects.tx.rollback().await?;
-                if error.is::<crate::repository::ReferenceUnavailable>() {
-                    return Ok((
-                        None,
-                        navigation::Prepared::ready(render::unavailable(
-                            &self.presentation,
-                            &self.manifest,
-                        )?),
-                    ));
-                }
-                return Err(error);
+        let _wasm = budget.wasm.take();
+        let (mut tx, receipt, nonce) = match attempt? {
+            action::Attempt::Settled(outcome) => {
+                return Ok((
+                    None,
+                    navigation::Prepared::ready(self.settle(a, outcome, submission, csrf, input)?),
+                ));
             }
+            action::Attempt::Commit { tx, receipt, nonce } => (tx, receipt, Some(nonce)),
+            action::Attempt::Replay { tx, receipt } => (tx, receipt, None),
         };
-        if let ResponseIntent::Rejected {
-            field_errors,
-            message,
-        } = &outcome
-        {
-            let response = render::recovery(
-                &self.presentation,
-                &self.manifest,
-                action,
-                &FormCredentials {
-                    csrf: csrf.into(),
-                    submission: submission.into(),
-                    values: Fields::new(),
-                },
-                input,
-                render::Recovery::Rejected {
-                    errors: field_errors,
-                    message,
-                },
-            )?;
-            effects.tx.rollback().await?;
-            return Ok((None, navigation::Prepared::ready(response)));
-        }
-        ensure!(
-            outcome == ResponseIntent::Execute,
-            "invalid action decision"
-        );
-        let outcomes = match effects.execute_transaction(a).await {
-            Ok(outcomes) => outcomes,
-            Err(error) => {
-                budget.database_calls = effects.calls;
-                effects.tx.rollback().await?;
-                if error.is::<repository::ReferenceUnavailable>() {
-                    return Ok((
-                        None,
-                        navigation::Prepared::ready(render::unavailable(
-                            &self.presentation,
-                            &self.manifest,
-                        )?),
-                    ));
-                }
-                if let Some(guard) = error.downcast_ref::<repository::GuardFailure>() {
-                    let errors = Fields::from([(guard.input.clone(), guard.message.clone())]);
-                    let rendered = render::recovery(
-                        &self.presentation,
-                        &self.manifest,
-                        action,
-                        &FormCredentials {
-                            csrf: csrf.into(),
-                            submission: submission.into(),
-                            values: Fields::new(),
-                        },
-                        input,
-                        render::Recovery::Rejected {
-                            errors: &errors,
-                            message: "Review the highlighted fields.",
-                        },
-                    )?;
-                    return Ok((None, navigation::Prepared::ready(rendered)));
-                }
-                return Err(error);
-            }
-        };
-        budget.database_calls = effects.calls;
-        let destination = self
-            .capture_destination(
-                &mut effects.tx,
-                a,
-                signed_target.as_ref(),
-                original.as_ref(),
-                &outcomes,
-            )
-            .await?;
-        let handover = outcomes
-            .iter()
-            .zip(&a.steps)
-            .find_map(|(outcome, step)| {
-                let operation = manifest::operation(&self.manifest, step.operation).ok()?;
-                (manifest::is_public(operation) && operation.kind == OperationKind::Create)
-                    .then_some(outcome)
-            })
-            .map(|outcome| -> Result<EditReceipt> {
-                Ok(EditReceipt {
-                    resource: outcome.resource,
-                    id: outcome.id,
-                    incarnation: outcome.incarnation.clone(),
-                    cap_version: 1,
-                    key_id: self.keys.signing_edit_key()?,
-                })
-            })
-            .transpose()?;
-        let receipt = serde_json::to_string(&navigation::SemanticReceipt {
-            version: 1,
-            outcomes,
-            source: a.redirect.source.clone(),
-            destination,
-            handover,
-        })?;
         let response = self
-            .prepare_response(&mut effects.tx, a, None, &receipt, &response_principal)
-            .await?;
-        effects
-            .tx
-            .execute(
-                "UPDATE nx_receipts SET outcome=$1 WHERE nonce=$2",
-                &[receipt.into(), token.nonce.into()],
+            .prepare_response(
+                &mut tx,
+                a,
+                receipt.target.as_ref(),
+                &receipt.payload,
+                &receipt.principal,
             )
-            .await?;
-        ensure!(Instant::now() < deadline, "request deadline");
-        Ok((Some(effects.tx), response))
+            .await;
+        let response = if nonce.is_none() {
+            response.or_else(|_| self.committed_recovery(a, submission, csrf, input))?
+        } else {
+            response?
+        };
+        if let Some(nonce) = nonce {
+            Self::write_receipt(&mut tx, &nonce, &receipt.payload, budget.deadline).await?;
+        }
+        Ok((Some(tx), response))
+    }
+
+    fn settle(
+        &self,
+        a: &Action,
+        outcome: action::Settled,
+        submission: &str,
+        csrf: &str,
+        input: &Fields,
+    ) -> Result<Rendered> {
+        use action::Settled;
+        let (errors, message) = match outcome {
+            Settled::Unavailable => return render::unavailable(&self.presentation, &self.manifest),
+            Settled::Conflict {
+                target,
+                stored,
+                session,
+                now,
+            } => return self.conflict(a, &session, now, target, &stored, input),
+            Settled::Rejected {
+                field_errors,
+                message,
+            } => (field_errors, message),
+            Settled::GuardRejected { input, message } => (
+                Fields::from([(input, message)]),
+                "Review the highlighted fields.".into(),
+            ),
+        };
+        render::recovery(
+            &self.presentation,
+            &self.manifest,
+            a.id,
+            &FormCredentials {
+                csrf: csrf.into(),
+                submission: submission.into(),
+                values: Fields::new(),
+            },
+            input,
+            render::Recovery::Rejected {
+                errors: &errors,
+                message: &message,
+            },
+        )
     }
 }
 
@@ -489,14 +315,15 @@ impl Application {
 // One budget survives every transaction retry; admission waits and bounded
 // transaction cleanup are separate from this execution deadline.
 pub(super) struct ExecutionBudget {
-    deadline: Instant,
-    fuel: u64,
-    host_calls: u32,
-    database_calls: u32,
+    pub(super) deadline: Instant,
+    pub(super) fuel: u64,
+    pub(super) host_calls: u32,
+    pub(super) database_calls: u32,
     parent_navigation_reserved: bool,
+    pub(super) wasm: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl ExecutionBudget {
-    fn parent_redirect_attempt(&mut self, gated: bool) -> Result<()> {
+    pub(super) fn parent_redirect_attempt(&mut self, gated: bool) -> Result<()> {
         // Navigation runs once after the successful commit, outside all retries.
         // Its quota covers begin/commit, the target lookup and its optional gate.
         if !self.parent_navigation_reserved {
@@ -521,6 +348,7 @@ impl ExecutionBudget {
             host_calls: limits.host_calls,
             database_calls: 16,
             parent_navigation_reserved: false,
+            wasm: None,
         }
     }
 }
