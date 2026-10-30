@@ -249,7 +249,7 @@ impl Effects {
             let mut page_params = params.clone();
             let keyset = plan.keyset(last, &mut page_params);
             let sql = format!(
-                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND ({}){parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT {batch}",
+                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({}){parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT {batch}",
                 self.tx.bounded_text("fields", 20_000),
                 clauses.join(" OR ")
             );
@@ -287,7 +287,7 @@ impl Effects {
         if self.more.is_none() && records.len() == size {
             let mut page_params = params.clone();
             let keyset = plan.keyset(last, &mut page_params);
-            let next=self.tx.fetch::<1>(&format!("SELECT CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND ({}){parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT 1",clauses.join(" OR ")),&page_params).await?;
+            let next=self.tx.fetch::<1>(&format!("SELECT CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({}){parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT 1",clauses.join(" OR ")),&page_params).await?;
             if !next.is_empty() {
                 self.more = last;
             }
@@ -417,8 +417,7 @@ impl Effects {
             .visibility
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("missing public visibility"))?;
-        let (expression, path) = self.tx.field_text(&visibility.field, params.len() + 1);
-        params.push(path);
+        let expression = self.tx.field_expression(&visibility.field)?;
         params.push(visibility.equals.as_str().into());
         Ok(format!(" AND ({expression} = ${})", params.len()))
     }

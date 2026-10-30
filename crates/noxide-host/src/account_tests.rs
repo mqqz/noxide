@@ -461,6 +461,26 @@ async fn filtered_lists(db: Database) {
         equals: Operand::Literal("false".into()),
     });
     manifest::validate(&m).unwrap();
+    let mut base = m.clone();
+    base.operations[0].filter.clear();
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    tx.bind_schema(&base).await.unwrap();
+    tx.commit().await.unwrap();
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    let error = tx.bind_schema(&m).await.unwrap_err().to_string();
+    assert!(
+        error.contains("missing derived index") && error.contains("schema indexes"),
+        "{error}"
+    );
+    tx.rollback().await.unwrap();
+    db.reconcile_query_indexes(&m).await.unwrap();
+    db.reconcile_query_indexes(&m).await.unwrap();
     let mut tx = db
         .begin(Instant::now() + Duration::from_secs(30))
         .await
@@ -478,6 +498,23 @@ async fn filtered_lists(db: Database) {
         let seq = tx.allocate_creation().await.unwrap();
         tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,$1,$2,'team',$3,'filtered',1,$4)", &[i.into(), owner.as_str().into(), serde_json::to_string(&fields).unwrap().into(), seq.into()]).await.unwrap();
     }
+    tx.execute("UPDATE nx_records SET created_seq=created_seq*2000", &[])
+        .await
+        .unwrap();
+    let unrelated = serde_json::to_string(&Fields::from([
+        ("body".into(), "unrelated".into()),
+        ("recipient".into(), eve.clone()),
+        ("recipient_tenant".into(), eve.clone()),
+        ("archived".into(), "false".into()),
+    ]))
+    .unwrap();
+    for batch in 0..10 {
+        tx.execute(&format!("WITH RECURSIVE numbers(n) AS (SELECT {} UNION ALL SELECT n+1 FROM numbers WHERE n<{}) INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) SELECT 1,1000000+n,$1,'team',$2,'unrelated',1,n*2+1 FROM numbers", batch * 10000 + 1, (batch + 1) * 10000), &[eve.as_str().into(), unrelated.as_str().into()]).await.unwrap();
+    }
+    tx.execute("UPDATE nx_creation_counter SET value=2002000", &[])
+        .await
+        .unwrap();
+    tx.execute("ANALYZE nx_records", &[]).await.unwrap();
     #[cfg(feature = "query-metrics")]
     {
         let expression = tx.field_expression("archived").unwrap();
@@ -485,11 +522,63 @@ async fn filtered_lists(db: Database) {
             "SELECT id FROM nx_records WHERE resource=1 AND owner='{alice}' AND {expression}='false' ORDER BY created_seq ASC LIMIT 21"
         );
         eprintln!(
-            "filtered inbox baseline (1000 caller records, one in ten matches): {} visits",
-            tx.examined_rows(&sql).await.unwrap()
+            "filtered inbox indexed (1000 caller records, one in ten matches, 100000 unrelated): {} visits",
+            {
+                let visits = tx.examined_rows(&sql).await.unwrap();
+                assert_eq!(visits, 21);
+                visits
+            }
         );
     }
     tx.commit().await.unwrap();
+    #[cfg(feature = "query-metrics")]
+    {
+        let mut multi = m.clone();
+        multi.operations[0].policy.any = vec![
+            vec![Predicate::Owner],
+            vec![Predicate::Role {
+                name: "moderator".into(),
+                tenant_scoped: false,
+            }],
+        ];
+        db.reconcile_query_indexes(&multi).await.unwrap();
+        let mut tx = db
+            .begin(Instant::now() + Duration::from_secs(10))
+            .await
+            .unwrap();
+        for granted in [false, true] {
+            let principal = Principal::User(User {
+                id: alice.clone(),
+                tenant: "team".into(),
+                roles: if granted {
+                    vec![("moderator".into(), "".into())]
+                } else {
+                    vec![]
+                },
+            });
+            let mut params = vec![Param::Number(1)];
+            let policy =
+                crate::policy::sql(&tx, &multi.operations[0].policy, &principal, &mut params)
+                    .join(" OR ");
+            let mut sql = format!(
+                "SELECT id FROM nx_records WHERE resource=$1 AND resource=1 AND ({policy}) AND {}='false' ORDER BY nx_records.created_seq ASC LIMIT 21",
+                tx.field_expression("archived").unwrap()
+            );
+            for (i, value) in params.iter().enumerate().rev() {
+                let value = match value {
+                    Param::Text(value) => format!("'{value}'"),
+                    Param::Number(value) => value.to_string(),
+                };
+                sql = sql.replace(&format!("${}", i + 1), &value);
+            }
+            eprintln!(
+                "single multi-rule filtered moderator={granted} visits={} plan={:?}",
+                tx.examined_rows(&sql).await.unwrap(),
+                tx.explain(&sql).await.unwrap()
+            );
+        }
+        tx.rollback().await.unwrap();
+    }
     for descending in [false, true] {
         m.operations[0].list.as_mut().unwrap().order = if descending {
             ListOrder::CreatedDesc
@@ -510,10 +599,85 @@ async fn filtered_lists(db: Database) {
                     selected.operations[0].policy.any = vec![vec![Predicate::Owner]];
                     selected.operations[1].policy = selected.operations[0].policy.clone();
                 }
+                db.reconcile_query_indexes(&selected).await.unwrap();
                 let tx = db
-                    .begin_read(Instant::now() + Duration::from_secs(10))
+                    .begin(Instant::now() + Duration::from_secs(10))
                     .await
                     .unwrap();
+                let mut tx = tx;
+                for requirement in crate::query_plan::required_indexes(&selected).unwrap() {
+                    let mut predicates = vec!["resource=$1 AND resource=1".to_owned()];
+                    let mut values = vec!["1".to_owned()];
+                    let mut types = vec!["bigint"];
+                    for column in &requirement.columns {
+                        let (expression, value) = match column {
+                            crate::policy::IndexColumn::Owner => ("owner".into(), alice.as_str()),
+                            crate::policy::IndexColumn::Tenant => ("tenant".into(), "team"),
+                            crate::policy::IndexColumn::Field(field) => (
+                                tx.field_expression(field).unwrap(),
+                                if field == "archived" {
+                                    "false"
+                                } else {
+                                    bob.as_str()
+                                },
+                            ),
+                        };
+                        values.push(format!("'{value}'"));
+                        types.push("text");
+                        predicates.push(format!("{expression}=${}", values.len()));
+                    }
+                    values.push(if descending {
+                        i64::MAX.to_string()
+                    } else {
+                        "0".into()
+                    });
+                    types.push("bigint");
+                    let direction = if descending { "DESC" } else { "ASC" };
+                    let comparison = if descending { "<" } else { ">" };
+                    let sql = format!(
+                        "SELECT id FROM nx_records WHERE {} AND created_seq{comparison}${} ORDER BY nx_records.created_seq {direction} LIMIT 21",
+                        predicates.join(" AND "),
+                        values.len()
+                    );
+                    let plan = match &db {
+                        Database::Sqlite(_) => {
+                            let mut literal = sql.clone();
+                            for (i, value) in values.iter().enumerate().rev() {
+                                literal = literal.replace(&format!("${}", i + 1), value);
+                            }
+                            tx.explain(&literal).await.unwrap().join("\n")
+                        }
+                        Database::Postgres(_) => {
+                            tx.execute("SET LOCAL plan_cache_mode=force_generic_plan", &[])
+                                .await
+                                .unwrap();
+                            tx.execute(
+                                &format!("PREPARE filtered_plan({}) AS {sql}", types.join(",")),
+                                &[],
+                            )
+                            .await
+                            .unwrap();
+                            let plan = tx
+                                .fetch::<1>(
+                                    &format!("EXPLAIN EXECUTE filtered_plan({})", values.join(",")),
+                                    &[],
+                                )
+                                .await
+                                .unwrap()
+                                .into_iter()
+                                .map(|[line]| line)
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            tx.execute("DEALLOCATE filtered_plan", &[]).await.unwrap();
+                            plan
+                        }
+                    };
+                    assert!(plan.contains(&requirement.name(1)), "{plan}");
+                    assert!(
+                        !plan.contains("Sort") && !plan.contains("TEMP B-TREE"),
+                        "{plan}"
+                    );
+                }
                 let mut e = effects(tx, &selected, id, false, "");
                 let mut ids = Vec::new();
                 loop {
@@ -582,7 +746,7 @@ async fn filtered_lists(db: Database) {
             },
         ]];
         let tx = db
-            .begin_read(Instant::now() + Duration::from_secs(10))
+            .begin(Instant::now() + Duration::from_secs(10))
             .await
             .unwrap();
         let mut e = effects(tx, &residual, &alice, false, "");
@@ -598,6 +762,13 @@ async fn filtered_lists(db: Database) {
         assert!(e.more.is_none());
         e.tx.rollback().await.unwrap();
     }
+    db.reconcile_query_indexes(&base).await.unwrap();
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(tx.bind_schema(&m).await.is_err());
+    tx.rollback().await.unwrap();
 }
 #[tokio::test]
 async fn sqlite_filtered_account_and_single_lists() {

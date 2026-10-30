@@ -578,16 +578,6 @@ impl Transaction {
         })
     }
 
-    pub(crate) fn field_text(&self, field: &str, index: usize) -> (String, Param) {
-        match self.backend {
-            Backend::Sqlite(_) => (
-                format!("json_extract(fields, ${index})"),
-                format!("$.\"{field}\"").into(),
-            ),
-            Backend::Postgres(_) => (format!("(fields::jsonb ->> ${index})"), field.into()),
-        }
-    }
-
     pub(crate) fn bounded_text(&self, column: &str, maximum: usize) -> String {
         // Names and limits come only from trusted code. NULL rejects oversized
         // stored values before their contents cross the SQL driver.
