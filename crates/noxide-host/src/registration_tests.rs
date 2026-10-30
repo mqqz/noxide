@@ -112,7 +112,7 @@ async fn invitation_contract(db: Database) {
         tx.fetch::<1>("SELECT CAST(version AS TEXT) FROM nx_storage", &[])
             .await
             .unwrap()[0][0],
-        "9"
+        "10"
     );
     let invites=tx.fetch::<4>("SELECT issuer,CAST(expires AS TEXT),CASE WHEN redeemed_at IS NULL THEN 'fresh' ELSE 'used' END,CASE WHEN redeemed_by IS NULL THEN 'none' ELSE redeemed_by END FROM nx_invites ORDER BY expires DESC",&[]).await.unwrap();
     assert_eq!(invites.len(), 2);

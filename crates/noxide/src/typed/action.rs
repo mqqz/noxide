@@ -1,6 +1,6 @@
 use super::resource::ResourceType;
-use crate::{Context, Fields, RequestView, ResponseIntent, RouteRef};
-use noxide_protocol::{Action, Operation, OperationKind};
+use crate::{Fields, RequestView, ResponseIntent};
+use noxide_protocol::{Action, Operation, Resource};
 use std::{collections::BTreeMap, marker::PhantomData};
 pub trait ActionInput: Sized {
     fn from_fields(fields: &Fields) -> Self;
@@ -14,7 +14,10 @@ pub trait ActionType: Sized {
     type Original: ActionInput;
     type Controls;
     fn definition() -> Action;
-    fn operation() -> Operation;
+    fn operations() -> Vec<Operation>;
+    fn resources() -> Vec<Resource> {
+        vec![Self::Resource::definition()]
+    }
     fn inspection() -> Option<Operation> {
         None
     }
@@ -41,35 +44,13 @@ impl<A: ActionType> Submission<A> {
     pub fn original(&self) -> Option<&A::Original> {
         self.original.as_ref()
     }
-    /// Stage exactly the host-retained input and target; the host commits later.
-    pub fn apply(self) -> ActionResult<A> {
-        let mut context = Context { _private: () };
-        let op = A::operation();
-        let response = match op.kind {
-            OperationKind::Create => {
-                let record = context.create(op.id);
-                ResponseIntent::Created {
-                    resource: op.resource,
-                    id: record.id,
-                    destination: RouteRef {
-                        params: Default::default(),
-                        route: A::definition().redirect.route(),
-                        target: Some(record.id),
-                    },
-                }
-            }
-            OperationKind::Update => context.update(op.id),
-            OperationKind::Delete => context.delete(op.id),
-            _ => panic!("action operation"),
-        };
-        Ok(ActionOutcome {
-            response,
+    pub fn execute(self) -> Execute<A> {
+        Execute {
             marker: PhantomData,
-        })
+        }
     }
 }
-pub struct ActionOutcome<A> {
-    response: ResponseIntent,
+pub struct Execute<A> {
     marker: PhantomData<A>,
 }
 pub struct ActionError<A> {
@@ -90,14 +71,18 @@ impl<A> ActionError<A> {
         self
     }
 }
-pub type ActionResult<A> = Result<ActionOutcome<A>, ActionError<A>>;
+impl<A> IntoActionResponse for Execute<A> {
+    fn into_response(self) -> ResponseIntent {
+        ResponseIntent::Execute
+    }
+}
 pub trait IntoActionResponse {
     fn into_response(self) -> ResponseIntent;
 }
-impl<A> IntoActionResponse for ActionResult<A> {
+impl<A> IntoActionResponse for Result<Execute<A>, ActionError<A>> {
     fn into_response(self) -> ResponseIntent {
         match self {
-            Ok(outcome) => outcome.response,
+            Ok(_) => ResponseIntent::Execute,
             Err(error) => ResponseIntent::Rejected {
                 field_errors: error.fields,
                 message: error.message,

@@ -427,10 +427,12 @@ mod declaration_tests {
         )
         .unwrap();
         let text = tokens.to_string();
-        assert!(text.contains("Redirect :: Page (show :: id ())"));
+        assert!(
+            text.contains("route : show :: id ()") && text.contains("RedirectSource :: Step (0)")
+        );
         assert!(!text.contains("show :: definition"));
-        assert!(text.contains("< Self as :: noxide :: ActionType > :: operation ()"));
-        assert!(!text.contains("Self :: operation ()"));
+        assert!(text.contains("< Self as :: noxide :: ActionType > :: operations ()"));
+        assert!(!text.contains("Self :: operations ()"));
         let page = expand_page(
             syn::parse_str("path = \"/tasks/{id}\"").unwrap(),
             syn::parse_quote!(
@@ -721,7 +723,7 @@ mod parent_redirect_tests {
                 lowered
                     .unwrap()
                     .to_string()
-                    .contains("Redirect :: Reference")
+                    .contains("RedirectSource :: Reference")
             );
         }
         for bad in ["parent()", "parent(thread, other)", "parent(thread(other))"] {

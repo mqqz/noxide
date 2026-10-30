@@ -340,10 +340,12 @@ async fn fresh_forms(db: &Database) {
     )
     .await
     .unwrap();
-    assert!(
+    assert_eq!(
         app.submit(&cookie, 1, &unused, &unused_csrf, input.clone())
             .await
-            .is_err()
+            .unwrap()
+            .status,
+        404
     );
     app.submit(&cookie, 1, &used, &csrf, input).await.unwrap();
     let page = String::from_utf8(app.view(&cookie, 1, None).await.unwrap().body).unwrap();
@@ -589,8 +591,21 @@ async fn ordinary_actions_cannot_write_moderator_fields_or_reuse_credential() {
             }]],
         };
         m.actions[0].inspect = None;
-        m.actions[1].fields = vec!["tag".into()];
-        m.actions[1].redirect = Redirect::Page(2);
+        m.actions[1].inputs = vec![Input {
+            name: "tag".into(),
+            label: "Tag".into(),
+            kind: FieldKind::Text,
+            optional: false,
+            max_bytes: 128,
+        }];
+        m.actions[1].steps[0].assign = vec![Assignment {
+            field: "tag".into(),
+            change: Change::Set(Value::Input("tag".into())),
+        }];
+        m.actions[1].redirect = Redirect {
+            route: 2,
+            source: RedirectSource::Signed,
+        };
         let keys = HostKeys::generate().unwrap();
         let secret = keys
             .edit_secret(keys.signing_edit_key().unwrap(), 1, 42, 1)

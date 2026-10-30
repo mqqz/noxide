@@ -245,6 +245,7 @@ impl Application {
         let receipt = EditReceipt {
             resource,
             id,
+            incarnation: stored.incarnation.clone(),
             cap_version: next as u64,
             key_id: self.keys.signing_edit_key()?,
         };

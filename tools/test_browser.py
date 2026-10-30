@@ -66,7 +66,7 @@ def main():
     manifest = args.manifest or ROOT / "examples/private-notes/manifest.json"
     declarations = json.loads(manifest.read_text())
     operation_kinds = {op["id"]: op["kind"] for op in declarations["operations"]}
-    action_ids = {operation_kinds[action["operation"]]: action["id"] for action in declarations["actions"]}
+    action_ids = {operation_kinds[action["steps"][0]["operation"]]: action["id"] for action in declarations["actions"]}
     create_id, edit_id, delete_id = (action_ids[kind] for kind in ("create", "update", "delete"))
     approved = subprocess.check_output([binary, "contract-hash", manifest], text=True).strip()
     backend_port, driver_port = port(), port()

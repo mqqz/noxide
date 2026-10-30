@@ -25,6 +25,7 @@ pub fn manifest() -> Manifest {
         }],
         operations: vec![
             Operation {
+                bind: None,
                 scope: None,
                 via: None,
                 filter: Vec::new(),
@@ -38,6 +39,7 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
+                bind: None,
                 scope: None,
                 via: None,
                 filter: Vec::new(),
@@ -51,6 +53,7 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
+                bind: None,
                 scope: None,
                 via: None,
                 filter: Vec::new(),
@@ -85,14 +88,30 @@ pub fn manifest() -> Manifest {
             },
         ],
         actions: vec![Action {
-            bind: None,
             layout: Vec::new(),
             id: 1,
             version: 1,
             name: "Save note".into(),
-            operation: 3,
-            redirect: noxide_protocol::Redirect::Page(2),
-            fields: vec!["body".into()],
+            redirect: Redirect {
+                route: 2,
+                source: RedirectSource::Step(0),
+            },
+            revision: Revision::Exact,
+            inputs: vec![Input {
+                name: "body".into(),
+                label: "Note".into(),
+                kind: FieldKind::Text,
+                optional: false,
+                max_bytes: 4096,
+            }],
+            steps: vec![Step {
+                operation: 3,
+                target: Target::None,
+                assign: vec![Assignment {
+                    field: "body".into(),
+                    change: Change::Set(Value::Input("body".into())),
+                }],
+            }],
             inspect: None,
         }],
     }
@@ -125,27 +144,12 @@ pub fn component(failure: Option<&str>) -> Vec<u8> {
         ],
     )))
     .unwrap();
-    let offset = br#"{"resource":1,"id":"#.len();
-    let digits = format!(
-        r#"i32.const {offset} local.set $i
-      block $done loop $next
-        local.get $i call $result i32.wrap_i64 i32.const 255 i32.and local.tee $c
-        i32.const 44 i32.eq br_if $done
-        local.get $c i64.extend_i32_u i32.const 1 call $emit
-        local.get $i i32.const 1 i32.add local.set $i br $next
-      end end"#
-    );
     let action = match failure {
         Some("trap") => "unreachable".into(),
         Some("loop") => "(loop $forever br $forever)".into(),
         Some("invalid") => emit(br#"{"page":{"title":"x","nodes":[{"raw":"<script>"}]}}"#),
         Some("twice") => "i32.const 3 i64.const 0 call $invoke drop".into(),
-        _ => format!(
-            "{} {digits} {} {digits} {}",
-            emit(br#"{"created":{"resource":1,"id":"#),
-            emit(br#", "destination":{"route":2,"target":"#),
-            emit(b"}}}")
-        ),
+        _ => emit(br#""execute""#),
     };
     let kind_offset = br#"{"version":1,"kind":{"#.len() + 1;
     wat::parse_str(format!(r#"(component
@@ -167,7 +171,7 @@ pub fn component(failure: Option<&str>) -> Vec<u8> {
         (func (export "handle") (local $i i32) (local $c i32)
           global.get $seen if unreachable end i32.const 1 global.set $seen
           i32.const {kind_offset} call $request i32.wrap_i64 i32.const 255 i32.and i32.const 97 i32.eq
-          if i32.const 3 i64.const 0 call $invoke drop {action}
+          if {action}
           else {page} end))
       (core instance $i (instantiate $m (with "h" (instance
         (export "emit" (func $emit)) (export "request" (func $request))
@@ -183,4 +187,62 @@ pub fn hidden(html: &str, name: &str) -> String {
         .next()
         .unwrap()
         .into()
+}
+
+#[allow(dead_code)]
+pub fn add_input(action: &mut Action, resource: &Resource, name: &str) {
+    let field = resource
+        .fields
+        .iter()
+        .find(|field| field.name == name)
+        .expect("fixture field");
+    action.inputs.push(Input {
+        name: field.name.clone(),
+        label: field.label.clone(),
+        kind: field.kind.clone(),
+        optional: field.optional,
+        max_bytes: field.max_bytes,
+    });
+    action.steps[0].assign.push(Assignment {
+        field: name.into(),
+        change: Change::Set(Value::Input(name.into())),
+    });
+}
+
+#[allow(dead_code)]
+pub fn action(
+    id: u32,
+    name: &str,
+    operation: u32,
+    target: Target,
+    resource: &Resource,
+    names: &[&str],
+    route: u32,
+) -> Action {
+    let mut action = Action {
+        id,
+        version: 1,
+        name: name.into(),
+        layout: vec![],
+        redirect: Redirect {
+            route,
+            source: if target == Target::None {
+                RedirectSource::Step(0)
+            } else {
+                RedirectSource::Signed
+            },
+        },
+        inspect: None,
+        inputs: vec![],
+        revision: Revision::Exact,
+        steps: vec![Step {
+            operation,
+            target,
+            assign: vec![],
+        }],
+    };
+    for name in names {
+        add_input(&mut action, resource, name);
+    }
+    action
 }

@@ -215,6 +215,7 @@ pub struct Application {
 struct EditReceipt {
     resource: u32,
     id: u64,
+    incarnation: String,
     cap_version: u64,
     key_id: u32,
 }
@@ -777,7 +778,7 @@ impl Application {
         csrf: &str,
         now: i64,
     ) -> Result<(Token, Token, auth::Principal)> {
-        let op = manifest::operation(&self.manifest, action.operation)?;
+        let op = manifest::operation(&self.manifest, action.steps[0].operation)?;
         if manifest::anonymous_action(op) {
             let anonymous = self
                 .keys
@@ -823,41 +824,36 @@ impl Application {
         principal: &auth::Principal,
         capability: Option<&str>,
     ) -> Result<Option<StoredRecord>> {
-        if !manifest::is_capability(manifest::operation(&self.manifest, action.operation)?) {
+        if !manifest::is_capability(manifest::operation(
+            &self.manifest,
+            action.steps[0].operation,
+        )?) {
             return self.current_target(tx, action, target, principal).await;
         }
         let Some(stored) = repository::load(tx, &self.manifest, target.resource, target.id).await?
         else {
             return Ok(None);
         };
+        if stored.incarnation != target.incarnation {
+            return Ok(None);
+        }
         let storage = u32::try_from(tx.storage_resource(&self.manifest, target.resource).await?)?;
-        self.keys
-            .verify_edit(
-                capability.ok_or(RequestError::InvalidRequest)?,
-                storage,
-                target.id,
-                stored.cap_version.ok_or(RequestError::InvalidRequest)?,
-            )
-            .map_err(|_| RequestError::InvalidRequest)?;
+        let (Some(secret), Some(version)) = (capability, stored.cap_version) else {
+            return Ok(None);
+        };
+        if self
+            .keys
+            .verify_edit(secret, storage, target.id, version)
+            .is_err()
+        {
+            return Ok(None);
+        }
         if let Some(inspection) = &action.inspect {
             let op = manifest::operation(&self.manifest, inspection.operation)?;
-            ensure!(
-                repository::allowed(
-                    &op.policy,
-                    principal,
-                    crate::policy::Row {
-                        owner: &stored.owner,
-                        tenant: &stored.tenant,
-                        fields: &stored.record.fields
-                    }
-                ),
-                "inspection policy denied"
-            );
+            if !repository::read_allowed(&self.manifest, principal, op, &stored)? {
+                return Ok(None);
+            }
         }
-        ensure!(
-            stored.incarnation == target.incarnation,
-            RequestError::InvalidRequest
-        );
         Ok(Some(stored))
     }
     async fn edit_handover(
@@ -867,7 +863,10 @@ impl Application {
         route: Option<u32>,
     ) -> Result<Rendered> {
         let record = repository::load(tx, &self.manifest, receipt.resource, receipt.id).await?;
-        if receipt.cap_version == 0
+        if record
+            .as_ref()
+            .is_none_or(|r| r.incarnation != receipt.incarnation)
+            || receipt.cap_version == 0
             || record
                 .as_ref()
                 .and_then(|r| r.cap_version)
@@ -900,24 +899,6 @@ impl Application {
             .transpose()?;
         render::capability_handover(Some(&secret), link.as_deref())
     }
-    async fn receipt_response(
-        &self,
-        tx: &mut Transaction,
-        action: &Action,
-        target: Option<&RecordTarget>,
-        outcome: &str,
-    ) -> Result<Rendered> {
-        let op = manifest::operation(&self.manifest, action.operation)?;
-        if manifest::is_public(op) && op.kind == OperationKind::Create {
-            let receipt: EditReceipt = serde_json::from_str(outcome)?;
-            ensure!(receipt.resource == op.resource, "receipt resource differs");
-            self.edit_handover(tx, &receipt, Some(action.redirect.route()))
-                .await
-        } else {
-            self.receipt(action, target, outcome)
-        }
-    }
-
     fn credentials(
         &self,
         action: &Action,
@@ -971,40 +952,18 @@ impl Application {
                 && *version == action.version,
             RequestError::InvalidRequest
         );
-        let op = manifest::operation(&self.manifest, action.operation)?;
-        match (&op.kind, target) {
-            (OperationKind::Create, None) => {
-                ensure!(
-                    manifest::reference_resource(&self.manifest, op.resource)?.is_none(),
-                    RequestError::InvalidRequest
-                );
-            }
-            (OperationKind::Create, Some(target)) => {
-                let parent = manifest::reference_resource(&self.manifest, op.resource)?
-                    .ok_or(RequestError::InvalidRequest)?;
+        match (manifest::signed_resource(&self.manifest, action)?, target) {
+            (None, None) => {}
+            (Some(resource), Some(target)) => {
                 let route = manifest::route(&self.manifest, target.route)?;
                 ensure!(
-                    target.resource == parent.id
+                    target.resource == resource
                         && target.id > 0
                         && target.id <= i64::MAX as u64
                         && target.revision > 0
                         && !target.incarnation.is_empty()
                         && target.incarnation.len() <= 64
-                        && route.resource == Some(parent.id)
-                        && route.forms.contains(&action.id),
-                    RequestError::InvalidRequest
-                );
-            }
-            (OperationKind::Update | OperationKind::Delete, Some(target)) => {
-                let route = manifest::route(&self.manifest, target.route)?;
-                ensure!(
-                    target.resource == op.resource
-                        && target.id > 0
-                        && target.id <= i64::MAX as u64
-                        && target.revision > 0
-                        && !target.incarnation.is_empty()
-                        && target.incarnation.len() <= 64
-                        && route.resource == Some(op.resource)
+                        && route.resource == Some(resource)
                         && route.forms.contains(&action.id),
                     RequestError::InvalidRequest
                 );
@@ -1021,7 +980,6 @@ impl Application {
         principal: &auth::Principal,
         stored: &StoredRecord,
     ) -> Result<bool> {
-        let op = manifest::operation(&self.manifest, action.operation)?;
         let permitted = |op: &Operation| {
             repository::allowed(
                 &op.policy,
@@ -1034,21 +992,52 @@ impl Application {
             )
         };
         let route = manifest::route(&self.manifest, route)?;
-        let readable = route
-            .operations
-            .iter()
-            .any(|id| manifest::operation(&self.manifest, *id).is_ok_and(permitted));
+        let readable = route.operations.iter().any(|id| {
+            manifest::operation(&self.manifest, *id).is_ok_and(|op| {
+                op.kind == OperationKind::Read
+                    && op.via.is_none()
+                    && op.resource == stored.record.resource
+                    && permitted(op)
+            })
+        });
         let inspection = action
             .inspect
             .as_ref()
             .map(|i| manifest::operation(&self.manifest, i.operation).map(permitted))
             .transpose()?
             .unwrap_or(true);
-        Ok(route.resource == Some(op.resource)
-            && stored.record.resource == op.resource
+        let first_signed = action.steps.iter().find(|s| s.target == Target::Signed);
+        let mutation = first_signed
+            .map(|s| manifest::operation(&self.manifest, s.operation).map(permitted))
+            .transpose()?
+            .unwrap_or(true);
+        let mut binding = true;
+        if action.steps.len() == 1 {
+            let step = &action.steps[0];
+            let op = manifest::operation(&self.manifest, step.operation)?;
+            if step
+                .assign
+                .iter()
+                .any(|assignment| assignment.change == Change::Set(Value::SignedTarget))
+            {
+                let bind = op
+                    .bind
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("missing binding eligibility"))?;
+                let eligible = manifest::operation(&self.manifest, bind.eligible)?;
+                binding = repository::read_allowed(&self.manifest, principal, eligible, stored)?
+                    && manifest::gate_permits(
+                        manifest::resource(&self.manifest, op.resource)?,
+                        &stored.record.fields,
+                        true,
+                    );
+            }
+        }
+        Ok(route.resource == Some(stored.record.resource)
             && readable
             && inspection
-            && permitted(op))
+            && mutation
+            && binding)
     }
 
     async fn current_target(
@@ -1059,18 +1048,6 @@ impl Application {
         principal: &auth::Principal,
     ) -> Result<Option<StoredRecord>> {
         let stored = repository::load(tx, &self.manifest, target.resource, target.id).await?;
-        let op = manifest::operation(&self.manifest, action.operation)?;
-        if op.kind == OperationKind::Create {
-            self.authorize_create(action, principal)?;
-            let parent = manifest::reference_resource(&self.manifest, op.resource)?
-                .ok_or_else(|| anyhow::anyhow!("missing parent"))?;
-            let source_resource = manifest::resource(&self.manifest, op.resource)?;
-            return Ok(stored.filter(|r| {
-                r.record.resource == parent.id
-                    && r.incarnation == target.incarnation
-                    && manifest::gate_permits(source_resource, &r.record.fields, true)
-            }));
-        }
         match stored {
             Some(stored)
                 if stored.incarnation == target.incarnation
@@ -1103,7 +1080,7 @@ impl Application {
         let mut forms = BTreeMap::new();
         for id in &r.forms {
             let action = manifest::action(&self.manifest, *id)?;
-            let op = manifest::operation(&self.manifest, action.operation)?;
+            let op = manifest::operation(&self.manifest, action.steps[0].operation)?;
             let subject = if manifest::anonymous_action(op) {
                 anonymous
             } else {
@@ -1113,79 +1090,55 @@ impl Application {
                 forms.insert(*id, None);
                 continue;
             };
-            let credentials = if op.kind == OperationKind::Create {
-                if manifest::is_public(op)
-                    || principal.user().is_ok_and(|user| {
-                        repository::allowed(
-                            &op.policy,
-                            principal,
-                            crate::policy::Row {
-                                owner: &user.id,
-                                tenant: &user.tenant,
-                                fields: &Default::default(),
-                            },
-                        )
-                    })
-                {
-                    if let Some(parent) = manifest::reference_resource(&self.manifest, op.resource)?
+            let credentials = if manifest::signed_resource(&self.manifest, action)?.is_some() {
+                if let Some(record) = &stored {
+                    if (manifest::is_capability(op) && record.cap_version.is_some())
+                        || self.target_allowed(action, route, principal, record)?
                     {
-                        let source_resource = manifest::resource(&self.manifest, op.resource)?;
-                        if let Some(record) = &stored
-                            && record.record.resource == parent.id
-                            && manifest::gate_permits(source_resource, &record.record.fields, true)
-                        {
-                            Some(self.credentials(
-                                action,
-                                subject,
-                                now,
-                                Some(RecordTarget {
-                                    resource: parent.id,
-                                    id: record.record.id,
-                                    incarnation: record.incarnation.clone(),
-                                    revision: record.revision,
-                                    route,
-                                }),
-                                Fields::new(),
-                            )?)
+                        let grant = RecordTarget {
+                            resource: record.record.resource,
+                            id: record.record.id,
+                            incarnation: record.incarnation.clone(),
+                            revision: record.revision,
+                            route,
+                        };
+                        let values = if manifest::is_capability(op) {
+                            Fields::new()
                         } else {
-                            None
-                        }
+                            self.action_values(action, &record.record.fields)
+                        };
+                        Some(self.credentials(action, subject, now, Some(grant), values)?)
                     } else {
-                        Some(self.credentials(action, subject, now, None, Fields::new())?)
+                        None
                     }
                 } else {
                     None
                 }
-            } else if let Some(record) = &stored {
-                if (manifest::is_capability(op) && record.cap_version.is_some())
-                    || self.target_allowed(action, route, principal, record)?
-                {
-                    let grant = RecordTarget {
-                        resource: op.resource,
-                        id: record.record.id,
-                        incarnation: record.incarnation.clone(),
-                        revision: record.revision,
-                        route,
-                    };
-                    let values = if manifest::is_capability(op) {
-                        Fields::new()
-                    } else {
-                        action
-                            .fields
-                            .iter()
-                            .map(|name| (name.clone(), record.record.fields[name].clone()))
-                            .collect()
-                    };
-                    Some(self.credentials(action, subject, now, Some(grant), values)?)
-                } else {
-                    None
-                }
+            } else if self.authorize_create(action, principal).is_ok() {
+                Some(self.credentials(action, subject, now, None, Fields::new())?)
             } else {
                 None
             };
             forms.insert(*id, credentials);
         }
         Ok(forms)
+    }
+
+    fn action_values(&self, action: &Action, fields: &Fields) -> Fields {
+        action
+            .steps
+            .iter()
+            .filter(|step| step.target == Target::Signed)
+            .flat_map(|step| &step.assign)
+            .filter_map(|assignment| {
+                let Change::Set(Value::Input(name)) = &assignment.change else {
+                    return None;
+                };
+                fields
+                    .get(&assignment.field)
+                    .map(|value| (name.clone(), value.clone()))
+            })
+            .collect()
     }
 
     fn conflict(
@@ -1199,20 +1152,14 @@ impl Application {
     ) -> Result<Rendered> {
         target.revision = stored.revision;
         let credentials = self.credentials(action, session, now, Some(target), Fields::new())?;
-        let operation = manifest::operation(&self.manifest, action.operation)?;
-        // An edit capability grants mutation authority, never a read projection.
-        let current =
-            if manifest::is_capability(operation) || operation.kind == OperationKind::Create {
-                Fields::new()
-            } else if operation.kind == OperationKind::Delete {
-                stored.record.fields.clone()
-            } else {
-                action
-                    .fields
-                    .iter()
-                    .map(|name| (name.clone(), stored.record.fields[name].clone()))
-                    .collect()
-            };
+        let operation = manifest::operation(&self.manifest, action.steps[0].operation)?;
+        let current = if manifest::is_capability(operation) {
+            Fields::new()
+        } else if operation.kind == OperationKind::Delete {
+            stored.record.fields.clone()
+        } else {
+            self.action_values(action, &stored.record.fields)
+        };
         render::recovery(
             &self.presentation,
             &self.manifest,
@@ -1220,67 +1167,6 @@ impl Application {
             &credentials,
             input,
             render::Recovery::Conflict { current: &current },
-        )
-    }
-
-    fn receipt(
-        &self,
-        action: &Action,
-        target: Option<&RecordTarget>,
-        outcome: &str,
-    ) -> Result<Rendered> {
-        let intent: ResponseIntent = serde_json::from_str(outcome)?;
-        let op = manifest::operation(&self.manifest, action.operation)?;
-        let (kind, resource, id, destination) = match &intent {
-            ResponseIntent::Created {
-                resource,
-                id,
-                destination,
-            } => (OperationKind::Create, *resource, *id, destination),
-            ResponseIntent::Updated {
-                resource,
-                id,
-                destination,
-            } => (OperationKind::Update, *resource, *id, destination),
-            ResponseIntent::Deleted {
-                resource,
-                id,
-                destination,
-            } => (OperationKind::Delete, *resource, *id, destination),
-            _ => anyhow::bail!("invalid receipt"),
-        };
-        ensure!(
-            kind == op.kind
-                && resource == op.resource
-                && id > 0
-                && id <= i64::MAX as u64
-                && destination.route == action.redirect.route(),
-            "receipt outcome differs"
-        );
-        ensure!(
-            destination.target
-                == if kind == OperationKind::Delete {
-                    None
-                } else {
-                    Some(id)
-                },
-            "receipt destination differs"
-        );
-        if let Some(target) = target
-            && kind != OperationKind::Create
-        {
-            ensure!(id == target.id, "receipt target differs");
-        }
-        if matches!(action.redirect, Redirect::Reference { .. }) {
-            return Ok(navigation::success());
-        }
-        render::render(
-            &intent,
-            &RenderContext {
-                presentation: &self.presentation,
-                manifest: Some(&self.manifest),
-                ..RenderContext::empty()
-            },
         )
     }
 
@@ -1391,7 +1277,7 @@ impl Application {
                 let token=self.keys.verify_cursor(encoded,now).map_err(|_|RequestError::InvalidCursor)?;
                 match token.kind { TokenKind::Cursor { scope: bound,after } if list.is_some() && bound==scope && after>0 && after<=i64::MAX as u64 => Ok(after), _=>Err(RequestError::InvalidCursor) }
             }).transpose()?;
-            let needs_anonymous = manifest::route(&self.manifest, route).map_err(|_| RequestError::InvalidRequest)?.forms.iter().any(|id| manifest::action(&self.manifest,*id).ok().and_then(|a| manifest::operation(&self.manifest,a.operation).ok()).is_some_and(manifest::anonymous_action));
+            let needs_anonymous = manifest::route(&self.manifest, route).map_err(|_| RequestError::InvalidRequest)?.forms.iter().any(|id| manifest::action(&self.manifest,*id).ok().and_then(|a| manifest::operation(&self.manifest,a.steps[0].operation).ok()).is_some_and(manifest::anonymous_action));
             let (anonymous, new_cookie) = if needs_anonymous {
                 if let Some(token) = anonymous_cookie.and_then(|c| self.keys.anonymous(c, now).ok()) { (Some(token), None) }
                 else { let (token,cookie) = self.keys.issue(TokenKind::Anonymous, "", now, security::ANONYMOUS_TTL).map_err(|_| RequestError::Rejected)?; (Some(token),Some(cookie)) }
@@ -1423,10 +1309,8 @@ impl Application {
                 manifest: self.manifest.clone(),
                 principal,
                 request: request.clone(),
-                outcome: None,
                 grant: None,
                 capability_grant: None,
-                record: None,
                 calls: 16,
                 cursor,
                 more: None,
@@ -1475,7 +1359,7 @@ impl Application {
             )
             .map_err(|_| RequestError::Rejected)?;
             if let ResponseIntent::Page(doc) | ResponseIntent::NotFound(doc) = &response
-                && doc.nodes.iter().any(|n| matches!(n, Instruction::Form { action } if manifest::action(&self.manifest,*action).ok().and_then(|a| manifest::operation(&self.manifest,a.operation).ok()).is_some_and(manifest::anonymous_action))) { rendered.anonymous_cookie = new_cookie; }
+                && doc.nodes.iter().any(|n| matches!(n, Instruction::Form { action } if manifest::action(&self.manifest,*action).ok().and_then(|a| manifest::operation(&self.manifest,a.steps[0].operation).ok()).is_some_and(manifest::anonymous_action))) { rendered.anonymous_cookie = new_cookie; }
             effects.tx.commit().await.map_err(|_| RequestError::Busy)?;
             Ok(rendered)
         })

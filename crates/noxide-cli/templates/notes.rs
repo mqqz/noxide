@@ -11,17 +11,21 @@ mod notes {
         body: String,
     }
 
-    fn create_note(submission: Submission<CreateNote>) -> ActionResult<CreateNote> {
+    fn create_note(
+        submission: Submission<CreateNote>,
+    ) -> Result<Execute<CreateNote>, ActionError<CreateNote>> {
         if submission.input().body.trim().is_empty() {
             return Err(CreateNote::body.error("Enter a note."));
         }
-        submission.apply()
+        Ok(submission.execute())
     }
-    fn edit_note(submission: Submission<EditNote>) -> ActionResult<EditNote> {
+    fn edit_note(
+        submission: Submission<EditNote>,
+    ) -> Result<Execute<EditNote>, ActionError<EditNote>> {
         if submission.input().body.trim().is_empty() {
             return Err(EditNote::body.error("Enter a note."));
         }
-        submission.apply()
+        Ok(submission.execute())
     }
     fn note_editor(fields: FormFields<EditNote>) -> FormLayout {
         form! {

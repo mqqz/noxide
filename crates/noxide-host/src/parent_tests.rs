@@ -61,6 +61,7 @@ pub(crate) fn declarations() -> Manifest {
         }
     }
     m.operations.push(Operation {
+        bind: None,
         scope: None,
         via: None,
         filter: Vec::new(),
@@ -91,7 +92,11 @@ pub(crate) fn declarations() -> Manifest {
         forms: vec![1],
         access: Access::PublicOptional,
     });
-    m.actions[0].bind = Some(Bind {
+    m.actions[0].steps[0].assign.push(Assignment {
+        field: "thread".into(),
+        change: Change::Set(Value::SignedTarget),
+    });
+    m.operations[2].bind = Some(Bind {
         field: "thread".into(),
         eligible: 4,
     });
@@ -100,7 +105,7 @@ pub(crate) fn declarations() -> Manifest {
         .find(|op| op.kind == OperationKind::List)
         .unwrap()
         .scope = Some("thread".into());
-    m.actions[0].fields.push("published".into());
+    crate::test_support::add_input(&mut m.actions[0], &m.resources[0], "published");
     m
 }
 pub(crate) async fn seed(db: &Database, m: &Manifest) {
@@ -158,10 +163,9 @@ async fn effects(db: &Database, m: &Manifest, route: u32, target: u64) -> Effect
             inspection: None,
             available_forms: vec![],
         },
-        outcome: None,
         grant: None,
         capability_grant: None,
-        record: None,
+
         calls: 64,
         cursor: None,
         more: None,
@@ -191,7 +195,7 @@ fn parent_admission_rejects_unbound_or_mutable_relationships() {
     let m = declarations();
     manifest::validate(&m).unwrap();
     let mut bad = m.clone();
-    bad.actions[0].fields.push("thread".into());
+    crate::test_support::add_input(&mut bad.actions[0], &bad.resources[0], "thread");
     assert!(manifest::validate(&bad).is_err());
     let mut bad = m.clone();
     bad.routes[0].forms.push(1);
@@ -223,6 +227,7 @@ async fn mutation_case(db: Database) {
     db.initialize().await.unwrap();
     let mut m = declarations();
     m.operations.push(Operation {
+        bind: None,
         scope: None,
         via: None,
         filter: Vec::new(),
@@ -240,22 +245,23 @@ async fn mutation_case(db: Database) {
         visibility: None,
         fields: None,
     });
-    m.actions.push(Action {
-        bind: None,
-        id: 2,
-        version: 1,
-        name: "Edit reply".into(),
-        operation: 5,
-        redirect: Redirect::Page(2),
-        fields: vec!["body".into()],
-        inspect: None,
-        layout: vec![],
-    });
+    m.actions.push(fixture::action(
+        2,
+        "Edit reply",
+        5,
+        Target::Signed,
+        &m.resources[0],
+        &["body"],
+        2,
+    ));
     m.routes[1].forms.push(2);
     m.routes[1].access = Access::PublicOptional;
     manifest::validate(&m).unwrap();
     let mut invalid = m.clone();
-    invalid.actions[1].fields.push("thread".into());
+    invalid.actions[1].steps[0].assign.push(Assignment {
+        field: "thread".into(),
+        change: Change::Set(Value::Constant("20".into())),
+    });
     assert!(
         manifest::validate(&invalid)
             .unwrap_err()
@@ -275,7 +281,7 @@ async fn mutation_case(db: Database) {
         incarnation: stored.incarnation.clone(),
         revision: stored.revision,
     });
-    e.record = Some(stored);
+
     e.request.kind = RequestKind::Action(2);
     e.principal = Principal::User(crate::auth::User {
         id: "moderator".into(),
@@ -286,9 +292,9 @@ async fn mutation_case(db: Database) {
         ("body".into(), "edited".into()),
         ("thread".into(), "20".into()),
     ]);
-    assert!(e.invoke(5, 0).await.is_err());
+    assert!(e.execute_transaction(&m.actions[1]).await.is_err());
     e.request.input.remove("thread");
-    e.invoke(5, 0).await.unwrap();
+    e.execute_transaction(&m.actions[1]).await.unwrap();
     e.tx.commit().await.unwrap();
     let mut e = effects(&db, &m, 2, 12).await;
     let stored = crate::repository::load(&mut e.tx, &m, 1, 12)
@@ -382,7 +388,7 @@ async fn concurrent_case(db: Database) {
             ]);
             e.grant = Some(grant);
             assert!(
-                e.invoke(3, 0)
+                e.execute_transaction(&child_manifest.actions[0])
                     .await
                     .unwrap_err()
                     .to_string()
@@ -530,9 +536,12 @@ async fn forms_case(db: Database, _sqlite: bool) {
         .submit(&cookie, 1, &token, &csrf, input.clone())
         .await
         .unwrap();
-    assert_eq!(conflict.status, denied.status);
-    assert_eq!(conflict.body, denied.body);
-    // Stale bindings share the unavailable response; obtain a new page form.
+    assert_eq!(denied.status, 404, "a locked binding remains unavailable");
+    assert_eq!(
+        conflict.status, 409,
+        "Exact applies to the signed parent form"
+    );
+    // Obtain a current Exact form after the parent becomes eligible again.
     let page = app.view_page(None, 3, Some(10), None).await.unwrap();
     let cookie = page.anonymous_cookie.unwrap();
     let text = String::from_utf8(page.body).unwrap();
@@ -578,6 +587,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         tenant_scoped: false,
     };
     m.operations.push(Operation {
+        bind: None,
         scope: None,
         via: None,
         filter: Vec::new(),
@@ -592,17 +602,15 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         visibility: None,
         fields: None,
     });
-    m.actions.push(Action {
-        bind: None,
-        id: 2,
-        version: 1,
-        name: "Delete thread".into(),
-        operation: 5,
-        redirect: Redirect::Page(1),
-        fields: vec![],
-        inspect: None,
-        layout: vec![],
-    });
+    m.actions.push(fixture::action(
+        2,
+        "Delete thread",
+        5,
+        Target::Signed,
+        &m.resources[0],
+        &[],
+        1,
+    ));
     m.routes[2].forms.push(2);
     manifest::validate(&m).unwrap();
     seed(&db, &m).await;
@@ -618,7 +626,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         incarnation: stored.incarnation.clone(),
         revision: stored.revision,
     });
-    e.record = Some(stored);
+
     e.request.kind = RequestKind::Action(2);
     e.principal = Principal::User(crate::auth::User {
         id: "moderator".into(),
@@ -626,7 +634,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         roles: vec![("moderator".into(), "".into())],
     });
     assert!(
-        e.invoke(5, 0)
+        e.execute_transaction(&m.actions[1])
             .await
             .unwrap_err()
             .to_string()
@@ -683,14 +691,20 @@ async fn integrity_case(db: Database, _sqlite: bool) {
     // A valid field rename rebuilds the index and preserves the relationship.
     let mut renamed = m.clone();
     renamed.resources[0].fields[2].name = "parent_thread".into();
+    renamed.actions[0].steps[0]
+        .assign
+        .iter_mut()
+        .find(|a| a.field == "thread")
+        .unwrap()
+        .field = "parent_thread".into();
     renamed.resources[0].gate.as_mut().unwrap().field = "parent_thread".into();
     for op in &mut renamed.operations {
         if op.scope.as_deref() == Some("thread") {
             op.scope = Some("parent_thread".into());
         }
     }
-    for action in &mut renamed.actions {
-        if let Some(bind) = &mut action.bind {
+    for operation in &mut renamed.operations {
+        if let Some(bind) = &mut operation.bind {
             bind.field = "parent_thread".into();
         }
     }
@@ -861,14 +875,20 @@ async fn index_scope_case(db: Database, sqlite: bool) {
     // Rebuild the parent index while same-named, large text already exists.
     let mut renamed = m.clone();
     renamed.resources[0].fields[2].name = "parent_thread".into();
+    renamed.actions[0].steps[0]
+        .assign
+        .iter_mut()
+        .find(|a| a.field == "thread")
+        .unwrap()
+        .field = "parent_thread".into();
     renamed.resources[0].gate.as_mut().unwrap().field = "parent_thread".into();
     for op in &mut renamed.operations {
         if op.scope.as_deref() == Some("thread") {
             op.scope = Some("parent_thread".into());
         }
     }
-    for action in &mut renamed.actions {
-        if let Some(bind) = &mut action.bind {
+    for operation in &mut renamed.operations {
+        if let Some(bind) = &mut operation.bind {
             bind.field = "parent_thread".into();
         }
     }
@@ -1399,9 +1419,12 @@ async fn postgres_full_creation_benchmark() {
 pub(crate) async fn redirect_app(db: Database) -> (Application, Manifest) {
     db.initialize().await.unwrap();
     let mut m = declarations();
-    m.actions[0].redirect = Redirect::Reference {
-        field: "thread".into(),
+    m.actions[0].redirect = Redirect {
         route: 3,
+        source: RedirectSource::Reference {
+            step: 0,
+            field: "thread".into(),
+        },
     };
     manifest::validate(&m).unwrap();
     let app = Application::new(
@@ -1500,9 +1523,12 @@ async fn sqlite_parent_redirect_handover_replay_and_visibility() {
 fn parent_redirect_admission_and_contract_identity() {
     let ordinary = declarations();
     let mut parent = ordinary.clone();
-    parent.actions[0].redirect = Redirect::Reference {
-        field: "thread".into(),
+    parent.actions[0].redirect = Redirect {
         route: 3,
+        source: RedirectSource::Reference {
+            step: 0,
+            field: "thread".into(),
+        },
     };
     manifest::validate(&parent).unwrap();
     assert_ne!(
@@ -1510,15 +1536,21 @@ fn parent_redirect_admission_and_contract_identity() {
         manifest::digest(&parent).unwrap()
     );
     for route in [1, 2, 999] {
-        parent.actions[0].redirect = Redirect::Reference {
-            field: "thread".into(),
+        parent.actions[0].redirect = Redirect {
             route,
+            source: RedirectSource::Reference {
+                step: 0,
+                field: "thread".into(),
+            },
         };
         assert!(manifest::validate(&parent).is_err());
     }
-    parent.actions[0].redirect = Redirect::Reference {
-        field: "thread".into(),
+    parent.actions[0].redirect = Redirect {
         route: 3,
+        source: RedirectSource::Reference {
+            step: 0,
+            field: "thread".into(),
+        },
     };
     let mut additional = parent.operations[3].clone();
     additional.id = 99;
@@ -1604,7 +1636,7 @@ async fn filtered_parent_case(db: Database) {
     db.initialize().await.unwrap();
     let mut m = declarations();
     m.resources[0].fields.push(boolean("archived"));
-    m.actions[0].fields.push("archived".into());
+    crate::test_support::add_input(&mut m.actions[0], &m.resources[0], "archived");
     m.operations[0].filter.push(Condition {
         field: "archived".into(),
         equals: Operand::Literal("false".into()),
@@ -1751,14 +1783,14 @@ fn forged_reference_and_follow_declarations_are_rejected_independently() {
             "forged declaration admitted: {bad:?}"
         );
     };
-    reject(&|m| m.actions[0].bind = None);
-    reject(&|m| m.actions[0].bind.as_mut().unwrap().field = "body".into());
-    reject(&|m| m.actions[0].bind.as_mut().unwrap().eligible = 2);
+    reject(&|m| m.operations[2].bind = None);
+    reject(&|m| m.operations[2].bind.as_mut().unwrap().field = "body".into());
+    reject(&|m| m.operations[2].bind.as_mut().unwrap().eligible = 2);
     reject(&|m| {
         let mut read = m.operations[3].clone();
         read.id = 7;
         m.operations.push(read);
-        m.actions[0].bind.as_mut().unwrap().eligible = 7;
+        m.operations[2].bind.as_mut().unwrap().eligible = 7;
     });
     reject(&|m| {
         let mut field = m.resources[0].fields[2].clone();
@@ -1805,9 +1837,12 @@ fn forged_reference_and_follow_declarations_are_rejected_independently() {
     reject(&|m| m.operations[4].via.as_mut().unwrap().source = 6);
     reject(&|m| m.routes[2].operations.retain(|id| *id != 1));
     reject(&|m| {
-        m.actions[0].redirect = Redirect::Reference {
-            field: "body".into(),
+        m.actions[0].redirect = Redirect {
             route: 3,
+            source: RedirectSource::Reference {
+                step: 0,
+                field: "body".into(),
+            },
         };
     });
     // Required protocol fields and deny_unknown_fields reject a second gate too.
@@ -1956,7 +1991,7 @@ async fn follow_case(db: Database) {
         route: 3,
     });
     assert!(
-        e.invoke(3, 0)
+        e.execute_transaction(&m.actions[0])
             .await
             .unwrap_err()
             .is::<crate::repository::ReferenceUnavailable>(),

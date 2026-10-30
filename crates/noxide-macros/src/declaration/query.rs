@@ -219,7 +219,7 @@ pub(crate) fn expand_query(
             fn record_id(record: &Self::Output) -> u64 { #identity }
             fn from_record(record: ::noxide::__private::Record) -> Self::Output { #decode }
             fn operation() -> ::noxide::__private::Operation {
-                ::noxide::__private::Operation { scope: #scope, via: #via,
+                ::noxide::__private::Operation { bind: None, scope: #scope, via: #via,
                     filter: vec![#(#filters),*], disclose: vec![#(#disclosures),*],
                 list: #list, visibility: #visibility, fields: #fields,
                     id: ::noxide::stable_id(concat!("query:", module_path!(), "::", stringify!(#name))),

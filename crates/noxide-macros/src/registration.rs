@@ -186,7 +186,7 @@ pub(crate) fn expand_application(registration: Registration) -> syn::Result<Toke
             let invoke = if let Some(handler) = handler {
                 quote!(#handler(::noxide::Submission::<#action>::new(&request)))
             } else {
-                quote!(::noxide::Submission::<#action>::new(&request).apply())
+                quote!(::noxide::Submission::<#action>::new(&request).execute())
             };
             quote! {
                 id if id == <#action as ::noxide::ActionType>::definition().id =>
@@ -200,8 +200,8 @@ pub(crate) fn expand_application(registration: Registration) -> syn::Result<Toke
             let mut builder = ::noxide::ApplicationDefinition::new();
             #(#pages::register(&mut builder);)*
             #(
-                builder.resource(<<#actions as ::noxide::ActionType>::Resource as ::noxide::ResourceType>::definition());
-                builder.operation(<#actions as ::noxide::ActionType>::operation());
+                for resource in <#actions as ::noxide::ActionType>::resources() { builder.resource(resource); }
+                for operation in <#actions as ::noxide::ActionType>::operations() { builder.operation(operation); }
                 if let Some(operation) = <#actions as ::noxide::ActionType>::inspection() { builder.operation(operation); }
                 builder.action(<#actions as ::noxide::ActionType>::definition());
             )*
