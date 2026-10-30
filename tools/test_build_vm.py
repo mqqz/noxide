@@ -71,7 +71,7 @@ fn probe(phase: &str) {
                 'fn note_editor(fields: FormFields<EditNote>) -> FormLayout {',
                 'fn note_editor(fields: FormFields<EditNote>) -> FormLayout {\n'
                 '    #[cfg(not(target_arch="wasm32"))]\n'
-                '    metadata_boundary::verify();') +
+                '    crate::metadata_boundary::verify();') +
                 '\n#[cfg(not(target_arch="wasm32"))]\nmod metadata_boundary {\n' +
                 probe + '\npub fn verify(){probe("metadata");eprintln!("METADATA_BOUNDARY_PROBE_PASSED");}\n}\n')
             base = [sys.executable, str(ROOT / "tools/build_vm.py"), "--kernel", args.kernel, "--toolchain", args.toolchain, "--source", str(source)]
