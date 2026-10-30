@@ -11,7 +11,7 @@ use anyhow::{Result, ensure};
 use noxide_protocol::time::Timestamp;
 use std::{
     fmt,
-    sync::{Mutex, atomic::AtomicI64},
+    sync::{Arc, Mutex, atomic::AtomicI64},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -48,14 +48,17 @@ pub(crate) struct CommittedTick {
 
 /// Consume and commit a bounded, generation-fenced maintenance transaction.
 /// Its caller must reserve independent maintenance capacity before opening it.
-pub(crate) async fn tick(tx: Transaction, credential_memory: &AtomicI64) -> Result<CommittedTick> {
+pub(crate) async fn tick(
+    tx: &mut Transaction,
+    credential_memory: &AtomicI64,
+) -> Result<CommittedTick> {
     let started = Instant::now();
     let wall = Timestamp::from_system_time(SystemTime::now())?;
     tick_sampled(tx, credential_memory, wall, started).await
 }
 
 async fn tick_sampled(
-    mut tx: Transaction,
+    tx: &mut Transaction,
     credential_memory: &AtomicI64,
     wall: Timestamp,
     started: Instant,
@@ -64,11 +67,11 @@ async fn tick_sampled(
     // Its effective seconds may include read-only credential observations. They
     // do not advance lifecycle time: only this sampled wall and durable history do.
     let seconds =
-        security::observe_clock_read(&mut tx, wall.unix_seconds_floor(), credential_memory).await?;
-    let seconds = security::observe_clock(&mut tx, seconds).await?;
+        security::observe_clock_read(tx, wall.unix_seconds_floor(), credential_memory).await?;
+    let seconds = security::observe_clock(tx, seconds).await?;
     Timestamp::from_unix_seconds(seconds)?;
 
-    let previous = read(&mut tx).await?;
+    let previous = read(tx).await?;
     let next = DurableClock {
         watermark: previous.watermark.max(wall),
         version: previous
@@ -121,6 +124,7 @@ pub(crate) enum TemporalUnavailable {
     NotStarted,
     Stale,
     Inconsistent,
+    Quarantined,
 }
 impl fmt::Display for TemporalUnavailable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -128,6 +132,7 @@ impl fmt::Display for TemporalUnavailable {
             Self::NotStarted => "lifecycle maintenance has not established freshness",
             Self::Stale => "lifecycle maintenance heartbeat is stale",
             Self::Inconsistent => "lifecycle clock regressed or observation is out of order",
+            Self::Quarantined => "lifecycle maintenance cleanup is unconfirmed",
         })
     }
 }
@@ -135,6 +140,7 @@ impl std::error::Error for TemporalUnavailable {}
 
 #[derive(Default)]
 struct State {
+    quarantined: bool,
     startup_complete: bool,
     progress: Option<HeartbeatObservation>,
     fresh_since: Option<Instant>,
@@ -142,10 +148,15 @@ struct State {
 
 /// One process's proof of recent durable maintenance progress. All access is
 /// constant work under a short mutex; no database work runs under that mutex.
-#[derive(Default)]
-pub(crate) struct Freshness(Mutex<State>);
+#[derive(Clone, Default)]
+pub(crate) struct Freshness(Arc<Mutex<State>>);
 
 impl Freshness {
+    pub(crate) fn quarantine(&self) {
+        if let Ok(mut state) = self.0.lock() {
+            state.quarantined = true;
+        }
+    }
     /// Startup must call this only after its own successful durable tick. A failed
     /// or ambiguous startup commit leaves this process unable to serve time.
     pub(crate) fn committed(&self, tick: CommittedTick) -> Result<()> {
@@ -212,6 +223,7 @@ impl Freshness {
             .0
             .lock()
             .map_err(|_| TemporalUnavailable::Inconsistent)?;
+        ensure!(!state.quarantined, TemporalUnavailable::Quarantined);
         let since = state.fresh_since.ok_or(TemporalUnavailable::NotStarted)?;
         ensure!(recent(since, now), TemporalUnavailable::Stale);
         let progress = state
@@ -241,6 +253,7 @@ fn validate_progress(
     started: Instant,
     now: Instant,
 ) -> Result<()> {
+    ensure!(!state.quarantined, TemporalUnavailable::Quarantined);
     ensure!(recent(started, now), TemporalUnavailable::Stale);
     ensure!(clock.version > 0, TemporalUnavailable::NotStarted);
     if let Some(previous) = &state.progress {

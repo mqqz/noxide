@@ -42,13 +42,18 @@ of application request and worker permits. Activation shares one two-second
 monotonic deadline across validation, schema/deployment binding, tick and commit.
 The one existing server maintenance service then uses a 200ms nonresetting
 deadline for admission, connection, fencing, tick, commit and awaited cleanup.
-A dedicated one-slot maintenance semaphore has no queue; every tick opens its own
-private provider connection, outside the request/session/Wasm lanes. There is no
-shared connection pool to exhaust. SQLite maintenance connections use a zero busy
+A dedicated one-slot maintenance semaphore has no queue. Each tick has a private
+work connection outside request/session/Wasm lanes; PostgreSQL additionally has
+one private control connection under that same slot. There is no shared pool to
+exhaust. The last 50ms of the original 200ms budget is reserved for cleanup. The
+provider execution deadline uses the preceding 150ms; this does not enlarge the
+maintenance budget. SQLite maintenance connections use a zero busy
 wait; a failed BEGIN waits for the SQLx worker close acknowledgement before
 returning. Ordinary request connections retain their existing busy timeout.
-This reserves host admission and connection
-capacity; external database locks or server-wide connection exhaustion can still
+PostgreSQL takes the clock row with `FOR UPDATE NOWAIT`, uses a 1ms lock timeout
+for other locks, and updates statement timeouts from the remaining work budget.
+Ordinary request settings remain unchanged. This reserves host admission and
+connection capacity; external database locks or server-wide connection exhaustion can still
 prevent progress, bounded by the deadline. Missed intervals skip backlog. Unavailable
 capacity, failed startup, stale progress or inconsistent durable state make
 temporal operations unavailable. They do not become guest policy rejections.
@@ -90,9 +95,33 @@ cover units and arithmetic, durable watermarks, backward clocks, restarts, fixed
 attempt values, read-only requests, version exhaustion, credential recovery,
 freshness, startup unknown commits, saturated request lanes, maintenance capacity
 loss, cancellation and service drain. The service remains active through HTTP
-request drain, then aborts and joins; listener errors/cancellation abort it too.
+request drain, then receives a stop signal and joins. An in-flight tick retains
+its permit and single-service owner through provider cleanup. Dropping/canceling
+serve signals stop and detaches this already bounded owner; it does not abort its
+provider work. A canceled startup transfers its owned permit to one bounded
+cleanup task under the original deadline.
 Only one service may own an application at a time. Retired generations cannot
 tick or obtain temporal attempt time.
+
+PostgreSQL cleanup cancels only its host-created work connection, drains/rolls
+back that connection and observes its backend identity disappear before releasing
+capacity. The driver exposes no public secret-bearing cancel token. The host
+captures the PID and backend start time plus a fresh unguessable application name,
+keeps the work socket owned through cancel, and checks tag/start/database/user
+in qualified catalog queries. This is a narrowly scoped check, not an atomic
+PID/secret cancellation primitive. A provider crash or operator kill/PID recycle
+between the identity check and cancellation is a residual trusted-provider
+assumption; guests have no path to supply identities or manage DB sessions.
+
+Unacknowledged cleanup permanently quarantines the slot and temporal readiness;
+late commits, old leases and peer observations cannot clear that state. Cleanup
+has no retry queue or deadline reset. HTTP shutdown reports an error if it cannot
+confirm drain in its bounded wait; it does not silently release an unknown owner.
+A fresh host process/application is required to recover quarantined capacity;
+its startup still retains the durable lifecycle watermark and requires its own
+confirmed tick. This is fail-closed handling of uncertainty, not proof that an
+unresponsive provider has physically stopped. Provider cleanup and PID-scope
+assumptions remain explicit independent-review requirements.
 
 The internal temporal-attempt accessor is ready for later consumers; no current
 resource path declares expiry. Independent review and exact final integrated-SHA

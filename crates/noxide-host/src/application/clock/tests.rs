@@ -283,6 +283,7 @@ async fn blocked_tick_deadline_cancellation_and_service_drain_are_bounded() {
     tokio::time::sleep(Duration::from_millis(1_020)).await;
     tokio::time::timeout(Duration::from_millis(500), service.shutdown())
         .await
+        .unwrap()
         .unwrap();
     assert!(!app.maintenance_running.load(Ordering::Acquire));
     assert!(app.maintenance.try_acquire().is_ok());
@@ -316,7 +317,7 @@ async fn unavailable_maintenance_capacity_cannot_renew_stale_time() {
     tokio::time::sleep(Duration::from_millis(1_100)).await;
     assert!(clock(&database).await[2] > startup[2]);
     assert!(temporal(&app).await.is_ok());
-    service.shutdown().await;
+    service.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -368,4 +369,151 @@ async fn storage_ten_requires_explicit_migration_and_is_never_reinitialized() {
         [["10".to_string()]]
     );
     tx.commit().await.unwrap();
+}
+
+async fn postgres_fixture(label: &str) -> (Database, String) {
+    use sqlx::Connection;
+    let root = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let mut admin = sqlx::PgConnection::connect(&root).await.unwrap();
+    let name = format!(
+        "p06_{label}_{}",
+        security::random_id()
+            .unwrap()
+            .replace('-', "a")
+            .replace('_', "b")
+            .to_lowercase()
+    );
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let mut url = url::Url::parse(&root).unwrap();
+    url.set_path(&name);
+    (Database::postgres(url.as_str()).unwrap(), url.to_string())
+}
+
+#[tokio::test]
+#[ignore = "requires NOXIDE_TEST_POSTGRES disposable local server"]
+async fn postgres_http_stop_waits_for_actual_inflight_backend_termination() {
+    use sqlx::{Connection, Row};
+    for delay in [0, 205] {
+        let (database, url) = postgres_fixture("http_stop").await;
+        let app = Arc::new(build(database.clone(), HostKeys::generate().unwrap()).await);
+        app.activate().await.unwrap();
+        let before = clock(&database).await;
+        let mut monitor = sqlx::PgConnection::connect(&url).await.unwrap();
+        // A real server-side barrier inside the actual production clock UPDATE;
+        // this exercises cancellation of admitted work, not an idle Rust task.
+        sqlx::query("CREATE FUNCTION nx_clock_pause() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_catalog.pg_sleep(0.3); RETURN NEW; END $$").execute(&mut monitor).await.unwrap();
+        sqlx::query("CREATE TRIGGER nx_clock_pause BEFORE UPDATE ON nx_clock FOR EACH ROW EXECUTE FUNCTION nx_clock_pause()").execute(&mut monitor).await.unwrap();
+        let listener = crate::http::Listener::loopback("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let (stop, shutdown) = tokio::sync::oneshot::channel();
+        let serving = app.clone();
+        let server = tokio::spawn(async move {
+            crate::http::serve(
+                listener,
+                serving,
+                crate::http::Origin::parse("http://localhost:8080").unwrap(),
+                async {
+                    let _ = shutdown.await;
+                },
+            )
+            .await
+        });
+        let pid=tokio::time::timeout(Duration::from_secs(3),async {
+            loop {
+                let rows=sqlx::query("SELECT pid FROM pg_catalog.pg_stat_activity WHERE datname=pg_catalog.current_database() AND application_name LIKE 'nx-clock-%' AND wait_event='PgSleep' AND query LIKE 'UPDATE nx_clock%'").fetch_all(&mut monitor).await.unwrap();
+                if let Some(row)=rows.first(){break row.get::<i32,_>(0);}
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        // First branch cancels during proven live provider work. Second branch
+        // lets the old 200ms client deadline pass before asking HTTP to stop.
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+        let stopped = std::time::Instant::now();
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_millis(250), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(stopped.elapsed() < Duration::from_millis(200));
+        let present: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE pid=$1")
+                .bind(pid)
+                .fetch_one(&mut monitor)
+                .await
+                .unwrap();
+        assert_eq!(
+            present, 0,
+            "HTTP returned before its maintenance backend stopped"
+        );
+        assert!(app.maintenance.try_acquire().is_ok());
+        assert!(!app.maintenance_running.load(Ordering::Acquire));
+        assert_eq!(
+            clock(&database).await,
+            before,
+            "canceled UPDATE must not refresh durable progress"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires NOXIDE_TEST_POSTGRES disposable local server"]
+async fn postgres_lost_control_quarantines_capacity_and_service_readiness() {
+    use sqlx::{Connection, Row};
+    let (database, url) = postgres_fixture("quarantine").await;
+    let app = Arc::new(build(database.clone(), HostKeys::generate().unwrap()).await);
+    app.activate().await.unwrap();
+    let before = clock(&database).await;
+    let mut monitor = sqlx::PgConnection::connect(&url).await.unwrap();
+    sqlx::query("CREATE FUNCTION nx_clock_pause() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_catalog.pg_sleep(0.3); RETURN NEW; END $$").execute(&mut monitor).await.unwrap();
+    sqlx::query("CREATE TRIGGER nx_clock_pause BEFORE UPDATE ON nx_clock FOR EACH ROW EXECUTE FUNCTION nx_clock_pause()").execute(&mut monitor).await.unwrap();
+    let service = app.start_clock_service().unwrap();
+    let control=tokio::time::timeout(Duration::from_secs(3),async {
+        loop {
+            let rows=sqlx::query("SELECT c.pid FROM pg_catalog.pg_stat_activity c WHERE c.datname=pg_catalog.current_database() AND c.application_name LIKE 'nx-ctl-%' AND EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity w WHERE w.datname=c.datname AND w.application_name LIKE 'nx-clock-%' AND w.wait_event='PgSleep')").fetch_all(&mut monitor).await.unwrap();
+            if let Some(row)=rows.first(){break row.get::<i32,_>(0);}
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    // Test-only provider failure: remove precisely this fixture's host control
+    // session while its corresponding work UPDATE is known to be in-flight.
+    sqlx::query("SELECT pg_catalog.pg_terminate_backend($1)")
+        .bind(control)
+        .execute(&mut monitor)
+        .await
+        .unwrap();
+    assert!(service.shutdown().await.is_err());
+    assert!(
+        app.maintenance.try_acquire().is_err(),
+        "unknown cleanup must not release its reserved slot"
+    );
+    assert!(
+        app.maintenance_running.load(Ordering::Acquire),
+        "unknown cleanup must not release service ownership"
+    );
+    assert!(app.start_clock_service().is_err());
+    assert!(matches!(temporal(&app).await, Err(RequestError::Busy)));
+    assert_eq!(
+        clock(&database).await,
+        before,
+        "unknown cleanup cannot publish clock progress"
+    );
+}
+
+#[tokio::test]
+async fn aborted_service_keeps_unknown_owner_and_temporal_readiness_quarantined() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = Database::sqlite(dir.path().join("aborted-service.db"));
+    let app = Arc::new(build(database, HostKeys::generate().unwrap()).await);
+    app.activate().await.unwrap();
+    let service = app.start_clock_service().unwrap();
+    service.task.as_ref().unwrap().abort();
+    assert!(service.shutdown().await.is_err());
+    assert!(app.maintenance_running.load(Ordering::Acquire));
+    assert!(matches!(temporal(&app).await, Err(RequestError::Busy)));
+    assert!(app.start_clock_service().is_err());
 }

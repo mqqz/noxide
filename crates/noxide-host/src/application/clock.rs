@@ -1,5 +1,8 @@
 use super::*;
-use crate::lifecycle_clock::{self, AttemptTime};
+use crate::{
+    database::{MaintenanceLease, MaintenanceUncertain},
+    lifecycle_clock::{self, AttemptTime},
+};
 use std::time::Duration;
 
 impl Application {
@@ -11,7 +14,9 @@ impl Application {
             // A real private database connection is opened outside every request,
             // session, worker and Wasm lane. There is no shared connection pool.
             // try_acquire gives one active maintenance transaction and no queue.
-            let _maintenance = self.maintenance.try_acquire()?;
+            let permit = self.maintenance.clone().try_acquire_owned()?;
+            let mut lease =
+                MaintenanceLease::new(permit, deadline.into_std(), self.lifecycle_clock.clone());
             if self
                 .manifest
                 .operations
@@ -21,7 +26,8 @@ impl Application {
                 self.keys.signing_edit_key()?;
             }
             self.presentation.validate(&self.manifest)?;
-            let mut tx = self.database.begin_maintenance(deadline.into_std()).await?;
+            lease.begin(&self.database).await?;
+            let tx = lease.tx();
             tx.check_storage().await?;
             tx.bind_schema(&self.manifest).await?;
             let generation = tx
@@ -31,7 +37,9 @@ impl Application {
                 self.generation.get().is_none_or(|g| g == &generation),
                 "application generation retired"
             );
-            let tick = lifecycle_clock::tick(tx, &self.clock).await?;
+            let outcome = lifecycle_clock::tick(tx, &self.clock).await;
+            lease.finish().await?;
+            let tick = outcome?;
             // No process readiness on a failed/unknown commit acknowledgement.
             ensure!(
                 self.generation.get_or_init(|| generation.clone()) == &generation,
@@ -52,14 +60,17 @@ impl Application {
 
     async fn tick_clock(&self) -> Result<()> {
         let deadline = Instant::now() + security::CLOCK_CHECKPOINT_BEGIN_DEADLINE;
-        timeout_at(deadline, async {
-            let _maintenance = self.maintenance.try_acquire()?;
-            let mut tx = self.database.begin_maintenance(deadline.into_std()).await?;
-            self.admission(&mut tx, false).await?;
-            let tick = lifecycle_clock::tick(tx, &self.clock).await?;
-            self.publish_clock(tick)
-        })
-        .await?
+        let permit = self.maintenance.clone().try_acquire_owned()?;
+        let mut lease =
+            MaintenanceLease::new(permit, deadline.into_std(), self.lifecycle_clock.clone());
+        lease.begin(&self.database).await?;
+        let outcome = async {
+            self.admission(lease.tx(), false).await?;
+            lifecycle_clock::tick(lease.tx(), &self.clock).await
+        }
+        .await;
+        lease.finish().await?;
+        self.publish_clock(outcome?)
     }
 
     /// Future temporal callers retain this value for their complete transaction
@@ -89,47 +100,81 @@ impl Application {
         self.maintenance_running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| anyhow::anyhow!("clock maintenance is already running"))?;
-        // Construct before spawning: cancellation before first poll still drops
-        // the guard and releases the single-service ownership bit.
-        let owner = ServiceOwner(self.clone());
+        // Construct before spawning. Only acknowledged, clean shutdown releases
+        // service ownership; task panic/abort leaves it quarantined.
+        let owner = ServiceOwner {
+            app: self.clone(),
+            stopped: false,
+        };
+        let (stop, mut stopping) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
-            let _owner = owner;
+            let mut owner = owner;
             let mut ticks = tokio::time::interval_at(
                 Instant::now() + lifecycle_clock::TICK_INTERVAL,
                 lifecycle_clock::TICK_INTERVAL,
             );
             ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                ticks.tick().await;
-                let _ = _owner.0.tick_clock().await;
+                tokio::select! {biased;
+                    _ = &mut stopping => { owner.stopped = true; return Ok(()); },
+                    _ = ticks.tick() => {}
+                }
+                if let Err(error) = owner.app.tick_clock().await
+                    && error.is::<MaintenanceUncertain>()
+                {
+                    return Err(error);
+                }
             }
         });
-        Ok(ClockService { task })
+        Ok(ClockService {
+            stop: Some(stop),
+            task: Some(task),
+            freshness: self.lifecycle_clock.clone(),
+        })
     }
 }
 
-struct ServiceOwner(Arc<Application>);
+struct ServiceOwner {
+    app: Arc<Application>,
+    stopped: bool,
+}
 impl Drop for ServiceOwner {
     fn drop(&mut self) {
-        self.0.maintenance_running.store(false, Ordering::Release);
+        if self.stopped {
+            self.app.maintenance_running.store(false, Ordering::Release);
+        } else {
+            self.app.lifecycle_clock.quarantine();
+        }
     }
 }
 
 pub(crate) struct ClockService {
-    task: tokio::task::JoinHandle<()>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<Result<()>>>,
+    freshness: crate::lifecycle_clock::Freshness,
 }
 impl ClockService {
-    pub(crate) async fn shutdown(mut self) {
-        self.task.abort();
-        let _ =
-            tokio::time::timeout(security::CLOCK_CHECKPOINT_BEGIN_DEADLINE, &mut self.task).await;
+    pub(crate) async fn shutdown(mut self) -> Result<()> {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        let mut task = self.task.take().expect("maintenance task");
+        // Timeout does not abort the owner: an uncertain in-flight cleanup keeps
+        // both ownership and its reserved permit until acknowledged/quarantined.
+        tokio::time::timeout(security::CLOCK_CHECKPOINT_BEGIN_DEADLINE, &mut task)
+            .await
+            .map_err(|_| {
+                self.freshness.quarantine();
+                MaintenanceUncertain
+            })??
     }
 }
 impl Drop for ClockService {
     fn drop(&mut self) {
-        // Also cancel on listener error or cancellation of serve itself. Dropping
-        // its private Transaction cancels SQLite and closes PG unresolved state.
-        self.task.abort();
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        // Detach, never abort provider work. Its single owner finishes cleanup.
     }
 }
 

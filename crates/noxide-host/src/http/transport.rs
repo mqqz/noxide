@@ -279,7 +279,7 @@ pub async fn serve(
     .await;
     connections.abort_all();
     while connections.join_next().await.is_some() {}
-    checkpoint.shutdown().await;
+    checkpoint.shutdown().await?;
     Ok(())
 }
 

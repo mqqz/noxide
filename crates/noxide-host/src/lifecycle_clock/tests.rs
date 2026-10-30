@@ -271,6 +271,28 @@ fn restart_and_delayed_own_tick_require_new_confirmed_fresh_progress() {
     );
 }
 
+#[test]
+fn quarantined_cleanup_rejects_reads_and_late_progress_across_clones() {
+    let freshness = Freshness::default();
+    let start = Instant::now();
+    freshness
+        .committed_at(committed(clock(10_000, 1), start), start)
+        .unwrap();
+    let cleanup = freshness.clone();
+    cleanup.quarantine();
+    assert!(freshness.attempt_at(clock(10_000, 1), start).is_err());
+    assert!(
+        freshness
+            .committed_at(committed(clock(11_000, 2), start), start)
+            .is_err()
+    );
+    assert!(
+        freshness
+            .observe_at(observed(clock(11_000, 2), start), start)
+            .is_err()
+    );
+}
+
 async fn fixture(database: &Database) {
     database.initialize().await.unwrap();
 }
@@ -280,11 +302,11 @@ async fn sample_tick(
     memory: &AtomicI64,
     millis: i64,
 ) -> Result<CommittedTick> {
-    let tx = database
+    let mut tx = database
         .begin(Instant::now() + Duration::from_secs(2))
         .await?;
     tick_sampled(
-        tx,
+        &mut tx,
         memory,
         Timestamp::from_unix_millis(millis)?,
         Instant::now(),
@@ -459,12 +481,12 @@ async fn production_tick_and_independent_observation_use_real_wall_and_database(
     fixture(&database).await;
     let freshness = Freshness::default();
     let memory = AtomicI64::new(0);
-    let tx = database
+    let mut tx = database
         .begin(Instant::now() + Duration::from_secs(2))
         .await
         .unwrap();
     freshness
-        .committed(tick(tx, &memory).await.unwrap())
+        .committed(tick(&mut tx, &memory).await.unwrap())
         .unwrap();
     let before = snapshot(&database).await;
     let observation =

@@ -179,6 +179,7 @@ impl Transaction {
 
     async fn query_indexes(&mut self) -> Result<Vec<String>> {
         let sql = match self.backend {
+            super::Backend::Closed => unreachable!("closed maintenance transaction"),
             Backend::Sqlite(_) => {
                 "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='nx_records' AND name GLOB 'nx_q_*'"
             }
@@ -247,6 +248,7 @@ impl Transaction {
                 for suffix in ["i", "t"] {
                     let name = format!("nx_a_{storage:x}_{}_{suffix}", field.name);
                     let query = match self.backend {
+                        super::Backend::Closed => unreachable!("closed maintenance transaction"),
                         super::Backend::Sqlite(_) => {
                             "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='nx_records' AND name=$1"
                         }

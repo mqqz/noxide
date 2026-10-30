@@ -1,5 +1,7 @@
+mod maintenance;
 mod schema;
 use anyhow::{Context, Result, ensure};
+pub(crate) use maintenance::{MaintenanceLease, MaintenanceUncertain};
 use sqlx::{
     Connection, Row,
     postgres::PgConnectOptions,
@@ -25,6 +27,8 @@ pub enum Database {
 tokio::task_local! {pub(crate) static MAINTENANCE_CLOSE_PROBE: Arc<AtomicBool>;}
 
 pub(crate) enum Backend {
+    // Only installed while consuming a maintenance transaction during close.
+    Closed,
     Sqlite(sqlx::SqliteConnection),
     Postgres(sqlx::PgConnection),
 }
@@ -40,6 +44,7 @@ pub(crate) struct Transaction {
     read_only: bool,
     cancelled: Arc<AtomicBool>,
     deadline: tokio::time::Instant,
+    maintenance: Option<maintenance::Control>,
 }
 
 #[derive(Clone)]
@@ -105,29 +110,36 @@ impl Database {
         Ok(Self::Postgres(options))
     }
     pub(crate) async fn begin(&self, deadline: Instant) -> Result<Transaction> {
-        tokio::time::timeout_at(deadline.into(), self.connect(deadline, false, false, false))
-            .await?
+        tokio::time::timeout_at(deadline.into(), self.connect(deadline, false, false, None)).await?
     }
     pub(crate) async fn begin_read(&self, deadline: Instant) -> Result<Transaction> {
-        tokio::time::timeout_at(deadline.into(), self.connect(deadline, false, true, false)).await?
+        tokio::time::timeout_at(deadline.into(), self.connect(deadline, false, true, None)).await?
     }
     /// Clock-only private connection. SQLite must never queue a busy worker
     /// beyond the maintenance attempt: its BEGIN IMMEDIATE fails without waiting.
     pub(crate) async fn begin_maintenance(&self, deadline: Instant) -> Result<Transaction> {
-        tokio::time::timeout_at(deadline.into(), self.connect(deadline, false, false, true)).await?
+        let work = deadline
+            .checked_sub(maintenance::CLEANUP_RESERVE)
+            .context("maintenance deadline")?;
+        tokio::time::timeout_at(
+            work.into(),
+            self.connect(work, false, false, Some(deadline)),
+        )
+        .await?
     }
     async fn begin_schema(&self) -> Result<Transaction> {
         let deadline = Instant::now() + Duration::from_secs(60);
-        tokio::time::timeout_at(deadline.into(), self.connect(deadline, true, false, false)).await?
+        tokio::time::timeout_at(deadline.into(), self.connect(deadline, true, false, None)).await?
     }
     async fn connect(
         &self,
         deadline: Instant,
         exclusive: bool,
         read_only: bool,
-        maintenance: bool,
+        maintenance: Option<Instant>,
     ) -> Result<Transaction> {
         let cancelled = Arc::new(AtomicBool::new(false));
+        let mut control = None;
         let backend = match self {
             Self::Sqlite(options) => {
                 #[cfg(unix)]
@@ -149,7 +161,7 @@ impl Database {
                         "SQLite database must be private (mode 0600)"
                     );
                 }
-                let options = if maintenance {
+                let options = if maintenance.is_some() {
                     options
                         .clone()
                         .busy_timeout(Duration::ZERO)
@@ -185,7 +197,7 @@ impl Database {
                 .execute(&mut cx)
                 .await;
                 if let Err(error) = begin {
-                    if maintenance {
+                    if maintenance.is_some() {
                         // Await the SQLx worker's shutdown acknowledgement before
                         // returning a failed lock attempt. No busy query remains.
                         cx.close().await?;
@@ -194,12 +206,30 @@ impl Database {
                             probe.store(true, Ordering::Release);
                         });
                     }
-                    return Err(error.into());
+                    return Err(if maintenance.is_some() {
+                        maintenance::ConnectStopped(error.into()).into()
+                    } else {
+                        error.into()
+                    });
                 }
                 Backend::Sqlite(cx)
             }
             Self::Postgres(options) => {
-                let mut cx = sqlx::PgConnection::connect_with(options).await?;
+                let scope = if maintenance.is_some() {
+                    format!("nx-clock-{}", crate::security::random_id()?)
+                } else {
+                    String::new()
+                };
+                let options = if maintenance.is_some() {
+                    let timeout = maintenance::remaining_ms(deadline)?;
+                    options.clone().application_name(&scope).options([
+                        ("statement_timeout", format!("{timeout}ms")),
+                        ("lock_timeout", "1ms".into()),
+                    ])
+                } else {
+                    options.clone()
+                };
+                let mut cx = sqlx::PgConnection::connect_with(&options).await?;
                 for setting in ["SHOW fsync", "SHOW full_page_writes"] {
                     let value: String = sqlx::query_scalar(setting).fetch_one(&mut cx).await?;
                     ensure!(value == "on", "unsafe PostgreSQL durability");
@@ -207,16 +237,24 @@ impl Database {
                 sqlx::query("SET synchronous_commit = on")
                     .execute(&mut cx)
                     .await?;
-                sqlx::query(if exclusive {
-                    "SET statement_timeout = '60s'"
+                let statement_timeout = if maintenance.is_some() {
+                    format!(
+                        "SET statement_timeout = '{}ms'",
+                        maintenance::remaining_ms(deadline)?
+                    )
+                } else if exclusive {
+                    "SET statement_timeout = '60s'".into()
                 } else {
-                    "SET statement_timeout = '1500ms'"
+                    "SET statement_timeout = '1500ms'".into()
+                };
+                sqlx::query(&statement_timeout).execute(&mut cx).await?;
+                sqlx::query(if maintenance.is_some() {
+                    "SET lock_timeout = '1ms'"
+                } else {
+                    "SET lock_timeout = '250ms'"
                 })
                 .execute(&mut cx)
                 .await?;
-                sqlx::query("SET lock_timeout = '250ms'")
-                    .execute(&mut cx)
-                    .await?;
                 sqlx::query(if exclusive {
                     "SET idle_in_transaction_session_timeout = '10s'"
                 } else {
@@ -233,6 +271,11 @@ impl Database {
                 };
                 let acquired: bool = sqlx::query_scalar(lock).fetch_one(&mut cx).await?;
                 ensure!(acquired, "application database is busy with maintenance");
+                if let Some(overall) = maintenance {
+                    control = Some(
+                        maintenance::Control::connect(&options, &mut cx, &scope, overall).await?,
+                    );
+                }
                 sqlx::query(if read_only {
                     "BEGIN ISOLATION LEVEL SERIALIZABLE, READ ONLY"
                 } else {
@@ -251,6 +294,7 @@ impl Database {
             read_only,
             cancelled,
             deadline: deadline.into(),
+            maintenance: control,
         })
     }
 
@@ -261,6 +305,7 @@ impl Database {
                 tx.execute(sql, &[]).await?;
             }
             match tx.backend {
+                Backend::Closed => unreachable!("closed maintenance transaction"),
                 Backend::Sqlite(_) => {
                     tx.execute("CREATE TRIGGER nx_accounts_no_delete BEFORE DELETE ON nx_accounts BEGIN SELECT RAISE(ABORT, 'account identities cannot be deleted'); END", &[]).await?;
                 }
@@ -348,6 +393,7 @@ impl Transaction {
                 .collect::<Vec<_>>()
                 .join(",");
             let json = match self.backend {
+                Backend::Closed => unreachable!("closed maintenance transaction"),
                 Backend::Sqlite(_) => format!("json_array({columns})"),
                 Backend::Postgres(_) => format!("CAST(json_build_array({columns}) AS TEXT)"),
             };
@@ -363,6 +409,7 @@ impl Transaction {
     #[cfg(test)]
     pub(crate) async fn explain(&mut self, query: &str) -> Result<Vec<String>> {
         match &mut self.backend {
+            Backend::Closed => unreachable!("closed maintenance transaction"),
             Backend::Sqlite(cx) => Ok(sqlx::query(&format!("EXPLAIN QUERY PLAN {query}"))
                 .fetch_all(cx)
                 .await?
@@ -383,6 +430,7 @@ impl Transaction {
     #[cfg(all(test, feature = "query-metrics"))]
     pub(crate) async fn examined_rows(&mut self, query: &str) -> Result<i64> {
         match &mut self.backend {
+            Backend::Closed => unreachable!("closed maintenance transaction"),
             Backend::Sqlite(cx) => {
                 use libsqlite3_sys::*;
                 let mut handle = cx.lock_handle().await?;
@@ -482,6 +530,7 @@ impl Transaction {
 
     async fn storage_tables(&mut self) -> Result<Vec<String>> {
         let sql = match self.backend {
+            Backend::Closed => unreachable!("closed maintenance transaction"),
             Backend::Sqlite(_) => {
                 "SELECT name FROM sqlite_schema WHERE type='table' AND name GLOB 'nx_*' ORDER BY name LIMIT 65"
             }
@@ -499,6 +548,7 @@ impl Transaction {
 
     async fn check_layout(&mut self) -> Result<()> {
         let trigger = match self.backend {
+            Backend::Closed => unreachable!("closed maintenance transaction"),
             Backend::Sqlite(_) => {
                 "SELECT name FROM sqlite_schema WHERE type='trigger' AND name='nx_accounts_no_delete' AND tbl_name='nx_accounts'"
             }
@@ -521,6 +571,7 @@ impl Transaction {
         );
         for &(table, columns) in TABLE_COLUMNS {
             let sql = match self.backend {
+                Backend::Closed => unreachable!("closed maintenance transaction"),
                 Backend::Sqlite(_) => {
                     "SELECT name,upper(type),COALESCE(dflt_value,''),CAST(\"notnull\" AS TEXT) FROM pragma_table_info($1) ORDER BY cid LIMIT 65"
                 }
@@ -604,6 +655,7 @@ impl Transaction {
     pub(crate) fn field_expression(&self, field: &str) -> Result<String> {
         ensure!(crate::manifest::identifier(field), "invalid field");
         Ok(match self.backend {
+            Backend::Closed => unreachable!("closed maintenance transaction"),
             Backend::Sqlite(_) => format!("json_extract(fields, '$.\"{field}\"')"),
             Backend::Postgres(_) => format!("(fields::jsonb ->> '{field}')"),
         })
@@ -613,6 +665,7 @@ impl Transaction {
         // Names and limits come only from trusted code. NULL rejects oversized
         // stored values before their contents cross the SQL driver.
         let size = match self.backend {
+            Backend::Closed => unreachable!("closed maintenance transaction"),
             Backend::Sqlite(_) => format!("length(CAST({column} AS BLOB))"),
             Backend::Postgres(_) => format!("octet_length({column})"),
         };
@@ -623,6 +676,7 @@ impl Transaction {
         self.execute_internal(sql, params).await
     }
     async fn execute_internal(&mut self, sql: &str, params: &[Param]) -> Result<u64> {
+        self.maintenance_timeout().await?;
         let deadline = if sql == "ROLLBACK" {
             tokio::time::Instant::now() + Duration::from_millis(500)
         } else {
@@ -630,6 +684,7 @@ impl Transaction {
         };
         tokio::time::timeout_at(deadline, async {
             Ok(match &mut self.backend {
+                Backend::Closed => unreachable!("closed maintenance transaction"),
                 Backend::Sqlite(cx) => bound_query!(sql, params).execute(cx).await?.rows_affected(),
                 Backend::Postgres(cx) => {
                     bound_query!(sql, params).execute(cx).await?.rows_affected()
@@ -645,6 +700,7 @@ impl Transaction {
         sql: &str,
         params: &[Param],
     ) -> Result<Vec<[String; N]>> {
+        self.maintenance_timeout().await?;
         macro_rules! rows {
             ($cx:expr) => {{
                 let rows = bound_query!(sql, params).fetch_all($cx).await?;
@@ -670,6 +726,7 @@ impl Transaction {
         }
         tokio::time::timeout_at(self.deadline, async {
             Ok(match &mut self.backend {
+                Backend::Closed => unreachable!("closed maintenance transaction"),
                 Backend::Sqlite(cx) => rows!(cx),
                 Backend::Postgres(cx) => rows!(cx),
             })
