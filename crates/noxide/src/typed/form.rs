@@ -1,4 +1,4 @@
-use super::{action::ActionType, query::FromRequest};
+use super::{action::WebActionType, query::FromRequest};
 use crate::RequestView;
 use noxide_protocol::{Container, Control, FormInstruction};
 use std::{marker::PhantomData, ops::Deref};
@@ -6,10 +6,10 @@ pub struct Form<A> {
     available: bool,
     marker: PhantomData<A>,
 }
-impl<A: ActionType> FromRequest for Form<A> {
+impl<A: WebActionType> FromRequest for Form<A> {
     fn from_request(request: &RequestView) -> Self {
         Self {
-            available: request.available_forms.contains(&A::definition().id),
+            available: request.available_forms.contains(&A::web_binding().id),
             marker: PhantomData,
         }
     }
@@ -20,15 +20,15 @@ impl<A> Form<A> {
     }
 }
 
-pub struct FormFields<A: ActionType> {
+pub struct FormFields<A: WebActionType> {
     controls: A::Controls,
 }
-impl<A: ActionType> Default for FormFields<A> {
+impl<A: WebActionType> Default for FormFields<A> {
     fn default() -> Self {
         Self::new()
     }
 }
-impl<A: ActionType> FormFields<A> {
+impl<A: WebActionType> FormFields<A> {
     pub fn new() -> Self {
         Self {
             controls: A::controls(),
@@ -42,7 +42,7 @@ impl<A: ActionType> FormFields<A> {
         }
     }
 }
-impl<A: ActionType> Deref for FormFields<A> {
+impl<A: WebActionType> Deref for FormFields<A> {
     type Target = A::Controls;
     fn deref(&self) -> &Self::Target {
         &self.controls

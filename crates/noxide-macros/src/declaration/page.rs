@@ -140,7 +140,7 @@ pub(crate) fn expand_page(declaration: PageDeclaration, item: syn::ItemFn) -> sy
                 resources.push(quote!(<<#inner as ::noxide::QueryType>::Resource as ::noxide::ResourceType>::definition()));
             }
             "Form" => {
-                forms.push(quote!(<#inner as ::noxide::ActionType>::definition().id));
+                forms.push(quote!(<#inner as ::noxide::WebActionType>::web_binding().id));
             }
             "Id" => {
                 if target.is_some() {

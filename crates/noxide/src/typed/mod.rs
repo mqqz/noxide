@@ -1,6 +1,8 @@
 //! Typed declarations and composition for guest applications.
-use noxide_protocol::{Action, FormInstruction, Manifest, Operation, Resource, Route, VERSION};
-use std::collections::BTreeMap;
+use noxide_protocol::{
+    Action, FormInstruction, Manifest, Operation, Resource, Route, VERSION, WebBinding,
+};
+use std::collections::{BTreeMap, BTreeSet};
 mod resource;
 pub use resource::*;
 mod query;
@@ -19,6 +21,7 @@ pub struct ApplicationDefinition {
     operations: BTreeMap<u32, Operation>,
     routes: BTreeMap<u32, Route>,
     actions: BTreeMap<u32, Action>,
+    web_bindings: BTreeMap<u32, WebBinding>,
 }
 impl ApplicationDefinition {
     pub fn new() -> Self {
@@ -49,19 +52,56 @@ impl ApplicationDefinition {
             "duplicate action"
         );
     }
+    pub fn web_binding(&mut self, binding: WebBinding) {
+        assert!(
+            self.web_bindings.insert(binding.id, binding).is_none(),
+            "duplicate web binding"
+        );
+    }
     pub fn layout(&mut self, id: u32, layout: Vec<FormInstruction>) {
-        self.actions
+        self.web_bindings
             .get_mut(&id)
-            .expect("layout action must be registered")
+            .expect("layout binding must be registered")
             .layout = layout;
     }
-    pub fn manifest(self) -> Manifest {
+    pub fn manifest(mut self) -> Manifest {
+        // Existing single-action declarations infer eligible reads from their
+        // declared page bindings. The emitted execution contract is explicit.
+        let infer_reads: BTreeSet<u32> = self
+            .actions
+            .values()
+            .filter(|action| action.target_reads.is_empty())
+            .map(|action| action.id)
+            .collect();
+        for route in self.routes.values() {
+            for id in &route.forms {
+                let binding = self.web_bindings.get(id).expect("unknown web binding");
+                let action = self
+                    .actions
+                    .get_mut(&binding.action)
+                    .expect("unknown action");
+                if !infer_reads.contains(&action.id) {
+                    continue;
+                }
+                for id in &route.operations {
+                    let operation = &self.operations[id];
+                    if operation.kind == noxide_protocol::OperationKind::Read
+                        && operation.via.is_none()
+                    {
+                        action.target_reads.push(*id);
+                    }
+                }
+                action.target_reads.sort_unstable();
+                action.target_reads.dedup();
+            }
+        }
         Manifest {
             version: VERSION,
             resources: self.resources.into_values().collect(),
             operations: self.operations.into_values().collect(),
             routes: self.routes.into_values().collect(),
             actions: self.actions.into_values().collect(),
+            web_bindings: self.web_bindings.into_values().collect(),
         }
     }
     pub fn json(self) -> String {

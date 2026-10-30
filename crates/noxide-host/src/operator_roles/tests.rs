@@ -602,7 +602,7 @@ async fn ordinary_actions_cannot_write_moderator_fields_or_reuse_credential() {
             field: "tag".into(),
             change: Change::Set(Value::Input("tag".into())),
         }];
-        m.actions[1].redirect = Redirect {
+        m.web_bindings[1].redirect = Redirect {
             route: 2,
             source: RedirectSource::Signed,
         };

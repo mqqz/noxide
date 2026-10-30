@@ -269,14 +269,14 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
                 let m = context
                     .manifest
                     .ok_or_else(|| anyhow::anyhow!("no actions"))?;
-                let a = crate::manifest::action(m, *action)?;
+                let a = crate::manifest::web_action(m, *action)?;
                 let Some(credentials) = credentials else {
                     continue;
                 };
                 form(
                     &mut out,
                     m,
-                    a,
+                    &a,
                     credentials,
                     &credentials.values,
                     false,
@@ -341,7 +341,7 @@ pub(crate) fn recovery(
     input: &Fields,
     reason: Recovery<'_>,
 ) -> Result<Rendered> {
-    let a = crate::manifest::action(m, action)?;
+    let a = crate::manifest::web_action(m, action)?;
     let empty = Fields::new();
     let (title, explanation, status, readonly, button, errors) = match &reason {
         Recovery::Committed => (
@@ -408,7 +408,7 @@ pub(crate) fn recovery(
             let label = if let Some(input) = a.inputs.iter().find(|input| &input.name == name) {
                 &input.label
             } else {
-                let resource = crate::manifest::signed_resource(m, a)?
+                let resource = crate::manifest::signed_resource(m, &a)?
                     .ok_or_else(|| anyhow::anyhow!("missing current resource"))?;
                 &crate::manifest::resource(m, resource)?
                     .fields
@@ -442,7 +442,7 @@ pub(crate) fn recovery(
     form(
         &mut out,
         m,
-        a,
+        &a,
         credentials,
         input,
         readonly,
@@ -523,12 +523,12 @@ mod tests {
                 max_bytes: field.max_bytes,
             })
             .collect();
-        manifest.actions[0].layout = layout;
+        manifest.web_bindings[0].layout = layout;
         let mut out = Buffer(String::new());
         form(
             &mut out,
             &manifest,
-            &manifest.actions[0],
+            &crate::manifest::web_action(&manifest, 1).unwrap(),
             &FormCredentials {
                 csrf: "csrf".into(),
                 submission: "token".into(),
@@ -551,7 +551,7 @@ mod tests {
         // These containers were previously accepted by the renderer but rejected
         // at admission. Direct render callers must obey the same grammar.
         for container in [Container::List, Container::Pre, Container::Main] {
-            manifest.actions[0].layout = vec![
+            manifest.web_bindings[0].layout = vec![
                 FormInstruction::Begin(container),
                 FormInstruction::End,
                 FormInstruction::Field {
@@ -562,13 +562,13 @@ mod tests {
                     label: "Save".into(),
                 },
             ];
-            let action = &manifest.actions[0];
-            assert!(crate::form_layout::validate(&manifest, action, &action.layout).is_err());
+            let action = crate::manifest::web_action(&manifest, 1).unwrap();
+            assert!(crate::form_layout::validate(&manifest, &action, action.layout).is_err());
             assert!(
                 form(
                     &mut Buffer(String::new()),
                     &manifest,
-                    action,
+                    &action,
                     &FormCredentials {
                         csrf: "csrf".into(),
                         submission: "token".into(),

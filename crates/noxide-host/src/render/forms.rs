@@ -4,7 +4,7 @@ use super::*;
 pub(super) fn form(
     out: &mut Buffer,
     m: &Manifest,
-    action: &Action,
+    action: &crate::manifest::WebAction<'_>,
     credentials: &FormCredentials,
     input: &Fields,
     readonly: bool,
@@ -58,7 +58,7 @@ pub(super) fn form(
             .collect::<Vec<_>>();
         &default_layout
     } else {
-        &action.layout
+        action.layout
     };
     crate::form_layout::validate(m, action, layout)?;
     let mut stack = Vec::new();
@@ -115,7 +115,7 @@ pub(super) fn hidden(out: &mut Buffer, name: &str, value: &str) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn render_field(
     out: &mut Buffer,
-    action: &Action,
+    action: &crate::manifest::WebAction<'_>,
     field: &Input,
     requested: &Control,
     input: &Fields,

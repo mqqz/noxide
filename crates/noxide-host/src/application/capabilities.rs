@@ -69,7 +69,7 @@ impl Application {
             let target = RecordTarget {
                 resource,
                 id,
-                route,
+                route: Some(route),
                 incarnation: record.incarnation,
                 revision: record.revision,
             };
@@ -198,7 +198,7 @@ impl Application {
                 && token.subject == anonymous.nonce
                 && target.resource == resource
                 && target.id == id
-                && self.capability_route(resource)? == target.route,
+                && Some(self.capability_route(resource)?) == target.route,
             RequestError::InvalidRequest
         );
         ensure!(secret.len() <= 128, RequestError::InvalidRequest);
@@ -223,9 +223,7 @@ impl Application {
                 receipt.resource == resource && receipt.id == id,
                 RequestError::InvalidRequest
             );
-            let page = self
-                .edit_handover(&mut tx, &receipt, Some(target.route))
-                .await?;
+            let page = self.edit_handover(&mut tx, &receipt, target.route).await?;
             return Ok((tx, page));
         }
         let stored = repository::load(&mut tx, &self.manifest, resource, id)
@@ -254,9 +252,7 @@ impl Application {
             &[serde_json::to_string(&receipt)?.into(), token.nonce.into()],
         )
         .await?;
-        let page = self
-            .edit_handover(&mut tx, &receipt, Some(target.route))
-            .await?;
+        let page = self.edit_handover(&mut tx, &receipt, target.route).await?;
         Ok((tx, page))
     }
 }

@@ -35,6 +35,7 @@ fn declarations() -> Manifest {
         },
     ]);
     m.actions.clear();
+    m.web_bindings.clear();
     m.routes[0].forms.clear();
     for op in &mut m.operations[..2] {
         op.policy.any = vec![vec![Predicate::Public]];
@@ -100,6 +101,8 @@ fn create_action(m: &mut Manifest) {
     for field in &m.resources[0].fields {
         fixture::add_input(&mut action, &m.resources[0], &field.name);
     }
+    m.web_bindings
+        .push(fixture::manifest().web_bindings.remove(0));
     m.actions.push(action);
 }
 
@@ -212,6 +215,8 @@ fn manifest_action_inspection_cannot_use_public_read() {
         operation: 2,
         fields: vec!["body".into()],
     });
+    m.web_bindings
+        .push(fixture::manifest().web_bindings.remove(0));
     m.actions.push(action);
     m.routes[1].access = Access::PublicOptional;
     m.routes[1].forms.push(1);
@@ -851,7 +856,7 @@ async fn sqlite_initial_create_commit_is_host_owned() {
                 e.request.input.insert("published".into(), value.into());
             }
             let result = e
-                .execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+                .execute_transaction(crate::application::ActionCore::of(&m.actions[0]).unwrap())
                 .await;
             if supplied.is_some() {
                 assert!(result.is_err());
@@ -896,15 +901,18 @@ async fn sqlite_initial_create_commit_is_host_owned() {
                 visibility: None,
                 fields: None,
             });
-            updates.actions.push(fixture::action(
-                2,
-                "Moderate",
-                4,
-                Target::Signed,
-                &updates.resources[0],
-                &["published"],
-                2,
-            ));
+            {
+                let action = fixture::action(
+                    2,
+                    "Moderate",
+                    4,
+                    Target::Signed,
+                    &updates.resources[0],
+                    &["published"],
+                    2,
+                );
+                fixture::register_action(&mut updates, action);
+            }
             updates.routes[1].forms.push(2);
             manifest::validate(&updates).unwrap();
             let tx = db
@@ -922,16 +930,14 @@ async fn sqlite_initial_create_commit_is_host_owned() {
             e.grant = Some(crate::security::RecordTarget {
                 resource: 1,
                 id: record.id,
-                route: 2,
+                route: Some(2),
                 incarnation: stored.incarnation.clone(),
                 revision: stored.revision,
             });
 
-            e.execute_transaction(
-                crate::application::ActionCore::of(&updates, &updates.actions[1]).unwrap(),
-            )
-            .await
-            .unwrap();
+            e.execute_transaction(crate::application::ActionCore::of(&updates.actions[1]).unwrap())
+                .await
+                .unwrap();
             e.tx.commit().await.unwrap();
             let mut tx = db
                 .begin_read(Instant::now() + Duration::from_secs(5))

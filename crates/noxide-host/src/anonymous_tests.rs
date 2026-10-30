@@ -57,24 +57,22 @@ fn declarations() -> Manifest {
     }
     fixture::add_input(&mut m.actions[0], &m.resources[0], "published");
     fixture::add_input(&mut m.actions[0], &m.resources[0], "private");
-    m.actions.push(fixture::action(
-        2,
-        "Edit",
-        4,
-        Target::Signed,
-        &m.resources[0],
-        &["body", "private"],
-        2,
-    ));
-    m.actions.push(fixture::action(
-        3,
-        "Delete",
-        5,
-        Target::Signed,
-        &m.resources[0],
-        &[],
-        1,
-    ));
+    {
+        let action = fixture::action(
+            2,
+            "Edit",
+            4,
+            Target::Signed,
+            &m.resources[0],
+            &["body", "private"],
+            2,
+        );
+        fixture::register_action(&mut m, action);
+    }
+    {
+        let action = fixture::action(3, "Delete", 5, Target::Signed, &m.resources[0], &[], 1);
+        fixture::register_action(&mut m, action);
+    }
     for r in &mut m.routes {
         r.access = Access::PublicOptional;
     }
@@ -953,7 +951,7 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
             id: 42,
             incarnation: record.incarnation.clone(),
             revision: record.revision,
-            route: 2,
+            route: Some(2),
         };
         let request = RequestView {
             params: Default::default(),

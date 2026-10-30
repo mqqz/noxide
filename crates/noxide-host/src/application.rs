@@ -1,5 +1,6 @@
 mod action;
 pub(crate) use action::ActionCore;
+use action::{ExecutionBudget, input_digest};
 mod capabilities;
 mod navigation;
 mod submission;
@@ -903,7 +904,7 @@ impl Application {
     }
     fn credentials(
         &self,
-        action: &Action,
+        action: &manifest::WebAction<'_>,
         session: &Token,
         now: i64,
         target: Option<RecordTarget>,
@@ -936,6 +937,7 @@ impl Application {
         &self,
         token: &Token,
         action: ActionCore<'_>,
+        binding: &noxide_protocol::WebBinding,
     ) -> Result<Option<RecordTarget>> {
         let (TokenKind::Submission {
             contract,
@@ -954,8 +956,8 @@ impl Application {
         };
         ensure!(
             contract == &self.submission_contract()
-                && *id == action.id
-                && *version == action.version,
+                && *id == binding.id
+                && *version == binding.version,
             RequestError::InvalidRequest
         );
         match (
@@ -964,7 +966,10 @@ impl Application {
         ) {
             (None, None) => {}
             (Some(resource), Some(target)) => {
-                let route = manifest::route(&self.manifest, target.route)?;
+                let route = manifest::route(
+                    &self.manifest,
+                    target.route.ok_or(RequestError::InvalidRequest)?,
+                )?;
                 ensure!(
                     target.resource == resource
                         && target.id > 0
@@ -973,7 +978,7 @@ impl Application {
                         && !target.incarnation.is_empty()
                         && target.incarnation.len() <= 64
                         && route.resource == Some(resource)
-                        && route.forms.contains(&action.id),
+                        && route.forms.contains(&binding.id),
                     RequestError::InvalidRequest
                 );
             }
@@ -985,7 +990,7 @@ impl Application {
     fn target_allowed(
         &self,
         action: ActionCore<'_>,
-        route: u32,
+        route: Option<u32>,
         principal: &auth::Principal,
         stored: &StoredRecord,
     ) -> Result<bool> {
@@ -1000,14 +1005,18 @@ impl Application {
                 },
             )
         };
-        let route = manifest::route(&self.manifest, route)?;
-        let readable = route.operations.iter().any(|id| {
-            manifest::operation(&self.manifest, *id).is_ok_and(|op| {
-                op.kind == OperationKind::Read
-                    && op.via.is_none()
-                    && op.resource == stored.record.resource
-                    && permitted(op)
-            })
+        let route = route
+            .map(|id| manifest::route(&self.manifest, id))
+            .transpose()?;
+        let readable = action.target_reads.iter().any(|id| {
+            route.is_none_or(|route| route.operations.contains(id))
+                && manifest::operation(&self.manifest, *id).is_ok_and(|op| {
+                    op.kind == OperationKind::Read
+                        && op.via.is_none()
+                        && op.resource == stored.record.resource
+                        && repository::read_allowed(&self.manifest, principal, op, stored)
+                            .unwrap_or(false)
+                })
         });
         let inspection = action
             .inspect
@@ -1042,11 +1051,13 @@ impl Application {
                     );
             }
         }
-        Ok(route.resource == Some(stored.record.resource)
-            && readable
-            && inspection
-            && mutation
-            && binding)
+        Ok(
+            route.is_none_or(|route| route.resource == Some(stored.record.resource))
+                && readable
+                && inspection
+                && mutation
+                && binding,
+        )
     }
 
     async fn current_target(
@@ -1088,10 +1099,10 @@ impl Application {
         };
         let mut forms = BTreeMap::new();
         for id in &r.forms {
-            let action = manifest::action(&self.manifest, *id)?;
+            let action = manifest::web_action(&self.manifest, *id)?;
             let op = manifest::operation(
                 &self.manifest,
-                ActionCore::of(&self.manifest, action)?.first_operation(),
+                ActionCore::of(action.core)?.first_operation(),
             )?;
             let subject = if manifest::anonymous_action(op) {
                 anonymous
@@ -1102,12 +1113,12 @@ impl Application {
                 forms.insert(*id, None);
                 continue;
             };
-            let credentials = if manifest::signed_resource(&self.manifest, action)?.is_some() {
+            let credentials = if manifest::signed_resource(&self.manifest, &action)?.is_some() {
                 if let Some(record) = &stored {
                     if (manifest::is_capability(op) && record.cap_version.is_some())
                         || self.target_allowed(
-                            ActionCore::of(&self.manifest, action)?,
-                            route,
+                            ActionCore::of(action.core)?,
+                            Some(route),
                             principal,
                             record,
                         )?
@@ -1117,14 +1128,14 @@ impl Application {
                             id: record.record.id,
                             incarnation: record.incarnation.clone(),
                             revision: record.revision,
-                            route,
+                            route: Some(route),
                         };
                         let values = if manifest::is_capability(op) {
                             Fields::new()
                         } else {
-                            self.action_values(action, &record.record.fields)
+                            self.action_values(&action, &record.record.fields)
                         };
-                        Some(self.credentials(action, subject, now, Some(grant), values)?)
+                        Some(self.credentials(&action, subject, now, Some(grant), values)?)
                     } else {
                         None
                     }
@@ -1132,10 +1143,10 @@ impl Application {
                     None
                 }
             } else if self
-                .authorize_create(ActionCore::of(&self.manifest, action)?, principal)
+                .authorize_create(ActionCore::of(action.core)?, principal)
                 .is_ok()
             {
-                Some(self.credentials(action, subject, now, None, Fields::new())?)
+                Some(self.credentials(&action, subject, now, None, Fields::new())?)
             } else {
                 None
             };
@@ -1144,7 +1155,7 @@ impl Application {
         Ok(forms)
     }
 
-    fn action_values(&self, action: &Action, fields: &Fields) -> Fields {
+    fn action_values(&self, action: &manifest::WebAction<'_>, fields: &Fields) -> Fields {
         action
             .steps
             .iter()
@@ -1163,7 +1174,7 @@ impl Application {
 
     fn conflict(
         &self,
-        action: &Action,
+        action: &manifest::WebAction<'_>,
         session: &Token,
         now: i64,
         mut target: RecordTarget,
@@ -1174,7 +1185,7 @@ impl Application {
         let credentials = self.credentials(action, session, now, Some(target), Fields::new())?;
         let operation = manifest::operation(
             &self.manifest,
-            ActionCore::of(&self.manifest, action)?.first_operation(),
+            ActionCore::of(action.core)?.first_operation(),
         )?;
         let current = if manifest::is_capability(operation) {
             Fields::new()
@@ -1300,7 +1311,7 @@ impl Application {
                 let token=self.keys.verify_cursor(encoded,now).map_err(|_|RequestError::InvalidCursor)?;
                 match token.kind { TokenKind::Cursor { scope: bound,after } if list.is_some() && bound==scope && after>0 && after<=i64::MAX as u64 => Ok(after), _=>Err(RequestError::InvalidCursor) }
             }).transpose()?;
-            let needs_anonymous = manifest::route(&self.manifest, route).map_err(|_| RequestError::InvalidRequest)?.forms.iter().any(|id| manifest::action(&self.manifest,*id).ok().and_then(|a| ActionCore::of(&self.manifest, a).ok()).and_then(|a| manifest::operation(&self.manifest,a.first_operation()).ok()).is_some_and(manifest::anonymous_action));
+            let needs_anonymous = manifest::route(&self.manifest, route).map_err(|_| RequestError::InvalidRequest)?.forms.iter().any(|id| manifest::web_action(&self.manifest,*id).ok().and_then(|a| ActionCore::of(a.core).ok()).and_then(|a| manifest::operation(&self.manifest,a.first_operation()).ok()).is_some_and(manifest::anonymous_action));
             let (anonymous, new_cookie) = if needs_anonymous {
                 if let Some(token) = anonymous_cookie.and_then(|c| self.keys.anonymous(c, now).ok()) { (Some(token), None) }
                 else { let (token,cookie) = self.keys.issue(TokenKind::Anonymous, "", now, security::ANONYMOUS_TTL).map_err(|_| RequestError::Rejected)?; (Some(token),Some(cookie)) }
@@ -1382,7 +1393,7 @@ impl Application {
             )
             .map_err(|_| RequestError::Rejected)?;
             if let ResponseIntent::Page(doc) | ResponseIntent::NotFound(doc) = &response
-                && doc.nodes.iter().any(|n| matches!(n, Instruction::Form { action } if manifest::action(&self.manifest,*action).ok().and_then(|a| ActionCore::of(&self.manifest, a).ok()).and_then(|a| manifest::operation(&self.manifest,a.first_operation()).ok()).is_some_and(manifest::anonymous_action))) { rendered.anonymous_cookie = new_cookie; }
+                && doc.nodes.iter().any(|n| matches!(n, Instruction::Form { action } if manifest::web_action(&self.manifest,*action).ok().and_then(|a| ActionCore::of(a.core).ok()).and_then(|a| manifest::operation(&self.manifest,a.first_operation()).ok()).is_some_and(manifest::anonymous_action))) { rendered.anonymous_cookie = new_cookie; }
             effects.tx.commit().await.map_err(|_| RequestError::Busy)?;
             Ok(rendered)
         })

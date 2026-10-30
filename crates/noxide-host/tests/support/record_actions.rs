@@ -16,12 +16,12 @@ pub fn declarations() -> Manifest {
             {"id":2,"path":"/notes/{note}","resource":1,"operations":[2],"forms":[2,3]}
         ],
         "actions":[
-            {"id":2,"version":1,"name":"Save changes","redirect":{"route":2,"source":"signed"},
-             "revision":"exact", "inputs":[{"name":"body","label":"Note","kind":"text","optional":false,"max_bytes":4096}],
-             "steps":[{"operation":4,"target":"signed","assign":[{"field":"body","change":{"set":{"input":"body"}}}]}],
-             "layout":[],"inspect":{"operation":2,"fields":["body"]}},
-            {"id":3,"version":1,"name":"Delete note","redirect":{"route":1,"source":"signed"},"revision":"exact","inputs":[],
-             "steps":[{"operation":5,"target":"signed","assign":[]}],"layout":[]}
+            {"id":2,"version":1,"name":"Save changes","revision":"exact","inputs":[{"name":"body","label":"Note","kind":"text","optional":false,"max_bytes":4096}],"steps":[{"operation":4,"target":"signed","assign":[{"field":"body","change":{"set":{"input":"body"}}}]}],"inspect":{"operation":2,"fields":["body"]},"target_reads":[2]},
+            {"id":3,"version":1,"name":"Delete note","revision":"exact","inputs":[],"steps":[{"operation":5,"target":"signed","assign":[]}],"target_reads":[2]}
+        ],
+"web_bindings":[
+            {"id":2,"version":1,"action":2,"layout":[],"redirect":{"route":2,"source":"signed"}},
+            {"id":3,"version":1,"action":3,"layout":[],"redirect":{"route":1,"source":"signed"}}
         ]
     })).unwrap()
 }

@@ -204,8 +204,9 @@ pub(crate) fn expand_application(registration: Registration) -> syn::Result<Toke
                 for operation in <#actions as ::noxide::ActionType>::operations() { builder.operation(operation); }
                 if let Some(operation) = <#actions as ::noxide::ActionType>::inspection() { builder.operation(operation); }
                 builder.action(<#actions as ::noxide::ActionType>::definition());
+                builder.web_binding(<#actions as ::noxide::WebActionType>::web_binding());
             )*
-            #(builder.layout(<#form_types as ::noxide::ActionType>::definition().id, #form_functions(::noxide::FormFields::<#form_types>::new()).instructions);)*
+            #(builder.layout(<#form_types as ::noxide::WebActionType>::web_binding().id, #form_functions(::noxide::FormFields::<#form_types>::new()).instructions);)*
             builder.json()
         }
         struct __NoxideApplication;

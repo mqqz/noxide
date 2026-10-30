@@ -1,4 +1,4 @@
-use super::{action::ActionType, form::Form};
+use super::{action::WebActionType, form::Form};
 use crate::{Document, Instruction, ResponseIntent, RouteRef};
 use noxide_protocol::Container;
 /// An escaped, composable document instruction sequence.
@@ -45,17 +45,17 @@ macro_rules! text_render {
     ($($t:ty),*) => { $(impl Render for $t { fn render(self, fragment: &mut Fragment) { fragment.text(self); } })* };
 }
 text_render!(&str, String, &String, char, bool, i64, u64, usize, i32, u32);
-impl<A: ActionType> Render for Form<A> {
+impl<A: WebActionType> Render for Form<A> {
     fn render(self, fragment: &mut Fragment) {
         fragment.nodes.push(Instruction::Form {
-            action: A::definition().id,
+            action: A::web_binding().id,
         });
     }
 }
-impl<A: ActionType> Render for &Form<A> {
+impl<A: WebActionType> Render for &Form<A> {
     fn render(self, fragment: &mut Fragment) {
         fragment.nodes.push(Instruction::Form {
-            action: A::definition().id,
+            action: A::web_binding().id,
         });
     }
 }

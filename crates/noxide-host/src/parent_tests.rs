@@ -92,6 +92,7 @@ pub(crate) fn declarations() -> Manifest {
         forms: vec![1],
         access: Access::PublicOptional,
     });
+    m.actions[0].target_reads = vec![4];
     m.actions[0].steps[0].assign.push(Assignment {
         field: "thread".into(),
         change: Change::Set(Value::SignedTarget),
@@ -245,15 +246,18 @@ async fn mutation_case(db: Database) {
         visibility: None,
         fields: None,
     });
-    m.actions.push(fixture::action(
-        2,
-        "Edit reply",
-        5,
-        Target::Signed,
-        &m.resources[0],
-        &["body"],
-        2,
-    ));
+    {
+        let action = fixture::action(
+            2,
+            "Edit reply",
+            5,
+            Target::Signed,
+            &m.resources[0],
+            &["body"],
+            2,
+        );
+        fixture::register_action(&mut m, action);
+    }
     m.routes[1].forms.push(2);
     m.routes[1].access = Access::PublicOptional;
     manifest::validate(&m).unwrap();
@@ -277,7 +281,7 @@ async fn mutation_case(db: Database) {
     e.grant = Some(crate::security::RecordTarget {
         resource: 1,
         id: 12,
-        route: 2,
+        route: Some(2),
         incarnation: stored.incarnation.clone(),
         revision: stored.revision,
     });
@@ -293,12 +297,12 @@ async fn mutation_case(db: Database) {
         ("thread".into(), "20".into()),
     ]);
     assert!(
-        e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[1]).unwrap())
+        e.execute_transaction(crate::application::ActionCore::of(&m.actions[1]).unwrap())
             .await
             .is_err()
     );
     e.request.input.remove("thread");
-    e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[1]).unwrap())
+    e.execute_transaction(crate::application::ActionCore::of(&m.actions[1]).unwrap())
         .await
         .unwrap();
     e.tx.commit().await.unwrap();
@@ -354,7 +358,7 @@ async fn concurrent_case(db: Database) {
         let grant = crate::security::RecordTarget {
             resource: 2,
             id: 10,
-            route: 3,
+            route: Some(3),
             incarnation: stored.incarnation.clone(),
             revision: stored.revision,
         };
@@ -395,8 +399,7 @@ async fn concurrent_case(db: Database) {
             e.grant = Some(grant);
             assert!(
                 e.execute_transaction(
-                    crate::application::ActionCore::of(&child_manifest, &child_manifest.actions[0])
-                        .unwrap()
+                    crate::application::ActionCore::of(&child_manifest.actions[0]).unwrap()
                 )
                 .await
                 .unwrap_err()
@@ -611,15 +614,18 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         visibility: None,
         fields: None,
     });
-    m.actions.push(fixture::action(
-        2,
-        "Delete thread",
-        5,
-        Target::Signed,
-        &m.resources[0],
-        &[],
-        1,
-    ));
+    {
+        let action = fixture::action(
+            2,
+            "Delete thread",
+            5,
+            Target::Signed,
+            &m.resources[0],
+            &[],
+            1,
+        );
+        fixture::register_action(&mut m, action);
+    }
     m.routes[2].forms.push(2);
     manifest::validate(&m).unwrap();
     seed(&db, &m).await;
@@ -631,7 +637,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
     e.grant = Some(crate::security::RecordTarget {
         resource: 2,
         id: 10,
-        route: 3,
+        route: Some(3),
         incarnation: stored.incarnation.clone(),
         revision: stored.revision,
     });
@@ -643,7 +649,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         roles: vec![("moderator".into(), "".into())],
     });
     assert!(
-        e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[1]).unwrap())
+        e.execute_transaction(crate::application::ActionCore::of(&m.actions[1]).unwrap())
             .await
             .unwrap_err()
             .to_string()
@@ -665,6 +671,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
     target.routes[2].resource = Some(3);
     target.routes[2].forms.retain(|id| *id == 1);
     target.actions.retain(|a| a.id == 1);
+    target.web_bindings.retain(|binding| binding.action == 1);
     target.operations.retain(|o| o.id != 5);
     manifest::validate(&target).unwrap();
     let migration = crate::schema::Migration {
@@ -1428,7 +1435,7 @@ async fn postgres_full_creation_benchmark() {
 pub(crate) async fn redirect_app(db: Database) -> (Application, Manifest) {
     db.initialize().await.unwrap();
     let mut m = declarations();
-    m.actions[0].redirect = Redirect {
+    m.web_bindings[0].redirect = Redirect {
         route: 3,
         source: RedirectSource::Reference {
             step: 0,
@@ -1532,7 +1539,7 @@ async fn sqlite_parent_redirect_handover_replay_and_visibility() {
 fn parent_redirect_admission_and_contract_identity() {
     let ordinary = declarations();
     let mut parent = ordinary.clone();
-    parent.actions[0].redirect = Redirect {
+    parent.web_bindings[0].redirect = Redirect {
         route: 3,
         source: RedirectSource::Reference {
             step: 0,
@@ -1545,7 +1552,7 @@ fn parent_redirect_admission_and_contract_identity() {
         manifest::digest(&parent).unwrap()
     );
     for route in [1, 2, 999] {
-        parent.actions[0].redirect = Redirect {
+        parent.web_bindings[0].redirect = Redirect {
             route,
             source: RedirectSource::Reference {
                 step: 0,
@@ -1554,7 +1561,7 @@ fn parent_redirect_admission_and_contract_identity() {
         };
         assert!(manifest::validate(&parent).is_err());
     }
-    parent.actions[0].redirect = Redirect {
+    parent.web_bindings[0].redirect = Redirect {
         route: 3,
         source: RedirectSource::Reference {
             step: 0,
@@ -1846,7 +1853,7 @@ fn forged_reference_and_follow_declarations_are_rejected_independently() {
     reject(&|m| m.operations[4].via.as_mut().unwrap().source = 6);
     reject(&|m| m.routes[2].operations.retain(|id| *id != 1));
     reject(&|m| {
-        m.actions[0].redirect = Redirect {
+        m.web_bindings[0].redirect = Redirect {
             route: 3,
             source: RedirectSource::Reference {
                 step: 0,
@@ -1997,10 +2004,10 @@ async fn follow_case(db: Database) {
         id: 10,
         incarnation: "parent".into(),
         revision: 1,
-        route: 3,
+        route: Some(3),
     });
     assert!(
-        e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+        e.execute_transaction(crate::application::ActionCore::of(&m.actions[0]).unwrap())
             .await
             .unwrap_err()
             .is::<crate::repository::ReferenceUnavailable>(),

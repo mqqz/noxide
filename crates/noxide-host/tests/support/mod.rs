@@ -87,15 +87,21 @@ pub fn manifest() -> Manifest {
                 forms: vec![],
             },
         ],
-        actions: vec![Action {
-            layout: Vec::new(),
+        web_bindings: vec![WebBinding {
             id: 1,
             version: 1,
-            name: "Save note".into(),
+            action: 1,
+            layout: vec![],
             redirect: Redirect {
                 route: 2,
                 source: RedirectSource::Step(0),
             },
+        }],
+        actions: vec![Action {
+            target_reads: vec![2],
+            id: 1,
+            version: 1,
+            name: "Save note".into(),
             revision: Revision::Exact,
             inputs: vec![Input {
                 name: "body".into(),
@@ -218,12 +224,26 @@ pub fn action(
     resource: &Resource,
     names: &[&str],
     route: u32,
-) -> Action {
+) -> FixtureAction {
     let mut action = Action {
         id,
         version: 1,
         name: name.into(),
-        layout: vec![],
+        target_reads: vec![2],
+        inspect: None,
+        inputs: vec![],
+        revision: Revision::Exact,
+        steps: vec![Step {
+            operation,
+            target: target.clone(),
+            assign: vec![],
+        }],
+    };
+    for name in names {
+        add_input(&mut action, resource, name);
+    }
+    FixtureAction {
+        core: action,
         redirect: Redirect {
             route,
             source: if target == Target::None {
@@ -232,17 +252,68 @@ pub fn action(
                 RedirectSource::Signed
             },
         },
-        inspect: None,
-        inputs: vec![],
-        revision: Revision::Exact,
-        steps: vec![Step {
-            operation,
-            target,
-            assign: vec![],
-        }],
-    };
-    for name in names {
-        add_input(&mut action, resource, name);
     }
-    action
+}
+#[allow(dead_code)]
+pub struct FixtureAction {
+    pub core: Action,
+    pub redirect: Redirect,
+}
+impl std::ops::Deref for FixtureAction {
+    type Target = Action;
+    fn deref(&self) -> &Action {
+        &self.core
+    }
+}
+impl std::ops::DerefMut for FixtureAction {
+    fn deref_mut(&mut self) -> &mut Action {
+        &mut self.core
+    }
+}
+#[allow(dead_code)]
+pub fn register_action(m: &mut Manifest, mut action: FixtureAction) {
+    action.core.target_reads = m
+        .routes
+        .iter()
+        .filter(|route| route.forms.contains(&action.core.id))
+        .flat_map(|route| &route.operations)
+        .copied()
+        .filter(|id| {
+            m.operations
+                .iter()
+                .any(|op| op.id == *id && op.kind == OperationKind::Read && op.via.is_none())
+        })
+        .collect();
+    if action.core.target_reads.is_empty() {
+        let signed = action
+            .core
+            .steps
+            .iter()
+            .find(|step| step.target == Target::Signed)
+            .and_then(|step| m.operations.iter().find(|op| op.id == step.operation))
+            .map(|op| op.resource);
+        action.core.target_reads = m
+            .operations
+            .iter()
+            .filter(|op| {
+                op.kind == OperationKind::Read
+                    && op.via.is_none()
+                    && (signed == Some(op.resource)
+                        || m.routes.iter().any(|route| {
+                            route.id == action.redirect.route && route.resource == Some(op.resource)
+                        }))
+            })
+            .map(|op| op.id)
+            .collect();
+    }
+    action.core.target_reads.sort_unstable();
+    action.core.target_reads.dedup();
+    m.web_bindings.push(WebBinding {
+        id: action.core.id,
+        version: action.core.version,
+        action: action.core.id,
+        layout: vec![],
+        redirect: action.redirect,
+    });
+    m.actions.push(action.core);
 }

@@ -1,5 +1,5 @@
 //! Core action execution and transactional replay semantics.
-use super::{Application, EditReceipt, RequestError, navigation, submission::ExecutionBudget};
+use super::{Application, EditReceipt, RequestError, navigation};
 use crate::{
     auth,
     database::{Param, Transaction},
@@ -9,8 +9,8 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use noxide_protocol::{
-    Action, Fields, Input, Inspection, Manifest, OperationKind, RedirectSource, RequestKind,
-    RequestView, ResponseIntent, Revision, Step, VERSION,
+    Action, Fields, Input, Inspection, OperationKind, RedirectSource, RequestKind, RequestView,
+    ResponseIntent, Revision, Step, VERSION,
 };
 use tokio::time::Instant;
 
@@ -23,14 +23,10 @@ pub(crate) struct ActionCore<'a> {
     pub revision: &'a Revision,
     pub steps: &'a [Step],
     pub inspect: Option<&'a Inspection>,
-    pub source: &'a RedirectSource,
-    pub destination_resource: Option<u32>,
-    /// Opaque identity retained to preserve the serialized receipt contract.
-    pub destination_route: u32,
+    pub target_reads: &'a [u32],
 }
 impl<'a> ActionCore<'a> {
-    pub fn of(manifest: &Manifest, action: &'a Action) -> Result<Self> {
-        let destination = manifest::route(manifest, action.redirect.route())?;
+    pub fn of(action: &'a Action) -> Result<Self> {
         Ok(Self {
             id: action.id,
             version: action.version,
@@ -38,9 +34,7 @@ impl<'a> ActionCore<'a> {
             revision: &action.revision,
             steps: &action.steps,
             inspect: action.inspect.as_ref(),
-            source: &action.redirect.source,
-            destination_resource: destination.resource,
-            destination_route: destination.id,
+            target_reads: &action.target_reads,
         })
     }
 
@@ -49,11 +43,44 @@ impl<'a> ActionCore<'a> {
     }
 }
 
-/// Credentials resolved under the action's write transaction.
-pub(super) struct Submitter<'a> {
-    pub cookie: &'a str,
-    pub submission: &'a str,
-    pub csrf: &'a str,
+/// Sealed target proof constructed only by verified host admission.
+/// Current read/edit authority is checked after committed-receipt recovery.
+struct TargetGrant {
+    target: RecordTarget,
+    capability: Option<String>,
+}
+
+/// Transaction-scoped execution identity; guests and adapters cannot supply a principal.
+pub(super) struct InvocationContext<'a> {
+    action: ActionCore<'a>,
+    input: Fields,
+    principal: auth::Principal,
+    target: Option<TargetGrant>,
+    identity: String,
+    nonce: String,
+    subject: String,
+    expires: i64,
+    navigation: Option<NavigationPlan<'a>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct NavigationPlan<'a> {
+    pub source: &'a RedirectSource,
+    pub destination_resource: Option<u32>,
+    pub destination_route: u32,
+}
+impl<'a> NavigationPlan<'a> {
+    pub fn web(
+        manifest: &noxide_protocol::Manifest,
+        binding: &'a noxide_protocol::WebBinding,
+    ) -> Result<Self> {
+        let destination = manifest::route(manifest, binding.redirect.route)?;
+        Ok(Self {
+            source: &binding.redirect.source,
+            destination_resource: destination.resource,
+            destination_route: destination.id,
+        })
+    }
 }
 
 /// One action attempt; completed mutations still await response preparation and commit.
@@ -79,8 +106,6 @@ pub(super) enum Settled {
     Conflict {
         target: RecordTarget,
         stored: StoredRecord,
-        session: Box<Token>,
-        now: i64,
     },
     Rejected {
         field_errors: Fields,
@@ -96,35 +121,30 @@ impl Application {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn attempt_action(
         &self,
-        submitter: Submitter<'_>,
-        a: ActionCore<'_>,
-        input: &Fields,
-        input_hash: &str,
-        capability: Option<&str>,
+        mut tx: Transaction,
+        context: InvocationContext<'_>,
         budget: &mut ExecutionBudget,
     ) -> Result<Attempt> {
         let deadline = budget.deadline;
-        let mut tx = self.database.begin(deadline.into_std()).await?;
-        self.admission(&mut tx, false).await?;
-        let now = security::now()?;
-        let now = self.observe_clock_write(&mut tx, now).await?;
-        let (token, session, principal) = self
-            .submission_identity(
-                &mut tx,
-                a,
-                submitter.cookie,
-                submitter.submission,
-                submitter.csrf,
-                now,
-            )
-            .await?;
-        let target = self.submission_target(&token, a)?;
+        let InvocationContext {
+            action: a,
+            input,
+            principal,
+            target: grant,
+            identity,
+            nonce,
+            subject,
+            expires,
+            navigation,
+        } = context;
+        let target = grant.as_ref().map(|grant| grant.target.clone());
+        let input_hash = identity.as_str();
         let claimed = tx.execute("INSERT INTO nx_receipts(nonce,subject,contract,action,input,outcome,expires) VALUES($1,$2,$3,$4,$5,'',$6) ON CONFLICT(nonce) DO NOTHING", &[
-            token.nonce.as_str().into(), session.nonce.as_str().into(), self.contract.as_str().into(), Param::Number(a.id.into()), input_hash.into(), Param::Number(token.expires),
+            nonce.as_str().into(), subject.as_str().into(), self.contract.as_str().into(), Param::Number(a.id.into()), input_hash.into(), Param::Number(expires),
         ]).await?;
         if claimed == 0 {
             let [digest, outcome] = self
-                .load_receipt(&mut tx, &token.nonce, &session.nonce)
+                .load_receipt(&mut tx, &nonce, &subject)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("receipt unavailable"))?;
             ensure!(digest == input_hash, RequestError::InvalidRequest);
@@ -139,7 +159,13 @@ impl Application {
         }
         let record = if let Some(target) = &target {
             let Some(stored) = self
-                .authorized_target(&mut tx, a, target, &principal, capability)
+                .authorized_target(
+                    &mut tx,
+                    a,
+                    target,
+                    &principal,
+                    grant.as_ref().and_then(|grant| grant.capability.as_deref()),
+                )
                 .await?
             else {
                 tx.rollback().await?;
@@ -150,8 +176,6 @@ impl Application {
                 return Ok(Attempt::Settled(Settled::Conflict {
                     target: target.clone(),
                     stored,
-                    session: Box::new(session),
-                    now,
                 }));
             }
             Some(stored)
@@ -162,12 +186,14 @@ impl Application {
             }
             None
         };
-        let gated_destination = a
-            .destination_resource
+        let gated_destination = navigation
+            .and_then(|plan| plan.destination_resource)
             .map(|id| manifest::resource(&self.manifest, id))
             .transpose()?
             .is_some_and(|resource| resource.gate.is_some());
-        budget.parent_redirect_attempt(gated_destination)?;
+        if navigation.is_some() {
+            budget.parent_redirect_attempt(gated_destination)?;
+        }
         let signed_target = target.clone();
         let original = record.clone();
         let response_principal = principal.clone();
@@ -283,15 +309,18 @@ impl Application {
             }
         };
         budget.database_calls = effects.calls;
-        let destination = self
-            .capture_destination(
+        let destination = if let Some(plan) = navigation {
+            self.capture_destination(
                 &mut effects.tx,
-                a,
+                plan,
                 signed_target.as_ref(),
                 original.as_ref(),
                 &outcomes,
             )
-            .await?;
+            .await?
+        } else {
+            None
+        };
         let handover = outcomes
             .iter()
             .zip(a.steps)
@@ -311,9 +340,9 @@ impl Application {
             })
             .transpose()?;
         let receipt = serde_json::to_string(&navigation::SemanticReceipt {
-            version: 1,
+            version: 2,
             outcomes,
-            source: a.source.clone(),
+            source: navigation.map(|plan| plan.source.clone()),
             destination,
             handover,
         })?;
@@ -324,8 +353,97 @@ impl Application {
                 target: None,
                 principal: response_principal,
             },
-            nonce: token.nonce,
+            nonce,
         })
+    }
+
+    /// Browser adapter admission. Service admission deliberately has no constructor
+    /// until persisted grant/job/fence checks exist (P10).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn admit_web_invocation<'a>(
+        &'a self,
+        tx: &mut Transaction,
+        binding: u32,
+        cookie: &str,
+        submission: &str,
+        csrf: &str,
+        input: &Fields,
+        capability: Option<&str>,
+    ) -> Result<(InvocationContext<'a>, Token, i64)> {
+        let binding = manifest::web_binding(&self.manifest, binding)?;
+        let action = manifest::action(&self.manifest, binding.action)?;
+        let core = ActionCore::of(action)?;
+        let input = manifest::canonical_input(&self.manifest, action, input)
+            .map_err(|_| RequestError::InvalidRequest)?;
+        manifest::validate_input(&self.manifest, action, &input)
+            .map_err(|_| RequestError::InvalidRequest)?;
+        let input_hash = input_digest(core, &input)?;
+        let now = self.observe_clock_write(tx, security::now()?).await?;
+        let (token, session, principal) = self
+            .submission_identity(tx, core, cookie, submission, csrf, now)
+            .await?;
+        let target = self.submission_target(&token, core, binding)?;
+        let identity = self.web_invocation_identity(
+            binding,
+            &token,
+            &session,
+            &principal,
+            &input_hash,
+            target.as_ref(),
+        )?;
+        let context = InvocationContext {
+            action: core,
+            input,
+            principal,
+            target: target.map(|target| TargetGrant {
+                target,
+                capability: capability.map(str::to_owned),
+            }),
+            identity,
+            nonce: token.nonce,
+            subject: session.nonce.clone(),
+            expires: token.expires,
+            navigation: Some(NavigationPlan::web(&self.manifest, binding)?),
+        };
+        Ok((context, session, now))
+    }
+
+    pub(super) fn web_invocation_identity(
+        &self,
+        binding: &noxide_protocol::WebBinding,
+        token: &Token,
+        session: &Token,
+        principal: &auth::Principal,
+        input_hash: &str,
+        target: Option<&RecordTarget>,
+    ) -> Result<String> {
+        use base64::Engine;
+        use sha2::Digest;
+        let subject = match principal {
+            auth::Principal::Anonymous => ("anonymous", "", ""),
+            auth::Principal::User(user) => ("user", user.id.as_str(), user.tenant.as_str()),
+        };
+        let action = manifest::action(&self.manifest, binding.action)?;
+        // Existing receipt columns persist this digest. It binds every execution
+        // identity field; changing an adapter or binding cannot reuse its claim.
+        let canonical = serde_json::to_vec(&(
+            VERSION,
+            "web",
+            self.submission_contract(),
+            subject,
+            &session.nonce,
+            action.id,
+            action.version,
+            binding.id,
+            binding.version,
+            input_hash,
+            target,
+            &token.nonce,
+        ))?;
+        Ok(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(sha2::Sha256::digest(canonical)),
+        )
     }
 
     // Called by the binding after response preparation, preserving the original
@@ -375,44 +493,511 @@ impl Application {
     }
 }
 
+pub(super) fn input_digest(action: ActionCore<'_>, input: &Fields) -> Result<String> {
+    use base64::Engine;
+    use sha2::Digest;
+    ensure!(
+        input.len() == action.inputs.len(),
+        "unexpected digest input"
+    );
+    let input: Fields = action
+        .inputs
+        .iter()
+        .map(|schema| {
+            let value = input
+                .get(&schema.name)
+                .ok_or_else(|| anyhow::anyhow!("missing digest input"))?;
+            Ok((
+                schema.name.clone(),
+                schema.canonical(value).map_err(anyhow::Error::msg)?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    Ok(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(
+            serde_json::to_vec(&(VERSION, action.version, &action.inputs, input))?,
+        )),
+    )
+}
+
+// One budget survives every transaction retry; admission waits and bounded
+// transaction cleanup are separate from this execution deadline.
+pub(super) struct ExecutionBudget {
+    pub(super) deadline: Instant,
+    pub(super) fuel: u64,
+    pub(super) host_calls: u32,
+    pub(super) database_calls: u32,
+    parent_navigation_reserved: bool,
+    // Hold admission through binding response preparation and receipt persistence.
+    pub(super) wasm: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+impl ExecutionBudget {
+    pub(super) fn parent_redirect_attempt(&mut self, gated: bool) -> Result<()> {
+        // Navigation runs once after the successful commit, outside all retries.
+        // Its quota covers begin/commit, the target lookup and its optional gate.
+        if !self.parent_navigation_reserved {
+            self.database_calls = self
+                .database_calls
+                .checked_sub(4 + 2 * u32::from(gated))
+                .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
+            self.parent_navigation_reserved = true;
+        }
+        // Each attempt actually captures the parent with storage_resource + load.
+        // Charge before calling it so errors and rolled-back work stay charged.
+        self.database_calls = self
+            .database_calls
+            .checked_sub(2)
+            .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
+        Ok(())
+    }
+    pub(super) fn new(limits: &crate::runtime::Limits, deadline: Instant) -> Self {
+        Self {
+            deadline,
+            fuel: limits.fuel,
+            host_calls: limits.host_calls,
+            database_calls: 16,
+            parent_navigation_reserved: false,
+            wasm: None,
+        }
+    }
+}
+
+/// Common host admission envelope. A grant never replaces these permits.
+pub(super) struct InvocationAdmission {
+    _request: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    _database: tokio::sync::OwnedSemaphorePermit,
+    _anonymous_write: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+impl Application {
+    pub(super) async fn admit_invocation(
+        &self,
+        anonymous: bool,
+    ) -> std::result::Result<InvocationAdmission, RequestError> {
+        let request = self
+            .admission_limits
+            .requests()
+            .request()
+            .await
+            .map_err(|_| RequestError::Busy)?;
+        let anonymous_write = self.anonymous_write(anonymous).await?;
+        let database = self
+            .admission_limits
+            .database()
+            .acquire()
+            .await
+            .map_err(|_| RequestError::Busy)?;
+        Ok(InvocationAdmission {
+            _request: request,
+            _database: database,
+            _anonymous_write: anonymous_write,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn headless_core_requires_no_route_or_redirect() {
+        let mut manifest = crate::test_support::manifest();
+        manifest.web_bindings.clear();
+        manifest.routes.clear();
+        manifest::validate(&manifest).unwrap();
+        let action = &manifest.actions[0];
+        let core = ActionCore::of(action).unwrap();
+        assert_eq!(core.id, action.id);
+        assert_eq!(core.steps, action.steps);
+        assert_eq!(core.inputs, action.inputs);
+        assert_eq!(core.target_reads, action.target_reads);
+        // No production service constructor exists: a headless declaration alone
+        // cannot enter the web adapter or create a service invocation context.
+        assert!(manifest::web_action(&manifest, action.id).is_err());
+        let app = Application::new(
+            &crate::test_support::component(None),
+            &serde_json::to_vec(&manifest).unwrap(),
+            manifest::digest(&manifest).unwrap(),
+            crate::Database::sqlite(":memory:"),
+            crate::HostKeys::generate().unwrap(),
+            crate::runtime::Limits::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            app.submit("unverified", action.id, "", "", Fields::new())
+                .await,
+            Err(RequestError::InvalidRequest)
+        ));
+    }
+    #[tokio::test]
+    async fn web_binding_seal_and_receipt_identity_reject_adapter_substitution() {
+        use crate::{Database, HostKeys, runtime::Limits, test_support as fixture};
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::sqlite(tmp.path().join("binding-identity.db"));
+        db.initialize().await.unwrap();
+        db.create_account("alice", "binding identity test password", "tenant")
+            .await
+            .unwrap();
+        let mut manifest = fixture::manifest();
+        let mut second = manifest.web_bindings[0].clone();
+        second.id = 91;
+        second.version = 7;
+        manifest.web_bindings.push(second);
+        manifest.routes[0].forms.push(91);
+        let app = std::sync::Arc::new(
+            Application::new(
+                &fixture::component(None),
+                &serde_json::to_vec(&manifest).unwrap(),
+                manifest::digest(&manifest).unwrap(),
+                db.clone(),
+                HostKeys::generate().unwrap(),
+                Limits::default(),
+            )
+            .unwrap(),
+        );
+        app.activate().await.unwrap();
+        let challenge = app.login_challenge().await.unwrap();
+        let cookie = app
+            .login(
+                &challenge.cookie,
+                &challenge.csrf,
+                "alice",
+                "binding identity test password",
+            )
+            .await
+            .unwrap();
+        let page = app.view(&cookie, 1, None).await.unwrap();
+        let html = String::from_utf8(page.body).unwrap();
+        let submission = fixture::hidden(&html, "_submission");
+        let csrf = fixture::hidden(&html, "_csrf");
+        let input = Fields::from([("body".into(), "one canonical execution".into())]);
+        assert!(matches!(
+            app.submit(&cookie, 91, &submission, &csrf, input.clone())
+                .await,
+            Err(RequestError::InvalidRequest)
+        ));
+        let first = app
+            .submit(&cookie, 1, &submission, &csrf, input.clone())
+            .await
+            .unwrap();
+        let replay = app
+            .submit(&cookie, 1, &submission, &csrf, input.clone())
+            .await
+            .unwrap();
+        assert_eq!(first.location, replay.location);
+        assert!(matches!(
+            app.submit(&cookie, 91, &submission, &csrf, input.clone())
+                .await,
+            Err(RequestError::InvalidRequest)
+        ));
+        let now = security::now().unwrap();
+        let token = app.keys.verify(&submission, now).unwrap();
+        let session = app.keys.verify(&cookie, now).unwrap();
+        let mut tx = db
+            .begin((Instant::now() + std::time::Duration::from_secs(3)).into_std())
+            .await
+            .unwrap();
+        let (_, principal) = auth::authenticate(&mut tx, &app.keys, &cookie, now)
+            .await
+            .unwrap();
+        let digest = input_digest(ActionCore::of(&manifest.actions[0]).unwrap(), &input).unwrap();
+        let binding = &manifest.web_bindings[0];
+        let identity = app
+            .web_invocation_identity(binding, &token, &session, &principal, &digest, None)
+            .unwrap();
+        assert_eq!(
+            app.load_receipt(&mut tx, &token.nonce, &session.nonce)
+                .await
+                .unwrap()
+                .unwrap()[0],
+            identity
+        );
+        let mut substituted = binding.clone();
+        substituted.version += 1;
+        assert_ne!(
+            identity,
+            app.web_invocation_identity(&substituted, &token, &session, &principal, &digest, None)
+                .unwrap()
+        );
+        assert_ne!(
+            identity,
+            app.web_invocation_identity(
+                &manifest.web_bindings[1],
+                &token,
+                &session,
+                &principal,
+                &digest,
+                None
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_records", &[])
+                .await
+                .unwrap()[0][0],
+            "1"
+        );
+        tx.rollback().await.unwrap();
+        // A different binding ID is a valid presentation of canonical action 1.
+        // The guest still receives RequestKind::Action(1); recovery uses binding 91.
+        let alternate = manifest::web_action(&manifest, 91).unwrap();
+        let credentials = app
+            .credentials(
+                &alternate,
+                &session,
+                security::now().unwrap(),
+                None,
+                Fields::new(),
+            )
+            .unwrap();
+        let saved = app
+            .submit(
+                &cookie,
+                91,
+                &credentials.submission,
+                &credentials.csrf,
+                input.clone(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(saved.location, first.location);
+        let recovered = app
+            .recover_form(
+                &cookie,
+                91,
+                &credentials.submission,
+                &credentials.csrf,
+                &input,
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.location, recovered.location);
+        let replay = app
+            .submit(
+                &cookie,
+                91,
+                &credentials.submission,
+                &credentials.csrf,
+                input,
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.location, replay.location);
+    }
+
     #[test]
-    fn core_view_preserves_execution_fields_and_validates_destination() {
-        let manifest = crate::test_support::manifest();
-        let mut action = manifest.actions[0].clone();
-        action.id = 17;
-        action.version = 23;
-        action.revision = Revision::Identity;
-        action.inspect = Some(Inspection {
+    fn target_reads_require_both_declared_and_issuing_route_authority() {
+        use crate::{Database, HostKeys, runtime::Limits, test_support as fixture};
+        let mut manifest = fixture::manifest();
+        let mut independent = manifest.operations[1].clone();
+        independent.id = 9;
+        manifest.operations.push(independent);
+        manifest.actions[0].target_reads = vec![9];
+        let app = Application::new(
+            &fixture::component(None),
+            &serde_json::to_vec(&manifest).unwrap(),
+            manifest::digest(&manifest).unwrap(),
+            Database::sqlite(":memory:"),
+            HostKeys::generate().unwrap(),
+            Limits::default(),
+        )
+        .unwrap();
+        let principal = auth::Principal::User(auth::User {
+            id: "owner".into(),
+            tenant: "tenant".into(),
+            roles: vec![],
+        });
+        let stored = StoredRecord {
+            record: noxide_protocol::Record {
+                resource: 1,
+                id: 1,
+                fields: Fields::from([("body".into(), "private".into())]),
+            },
+            owner: "owner".into(),
+            tenant: "tenant".into(),
+            incarnation: "sealed".into(),
+            revision: 1,
+            cap_version: None,
+        };
+        assert!(
+            !app.target_allowed(
+                ActionCore::of(&manifest.actions[0]).unwrap(),
+                Some(2),
+                &principal,
+                &stored
+            )
+            .unwrap()
+        );
+        let mut core = manifest.actions[0].clone();
+        core.target_reads = vec![2];
+        assert!(
+            app.target_allowed(ActionCore::of(&core).unwrap(), Some(2), &principal, &stored)
+                .unwrap()
+        );
+        assert!(
+            !app.target_allowed(
+                ActionCore::of(&core).unwrap(),
+                Some(2),
+                &auth::Principal::Anonymous,
+                &stored
+            )
+            .unwrap()
+        );
+    }
+    #[tokio::test]
+    async fn edit_grant_cannot_authorize_guest_inspection() {
+        use crate::{Database, HostKeys, runtime::Limits, test_support as fixture};
+        use noxide_protocol::{Access, Inspection, Policy, Predicate, Target};
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::sqlite(tmp.path().join("edit-inspection.db"));
+        db.initialize().await.unwrap();
+        let mut manifest = fixture::manifest();
+        manifest.operations[2].policy = Policy {
+            any: vec![vec![Predicate::Public]],
+        };
+        let mut update = manifest.operations[2].clone();
+        update.id = 4;
+        update.kind = OperationKind::Update;
+        update.policy = Policy {
+            any: vec![vec![Predicate::Capability]],
+        };
+        manifest.operations.push(update);
+        let mut edit = fixture::action(
+            2,
+            "Edit",
+            4,
+            Target::Signed,
+            &manifest.resources[0],
+            &["body"],
+            2,
+        );
+        edit.inspect = Some(Inspection {
             operation: 2,
             fields: vec!["body".into()],
         });
-        action.redirect.source = RedirectSource::Reference {
-            step: 0,
-            field: "parent".into(),
+        fixture::register_action(&mut manifest, edit);
+        manifest.routes[0].access = Access::PublicOptional;
+        manifest.routes[1].access = Access::PublicOptional;
+        manifest.routes[1].forms.push(2);
+        let app = std::sync::Arc::new(
+            Application::new(
+                &fixture::component(None),
+                &serde_json::to_vec(&manifest).unwrap(),
+                manifest::digest(&manifest).unwrap(),
+                db.clone(),
+                HostKeys::generate().unwrap(),
+                Limits::default(),
+            )
+            .unwrap(),
+        );
+        app.activate().await.unwrap();
+        let page = app.view_page(None, 1, None, None).await.unwrap();
+        let cookie = page.anonymous_cookie.unwrap();
+        let html = String::from_utf8(page.body).unwrap();
+        let saved = app
+            .submit(
+                &cookie,
+                1,
+                &fixture::hidden(&html, "_submission"),
+                &fixture::hidden(&html, "_csrf"),
+                Fields::from([("body".into(), "secret inspection".into())]),
+            )
+            .await
+            .unwrap();
+        let html = String::from_utf8(saved.body).unwrap();
+        let secret = html
+            .split_once("<pre>")
+            .unwrap()
+            .1
+            .split_once("</pre>")
+            .unwrap()
+            .0;
+        let mut tx = db
+            .begin((Instant::now() + std::time::Duration::from_secs(3)).into_std())
+            .await
+            .unwrap();
+        let id: u64 = tx
+            .fetch::<1>("SELECT CAST(id AS TEXT) FROM nx_records", &[])
+            .await
+            .unwrap()[0][0]
+            .parse()
+            .unwrap();
+        let stored = repository::load(&mut tx, &manifest, 1, id)
+            .await
+            .unwrap()
+            .unwrap();
+        let target = RecordTarget {
+            resource: 1,
+            id,
+            incarnation: stored.incarnation,
+            revision: stored.revision,
+            route: Some(2),
         };
-        let core = ActionCore::of(&manifest, &action).unwrap();
-        assert_eq!(core.id, action.id);
-        assert_eq!(core.version, action.version);
-        assert_eq!(core.inputs, action.inputs);
-        assert_eq!(core.revision, &action.revision);
-        assert_eq!(core.steps, action.steps);
-        assert_eq!(core.inspect, action.inspect.as_ref());
-        assert_eq!(core.source, &action.redirect.source);
-        assert_eq!(core.destination_resource, Some(1));
-        assert_eq!(core.destination_route, action.redirect.route());
-        assert_eq!(core.first_operation(), action.steps[0].operation);
+        let core = ActionCore::of(&manifest.actions[1]).unwrap();
+        assert!(
+            app.authorized_target(
+                &mut tx,
+                core,
+                &target,
+                &auth::Principal::Anonymous,
+                Some(secret)
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        let mut mutation_only = manifest.actions[1].clone();
+        mutation_only.inspect = None;
+        assert!(
+            app.authorized_target(
+                &mut tx,
+                ActionCore::of(&mutation_only).unwrap(),
+                &target,
+                &auth::Principal::Anonymous,
+                Some(secret)
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+        tx.rollback().await.unwrap();
+    }
+    #[test]
+    fn forged_web_bindings_and_target_read_declarations_fail_admission() {
+        let baseline = crate::test_support::manifest();
+        for alteration in 0..5 {
+            let mut forged = baseline.clone();
+            match alteration {
+                0 => forged.web_bindings[0].action = u32::MAX,
+                1 => forged.web_bindings[0].version = 0,
+                2 => forged.web_bindings.push(forged.web_bindings[0].clone()),
+                3 => forged.web_bindings[0].redirect.route = u32::MAX,
+                4 => forged.actions[0].target_reads = vec![3], // mutation cannot supply reads
+                _ => unreachable!(),
+            }
+            assert!(
+                manifest::validate(&forged).is_err(),
+                "alteration {alteration}"
+            );
+        }
+        let mut wire = serde_json::to_value(&baseline).unwrap();
+        wire["actions"][0]["redirect"] = serde_json::json!({"route":2,"source":{"step":0}});
+        assert!(manifest::parse(&serde_json::to_vec(&wire).unwrap()).is_err());
+        let mut wire = serde_json::to_value(&baseline).unwrap();
+        wire["workers"] = serde_json::json!([{"action":1,"enabled":true}]);
+        assert!(manifest::parse(&serde_json::to_vec(&wire).unwrap()).is_err());
+    }
 
-        action.inspect = None;
-        action.redirect.route = 1;
-        let core = ActionCore::of(&manifest, &action).unwrap();
-        assert!(core.inspect.is_none());
-        assert!(core.destination_resource.is_none());
-        assert_eq!(core.destination_route, 1);
-        action.redirect.route = u32::MAX;
-        assert!(ActionCore::of(&manifest, &action).is_err());
+    #[test]
+    fn binding_registry_order_is_canonical_but_binding_authority_changes_digest() {
+        let mut manifest = crate::test_support::manifest();
+        let mut second = manifest.web_bindings[0].clone();
+        second.id = 91;
+        manifest.web_bindings.push(second);
+        let original = manifest::digest(&manifest).unwrap();
+        manifest.web_bindings.reverse();
+        assert_eq!(original, manifest::digest(&manifest).unwrap());
+        manifest.web_bindings[0].version += 1;
+        assert_ne!(original, manifest::digest(&manifest).unwrap());
     }
 }

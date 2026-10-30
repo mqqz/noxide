@@ -256,11 +256,8 @@ pub(crate) fn expand_action(
         impl ::noxide::ActionType for #name {
             type Resource = #resource;
             type Input = #input_name;
-            type Controls = #controls_name;
+
             type Original = #original_type;
-            fn controls() -> Self::Controls {
-                #controls_name { #(#names: ::noxide::ControlField::new(#keys)),* }
-            }
             fn operations() -> Vec<::noxide::__private::Operation> {
                 vec![::noxide::__private::Operation { bind: #bind, scope: None, via: None,
                     filter: Vec::new(), disclose: Vec::new(),
@@ -281,11 +278,21 @@ pub(crate) fn expand_action(
                 ::noxide::__private::Action {
                     id: ::noxide::stable_id(concat!("action:", module_path!(), "::", stringify!(#name))),
                     version: #version, name: #label.into(),
-                    steps: vec![::noxide::__private::Step { operation: <Self as ::noxide::ActionType>::operations()[0].id, target: #target, assign }], redirect: #redirect_value,
-                    inputs, revision: ::noxide::__private::Revision::Exact, inspect: #inspection, layout: vec![],
+                    steps: vec![::noxide::__private::Step { operation: <Self as ::noxide::ActionType>::operations()[0].id, target: #target, assign }], target_reads: vec![],
+                    inputs, revision: ::noxide::__private::Revision::Exact, inspect: #inspection,
                 }
             }
             fn inspection() -> Option<::noxide::__private::Operation> { #inspection_operation }
+        }
+        impl ::noxide::WebActionType for #name {
+            type Controls = #controls_name;
+            fn controls() -> Self::Controls {
+                #controls_name { #(#names: ::noxide::ControlField::new(#keys)),* }
+            }
+            fn web_binding() -> ::noxide::__private::WebBinding {
+                let action = <Self as ::noxide::ActionType>::definition();
+                ::noxide::__private::WebBinding { id: action.id, version: action.version, action: action.id, layout: vec![], redirect: #redirect_value }
+            }
         }
     })
 }
@@ -872,12 +879,17 @@ fn expand_transaction(
             type Resource = #primary;
             type Input = #input_name;
             type Original = #original_type;
-            type Controls = #controls_name;
-            fn controls() -> Self::Controls { #controls_name { #(#names: ::noxide::ControlField::new(#keys)),* } }
+
+
             fn resources() -> Vec<::noxide::__private::Resource> { vec![#(<#resources as ::noxide::ResourceType>::definition()),*] }
             fn operations() -> Vec<::noxide::__private::Operation> { vec![#(#operations,)* #(#eligibility_operations),*] }
             fn inspection() -> Option<::noxide::__private::Operation> { #inspection_operation }
-            fn definition() -> ::noxide::__private::Action { ::noxide::__private::Action { id: ::noxide::stable_id(concat!("action:", module_path!(), "::", stringify!(#name))), version: #version, name: #label.into(), layout: vec![], redirect: ::noxide::__private::Redirect { route: #redirect::id(), source: #source }, inspect: #inspection, inputs: vec![#(#schemas),*], revision: #revision, steps: vec![#(#steps),*] } }
+            fn definition() -> ::noxide::__private::Action { ::noxide::__private::Action { id: ::noxide::stable_id(concat!("action:", module_path!(), "::", stringify!(#name))), version: #version, name: #label.into(), target_reads: vec![], inspect: #inspection, inputs: vec![#(#schemas),*], revision: #revision, steps: vec![#(#steps),*] } }
+        }
+        impl ::noxide::WebActionType for #name {
+            type Controls = #controls_name;
+            fn controls() -> Self::Controls { #controls_name { #(#names: ::noxide::ControlField::new(#keys)),* } }
+            fn web_binding() -> ::noxide::__private::WebBinding { let action = <Self as ::noxide::ActionType>::definition(); ::noxide::__private::WebBinding { id: action.id, version: action.version, action: action.id, layout: vec![], redirect: ::noxide::__private::Redirect { route: #redirect::id(), source: #source } } }
         }
     })
 }

@@ -1,6 +1,6 @@
 use super::resource::ResourceType;
 use crate::{Fields, RequestView, ResponseIntent};
-use noxide_protocol::{Action, Operation, Resource};
+use noxide_protocol::{Action, Operation, Resource, WebBinding};
 use std::{collections::BTreeMap, marker::PhantomData};
 pub trait ActionInput: Sized {
     fn from_fields(fields: &Fields) -> Self;
@@ -12,7 +12,6 @@ pub trait ActionType: Sized {
     type Resource: ResourceType;
     type Input: ActionInput;
     type Original: ActionInput;
-    type Controls;
     fn definition() -> Action;
     fn operations() -> Vec<Operation>;
     fn resources() -> Vec<Resource> {
@@ -21,7 +20,13 @@ pub trait ActionType: Sized {
     fn inspection() -> Option<Operation> {
         None
     }
+}
+
+/// Optional browser controls and navigation for a canonical action.
+pub trait WebActionType: ActionType {
+    type Controls;
     fn controls() -> Self::Controls;
+    fn web_binding() -> WebBinding;
 }
 
 pub struct Submission<A: ActionType> {

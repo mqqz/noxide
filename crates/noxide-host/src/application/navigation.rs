@@ -14,7 +14,7 @@ use super::*;
 pub(super) struct SemanticReceipt {
     pub version: u32,
     pub outcomes: Vec<MutationOutcome>,
-    pub source: RedirectSource,
+    pub source: Option<RedirectSource>,
     pub destination: Option<ReferenceDestination>,
     pub handover: Option<EditReceipt>,
 }
@@ -44,7 +44,7 @@ pub(super) fn success() -> Rendered {
 impl Application {
     pub(super) fn committed_recovery(
         &self,
-        action: &Action,
+        action: &manifest::WebAction<'_>,
         submission: &str,
         csrf: &str,
         input: &Fields,
@@ -66,7 +66,7 @@ impl Application {
     pub(super) async fn capture_destination(
         &self,
         tx: &mut Transaction,
-        action: ActionCore<'_>,
+        action: action::NavigationPlan<'_>,
         signed: Option<&RecordTarget>,
         original: Option<&StoredRecord>,
         outcomes: &[MutationOutcome],
@@ -129,16 +129,16 @@ impl Application {
     pub(super) async fn prepare_response(
         &self,
         tx: &mut Transaction,
-        action: &Action,
+        action: &manifest::WebAction<'_>,
         target: Option<&RecordTarget>,
         payload: &str,
         principal: &auth::Principal,
     ) -> Result<Prepared> {
         let receipt: SemanticReceipt = serde_json::from_str(payload)?;
         ensure!(
-            receipt.version == 1
+            receipt.version == 2
                 && receipt.outcomes.len() == action.steps.len()
-                && receipt.source == action.redirect.source,
+                && receipt.source.as_ref() == Some(&action.redirect.source),
             "receipt contract differs"
         );
         for (outcome, step) in receipt.outcomes.iter().zip(&action.steps) {
@@ -312,9 +312,9 @@ mod tests {
         // Current ordinary and reference receipts round-trip.
         // Keys and identifiers are test data.
         for raw in [
-            r#"{"version":1,"outcomes":[{"kind":"created","resource":7,"id":9,"incarnation":"test"}],"source":{"step":0},"destination":null,"handover":{"resource":7,"id":9,"incarnation":"test","cap_version":2,"key_id":3}}"#,
-            r#"{"version":1,"outcomes":[{"kind":"created","resource":7,"id":9,"incarnation":"test"}],"source":{"reference":{"step":0,"field":"thread"}},"destination":{"route":5,"resource":6,"id":8,"incarnation":"test-incarnation"},"handover":null}"#,
-            r#"{"version":1,"outcomes":[{"kind":"deleted","resource":7,"id":9,"incarnation":"test"}],"source":"signed","destination":null,"handover":null}"#,
+            r#"{"version":2,"outcomes":[{"kind":"created","resource":7,"id":9,"incarnation":"test"}],"source":{"step":0},"destination":null,"handover":{"resource":7,"id":9,"incarnation":"test","cap_version":2,"key_id":3}}"#,
+            r#"{"version":2,"outcomes":[{"kind":"created","resource":7,"id":9,"incarnation":"test"}],"source":{"reference":{"step":0,"field":"thread"}},"destination":{"route":5,"resource":6,"id":8,"incarnation":"test-incarnation"},"handover":null}"#,
+            r#"{"version":2,"outcomes":[{"kind":"deleted","resource":7,"id":9,"incarnation":"test"}],"source":"signed","destination":null,"handover":null}"#,
         ] {
             let receipt: SemanticReceipt = serde_json::from_str(raw).unwrap();
             assert_eq!(
@@ -334,7 +334,7 @@ mod tests {
         }
         assert!(
             serde_json::from_str::<SemanticReceipt>(
-                r#"{"version":1,"outcome":{},"destination":null,"extra":true}"#
+                r#"{"version":2,"outcome":{},"destination":null,"extra":true}"#
             )
             .is_err()
         );
@@ -363,7 +363,7 @@ mod tests {
     async fn private_parent_case(db: Database) {
         db.initialize().await.unwrap();
         let mut m = parent_tests::declarations();
-        m.actions[0].redirect = Redirect {
+        m.web_bindings[0].redirect = Redirect {
             route: 3,
             source: RedirectSource::Reference {
                 step: 0,
@@ -506,7 +506,7 @@ mod tests {
                 step: 0,
                 field: "thread".into(),
             };
-            m.actions.push(action);
+            fixture::register_action(&mut m, action);
         }
         m.routes[1].forms = vec![2, 3];
         m.routes[1].access = Access::PublicOptional;
@@ -539,13 +539,13 @@ mod tests {
             let target = RecordTarget {
                 resource: 1,
                 id: 12,
-                route: 2,
+                route: Some(2),
                 incarnation: stored.incarnation,
                 revision: stored.revision,
             };
-            let action = manifest::action(&m, action_id).unwrap();
+            let action = manifest::web_action(&m, action_id).unwrap();
             let credentials = app
-                .credentials(action, &session, now, Some(target), Fields::new())
+                .credentials(&action, &session, now, Some(target), Fields::new())
                 .unwrap();
             let input = if action_id == 2 {
                 Fields::from([("body".into(), "updated".into())])
@@ -609,23 +609,9 @@ mod tests {
             ("published".into(), "true".into()),
         ]);
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut budget =
-            super::super::submission::ExecutionBudget::new(app.runtime.limits(), deadline);
+        let mut budget = super::super::action::ExecutionBudget::new(app.runtime.limits(), deadline);
         let (tx, prepared) = app
-            .prepare(
-                &cookie,
-                1,
-                &submission,
-                &csrf,
-                &input,
-                &super::super::submission::input_digest(
-                    ActionCore::of(&m, &m.actions[0]).unwrap(),
-                    &input,
-                )
-                .unwrap(),
-                None,
-                &mut budget,
-            )
+            .prepare(&cookie, 1, &submission, &csrf, &input, None, &mut budget)
             .await
             .unwrap();
         let fallback = prepared.fallback.body.clone();
@@ -687,7 +673,7 @@ mod tests {
         let prepared = app
             .prepare_response(
                 &mut tx,
-                &m.actions[0],
+                &manifest::web_action(&m, m.web_bindings[0].id).unwrap(),
                 None,
                 &payload,
                 &auth::Principal::Anonymous,

@@ -42,13 +42,17 @@ pub(crate) enum TokenKind {
     Anonymous,
     AnonymousSubmission {
         contract: String,
+        /// Web binding ID; zero is reserved for host edit-key rotation.
         action: u32,
+        /// Web binding version, independent of the canonical action version.
         version: u32,
         target: Option<RecordTarget>,
     },
     Submission {
         contract: String,
+        /// Web binding ID; zero is reserved for host edit-key rotation.
         action: u32,
+        /// Web binding version, independent of the canonical action version.
         version: u32,
         target: Option<RecordTarget>,
     },
@@ -62,7 +66,8 @@ pub(crate) struct RecordTarget {
     pub id: u64,
     pub incarnation: String,
     pub revision: i64,
-    pub route: u32,
+    /// Issuing web route; absent for non-browser sealed identities.
+    pub route: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -415,7 +420,7 @@ mod tests {
                     id: 42,
                     incarnation: "record-incarnation".into(),
                     revision: 2,
-                    route: 1,
+                    route: Some(1),
                 }),
             },
         ] {

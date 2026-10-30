@@ -21,31 +21,18 @@ impl Application {
         input: Fields,
         capability: Option<&str>,
     ) -> std::result::Result<Rendered, RequestError> {
-        let _request = self
-            .admission_limits
-            .requests()
-            .request()
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        let op = manifest::action(&self.manifest, action)
-            .and_then(|a| ActionCore::of(&self.manifest, a))
-            .and_then(|a| manifest::operation(&self.manifest, a.first_operation()))
+        let binding = manifest::web_action(&self.manifest, action)
             .map_err(|_| RequestError::InvalidRequest)?;
-        let _anonymous_write = self.anonymous_write(manifest::anonymous_action(op)).await?;
-        let _database = self
-            .admission_limits
-            .database()
-            .acquire()
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        let a =
-            manifest::action(&self.manifest, action).map_err(|_| RequestError::InvalidRequest)?;
-        let input = manifest::canonical_input(&self.manifest, a, &input)
+        let op = manifest::operation(&self.manifest, binding.steps[0].operation)
             .map_err(|_| RequestError::InvalidRequest)?;
-        manifest::validate_input(&self.manifest, a, &input)
+        let _admission = self
+            .admit_invocation(manifest::anonymous_action(op))
+            .await?;
+        let a = manifest::web_action(&self.manifest, action)
             .map_err(|_| RequestError::InvalidRequest)?;
-        let input_hash = ActionCore::of(&self.manifest, a)
-            .and_then(|core| input_digest(core, &input))
+        let input = manifest::canonical_input(&self.manifest, &a, &input)
+            .map_err(|_| RequestError::InvalidRequest)?;
+        manifest::validate_input(&self.manifest, &a, &input)
             .map_err(|_| RequestError::InvalidRequest)?;
         let deadline = Instant::now() + self.runtime.limits().wall_time;
         let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
@@ -58,7 +45,6 @@ impl Application {
                     submission,
                     csrf,
                     &input,
-                    &input_hash,
                     capability,
                     &mut budget,
                 ),
@@ -132,8 +118,9 @@ impl Application {
             .map_err(|_| RequestError::Busy)?;
         let deadline = Instant::now() + self.runtime.limits().wall_time;
         let prepared = timeout_at(deadline, async {
-            let a = manifest::action(&self.manifest, action)?;
-            let core = ActionCore::of(&self.manifest, a)?;
+            let a = manifest::web_action(&self.manifest, action)?;
+            let core = ActionCore::of(a.core)?;
+            let binding = manifest::web_binding(&self.manifest, action)?;
             let mut tx = self.database.begin(deadline.into_std()).await?;
             self.admission(&mut tx, false).await?;
             let now = security::now()?;
@@ -141,21 +128,32 @@ impl Application {
             let (token, session, principal) = self
                 .submission_identity(&mut tx, core, cookie, submission, csrf, now)
                 .await?;
-            let target = self.submission_target(&token, core)?;
+            let target = self.submission_target(&token, core, binding)?;
             let receipt = self
                 .load_receipt(&mut tx, &token.nonce, &session.nonce)
                 .await?;
             if let Some([digest, outcome]) = receipt.as_ref() {
-                let canonical = manifest::canonical_input(&self.manifest, a, input).ok();
+                let canonical = manifest::canonical_input(&self.manifest, &a, input).ok();
                 let expected = canonical
                     .as_ref()
-                    .map(|input| input_digest(core, input))
+                    .map(|input| {
+                        input_digest(core, input).and_then(|digest| {
+                            self.web_invocation_identity(
+                                binding,
+                                &token,
+                                &session,
+                                &principal,
+                                &digest,
+                                target.as_ref(),
+                            )
+                        })
+                    })
                     .transpose()?;
 
                 let response = if expected.as_ref() == Some(digest) {
-                    self.prepare_response(&mut tx, a, target.as_ref(), outcome, &principal)
+                    self.prepare_response(&mut tx, &a, target.as_ref(), outcome, &principal)
                         .await
-                        .or_else(|_| self.committed_recovery(a, submission, csrf, input))?
+                        .or_else(|_| self.committed_recovery(&a, submission, csrf, input))?
                 } else {
                     navigation::Prepared::ready(render::form_already_used(
                         &self.presentation,
@@ -163,7 +161,7 @@ impl Application {
                     )?)
                 };
                 if tx.commit().await.is_err() {
-                    return self.committed_recovery(a, submission, csrf, input);
+                    return self.committed_recovery(&a, submission, csrf, input);
                 }
                 return Ok(response);
             }
@@ -173,22 +171,25 @@ impl Application {
                     .await?
                 else {
                     return self
-                        .settle(a, action::Settled::Unavailable, submission, csrf, input)
+                        .settle(
+                            &a,
+                            action::Settled::Unavailable,
+                            submission,
+                            csrf,
+                            input,
+                            None,
+                        )
                         .map(navigation::Prepared::ready);
                 };
                 if a.revision == Revision::Exact && stored.revision != target.revision && !unknown {
                     return self
                         .settle(
-                            a,
-                            action::Settled::Conflict {
-                                target,
-                                stored,
-                                session: Box::new(session),
-                                now,
-                            },
+                            &a,
+                            action::Settled::Conflict { target, stored },
                             submission,
                             csrf,
                             input,
+                            Some((&session, now)),
                         )
                         .map(navigation::Prepared::ready);
                 }
@@ -223,31 +224,32 @@ impl Application {
         submission: &str,
         csrf: &str,
         input: &Fields,
-        input_hash: &str,
         capability: Option<&str>,
         budget: &mut ExecutionBudget,
     ) -> Result<(Option<Transaction>, navigation::Prepared)> {
-        let a = manifest::action(&self.manifest, action)?;
-        let attempt = self
-            .attempt_action(
-                action::Submitter {
-                    cookie,
-                    submission,
-                    csrf,
-                },
-                ActionCore::of(&self.manifest, a)?,
-                input,
-                input_hash,
-                capability,
-                budget,
+        let a = manifest::web_action(&self.manifest, action)?;
+        let binding = manifest::web_binding(&self.manifest, action)?;
+        let mut tx = self.database.begin(budget.deadline.into_std()).await?;
+        self.admission(&mut tx, false).await?;
+        let (context, session, now) = self
+            .admit_web_invocation(
+                &mut tx, binding.id, cookie, submission, csrf, input, capability,
             )
-            .await;
+            .await?;
+        let attempt = self.attempt_action(tx, context, budget).await;
         let _wasm = budget.wasm.take();
         let (mut tx, receipt, nonce) = match attempt? {
             action::Attempt::Settled(outcome) => {
                 return Ok((
                     None,
-                    navigation::Prepared::ready(self.settle(a, outcome, submission, csrf, input)?),
+                    navigation::Prepared::ready(self.settle(
+                        &a,
+                        outcome,
+                        submission,
+                        csrf,
+                        input,
+                        Some((&session, now)),
+                    )?),
                 ));
             }
             action::Attempt::Commit { tx, receipt, nonce } => (tx, receipt, Some(nonce)),
@@ -256,14 +258,14 @@ impl Application {
         let response = self
             .prepare_response(
                 &mut tx,
-                a,
+                &a,
                 receipt.target.as_ref(),
                 &receipt.payload,
                 &receipt.principal,
             )
             .await;
         let response = if nonce.is_none() {
-            response.or_else(|_| self.committed_recovery(a, submission, csrf, input))?
+            response.or_else(|_| self.committed_recovery(&a, submission, csrf, input))?
         } else {
             response?
         };
@@ -275,21 +277,21 @@ impl Application {
 
     fn settle(
         &self,
-        a: &Action,
+        a: &manifest::WebAction<'_>,
         outcome: action::Settled,
         submission: &str,
         csrf: &str,
         input: &Fields,
+        refresh: Option<(&Token, i64)>,
     ) -> Result<Rendered> {
         use action::Settled;
         let (errors, message) = match outcome {
             Settled::Unavailable => return render::unavailable(&self.presentation, &self.manifest),
-            Settled::Conflict {
-                target,
-                stored,
-                session,
-                now,
-            } => return self.conflict(a, &session, now, target, &stored, input),
+            Settled::Conflict { target, stored } => {
+                let (session, now) =
+                    refresh.ok_or_else(|| anyhow::anyhow!("missing web refresh identity"))?;
+                return self.conflict(a, session, now, target, &stored, input);
+            }
             Settled::Rejected {
                 field_errors,
                 message,
@@ -317,32 +319,6 @@ impl Application {
     }
 }
 
-pub(super) fn input_digest(action: ActionCore<'_>, input: &Fields) -> Result<String> {
-    ensure!(
-        input.len() == action.inputs.len(),
-        "unexpected digest input"
-    );
-    let input: Fields = action
-        .inputs
-        .iter()
-        .map(|schema| {
-            let value = input
-                .get(&schema.name)
-                .ok_or_else(|| anyhow::anyhow!("missing digest input"))?;
-            Ok((
-                schema.name.clone(),
-                schema.canonical(value).map_err(anyhow::Error::msg)?,
-            ))
-        })
-        .collect::<Result<_>>()?;
-    Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(serde_json::to_vec(&(
-        VERSION,
-        action.version,
-        &action.inputs,
-        input,
-    ))?)))
-}
-
 impl Application {
     pub(super) async fn load_receipt(
         &self,
@@ -363,48 +339,6 @@ impl Application {
             RequestError::InvalidRequest
         );
         Ok(Some([digest, outcome]))
-    }
-}
-
-// One budget survives every transaction retry; admission waits and bounded
-// transaction cleanup are separate from this execution deadline.
-pub(super) struct ExecutionBudget {
-    pub(super) deadline: Instant,
-    pub(super) fuel: u64,
-    pub(super) host_calls: u32,
-    pub(super) database_calls: u32,
-    parent_navigation_reserved: bool,
-    // Hold admission through binding response preparation and receipt persistence.
-    pub(super) wasm: Option<tokio::sync::OwnedSemaphorePermit>,
-}
-impl ExecutionBudget {
-    pub(super) fn parent_redirect_attempt(&mut self, gated: bool) -> Result<()> {
-        // Navigation runs once after the successful commit, outside all retries.
-        // Its quota covers begin/commit, the target lookup and its optional gate.
-        if !self.parent_navigation_reserved {
-            self.database_calls = self
-                .database_calls
-                .checked_sub(4 + 2 * u32::from(gated))
-                .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
-            self.parent_navigation_reserved = true;
-        }
-        // Each attempt actually captures the parent with storage_resource + load.
-        // Charge before calling it so errors and rolled-back work stay charged.
-        self.database_calls = self
-            .database_calls
-            .checked_sub(2)
-            .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
-        Ok(())
-    }
-    pub(super) fn new(limits: &Limits, deadline: Instant) -> Self {
-        Self {
-            deadline,
-            fuel: limits.fuel,
-            host_calls: limits.host_calls,
-            database_calls: 16,
-            parent_navigation_reserved: false,
-            wasm: None,
-        }
     }
 }
 
@@ -429,7 +363,6 @@ mod parent_redirect_budget_tests {
             ("body".into(), "retried reply".into()),
             ("published".into(), "true".into()),
         ]);
-        let digest = input_digest(ActionCore::of(&m, &m.actions[0]).unwrap(), &input).unwrap();
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
         let mut budget = ExecutionBudget::new(app.runtime.limits(), deadline);
         // Complete capture, mutation and response preparation on every attempt.
@@ -437,16 +370,7 @@ mod parent_redirect_budget_tests {
         // without relying on database lock timing or a provider-specific error.
         for attempt in 0..3 {
             let (tx, prepared) = app
-                .prepare(
-                    &cookie,
-                    1,
-                    &submission,
-                    &csrf,
-                    &input,
-                    &digest,
-                    None,
-                    &mut budget,
-                )
+                .prepare(&cookie, 1, &submission, &csrf, &input, None, &mut budget)
                 .await
                 .unwrap();
             let mut tx = tx.unwrap();

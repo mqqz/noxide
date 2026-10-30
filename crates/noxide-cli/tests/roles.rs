@@ -56,6 +56,7 @@ fn manifest() -> Manifest {
             access: Access::Authenticated,
         }],
         actions: vec![],
+        web_bindings: vec![],
     }
 }
 async fn run(cwd: &Path, config: &Path, command: &str, args: &[&str]) -> std::process::Output {

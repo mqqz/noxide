@@ -12,7 +12,16 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest> {
 
 pub fn digest(manifest: &Manifest) -> Result<[u8; 32]> {
     validate(manifest)?;
-    Ok(Sha256::digest(serde_json::to_vec(manifest)?).into())
+    let mut canonical = manifest.clone();
+    canonical.resources.sort_by(|a, b| a.name.cmp(&b.name));
+    canonical.operations.sort_by_key(|operation| operation.id);
+    canonical.routes.sort_by_key(|route| route.id);
+    canonical.actions.sort_by_key(|action| action.id);
+    canonical.web_bindings.sort_by_key(|binding| binding.id);
+    for action in &mut canonical.actions {
+        action.target_reads.sort_unstable();
+    }
+    Ok(Sha256::digest(serde_json::to_vec(&canonical)?).into())
 }
 
 fn validate_selection(m: &Manifest, op: &Operation) -> Result<()> {
@@ -180,15 +189,20 @@ pub fn validate(m: &Manifest) -> Result<()> {
         !m.resources.is_empty() && m.resources.len() <= 16,
         "resource limit"
     );
-    ensure!(!m.routes.is_empty() && m.routes.len() <= 32, "route limit");
+    ensure!(m.routes.len() <= 32, "route limit");
     ensure!(
-        m.operations.len() <= 64 && m.actions.len() <= 32,
+        !m.routes.is_empty() || !m.actions.is_empty(),
+        "empty application"
+    );
+    ensure!(
+        m.operations.len() <= 64 && m.actions.len() <= 32 && m.web_bindings.len() <= 32,
         "contract limit"
     );
     unique(m.resources.iter().map(|x| x.id))?;
     unique(m.operations.iter().map(|x| x.id))?;
     unique(m.routes.iter().map(|x| x.id))?;
     unique(m.actions.iter().map(|x| x.id))?;
+    unique(m.web_bindings.iter().map(|x| x.id))?;
     let mut resource_keys = BTreeSet::new();
     for r in &m.resources {
         for field in &r.fields {
@@ -601,8 +615,8 @@ pub fn validate(m: &Manifest) -> Result<()> {
             );
         }
         for id in &r.forms {
-            let a = action(m, *id)?;
-            if let Some(target) = signed_resource(m, a)? {
+            let a = web_action(m, *id)?;
+            if let Some(target) = signed_resource(m, &a)? {
                 ensure!(
                     r.resource == Some(target),
                     "mutation form requires its signed target route"
@@ -628,13 +642,17 @@ pub fn validate(m: &Manifest) -> Result<()> {
         }
     }
     ensure!(
-        m.routes
-            .iter()
-            .any(|r| r.path == "/" && r.resource.is_none()),
+        m.routes.is_empty()
+            || m.routes
+                .iter()
+                .any(|r| r.path == "/" && r.resource.is_none()),
         "missing index route"
     );
     for a in &m.actions {
         validate_action(m, a)?;
+    }
+    for binding in &m.web_bindings {
+        validate_web_binding(m, &web_action(m, binding.id)?)?;
     }
     Ok(())
 }
@@ -685,6 +703,7 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
         "invalid action"
     );
     ensure!((1..=4).contains(&a.steps.len()), "transaction step limit");
+    ensure!(a.inputs.len() <= 32, "action input count limit");
     let signed = signed_resource(m, a)?;
     let mut names = BTreeSet::new();
     for input in &a.inputs {
@@ -898,6 +917,31 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
         ensure!(!inspect.fields.is_empty(), "empty inspection");
         projected_fields(resource(m, read.resource)?, &inspect.fields)?;
     }
+    unique(a.target_reads.iter().copied())?;
+    ensure!(a.target_reads.len() <= 8, "target read limit");
+    for id in &a.target_reads {
+        let read = operation(m, *id)?;
+        ensure!(
+            read.kind == OperationKind::Read
+                && read.via.is_none()
+                && signed.is_none_or(|resource| resource == read.resource),
+            "invalid target read operation"
+        );
+    }
+    ensure!(
+        signed.is_none()
+            || !a.target_reads.is_empty()
+            || a.steps
+                .iter()
+                .all(|step| operation(m, step.operation).is_ok_and(is_capability)),
+        "target requires eligible reads"
+    );
+    Ok(())
+}
+
+fn validate_web_binding(m: &Manifest, a: &WebAction<'_>) -> Result<()> {
+    ensure!(a.version > 0, "invalid web binding version");
+    let signed = signed_resource(m, a)?;
     validate_layout(m, a)?;
     let destination = route(m, a.redirect.route())?;
     ensure!(
@@ -1098,6 +1142,37 @@ pub fn action(m: &Manifest, id: u32) -> Result<&Action> {
         .find(|o| o.id == id)
         .ok_or_else(|| anyhow::anyhow!("unknown action"))
 }
+/// Admitted browser view. Execution data remains the canonical action.
+#[derive(Clone, Copy)]
+pub(crate) struct WebAction<'a> {
+    pub id: u32,
+    pub version: u32,
+    pub layout: &'a Vec<FormInstruction>,
+    pub redirect: &'a Redirect,
+    pub core: &'a Action,
+}
+impl std::ops::Deref for WebAction<'_> {
+    type Target = Action;
+    fn deref(&self) -> &Action {
+        self.core
+    }
+}
+pub(crate) fn web_binding(m: &Manifest, id: u32) -> Result<&WebBinding> {
+    m.web_bindings
+        .iter()
+        .find(|binding| binding.id == id)
+        .ok_or_else(|| anyhow::anyhow!("unknown web binding"))
+}
+pub(crate) fn web_action(m: &Manifest, id: u32) -> Result<WebAction<'_>> {
+    let binding = web_binding(m, id)?;
+    Ok(WebAction {
+        id: binding.id,
+        version: binding.version,
+        layout: &binding.layout,
+        redirect: &binding.redirect,
+        core: action(m, binding.action)?,
+    })
+}
 pub fn validate_fields(resource: &Resource, fields: &Fields) -> Result<()> {
     ensure!(fields.len() == resource.fields.len(), "unexpected fields");
     for f in &resource.fields {
@@ -1185,11 +1260,11 @@ pub fn canonical_input(m: &Manifest, action: &Action, input: &Fields) -> Result<
         .collect()
 }
 
-fn validate_layout(m: &Manifest, action: &Action) -> Result<()> {
+fn validate_layout(m: &Manifest, action: &WebAction<'_>) -> Result<()> {
     if action.layout.is_empty() {
         return Ok(());
     }
-    crate::form_layout::validate(m, action, &action.layout)
+    crate::form_layout::validate(m, action, action.layout)
 }
 
 pub(crate) fn is_capability(op: &Operation) -> bool {
@@ -1525,21 +1600,21 @@ mod tests {
     #[test]
     fn optional_boolean_requires_a_control_that_represents_unset() {
         let mut manifest = schema(vec![field("flag", FieldKind::Boolean, true)]);
-        manifest.actions[0].layout = vec![layout_field("flag", Control::Select), submit()];
+        manifest.web_bindings[0].layout = vec![layout_field("flag", Control::Select), submit()];
         validate(&manifest).unwrap();
-        manifest.actions[0].layout[0] = layout_field("flag", Control::Checkbox);
+        manifest.web_bindings[0].layout[0] = layout_field("flag", Control::Checkbox);
         assert!(validate(&manifest).is_err());
         manifest.resources[0].fields[0].optional = false;
         manifest.actions[0].inputs[0].optional = false;
         validate(&manifest).unwrap();
-        manifest.actions[0].layout[0] = layout_field("flag", Control::Select);
+        manifest.web_bindings[0].layout[0] = layout_field("flag", Control::Select);
         assert!(validate(&manifest).is_err());
     }
 
     #[test]
     fn blueprint_requires_exactly_the_declared_fields_and_one_submit() {
         let mut manifest = schema(vec![field("body", FieldKind::Text, false)]);
-        manifest.actions[0].layout = vec![
+        manifest.web_bindings[0].layout = vec![
             FormInstruction::Begin(Container::Section),
             FormInstruction::Text("Review changes".into()),
             layout_field("body", Control::Textarea { rows: 12 }),
@@ -1573,7 +1648,7 @@ mod tests {
                 submit(),
             ],
         ] {
-            manifest.actions[0].layout = invalid;
+            manifest.web_bindings[0].layout = invalid;
             assert!(validate(&manifest).is_err());
         }
     }
@@ -1870,7 +1945,7 @@ mod transaction_tests {
             },
         ];
         a.revision = Revision::Identity;
-        a.redirect = Redirect {
+        m.web_bindings[0].redirect = Redirect {
             route: 3,
             source: RedirectSource::Step(1),
         };
@@ -1939,7 +2014,7 @@ mod transaction_tests {
             .push(set("published", Value::Constant("true".into())));
         initialized.routes[0].forms.clear();
         initialized.routes[1].forms = vec![1];
-        initialized.actions[0].redirect.source = RedirectSource::Signed;
+        initialized.web_bindings[0].redirect.source = RedirectSource::Signed;
         validate(&initialized).unwrap();
 
         let mut account = crate::test_support::manifest();
@@ -1966,7 +2041,7 @@ mod transaction_tests {
         account.actions[0].steps[0].target = Target::Signed;
         account.routes[0].forms.clear();
         account.routes[1].forms = vec![1];
-        account.actions[0].redirect.source = RedirectSource::Signed;
+        account.web_bindings[0].redirect.source = RedirectSource::Signed;
         assert!(
             validate(&account)
                 .unwrap_err()
@@ -2346,7 +2421,7 @@ mod transaction_tests {
         let mut bad = m.clone();
         bad.actions[0].steps.swap(0, 1);
         bad.actions[0].steps[2].assign[1].change = Change::Set(Value::Created(0));
-        bad.actions[0].redirect.source = RedirectSource::Step(0);
+        bad.web_bindings[0].redirect.source = RedirectSource::Step(0);
         changed(bad);
         let mut bad = m.clone();
         if let Change::Decrease { rejection, .. } = &mut bad.actions[0].steps[0].assign[0].change {
@@ -2363,7 +2438,7 @@ mod transaction_tests {
         });
         changed(bad);
         let mut bad = m.clone();
-        bad.actions[0].redirect = Redirect {
+        bad.web_bindings[0].redirect = Redirect {
             route: 2,
             source: RedirectSource::Signed,
         };

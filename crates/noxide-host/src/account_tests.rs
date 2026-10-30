@@ -118,7 +118,7 @@ async fn contract(db: Database, descending: bool) {
             .unwrap();
         let mut e = effects(tx, &m, &alice, true, target);
         assert!(
-            e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+            e.execute_transaction(crate::application::ActionCore::of(&m.actions[0]).unwrap())
                 .await
                 .is_err()
         );
@@ -139,7 +139,7 @@ async fn contract(db: Database, descending: bool) {
         let mut e = effects(tx, &m, &alice, true, &bob);
         e.principal = principal;
         assert!(
-            e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+            e.execute_transaction(crate::application::ActionCore::of(&m.actions[0]).unwrap())
                 .await
                 .is_err()
         );
@@ -154,7 +154,7 @@ async fn contract(db: Database, descending: bool) {
         .input
         .insert("recipient_tenant".into(), eve.clone());
     assert!(
-        e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+        e.execute_transaction(crate::application::ActionCore::of(&m.actions[0]).unwrap())
             .await
             .is_err()
     );
@@ -173,7 +173,7 @@ async fn contract(db: Database, descending: bool) {
             .unwrap();
         let mut e = effects(tx, &m, &alice, true, if i == 0 { &alice } else { &bob });
         let outcomes = e
-            .execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+            .execute_transaction(crate::application::ActionCore::of(&m.actions[0]).unwrap())
             .await
             .unwrap();
         let record = repository::load(&mut e.tx, &m, 1, outcomes[0].id)
@@ -354,7 +354,7 @@ async fn contract(db: Database, descending: bool) {
         .await
         .unwrap();
     let mut e = effects(tx, &m, &alice, true, &racing);
-    e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+    e.execute_transaction(crate::application::ActionCore::of(&m.actions[0]).unwrap())
         .await
         .unwrap();
     let (created, disabled) = tokio::join!(e.tx.commit(), db.disable_account(&racing));
@@ -366,7 +366,7 @@ async fn contract(db: Database, descending: bool) {
         .unwrap();
     let mut e = effects(tx, &m, &alice, true, &racing);
     assert!(
-        e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+        e.execute_transaction(crate::application::ActionCore::of(&m.actions[0]).unwrap())
             .await
             .is_err()
     );
@@ -378,7 +378,7 @@ async fn contract(db: Database, descending: bool) {
         .unwrap();
     let mut e = effects(tx, &m, &alice, true, &bob);
     assert!(
-        e.execute_transaction(crate::application::ActionCore::of(&m, &m.actions[0]).unwrap())
+        e.execute_transaction(crate::application::ActionCore::of(&m.actions[0]).unwrap())
             .await
             .is_err()
     );

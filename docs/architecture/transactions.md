@@ -46,51 +46,54 @@ The host separates three parts of an action:
   response mapping, conflict and rejection forms, recovery and handover delivery.
 - The response expresses success, validation errors and an optional destination.
 
-This is an in-process implementation boundary. The wire `Action`, manifest,
-request and response schemas, protocol version, approval digests, signed token
-format and receipt JSON intentionally remain unchanged. The SDK and macros keep
-the existing action declaration.
+Protocol 5 separates canonical `Action` execution declarations from
+`WebBinding` presentation. Routes carry binding IDs; bindings reference action IDs.
+Several bindings can present the same action. A canonical action can have no web
+binding, route or redirect; a headless-only manifest may have zero routes.
+The existing action syntax generates both declarations.
+`ActionType` owns inputs and execution; `WebActionType` adds controls and navigation.
+Explicit headless SDK declarations register an `Action` through
+`ApplicationDefinition::action` and need no `WebActionType` implementation.
 
-`application/action.rs::attempt_action` consumes `ActionCore` and returns an
-`Attempt` without rendering. `Submitter` groups the cookie, submission token and
-CSRF proof; verification still happens inside the write transaction. Signed
-targets retain their issuing route: a permitted read operation on that route is
-core authority, not a form presentation detail. Edit capabilities retain their
-existing mutation authority, while inspection still requires read permission.
+`application/action.rs::attempt_action` accepts a transaction and an opaque,
+host-created invocation context. Browser admission authenticates the cookie,
+verifies CSRF, the signed submission and binding/version, and seals the target
+identity. It does not reauthorize the target before receipt recovery. Private
+context and target-grant fields prevent an adapter from supplying a principal or
+turning a raw record ID into authority. Service admission has no constructor until
+P10 implements authoritative persisted grant/job/fence checks.
 
-The core issues an anonymous edit capability as a transactional effect and records
-its handover identity in the receipt. Only delivery of the secret on the handover
-page belongs to the binding. `submission.rs` prepares the response with the open
-transaction, then calls the core receipt-write helper, checks the deadline and
-commits. This preserves response preparation before receipt persistence and
-commit. Replay keeps its committed-recovery fallback; unknown commit outcomes
-stay in receipt recovery. Rendering settled outcomes performs no database work,
-so the core rolls back before returning them. These boundaries describe the
-implementation; they do not prove audited security or transport anonymity.
+The action explicitly declares eligible `target_reads`. A web target grant also
+requires a matching read operation on its issuing route; current policy is checked
+inside the execution transaction. SDK registration lowers the existing page
+bindings into that explicit read list without inventing policies. Edit credentials
+retain mutation authority only: guest inspection still requires its declared
+read operation. No route, redirect or browser credential is required by `ActionCore`.
 
-### Deferred until a second invocation style exists
+The receipt claim cryptographically binds invocation kind, deployment generation,
+contract, user/tenant or anonymous subject, session, canonical action/version,
+web binding/version, canonical inputs, sealed target identity and replay nonce.
+Mutable roles are excluded from identity. Recovery precedes target policy and
+revision reevaluation; rejected attempts roll back their claim. Every step
+outcome, incarnation and anonymous handover remains in the semantic receipt.
 
-A concrete operator CLI or non-browser client should motivate any further split.
-The following are deferred:
+The common invocation admission envelope holds request and database permits and
+preserves anonymous-write limits. Its execution budget retains one deadline,
+fuel, host-call and database-call allowance across retries. The WASM permit stays
+held through result preparation and receipt persistence. Web preparation captures
+navigation and handover before receipt write, deadline check and commit. A
+headless execution has no navigation source and requires bounded non-rendering
+result preparation before the same write/check/commit sequence. There is no
+production headless execution adapter yet.
 
-- Split the wire manifest into actions and `forms: Vec<FormBinding { action,
-  layout, destination }>`, with routes referencing forms, allowing several forms
-  per action. Bindings must remain covered by the manifest digest and approval.
-- Introduce `TargetGrant` with a private constructor: either read-authorized via
-  a declared read operation (currently the issuing route), or an edit capability.
-  A new binding must never accept a raw target ID.
-- Declare the target's read operation on the action, next to inspection, instead
-  of deriving that requirement from the issuing route.
-- Separate SDK control and redirect traits while retaining the ergonomic single
-  `#[action(..., redirect = ...)]` declaration.
-
-Any new binding must supply its own origin or CSRF-equivalent proof and replay
-key source. Its admission checks and adversarial tests must enforce the same
-request, database and WASM permits, deadline, fuel, database-call budgets and
-anonymous-write limits. The host must map outcomes to responses without raw
-response output. External-network and logging authority must remain unchanged,
-preserving anonymity defaults. Every authorization check must use the core
-executor; a new binding must not introduce a second authorization system.
+Semantic receipt version 2 makes the navigation source optional. Storage remains
+version 10; this change neither deletes databases nor adds a migration. Rebuild
+protocol-5 development contracts and explicitly reapprove/reactivate deployments;
+old signed forms and previous-contract receipts are invalidated by the contract
+and deployment-generation seal. There is no compatibility executor. Operators
+must resolve outstanding submissions under their original deployment before
+switching contracts when recovery is required. Persisted rows and handover keys
+remain subject to the existing schema/deployment lifecycle.
 
 ## Protocol shape
 
@@ -99,12 +102,18 @@ pub struct Action {
     pub id: u32,
     pub version: u32,
     pub name: String,
-    pub layout: Vec<FormInstruction>,
-    pub redirect: Redirect,           // destination names a step, see Receipts
+    pub target_reads: Vec<u32>,       // eligible reads; web intersects issuing route
     pub inspect: Option<Inspection>,  // reads the signed target, unchanged
     pub inputs: Vec<Input>,           // action-level schema, unique names
     pub revision: Revision,           // Exact | Identity, see Revision rules
     pub steps: Vec<Step>,             // 1..=4 steps, at most 2 creates
+}
+pub struct WebBinding {
+    pub id: u32,
+    pub version: u32,
+    pub action: u32,
+    pub layout: Vec<FormInstruction>,
+    pub redirect: Redirect,
 }
 pub struct Input { pub name: String, pub label: String, pub kind: FieldKind, pub optional: bool, pub max_bytes: u32 }
 pub struct Step { pub operation: u32, pub target: Target, pub assign: Vec<Assignment> }
@@ -157,7 +166,7 @@ Admission in `manifest.rs` rejects the manifest unless all of these hold:
 - There are 1–4 steps and at most 2 creates. A delete is the only step.
 - Each step's operation is a create, update or delete on the step's resource,
   with `Target::None` for create and `Target::Signed` otherwise. Every `Signed`
-  use addresses the resource of each route that carries the form.
+  use addresses the declared target resource; web bindings require matching issuing routes.
 - Each field is assigned at most once per step. A create assigns every writable
   stored field, including its reference. An update assigns a nonempty subset of
   ordinary fields. No step assigns owner, tenant, ID, incarnation, revision,

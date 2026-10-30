@@ -33,7 +33,9 @@ lowers to operation eligibility and a `Set(SignedTarget)` assignment. A multi-st
 create uses `create(Order, set(product = target, quantity = quantity),
 eligible = ReadProduct)`, or assigns a named earlier create instead of `target`.
 Eligibility must be a non-follow read of the referenced resource. Signed binding
-uses the page's signed target and applicable route read.
+uses the page's signed target and an explicitly declared action target read
+intersected with the issuing route's reads. An edit credential supplies mutation
+authority and cannot authorize inspection.
 
 Binding checks identity and incarnation, current eligibility, source create policy
 and both gate predicates inside the transaction. It does not compare the reference
@@ -108,5 +110,6 @@ precedes navigation.
 - Multi-hop follows.
 
 This track intentionally replaces old contracts, approval digests, cursor scopes
-and storage formats. Development databases must be recreated. Local validation is
+and storage formats. Rebuild and reapprove development contracts when changing protocol versions; do
+not delete databases. Local validation is
 not proof of audited security, deployment acceptance or transport anonymity.

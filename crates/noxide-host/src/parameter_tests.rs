@@ -133,12 +133,12 @@ fn host_rejects_parameterized_mutation_redirects() {
             m.routes[0].forms.clear();
             m.routes[1].forms.push(1);
         }
-        m.actions[0].redirect = Redirect {
+        m.web_bindings[0].redirect = Redirect {
             route: 3,
             source: RedirectSource::Step(0),
         };
         manifest::validate(&m).unwrap();
-        m.actions[0].redirect = Redirect {
+        m.web_bindings[0].redirect = Redirect {
             route: 2,
             source: RedirectSource::Step(0),
         };
@@ -167,12 +167,12 @@ fn host_rejects_parameterized_mutation_redirects() {
         access: Access::Authenticated,
         params: vec![],
     });
-    m.actions[0].redirect = Redirect {
+    m.web_bindings[0].redirect = Redirect {
         route: 3,
         source: RedirectSource::Step(0),
     };
     manifest::validate(&m).unwrap();
-    m.actions[0].redirect = Redirect {
+    m.web_bindings[0].redirect = Redirect {
         route: 1,
         source: RedirectSource::Step(0),
     };
@@ -213,7 +213,7 @@ fn host_rejects_parameterized_mutation_redirects() {
             m.actions[0].inputs.clear();
             m.actions[0].steps[0].assign.clear();
         }
-        m.actions[0].redirect = Redirect {
+        m.web_bindings[0].redirect = Redirect {
             route: 4,
             source: RedirectSource::Reference {
                 step: 0,
@@ -221,7 +221,7 @@ fn host_rejects_parameterized_mutation_redirects() {
             },
         };
         manifest::validate(&m).unwrap();
-        m.actions[0].redirect = Redirect {
+        m.web_bindings[0].redirect = Redirect {
             route: 3,
             source: RedirectSource::Reference {
                 step: 0,

@@ -398,16 +398,18 @@ and select **Save these changes** to submit against the current revision. The
 **Delete record** button removes the note with one POST; there is no confirmation
 round trip or trash view.
 
-Declarations use protocol version 4. A record route declares its generated resource ID;
-list routes use `null`. Every action declares a `fields` list: all writable resource fields
+Declarations use protocol version 5. A record route declares its generated resource ID;
+list routes use `null`. SDK mutation declarations use a `fields(...)` projection: all writable resource fields
 for creation (excluding host-bound parent fields and fields with `initial` values),
 a nonempty subset for updates, and an empty list for deletion.
 Create actions must have at least one writable field; parent-only child resources
 cannot declare a create action.
 The host rejects extra fields and missing required values, supplies false/None
 for omitted checkboxes/optional fields, and preserves fields outside an update's
-projection. Generated action handlers return the host's outcome for the bound
-target. Custom handlers use `Submission<Action>::apply()`.
+projection. Generated action handlers return an execution decision for the bound
+target. Custom handlers use `Submission<Action>::execute()`. Canonical actions
+contain inputs and mutation steps; separately identified web bindings contain
+layouts and redirects. Routes and form POST paths refer to binding IDs.
 
 Actions receive no stored values by default. An optional declaration such as
 `"inspect": {"operation": 2, "fields": ["body"]}` supplies those original values

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 pub const MAX_IR_BYTES: usize = 65_536;
 pub const MAX_NODES: usize = 1_024;
 pub const MAX_DEPTH: usize = 32;
@@ -362,12 +362,23 @@ pub struct Action {
     pub id: u32,
     pub version: u32,
     pub name: String,
-    pub layout: Vec<FormInstruction>,
-    pub redirect: Redirect,
+    /// Eligible non-follow target reads. Each grant still checks current policy.
+    pub target_reads: Vec<u32>,
     pub inspect: Option<Inspection>,
     pub inputs: Vec<Input>,
     pub revision: Revision,
     pub steps: Vec<Step>,
+}
+
+/// Browser presentation refers to a canonical action; it grants no authority.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WebBinding {
+    pub id: u32,
+    pub version: u32,
+    pub action: u32,
+    pub layout: Vec<FormInstruction>,
+    pub redirect: Redirect,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -470,6 +481,7 @@ pub struct Manifest {
     pub operations: Vec<Operation>,
     pub routes: Vec<Route>,
     pub actions: Vec<Action>,
+    pub web_bindings: Vec<WebBinding>,
 }
 
 pub type Fields = BTreeMap<String, String>;
@@ -657,11 +669,14 @@ mod tests {
         );
         required::<Action>(
             serde_json::json!({
-                "layout": [], "id": 1, "version": 1, "name": "Create",
-                "redirect": {"route": 1, "source": {"step": 0}}, "inputs": [], "revision": "exact",
+                "target_reads": [], "id": 1, "version": 1, "name": "Create", "inputs": [], "revision": "exact",
                 "steps": [{"operation": 1, "target": "none", "assign": []}], "inspect": null
             }),
-            &["layout", "inputs", "revision", "steps"],
+            &["target_reads", "inputs", "revision", "steps"],
+        );
+        required::<WebBinding>(
+            serde_json::json!({ "id": 11, "version": 1, "action": 1, "layout": [], "redirect": {"route": 1, "source": {"step": 0}} }),
+            &["id", "version", "action", "layout", "redirect"],
         );
         required::<RequestView>(
             serde_json::json!({

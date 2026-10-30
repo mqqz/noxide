@@ -5,7 +5,7 @@ CRUD shorthand, or inferred queries; see the [explicit examples](../sdk-lowering
 
 | Crate | Responsibility |
 | --- | --- |
-| `noxide-protocol` | Canonical schemas, policies, operations, actions, routes, requests, results and Document IR |
+| `noxide-protocol` | Canonical schemas, policies, operations, actions, web bindings, routes, requests, results and Document IR |
 | `noxide-host` | Independent admission, authentication, authorization, bounded persistence and execution, receipts, rendering and navigation |
 | `noxide` | Typed resources, queries, actions, forms and pages; WIT bindings and guest entry points |
 | `noxide-macros` | Explicit declaration expansion and optional convenience lowering |
@@ -32,20 +32,20 @@ host authorization of the destination and credential handover.
 
 ## Mutation and navigation lifecycle
 
-`application/action.rs` owns a core action attempt: identity resolution inside the
-write transaction, receipt claim, target authorization, revision checks, authorized
-inspection, guest decision, step execution, destination capture and anonymous edit
+`application/action.rs` owns private invocation contexts and target grants, the
+common admission envelope and retry budget, and the core action attempt: receipt
+claim, target authorization, revision checks, authorized inspection, guest decision, step execution, destination capture and anonymous edit
 handover issuance. It returns a presentation-free outcome: a pending commit,
 matching receipt replay, or a settled unavailable, conflict, guest rejection or
 guard rejection. Missing, reincarnated and unauthorized targets share one
 unavailable outcome with no cause. `ActionCore` projects execution fields from the
-approved action; it carries the navigation source and destination resource. The
-destination route ID is retained as an opaque receipt identity to preserve receipt
-serialization. It carries no form presentation.
+approved canonical action and declares eligible target reads. It has no route or
+redirect dependency. A separate optional navigation plan comes from verified web
+binding admission. Service admission remains unavailable until P10.
 
-`application/submission.rs` is the web form binding. It owns admission, input
-canonicalization and digesting, the shared retry budget, response mapping, the
-commit loop and recovery. Its preparation function maps settled outcomes to forms
+`application/submission.rs` is the web form binding. It uses common invocation
+admission and owns browser proof verification, input handling, response mapping,
+the commit loop and recovery. Its preparation function maps settled outcomes to forms
 and asks `application/navigation.rs` to prepare a pending commit or replay response
 inside the open transaction. The core receipt-write helper runs after response
 preparation, retaining the order: prepare response, write receipt, check deadline,

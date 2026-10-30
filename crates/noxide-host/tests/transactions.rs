@@ -37,47 +37,24 @@ fn declarations() -> Manifest {
             {"id":4,"path":"/order_notes/{note}","resource":3,"operations":[6],"forms":[]}
         ],
         "actions": [
-            {"id":1,"version":1,"name":"Place order","revision":"identity","layout":[],"inspect":null,
-             "inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20},{"name":"body","label":"Note","kind":"text","optional":false,"max_bytes":200}],
-             "steps":[
-                {"operation":2,"target":"signed","assign":[{"field":"stock","change":{"decrease":{"by":"quantity","rejection":{"input":"quantity","message":"Not enough stock"}}}}]},
-                {"operation":3,"target":"none","assign":[{"field":"quantity","change":{"set":{"input":"quantity"}}},{"field":"product","change":{"set":"signed_target"}}]},
-                {"operation":5,"target":"none","assign":[{"field":"body","change":{"set":{"input":"body"}}},{"field":"order","change":{"set":{"created":1}}}]}],
-             "redirect":{"route":3,"source":{"step":1}}},
-            {"id":2,"version":1,"name":"Edit stock","revision":"exact","layout":[],"inspect":{"operation":1,"fields":["stock"]},
-             "inputs":[{"name":"stock","label":"Stock","kind":{"integer":{"min":0,"max":10}},"optional":false,"max_bytes":20}],
-             "steps":[{"operation":2,"target":"signed","assign":[{"field":"stock","change":{"set":{"input":"stock"}}}]}],
-             "redirect":{"route":2,"source":"signed"}},
-            {"id":3,"version":1,"name":"Two signed steps","revision":"identity","layout":[],"inspect":null,
-             "inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],
-             "steps":[
-                {"operation":2,"target":"signed","assign":[{"field":"stock","change":{"increase":{"by":"quantity","rejection":{"input":"quantity","message":"Stock limit"}}}}]},
-                {"operation":2,"target":"signed","assign":[{"field":"stock","change":{"decrease":{"by":"quantity","rejection":{"input":"quantity","message":"Not enough stock"}}}}]}],
-             "redirect":{"route":2,"source":"signed"}},
-            {"id":4,"version":1,"name":"Open then order","revision":"exact","layout":[],"inspect":null,
-             "inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],
-             "steps":[
-                {"operation":2,"target":"signed","assign":[{"field":"open","change":{"set":{"constant":"true"}}}]},
-                {"operation":3,"target":"none","assign":[{"field":"quantity","change":{"set":{"input":"quantity"}}},{"field":"product","change":{"set":"signed_target"}}]}],
-             "redirect":{"route":3,"source":{"step":1}}},
-            {"id":5,"version":1,"name":"Close then order","revision":"exact","layout":[],"inspect":null,
-             "inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],
-             "steps":[
-                {"operation":2,"target":"signed","assign":[{"field":"open","change":{"set":{"constant":"false"}}}]},
-                {"operation":3,"target":"none","assign":[{"field":"quantity","change":{"set":{"input":"quantity"}}},{"field":"product","change":{"set":"signed_target"}}]}],
-             "redirect":{"route":3,"source":{"step":1}}},
-            {"id":6,"version":1,"name":"Increase counter","revision":"identity","layout":[],"inspect":null,
-             "inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],
-             "steps":[{"operation":2,"target":"signed","assign":[{"field":"counter","change":{"increase":{"by":"quantity","rejection":{"input":"quantity","message":"Counter upper bound"}}}}]}],
-             "redirect":{"route":2,"source":"signed"}},
-            {"id":7,"version":1,"name":"Decrease counter","revision":"identity","layout":[],"inspect":null,
-             "inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],
-             "steps":[{"operation":2,"target":"signed","assign":[{"field":"counter","change":{"decrease":{"by":"quantity","rejection":{"input":"quantity","message":"Counter lower bound"}}}}]}],
-             "redirect":{"route":2,"source":"signed"}},
-            {"id":8,"version":1,"name":"Increase stock","revision":"identity","layout":[],"inspect":null,
-             "inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],
-             "steps":[{"operation":2,"target":"signed","assign":[{"field":"stock","change":{"increase":{"by":"quantity","rejection":{"input":"quantity","message":"Stock upper bound"}}}}]}],
-             "redirect":{"route":2,"source":"signed"}}
+            {"id":1,"version":1,"name":"Place order","revision":"identity","inspect":null,"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20},{"name":"body","label":"Note","kind":"text","optional":false,"max_bytes":200}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"stock","change":{"decrease":{"by":"quantity","rejection":{"input":"quantity","message":"Not enough stock"}}}}]},{"operation":3,"target":"none","assign":[{"field":"quantity","change":{"set":{"input":"quantity"}}},{"field":"product","change":{"set":"signed_target"}}]},{"operation":5,"target":"none","assign":[{"field":"body","change":{"set":{"input":"body"}}},{"field":"order","change":{"set":{"created":1}}}]}],"target_reads":[1]},
+            {"id":2,"version":1,"name":"Edit stock","revision":"exact","inspect":{"operation":1,"fields":["stock"]},"inputs":[{"name":"stock","label":"Stock","kind":{"integer":{"min":0,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"stock","change":{"set":{"input":"stock"}}}]}],"target_reads":[1]},
+            {"id":3,"version":1,"name":"Two signed steps","revision":"identity","inspect":null,"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"stock","change":{"increase":{"by":"quantity","rejection":{"input":"quantity","message":"Stock limit"}}}}]},{"operation":2,"target":"signed","assign":[{"field":"stock","change":{"decrease":{"by":"quantity","rejection":{"input":"quantity","message":"Not enough stock"}}}}]}],"target_reads":[1]},
+            {"id":4,"version":1,"name":"Open then order","revision":"exact","inspect":null,"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"open","change":{"set":{"constant":"true"}}}]},{"operation":3,"target":"none","assign":[{"field":"quantity","change":{"set":{"input":"quantity"}}},{"field":"product","change":{"set":"signed_target"}}]}],"target_reads":[1]},
+            {"id":5,"version":1,"name":"Close then order","revision":"exact","inspect":null,"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"open","change":{"set":{"constant":"false"}}}]},{"operation":3,"target":"none","assign":[{"field":"quantity","change":{"set":{"input":"quantity"}}},{"field":"product","change":{"set":"signed_target"}}]}],"target_reads":[1]},
+            {"id":6,"version":1,"name":"Increase counter","revision":"identity","inspect":null,"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"counter","change":{"increase":{"by":"quantity","rejection":{"input":"quantity","message":"Counter upper bound"}}}}]}],"target_reads":[1]},
+            {"id":7,"version":1,"name":"Decrease counter","revision":"identity","inspect":null,"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"counter","change":{"decrease":{"by":"quantity","rejection":{"input":"quantity","message":"Counter lower bound"}}}}]}],"target_reads":[1]},
+            {"id":8,"version":1,"name":"Increase stock","revision":"identity","inspect":null,"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"stock","change":{"increase":{"by":"quantity","rejection":{"input":"quantity","message":"Stock upper bound"}}}}]}],"target_reads":[1]}
+        ],
+"web_bindings":[
+            {"id":1,"version":1,"action":1,"layout":[],"redirect":{"route":3,"source":{"step":1}}},
+            {"id":2,"version":1,"action":2,"layout":[],"redirect":{"route":2,"source":"signed"}},
+            {"id":3,"version":1,"action":3,"layout":[],"redirect":{"route":2,"source":"signed"}},
+            {"id":4,"version":1,"action":4,"layout":[],"redirect":{"route":3,"source":{"step":1}}},
+            {"id":5,"version":1,"action":5,"layout":[],"redirect":{"route":3,"source":{"step":1}}},
+            {"id":6,"version":1,"action":6,"layout":[],"redirect":{"route":2,"source":"signed"}},
+            {"id":7,"version":1,"action":7,"layout":[],"redirect":{"route":2,"source":"signed"}},
+            {"id":8,"version":1,"action":8,"layout":[],"redirect":{"route":2,"source":"signed"}}
         ]
     })).unwrap();
     for (id, count) in [(9, 2), (10, 3)] {
@@ -85,6 +62,10 @@ fn declarations() -> Manifest {
         action.id = id;
         action.name = format!("Guard rollback {count}");
         action.steps = vec![m.actions[0].steps[0].clone(); count];
+        let mut binding = m.web_bindings[2].clone();
+        binding.id = id;
+        binding.action = id;
+        m.web_bindings.push(binding);
         m.actions.push(action);
     }
     let mut guarded_route = m.routes[1].clone();
@@ -808,7 +789,7 @@ async fn contract_changes_invalidate_tokens(mut case: Case) {
             3 => {
                 changed.actions[0].steps.swap(0, 1);
                 changed.actions[0].steps[2].assign[1].change = Change::Set(Value::Created(0));
-                changed.actions[0].redirect.source = RedirectSource::Step(0);
+                changed.web_bindings[0].redirect.source = RedirectSource::Step(0);
             }
             4 => {
                 let Change::Decrease { rejection, .. } =
@@ -826,7 +807,7 @@ async fn contract_changes_invalidate_tokens(mut case: Case) {
                 })
             }
             7 => {
-                changed.actions[0].redirect = Redirect {
+                changed.web_bindings[0].redirect = Redirect {
                     route: 2,
                     source: RedirectSource::Signed,
                 }
