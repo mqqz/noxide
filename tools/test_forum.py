@@ -135,6 +135,14 @@ def main():
             row = db.execute("SELECT fields,revision FROM nx_records WHERE id=?", (int(path.rsplit("/", 1)[1]),)).fetchone()
         return json.loads(row[0]), row[1]
 
+    def pending_path(resource):
+        # Operator inspection locates pending records for moderation. Anonymous
+        # handover pages must not disclose a destination without read authority.
+        with sqlite3.connect(args.output / "forum.db") as db:
+            record_id = db.execute("SELECT id FROM nx_records WHERE resource=(SELECT storage_id FROM nx_resource_catalog WHERE resource_key=?) ORDER BY created_seq DESC LIMIT 1", (resource,)).fetchone()[0]
+        assert record_id is not None
+        return f"/{resource}/{record_id}"
+
     def layout(html, destination, title=False, moderation=False, thread=False):
         forms = Forms(html)
         fields = next(f[1] for f in forms.forms if f[0] == destination)
@@ -236,9 +244,11 @@ def main():
                 title="Anonymous <script>alert(2)</script>", body="Literal <script>alert(3)</script>")
             assert status == 200 and "location" not in headers
             thread_secret = unescape(re.search(r"<pre>(.*?)</pre>", handover)[1])
-            anonymous_thread = re.search(r'href="(/threads/\d+)"', handover)[1]
+            assert re.search(r'href="/threads/\d+"', handover) is None
+            anonymous_thread = pending_path("threads")
             assert thread_secret not in anonymous_thread and "?" not in anonymous_thread
-            assert anonymous.request("GET", anonymous_thread)[0] == 404
+            unavailable = anonymous.request("GET", anonymous_thread)
+            assert unavailable[0] == 404, unavailable[0]
             assert stored(anonymous_thread)[0]["published"] == "false"
             assert stored(anonymous_thread)[0]["locked"] == "false"
             publish(anonymous_thread, "threads")
@@ -336,7 +346,8 @@ def main():
             assert status == 200 and "<pre>" in handover
             assert '<script>' not in handover
             secret = unescape(re.search(r"<pre>(.*?)</pre>", handover)[1])
-            reply_path = re.search(r'href="(/replies/\d+)"', handover)[1]
+            assert re.search(r'href="/replies/\d+"', handover) is None
+            reply_path = pending_path("replies")
             assert secret not in reply_path and "?" not in reply_path
             assert stored(reply_path)[0]["published"] == "false"
             assert anonymous.request("GET", reply_path)[0] == 404
