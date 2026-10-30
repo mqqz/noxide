@@ -89,15 +89,16 @@ password.chmod(0o600)
 PY
 "$HOST_CLI" account "$FORUM_RUN/runtime.json" moderator "$FORUM_RUN/moderator-password"
 rm -- "$FORUM_RUN/moderator-password"
-"$HOST_CLI" role grant "$FORUM_RUN/runtime.json" moderator moderator --global
-"$HOST_CLI" role list "$FORUM_RUN/runtime.json" moderator
+MODERATOR_ID=$("$HOST_CLI" account-lookup "$FORUM_RUN/runtime.json" moderator)
+"$HOST_CLI" role grant "$FORUM_RUN/runtime.json" "$MODERATOR_ID" moderator --global
+"$HOST_CLI" role list "$FORUM_RUN/runtime.json" "$MODERATOR_ID"
 "$HOST_CLI" serve "$FORUM_RUN/runtime.json"
 ```
 
 All configured paths are relative to this `runtime.json`. Role grants verify
 `bundle/manifest.json` against its `approved_contract`; serving uses that same
 manifest, component, database, and fresh keys. No prior deployment activation is
-needed for the grant. This run uses a fresh storage-version-6 database. Keep its
+needed for the grant. This run uses a fresh storage-version-7 database. Keep its
 private directory outside application sources; do not reuse production keys.
 
 Visit `http://localhost:8080`, register an ordinary account, and submit a thread.
@@ -112,8 +113,9 @@ is stored without trimming.
 To revoke authority, use another terminal with the same `FORUM_RUN` and `HOST_CLI`:
 
 ```sh
-"$HOST_CLI" role revoke "$FORUM_RUN/runtime.json" moderator moderator --global
-"$HOST_CLI" role list "$FORUM_RUN/runtime.json" moderator
+MODERATOR_ID=$("$HOST_CLI" account-lookup "$FORUM_RUN/runtime.json" moderator)
+"$HOST_CLI" role revoke "$FORUM_RUN/runtime.json" "$MODERATOR_ID" moderator --global
+"$HOST_CLI" role list "$FORUM_RUN/runtime.json" "$MODERATOR_ID"
 ```
 
 Existing sessions observe the revocation on subsequent authorization transactions.

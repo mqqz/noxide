@@ -88,9 +88,9 @@ async fn conformance(db: Database, mut inspect: InspectDb) {
     let keys = serde_json::to_vec(&HostKeys::generate().unwrap()).unwrap();
     let app = application(&db, &keys, "ok").await;
     inspect
-        .execute("INSERT INTO nx_roles(principal,name,tenant) VALUES('alice','writer','')")
+        .execute("INSERT INTO nx_roles(principal,name,tenant) VALUES((SELECT id FROM nx_accounts WHERE login_name='alice'),'writer','')")
         .await;
-    inspect.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,42,'alice','one','{\"body\":\"original\",\"tag\":\"private tag\"}','first-incarnation',1,1),(1,43,'alice','one','{\"body\":\"other\",\"tag\":\"other tag\"}','other-incarnation',1,2)").await;
+    inspect.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,42,(SELECT id FROM nx_accounts WHERE login_name='alice'),'one','{\"body\":\"original\",\"tag\":\"private tag\"}','first-incarnation',1,1),(1,43,(SELECT id FROM nx_accounts WHERE login_name='alice'),'one','{\"body\":\"other\",\"tag\":\"other tag\"}','other-incarnation',1,2)").await;
     let alice = login(&app, "alice").await;
     let bob = login(&app, "bob").await;
     let page = String::from_utf8(app.view(&alice, 2, Some(42)).await.unwrap().body).unwrap();
@@ -198,7 +198,7 @@ async fn conformance(db: Database, mut inspect: InspectDb) {
         303
     );
     inspect
-        .execute("DELETE FROM nx_roles WHERE principal='alice'")
+        .execute("DELETE FROM nx_roles WHERE principal=(SELECT id FROM nx_accounts WHERE login_name='alice')")
         .await;
     assert_eq!(
         app.submit(&alice, 2, &next, &csrf, unsaved)
@@ -218,7 +218,7 @@ async fn conformance(db: Database, mut inspect: InspectDb) {
             .contains("first edit")
     );
     inspect
-        .execute("INSERT INTO nx_roles(principal,name,tenant) VALUES('alice','writer','')")
+        .execute("INSERT INTO nx_roles(principal,name,tenant) VALUES((SELECT id FROM nx_accounts WHERE login_name='alice'),'writer','')")
         .await;
     // Two independent forms share a revision, but have different receipt IDs.
     let (left, csrf) = form(&app, &alice, 2).await;
@@ -319,7 +319,7 @@ async fn conformance(db: Database, mut inspect: InspectDb) {
         .unwrap();
     assert_eq!(result.location.as_deref(), Some("/"));
     inspect
-        .execute("DELETE FROM nx_roles WHERE principal='alice' AND name='writer'")
+        .execute("DELETE FROM nx_roles WHERE principal=(SELECT id FROM nx_accounts WHERE login_name='alice') AND name='writer'")
         .await;
     assert_eq!(
         app.submit(&alice, 3, &deleted, &csrf, Fields::new())
@@ -329,7 +329,7 @@ async fn conformance(db: Database, mut inspect: InspectDb) {
         303
     );
     inspect
-        .execute("INSERT INTO nx_roles(principal,name,tenant) VALUES('alice','writer','')")
+        .execute("INSERT INTO nx_roles(principal,name,tenant) VALUES((SELECT id FROM nx_accounts WHERE login_name='alice'),'writer','')")
         .await;
     assert_eq!(
         app.submit(&alice, 3, &other_delete, &csrf, Fields::new())
@@ -338,7 +338,7 @@ async fn conformance(db: Database, mut inspect: InspectDb) {
             .status,
         404
     );
-    inspect.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,42,'alice','one','{\"body\":\"replacement secret\",\"tag\":\"replacement\"}','second-incarnation',3,3)").await;
+    inspect.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,42,(SELECT id FROM nx_accounts WHERE login_name='alice'),'one','{\"body\":\"replacement secret\",\"tag\":\"replacement\"}','second-incarnation',3,3)").await;
     let result = app
         .submit(&alice, 3, &other_delete, &csrf, Fields::new())
         .await
@@ -460,7 +460,7 @@ async fn inspection_revocation(db: &Database, keys: &[u8], alice: &str, inspect:
         tenant_scoped: false,
     });
     inspect
-        .execute("INSERT INTO nx_roles(principal,name,tenant) VALUES('alice','reader','')")
+        .execute("INSERT INTO nx_roles(principal,name,tenant) VALUES((SELECT id FROM nx_accounts WHERE login_name='alice'),'reader','')")
         .await;
     let app = application_with(db, keys, "ok", m).await;
     let (completed, csrf) = form(&app, alice, 2).await;
@@ -472,7 +472,7 @@ async fn inspection_revocation(db: &Database, keys: &[u8], alice: &str, inspect:
         .unwrap();
     let (pending, _) = form(&app, alice, 2).await;
     inspect
-        .execute("DELETE FROM nx_roles WHERE principal='alice' AND name='reader'")
+        .execute("DELETE FROM nx_roles WHERE principal=(SELECT id FROM nx_accounts WHERE login_name='alice') AND name='reader'")
         .await;
     let before = inspect.state().await;
     let replay = app

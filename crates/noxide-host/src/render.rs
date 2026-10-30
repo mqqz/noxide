@@ -160,9 +160,9 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
     stylesheet(&mut out, context.presentation)?;
     out.push("</head><body>")?;
     if let Some(csrf) = &context.logout_csrf {
-        out.push(
-            "<nav aria-label=\"Account\"><a href=\"/\">Home</a><form method=\"post\" action=\"",
-        )?;
+        out.push("<nav aria-label=\"Account\"><a href=\"/\">Home</a> <a href=\"")?;
+        out.text(&context.presentation.account_path)?;
+        out.push("\">Account ID</a><form method=\"post\" action=\"")?;
         out.text(&context.presentation.logout_path)?;
         out.push("\"><input type=\"hidden\" name=\"")?;
         out.text(&context.presentation.csrf_field)?;

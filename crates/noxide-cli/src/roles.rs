@@ -11,7 +11,7 @@ pub async fn run(args: &[OsString]) -> Result<()> {
     ensure!(matches!(command, "grant" | "revoke" | "list"), "{USAGE}");
     ensure!(args.len() >= 3, "{USAGE}");
     let user = args[2].to_str().context("invalid user identifier")?;
-    ensure!(manifest::identifier(user), "invalid user identifier");
+    ensure!(noxide_host::account_id(user), "invalid user identifier");
     if command == "list" {
         ensure!(args.len() == 3, "{USAGE}");
         let (config, base) = super::config(Path::new(&args[1]))?;

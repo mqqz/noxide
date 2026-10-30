@@ -324,7 +324,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut tx = db.begin(deadline.into_std()).await.unwrap();
         tx.execute(
-            "INSERT INTO nx_accounts(id,password,tenant,epoch) VALUES('alice','unused','one',1)",
+            "INSERT INTO nx_accounts(id,password,tenant,state,epoch) VALUES('alice','unused','one','active',1)",
             &[],
         )
         .await

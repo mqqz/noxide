@@ -184,9 +184,9 @@ Policies support `owner`, `same_tenant`, `role("writer")`,
 approves the generated contract. Guest code can reject an operation but cannot
 override host policy.
 
-Operators manage assignments with `noxide role grant|revoke CONFIG.json USER ROLE
+Operators manage assignments with `noxide role grant|revoke CONFIG.json ACCOUNT_ID ROLE
 --global` or `--tenant TENANT`, and inspect them with `noxide role list CONFIG.json
-USER`. Global `role` and scoped `tenant_role` predicates are distinct; a tenant
+ACCOUNT_ID`. Global `role` and scoped `tenant_role` predicates are distinct; a tenant
 grant must match the account's existing nonempty tenant. Grants require that exact
 role and scope in the configured approved manifest. Registration grants no roles.
 
@@ -652,3 +652,55 @@ after the child has been deleted.
 
 The [architecture layers](architecture/layers.md) describe explicit SDK declarations,
 optional convenience lowering, and independent host enforcement.
+
+## Account references and principal policies
+
+`AccountId` is an opaque identity, distinct from a login name. Parsing checks its
+canonical encoding only; it does not grant authority or prove account eligibility.
+Declare references explicitly:
+
+```rust,ignore
+#[derive(noxide::Resource)]
+#[resource(key = "messages")]
+struct Message {
+    #[id] id: noxide::Id<Self>,
+    #[field(scope = same_tenant)] recipient: noxide::AccountId,
+    #[field(max_bytes = 4096)] body: String,
+}
+#[noxide::query(list(Message), allow = any(owner, principal_is(recipient)), page_size = 20)]
+struct ListMessages;
+#[noxide::query(read(Message), allow = any(owner, principal_is(recipient)))]
+struct ReadMessage;
+```
+
+The host validates references atomically at record creation: creator and targets
+must be active and share a nonempty tenant. Only operator-assigned tenants are
+supported. Self-registered accounts have no tenant and cannot participate in
+these bindings. Empty tenant never means a shared default tenant.
+
+Account fields are required, have no defaults, and are limited to four per
+resource. They cannot appear in update projections. Schema conversion and
+backfilling an existing resource with account references are unsupported; create
+a new resource instead. Same-kind constraint changes, such as tightening
+`max_bytes`, are allowed when stored IDs remain valid and the binding scope is
+unchanged. Identity and immutability are separate concepts: the
+initial write contract enforces immutability.
+
+`principal_is(field)` is available only on read/list operations, including inside
+`any`/`all`. It compares the stored identity with the authenticated principal;
+it adds no tenant check. For recipient access confined to the record's tenant,
+use `any(owner, all(principal_is(recipient), same_tenant))`. Owner remains the
+host-controlled creator. Recipient read access never implies mutation authority.
+
+Signed-in users can view their own ID at the host's `/account` page (configurable
+as `presentation.account_path`). They share IDs themselves. There is no guest
+directory or login-name resolution capability; the inbox displays opaque IDs.
+An exact ID can be tested for current binding eligibility through creation
+success. Ineligible targets receive the same public rejection, but database
+lookups are not claimed to be timing-indistinguishable.
+
+The inbox uses ordered owner and recipient index scans merged before pagination.
+It returns full pages when enough authorized records fit the output budget.
+Policies requiring residual filtering use bounded candidate scans and may return
+short or empty pages with a continuation. Continue using the host-rendered
+pagination links, rather than treating a short page as exhaustion.

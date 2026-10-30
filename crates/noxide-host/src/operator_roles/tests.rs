@@ -10,7 +10,7 @@ async fn seed(db: &Database, count: usize) {
         .unwrap();
     for n in 0..count {
         tx.execute(
-            "INSERT INTO nx_roles(principal,name,tenant) VALUES('alice',$1,'')",
+            "INSERT INTO nx_roles(principal,name,tenant) VALUES((SELECT id FROM nx_accounts WHERE login_name='alice'),$1,'')",
             &[format!("role{n}").into()],
         )
         .await
@@ -23,14 +23,27 @@ async fn basics(db: &Database) {
     db.create_account("alice", "private test password", "one")
         .await
         .unwrap();
-    assert!(db.list_roles("alice").await.unwrap().is_empty());
+    assert!(
+        db.list_roles(&crate::test_account(db, "alice").await)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     for scope in [RoleScope::Global, RoleScope::Tenant("one")] {
-        assert!(db.grant_role("alice", "moderator", scope).await.unwrap());
-        assert!(!db.grant_role("alice", "moderator", scope).await.unwrap());
+        assert!(
+            db.grant_role(&crate::test_account(db, "alice").await, "moderator", scope)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !db.grant_role(&crate::test_account(db, "alice").await, "moderator", scope)
+                .await
+                .unwrap()
+        );
     }
     // A global assignment alone cannot satisfy a tenant-scoped predicate.
     let global_only = auth::Principal::User(auth::User {
-        id: "alice".into(),
+        id: crate::test_account(db, "alice").await,
         tenant: "one".into(),
         roles: vec![("moderator".into(), "".into())],
     });
@@ -42,20 +55,42 @@ async fn basics(db: &Database) {
             }]],
         };
         assert_eq!(
-            policy::allowed(&policy, &global_only, "alice", "one"),
+            policy::allowed(
+                &policy,
+                &global_only,
+                crate::policy::Row {
+                    owner: "alice",
+                    tenant: "one",
+                    fields: &Default::default()
+                }
+            ),
             !tenant_scoped
         );
     }
-    let roles = db.list_roles("alice").await.unwrap();
+    let roles = db
+        .list_roles(&crate::test_account(db, "alice").await)
+        .await
+        .unwrap();
     assert_eq!(roles.len(), 2);
     assert_eq!(roles[0].tenant, "");
     assert_eq!(roles[1].tenant, "one");
     for (scope, tenant_scoped) in [(RoleScope::Global, false), (RoleScope::Tenant("one"), true)] {
-        assert!(db.revoke_role("alice", "moderator", scope).await.unwrap());
-        assert!(!db.revoke_role("alice", "moderator", scope).await.unwrap());
-        let roles = db.list_roles("alice").await.unwrap();
+        assert!(
+            db.revoke_role(&crate::test_account(db, "alice").await, "moderator", scope)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !db.revoke_role(&crate::test_account(db, "alice").await, "moderator", scope)
+                .await
+                .unwrap()
+        );
+        let roles = db
+            .list_roles(&crate::test_account(db, "alice").await)
+            .await
+            .unwrap();
         let principal = auth::Principal::User(auth::User {
-            id: "alice".into(),
+            id: crate::test_account(db, "alice").await,
             tenant: "one".into(),
             roles: roles.into_iter().map(|r| (r.name, r.tenant)).collect(),
         });
@@ -68,12 +103,31 @@ async fn basics(db: &Database) {
         assert!(!policy::allowed(
             &p(tenant_scoped),
             &principal,
-            "alice",
-            "one"
+            crate::policy::Row {
+                owner: "alice",
+                tenant: "one",
+                fields: &Default::default()
+            }
         ));
         if !tenant_scoped {
-            assert!(policy::allowed(&p(true), &principal, "alice", "one"));
-            assert!(!policy::allowed(&p(true), &principal, "alice", "two"));
+            assert!(policy::allowed(
+                &p(true),
+                &principal,
+                crate::policy::Row {
+                    owner: "alice",
+                    tenant: "one",
+                    fields: &Default::default()
+                }
+            ));
+            assert!(!policy::allowed(
+                &p(true),
+                &principal,
+                crate::policy::Row {
+                    owner: "alice",
+                    tenant: "two",
+                    fields: &Default::default()
+                }
+            ));
         }
     }
     for user in ["missing", "bad-user", ""] {
@@ -94,30 +148,46 @@ async fn basics(db: &Database) {
         RoleScope::Tenant(""),
         RoleScope::Tenant("bad-tenant"),
     ] {
-        assert!(db.grant_role("alice", "moderator", scope).await.is_err());
+        assert!(
+            db.grant_role(&crate::test_account(db, "alice").await, "moderator", scope)
+                .await
+                .is_err()
+        );
     }
     assert!(
-        db.grant_role("alice", "bad-role", RoleScope::Global)
-            .await
-            .is_err()
+        db.grant_role(
+            &crate::test_account(db, "alice").await,
+            "bad-role",
+            RoleScope::Global
+        )
+        .await
+        .is_err()
     );
     assert!(
-        db.grant_role("alice", "moderator", RoleScope::Tenant("one"))
-            .await
-            .unwrap()
+        db.grant_role(
+            &crate::test_account(db, "alice").await,
+            "moderator",
+            RoleScope::Tenant("one")
+        )
+        .await
+        .unwrap()
     );
     let mut tx = db
         .begin(Instant::now() + Duration::from_secs(5))
         .await
         .unwrap();
-    tx.execute("UPDATE nx_accounts SET tenant='two' WHERE id='alice'", &[])
+    tx.execute("UPDATE nx_accounts SET tenant='two' WHERE id=(SELECT id FROM nx_accounts WHERE login_name='alice')", &[])
         .await
         .unwrap();
     tx.commit().await.unwrap();
     assert!(
-        db.revoke_role("alice", "moderator", RoleScope::Tenant("one"))
-            .await
-            .unwrap()
+        db.revoke_role(
+            &crate::test_account(db, "alice").await,
+            "moderator",
+            RoleScope::Tenant("one")
+        )
+        .await
+        .unwrap()
     );
     seed(db, 31).await;
     let gate = Arc::new(tokio::sync::Barrier::new(2));
@@ -126,51 +196,92 @@ async fn basics(db: &Database) {
         let gate = gate.clone();
         async move {
             gate.wait().await;
-            db.grant_role("alice", name, RoleScope::Global).await
+            db.grant_role(
+                &crate::test_account(&db, "alice").await,
+                name,
+                RoleScope::Global,
+            )
+            .await
         }
     };
     let (a, b) = tokio::join!(attempt("nexta"), attempt("nextb"));
     assert!(a.is_ok() || b.is_ok());
     assert!(!(a.is_ok() && b.is_ok()));
-    assert_eq!(db.list_roles("alice").await.unwrap().len(), 32);
-    assert!(
-        !db.grant_role("alice", "role0", RoleScope::Global)
+    assert_eq!(
+        db.list_roles(&crate::test_account(db, "alice").await)
             .await
             .unwrap()
+            .len(),
+        32
     );
     assert!(
-        db.grant_role("alice", "overflow", RoleScope::Global)
-            .await
-            .is_err()
+        !db.grant_role(
+            &crate::test_account(db, "alice").await,
+            "role0",
+            RoleScope::Global
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        db.grant_role(
+            &crate::test_account(db, "alice").await,
+            "overflow",
+            RoleScope::Global
+        )
+        .await
+        .is_err()
     );
     let mut tx = db
         .begin(Instant::now() + Duration::from_secs(5))
         .await
         .unwrap();
     tx.execute(
-        "INSERT INTO nx_roles(principal,name,tenant) VALUES('alice','manual','')",
+        "INSERT INTO nx_roles(principal,name,tenant) VALUES((SELECT id FROM nx_accounts WHERE login_name='alice'),'manual','')",
         &[],
     )
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    assert!(db.list_roles("alice").await.is_err());
     assert!(
-        !db.grant_role("alice", "role0", RoleScope::Global)
-            .await
-            .unwrap()
-    );
-    assert!(
-        db.grant_role("alice", "overflow", RoleScope::Global)
+        db.list_roles(&crate::test_account(db, "alice").await)
             .await
             .is_err()
     );
     assert!(
-        db.revoke_role("alice", "manual", RoleScope::Global)
+        !db.grant_role(
+            &crate::test_account(db, "alice").await,
+            "role0",
+            RoleScope::Global
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        db.grant_role(
+            &crate::test_account(db, "alice").await,
+            "overflow",
+            RoleScope::Global
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        db.revoke_role(
+            &crate::test_account(db, "alice").await,
+            "manual",
+            RoleScope::Global
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        db.list_roles(&crate::test_account(db, "alice").await)
             .await
             .unwrap()
+            .len(),
+        32
     );
-    assert_eq!(db.list_roles("alice").await.unwrap().len(), 32);
 }
 
 async fn fresh_forms(db: &Database) {
@@ -202,9 +313,13 @@ async fn fresh_forms(db: &Database) {
         .unwrap();
     let page = String::from_utf8(app.view(&cookie, 1, None).await.unwrap().body).unwrap();
     assert!(!page.contains("name=\"_submission\""));
-    db.grant_role("alice", "moderator", RoleScope::Global)
-        .await
-        .unwrap();
+    db.grant_role(
+        &crate::test_account(db, "alice").await,
+        "moderator",
+        RoleScope::Global,
+    )
+    .await
+    .unwrap();
     let form = || async {
         let page = String::from_utf8(app.view(&cookie, 1, None).await.unwrap().body).unwrap();
         (
@@ -218,9 +333,13 @@ async fn fresh_forms(db: &Database) {
         .await
         .unwrap();
     let (unused, unused_csrf) = form().await;
-    db.revoke_role("alice", "moderator", RoleScope::Global)
-        .await
-        .unwrap();
+    db.revoke_role(
+        &crate::test_account(db, "alice").await,
+        "moderator",
+        RoleScope::Global,
+    )
+    .await
+    .unwrap();
     assert!(
         app.submit(&cookie, 1, &unused, &unused_csrf, input.clone())
             .await
@@ -256,16 +375,28 @@ async fn sqlite_fresh_forms() {
 async fn missing_storage_is_not_initialized() {
     let temp = tempfile::tempdir().unwrap();
     let db = Database::sqlite(temp.path().join("missing.db"));
-    assert!(db.list_roles("alice").await.is_err());
     assert!(
-        db.grant_role("alice", "moderator", RoleScope::Global)
+        db.list_roles(&crate::test_account(&db, "alice").await)
             .await
             .is_err()
     );
     assert!(
-        db.revoke_role("alice", "moderator", RoleScope::Global)
-            .await
-            .is_err()
+        db.grant_role(
+            &crate::test_account(&db, "alice").await,
+            "moderator",
+            RoleScope::Global
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        db.revoke_role(
+            &crate::test_account(&db, "alice").await,
+            "moderator",
+            RoleScope::Global
+        )
+        .await
+        .is_err()
     );
 }
 #[tokio::test]
@@ -281,18 +412,27 @@ async fn sqlite_contention_and_rollback() {
         .await
         .unwrap();
     held.execute(
-        "INSERT INTO nx_roles(principal,name,tenant) VALUES('alice','pending','')",
+        "INSERT INTO nx_roles(principal,name,tenant) VALUES((SELECT id FROM nx_accounts WHERE login_name='alice'),'pending','')",
         &[],
     )
     .await
     .unwrap();
     assert!(
-        db.grant_role("alice", "other", RoleScope::Global)
-            .await
-            .is_err()
+        db.grant_role(
+            &crate::test_account(&db, "alice").await,
+            "other",
+            RoleScope::Global
+        )
+        .await
+        .is_err()
     );
     held.rollback().await.unwrap();
-    assert!(db.list_roles("alice").await.unwrap().is_empty());
+    assert!(
+        db.list_roles(&crate::test_account(&db, "alice").await)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -342,15 +482,22 @@ async fn predicate_race(db: &Database) {
     // PostgreSQL only: both real grant transactions have read the 31-row
     // predicate before either insert. SQLite synchronizes before admission above.
     let gate = Arc::new(tokio::sync::Barrier::new(2));
+    let alice = crate::test_account(db, "alice").await;
     let (a, b) = tokio::join!(
         READ_BARRIER.scope(
             gate.clone(),
-            db.grant_role("alice", "racea", RoleScope::Global)
+            db.grant_role(&alice, "racea", RoleScope::Global)
         ),
-        READ_BARRIER.scope(gate, db.grant_role("alice", "raceb", RoleScope::Global)),
+        READ_BARRIER.scope(gate, db.grant_role(&alice, "raceb", RoleScope::Global)),
     );
     assert_ne!(a.is_ok(), b.is_ok());
-    assert_eq!(db.list_roles("alice").await.unwrap().len(), 32);
+    assert_eq!(
+        db.list_roles(&crate::test_account(db, "alice").await)
+            .await
+            .unwrap()
+            .len(),
+        32
+    );
 }
 
 #[tokio::test]
@@ -362,26 +509,41 @@ async fn lost_commit_ack_is_reported_and_reconciled() {
         .await
         .unwrap();
     let result = crate::failure_tests::lose_commit_ack(db.grant_role(
-        "alice",
+        &crate::test_account(&db, "alice").await,
         "moderator",
         RoleScope::Global,
     ))
     .await;
     assert!(result.unwrap_err().to_string().contains("indeterminate"));
-    assert_eq!(db.list_roles("alice").await.unwrap().len(), 1);
-    assert!(
-        !db.grant_role("alice", "moderator", RoleScope::Global)
+    assert_eq!(
+        db.list_roles(&crate::test_account(&db, "alice").await)
             .await
             .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        !db.grant_role(
+            &crate::test_account(&db, "alice").await,
+            "moderator",
+            RoleScope::Global
+        )
+        .await
+        .unwrap()
     );
     let result = crate::failure_tests::lose_commit_ack(db.revoke_role(
-        "alice",
+        &crate::test_account(&db, "alice").await,
         "moderator",
         RoleScope::Global,
     ))
     .await;
     assert!(result.unwrap_err().to_string().contains("indeterminate"));
-    assert!(db.list_roles("alice").await.unwrap().is_empty());
+    assert!(
+        db.list_roles(&crate::test_account(&db, "alice").await)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -448,12 +610,20 @@ async fn ordinary_actions_cannot_write_moderator_fields_or_reuse_credential() {
             .await
             .unwrap();
         tx.allocate_creation().await.unwrap();
-        let owner = if capability { "NULL" } else { "'alice'" };
+        let owner = if capability {
+            "NULL"
+        } else {
+            "(SELECT id FROM nx_accounts WHERE login_name='alice')"
+        };
         tx.execute(&format!("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version,created_seq) VALUES(1,42,{owner},'','{{\"body\":\"original\",\"tag\":\"moderator only\",\"published\":\"true\"}}','record',1,1,(SELECT value FROM nx_creation_counter WHERE singleton=1))"),&[]).await.unwrap();
         tx.commit().await.unwrap();
-        db.grant_role("alice", "moderator", RoleScope::Global)
-            .await
-            .unwrap();
+        db.grant_role(
+            &crate::test_account(&db, "alice").await,
+            "moderator",
+            RoleScope::Global,
+        )
+        .await
+        .unwrap();
         let challenge = app.login_challenge().await.unwrap();
         let cookie = app
             .login(
@@ -493,9 +663,13 @@ async fn ordinary_actions_cannot_write_moderator_fields_or_reuse_credential() {
             .await
             .is_err()
         );
-        db.revoke_role("alice", "moderator", RoleScope::Global)
-            .await
-            .unwrap();
+        db.revoke_role(
+            &crate::test_account(&db, "alice").await,
+            "moderator",
+            RoleScope::Global,
+        )
+        .await
+        .unwrap();
         assert!(
             app.submit_with_capability(
                 &cookie,

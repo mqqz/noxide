@@ -17,6 +17,7 @@ pub struct Presentation {
     /// Prefix without a trailing slash; resource and record IDs are appended.
     pub capability_path: String,
     pub login_path: String,
+    pub account_path: String,
     pub logout_path: String,
     pub action_path: String,
     pub stylesheet_path: String,
@@ -35,6 +36,7 @@ impl Default for Presentation {
             registration_path: "/register".into(),
             capability_path: "/_noxide/capability".into(),
             login_path: "/login".into(),
+            account_path: "/account".into(),
             logout_path: "/logout".into(),
             action_path: "/actions".into(),
             stylesheet_path: "/assets/site.css".into(),
@@ -85,8 +87,9 @@ impl Presentation {
                 "host field overlaps application or authentication field"
             );
         }
-        let paths: [&str; 6] = [
+        let paths: [&str; 7] = [
             &self.login_path,
+            &self.account_path,
             &self.logout_path,
             &self.action_path,
             &self.stylesheet_path,
@@ -114,7 +117,7 @@ impl Presentation {
                 );
             }
             for route in &manifest.routes {
-                if i == 5 {
+                if *path == self.capability_path {
                     let endpoint = format!("{path}/{{resource}}/{{id}}");
                     let left: Vec<_> = route.path.split('/').collect();
                     let right: Vec<_> = endpoint.split('/').collect();
@@ -137,7 +140,7 @@ impl Presentation {
                     crate::render::match_path(route, path).is_none(),
                     "host endpoint overlaps application route"
                 );
-                if i == 2 {
+                if *path == self.action_path {
                     ensure!(
                         path.split('/').skip(1).all(crate::manifest::identifier),
                         "invalid action path segment"

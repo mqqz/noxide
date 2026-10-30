@@ -27,7 +27,11 @@ rand = "0.8"
 base64 = "0.22"
 url = "2"
 
+[features]
+query-metrics = []
+
 [dev-dependencies]
+libsqlite3-sys = "0.30.1"
 tempfile = "3"
 wat = "1"
 tower = { version = "0.5", features = ["util"] }

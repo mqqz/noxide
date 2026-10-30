@@ -112,8 +112,8 @@ pub mod __private {
 /// Common application declarations, capabilities, and rendering types.
 pub mod prelude {
     pub use crate::{
-        ActionError, ActionResult, Choice, Form, FormFields, FormLayout, Fragment, Id, NotFound,
-        Page, PageResult, Query, Resource, Submission, action, app, application, form, html, page,
-        query,
+        AccountId, ActionError, ActionResult, Choice, Form, FormFields, FormLayout, Fragment, Id,
+        NotFound, Page, PageResult, Query, Resource, Submission, action, app, application, form,
+        html, page, query,
     };
 }

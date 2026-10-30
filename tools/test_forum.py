@@ -120,13 +120,14 @@ def main():
     password.write_text("Forum moderator password\n")
     password.chmod(0o600)
     subprocess.run([binary, "account", config, "moderator", password], check=True, timeout=15)
+    moderator_id = subprocess.check_output([binary, "account-lookup", config, "moderator"], text=True).strip()
     password.unlink()
 
     def role(command):
         # Resolve config-relative paths from a different working directory.
-        result = subprocess.run([binary, "role", command, config, "moderator", "moderator", "--global"],
+        result = subprocess.run([binary, "role", command, config, moderator_id, "moderator", "--global"],
                                 cwd=args.bundle.resolve(), check=True, capture_output=True, text=True, timeout=10)
-        assert "user=moderator role=moderator scope=global tenant=-: changed" in result.stdout
+        assert f"user={moderator_id} role=moderator scope=global tenant=-: changed" in result.stdout
         assert not result.stderr
 
     def stored(path):

@@ -8,6 +8,7 @@ pub(crate) enum PolicyAtom {
     Public,
     Capability,
     Owner,
+    PrincipalIs(Ident),
     Tenant,
     Role(LitStr, bool),
 }
@@ -17,6 +18,15 @@ pub(crate) fn policy(input: ParseStream<'_>) -> syn::Result<Vec<Vec<PolicyAtom>>
     match name.to_string().as_str() {
         "public" => Ok(vec![vec![PolicyAtom::Public]]),
         "capability" => Ok(vec![vec![PolicyAtom::Capability]]),
+        "principal_is" => {
+            let content;
+            parenthesized!(content in input);
+            let field: Ident = content.parse()?;
+            if !content.is_empty() {
+                return Err(content.error("expected one account field"));
+            }
+            Ok(vec![vec![PolicyAtom::PrincipalIs(field)]])
+        }
         "owner" => Ok(vec![vec![PolicyAtom::Owner]]),
         "same_tenant" => Ok(vec![vec![PolicyAtom::Tenant]]),
         "role" | "tenant_role" => {
@@ -87,11 +97,19 @@ pub(crate) fn policy(input: ParseStream<'_>) -> syn::Result<Vec<Vec<PolicyAtom>>
     }
 }
 
-pub(crate) fn policy_tokens(rules: &[Vec<PolicyAtom>]) -> Tokens {
+pub(crate) fn policy_tokens(rules: &[Vec<PolicyAtom>], resource: &syn::Type) -> Tokens {
     let rules = rules.iter().map(|rule| {
         let predicates = rule.iter().map(|atom| match atom {
             PolicyAtom::Public => quote!(::noxide::__private::Predicate::Public),
             PolicyAtom::Capability => quote!(::noxide::__private::Predicate::Capability),
+            PolicyAtom::PrincipalIs(field) => {
+                let hash = crate::syntax::stable_id(&field.to_string());
+                quote!({
+                    fn check<T: ::noxide::FieldSpec<#hash, Value = ::noxide::AccountId>>() {}
+                    check::<#resource>();
+                    ::noxide::__private::Predicate::PrincipalIs { field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into() }
+                })
+            }
             PolicyAtom::Owner => quote!(::noxide::__private::Predicate::Owner),
             PolicyAtom::Tenant => quote!(::noxide::__private::Predicate::SameTenant),
             PolicyAtom::Role(name, tenant_scoped) => quote!(::noxide::__private::Predicate::Role { name: #name.into(), tenant_scoped: #tenant_scoped }),

@@ -488,8 +488,11 @@ fn capability_policies_are_standalone_mutations_and_never_ordinary_authority() {
         assert!(!crate::repository::allowed(
             &good.operations[3].policy,
             &principal,
-            "alice",
-            ""
+            crate::policy::Row {
+                owner: "alice",
+                tenant: "",
+                fields: &Default::default()
+            }
         ));
     }
 }

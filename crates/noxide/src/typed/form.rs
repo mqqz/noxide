@@ -113,6 +113,7 @@ impl<T> ControlField<T> {
 }
 pub trait TextControl {}
 impl TextControl for String {}
+impl TextControl for super::resource::AccountId {}
 impl TextControl for i64 {}
 impl<T: TextControl> TextControl for Option<T> {}
 pub trait TextareaValue {}

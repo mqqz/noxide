@@ -70,6 +70,14 @@ pub fn validate(m: &Manifest) -> Result<()> {
                 <= 1,
             "one parent per resource"
         );
+        ensure!(
+            r.fields
+                .iter()
+                .filter(|f| matches!(f.kind, FieldKind::Account { .. }))
+                .count()
+                <= 4,
+            "account field limit"
+        );
         let mut fields = BTreeSet::new();
         for f in &r.fields {
             ensure!(
@@ -111,6 +119,10 @@ pub fn validate(m: &Manifest) -> Result<()> {
                         );
                     }
                 }
+                FieldKind::Account { .. } => ensure!(
+                    !f.optional && f.initial.is_none() && f.max_bytes >= 43,
+                    "account fields must be required without defaults"
+                ),
                 FieldKind::Text => {}
                 FieldKind::Boolean => ensure!(f.max_bytes >= 5, "boolean field budget"),
                 FieldKind::Integer { min, max } => {
@@ -168,6 +180,18 @@ pub fn validate(m: &Manifest) -> Result<()> {
         for rule in &op.policy.any {
             ensure!(!rule.is_empty() && rule.len() <= 4, "invalid policy rule");
             for p in rule {
+                if let Predicate::PrincipalIs { field } = p {
+                    ensure!(
+                        matches!(op.kind, OperationKind::Read | OperationKind::List),
+                        "principal_is requires read or list"
+                    );
+                    ensure!(
+                        resource(m, op.resource)?.fields.iter().any(
+                            |f| f.name == *field && matches!(f.kind, FieldKind::Account { .. })
+                        ),
+                        "principal_is requires an account field"
+                    );
+                }
                 if let Predicate::Role { name, .. } = p {
                     ensure!(identifier(name), "invalid role");
                 }
@@ -324,6 +348,15 @@ pub fn validate(m: &Manifest) -> Result<()> {
         );
         let op = operation(m, a.operation)?;
         let fields = action_fields(m, a)?;
+        if op.kind == OperationKind::Update {
+            ensure!(
+                fields
+                    .iter()
+                    .all(|f| !matches!(f.kind, FieldKind::Account { .. })),
+                "account fields are immutable"
+            );
+        }
+
         ensure!(
             fields
                 .iter()

@@ -464,8 +464,11 @@ impl Application {
                 || principal.user().is_ok_and(|user| repository::allowed(
                     &op.policy,
                     principal,
-                    &user.id,
-                    &user.tenant
+                    crate::policy::Row {
+                        owner: &user.id,
+                        tenant: &user.tenant,
+                        fields: &Default::default()
+                    }
                 )),
             "policy denied"
         );

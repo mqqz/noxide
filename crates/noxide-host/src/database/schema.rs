@@ -134,6 +134,7 @@ impl Transaction {
 
     pub(crate) async fn bind_schema(&mut self, manifest: &noxide_protocol::Manifest) -> Result<()> {
         if self.schema_definition().await?.is_some() {
+            self.validate_account_indexes(&manifest.resources).await?;
             return self.check_schema(manifest).await;
         }
         ensure!(
@@ -161,8 +162,50 @@ impl Transaction {
         self.store_schema(&manifest.resources, &[]).await
     }
 
+    async fn validate_account_indexes(
+        &mut self,
+        resources: &[noxide_protocol::Resource],
+    ) -> Result<()> {
+        for resource in resources {
+            for field in resource
+                .fields
+                .iter()
+                .filter(|f| matches!(f.kind, noxide_protocol::FieldKind::Account { .. }))
+            {
+                let storage = self.storage_key(&resource.name).await?;
+                for suffix in ["i", "t"] {
+                    let name = format!("nx_a_{storage:x}_{}_{suffix}", field.name);
+                    let query = match self.backend {
+                        super::Backend::Sqlite(_) => {
+                            "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='nx_records' AND name=$1"
+                        }
+                        super::Backend::Postgres(_) => {
+                            "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND tablename='nx_records' AND indexname=$1"
+                        }
+                    };
+                    ensure!(
+                        self.fetch::<1>(query, &[name.into()]).await?.len() == 1,
+                        "account reference index missing"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn parent_indexes(&mut self, resources: &[noxide_protocol::Resource]) -> Result<()> {
         for resource in resources {
+            let storage = self.storage_key(&resource.name).await?;
+            for field in resource
+                .fields
+                .iter()
+                .filter(|f| matches!(f.kind, noxide_protocol::FieldKind::Account { .. }))
+            {
+                let expression = self.parent_expression(&field.name)?;
+                for (suffix, columns) in [("i", ""), ("t", "tenant,")] {
+                    self.execute(&format!("CREATE INDEX nx_a_{storage:x}_{}_{suffix} ON nx_records(resource, ({expression}), {columns}created_seq) WHERE resource={storage}", field.name), &[]).await?;
+                }
+            }
             if let Some(field) = crate::manifest::parent_field(resource) {
                 let storage = self.storage_key(&resource.name).await?;
                 let expression = self.parent_expression(&field.name)?;
@@ -288,6 +331,20 @@ impl Transaction {
         ensure!(history.len() < 128, "migration history limit");
         schema::transition(&source, &target.resources, &migration.operations)?;
         for resource in &source {
+            let storage = self.storage_key(&resource.name).await?;
+            for field in resource
+                .fields
+                .iter()
+                .filter(|f| matches!(f.kind, noxide_protocol::FieldKind::Account { .. }))
+            {
+                for suffix in ["i", "t"] {
+                    self.execute(
+                        &format!("DROP INDEX nx_a_{storage:x}_{}_{suffix}", field.name),
+                        &[],
+                    )
+                    .await?;
+                }
+            }
             if crate::manifest::parent_field(resource).is_some() {
                 let storage = self.storage_key(&resource.name).await?;
                 for column in ["owner", "tenant"] {

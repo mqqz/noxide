@@ -230,6 +230,15 @@ impl Database {
             for sql in SCHEMA {
                 tx.execute(sql, &[]).await?;
             }
+            match tx.backend {
+                Backend::Sqlite(_) => {
+                    tx.execute("CREATE TRIGGER nx_accounts_no_delete BEFORE DELETE ON nx_accounts BEGIN SELECT RAISE(ABORT, 'account identities cannot be deleted'); END", &[]).await?;
+                }
+                Backend::Postgres(_) => {
+                    tx.execute("CREATE FUNCTION nx_reject_identity_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'account identities cannot be deleted'; END $$", &[]).await?;
+                    tx.execute("CREATE TRIGGER nx_accounts_no_delete BEFORE DELETE ON nx_accounts FOR EACH ROW EXECUTE FUNCTION nx_reject_identity_delete()", &[]).await?;
+                }
+            }
         } else {
             tx.check_storage().await?;
             tx.check_layout().await?;
@@ -338,6 +347,86 @@ impl Transaction {
         }
     }
 
+    /// Test-only instrumentation. Enable SQLite's scanstatus build flag together
+    /// with query-metrics; no raw database handle is exposed to applications.
+    #[cfg(all(test, feature = "query-metrics"))]
+    pub(crate) async fn examined_rows(&mut self, query: &str) -> Result<i64> {
+        match &mut self.backend {
+            Backend::Sqlite(cx) => {
+                use libsqlite3_sys::*;
+                let mut handle = cx.lock_handle().await?;
+                let query = std::ffi::CString::new(query)?;
+                let mut statement = std::ptr::null_mut();
+                // SAFETY: the sqlx lock exclusively owns the live connection;
+                // prepare initializes statement, which is finalized on all paths.
+                unsafe {
+                    ensure!(
+                        sqlite3_prepare_v2(
+                            handle.as_raw_handle().as_ptr(),
+                            query.as_ptr(),
+                            -1,
+                            &mut statement,
+                            std::ptr::null_mut()
+                        ) == SQLITE_OK,
+                        "prepare benchmark"
+                    );
+                    let mut result = sqlite3_step(statement);
+                    while result == SQLITE_ROW {
+                        result = sqlite3_step(statement);
+                    }
+                    let mut visits = 0_i64;
+                    let mut index = 0;
+                    loop {
+                        let mut count = 0_i64;
+                        if sqlite3_stmt_scanstatus(
+                            statement,
+                            index,
+                            SQLITE_SCANSTAT_NVISIT,
+                            (&mut count as *mut i64).cast(),
+                        ) != 0
+                        {
+                            break;
+                        }
+                        visits += count;
+                        index += 1;
+                    }
+                    sqlite3_finalize(statement);
+                    ensure!(
+                        result == SQLITE_DONE && index > 0,
+                        "scanstatus unavailable or benchmark failed"
+                    );
+                    Ok(visits)
+                }
+            }
+            Backend::Postgres(cx) => {
+                let row = sqlx::query(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {query}"))
+                    .fetch_one(cx)
+                    .await?;
+                let value: serde_json::Value = serde_json::from_slice(
+                    row.try_get_raw(0)?
+                        .as_bytes()
+                        .map_err(|e| anyhow::anyhow!("{e}"))?,
+                )?;
+                fn scans(node: &serde_json::Value) -> i64 {
+                    let own = if node["Node Type"]
+                        .as_str()
+                        .is_some_and(|s| s.contains("Scan"))
+                    {
+                        (node["Actual Rows"].as_f64().unwrap_or(0.0) as i64
+                            + node["Rows Removed by Filter"].as_f64().unwrap_or(0.0) as i64)
+                            * node["Actual Loops"].as_f64().unwrap_or(1.0) as i64
+                    } else {
+                        0
+                    };
+                    own + node["Plans"]
+                        .as_array()
+                        .map_or(0, |plans| plans.iter().map(scans).sum())
+                }
+                Ok(scans(&value[0]["Plan"]))
+            }
+        }
+    }
+
     pub(crate) async fn allocate_creation(&mut self) -> Result<i64> {
         let rows=self.fetch::<1>("UPDATE nx_creation_counter SET value=value+1 WHERE singleton=1 AND value<9223372036854775807 RETURNING CAST(value AS TEXT)", &[]).await?;
         ensure!(rows.len() == 1, "creation sequence exhausted");
@@ -378,6 +467,18 @@ impl Transaction {
     }
 
     async fn check_layout(&mut self) -> Result<()> {
+        let trigger = match self.backend {
+            Backend::Sqlite(_) => {
+                "SELECT name FROM sqlite_schema WHERE type='trigger' AND name='nx_accounts_no_delete' AND tbl_name='nx_accounts'"
+            }
+            Backend::Postgres(_) => {
+                "SELECT t.tgname FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname='nx_accounts' AND t.tgname='nx_accounts_no_delete' AND t.tgenabled='O'"
+            }
+        };
+        ensure!(
+            self.fetch::<1>(trigger, &[]).await?.len() == 1,
+            "identity tombstone protection is missing"
+        );
         let mut expected: Vec<_> = TABLE_COLUMNS
             .iter()
             .map(|(name, _)| (*name).to_owned())
@@ -413,6 +514,8 @@ impl Transaction {
                     || (table == "nx_invites" && expected_name == "code_hash");
                 let expected_not_null = if (matches!(self.backend, Backend::Sqlite(_))
                     && implicit_key)
+                    || (table == "nx_accounts"
+                        && matches!(expected_name, "login_name" | "password"))
                     || (table == "nx_records" && matches!(expected_name, "owner" | "cap_version"))
                     || (table == "nx_invites"
                         && matches!(expected_name, "redeemed_at" | "redeemed_by"))
@@ -620,7 +723,7 @@ pub(crate) fn retryable(error: &anyhow::Error) -> bool {
     )
 }
 
-const STORAGE_VERSION: i64 = 6;
+const STORAGE_VERSION: i64 = 7;
 const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
     (
         "nx_resource_catalog",
@@ -638,8 +741,10 @@ const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
         "nx_accounts",
         &[
             ("id", "TEXT"),
+            ("login_name", "TEXT"),
             ("password", "TEXT"),
             ("tenant", "TEXT"),
+            ("state", "TEXT"),
             ("epoch", "BIGINT"),
         ],
     ),
@@ -717,10 +822,10 @@ const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
 
 const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS nx_storage (singleton BIGINT PRIMARY KEY CHECK(singleton=1), version BIGINT NOT NULL)",
-    "INSERT INTO nx_storage(singleton,version) VALUES(1,6)",
+    "INSERT INTO nx_storage(singleton,version) VALUES(1,7)",
     "CREATE TABLE IF NOT EXISTS nx_resource_catalog (storage_id BIGINT PRIMARY KEY, resource_key TEXT NOT NULL UNIQUE)",
     "CREATE TABLE IF NOT EXISTS nx_schema_definition (singleton BIGINT PRIMARY KEY CHECK(singleton=1), definition TEXT NOT NULL, history TEXT NOT NULL)",
-    "CREATE TABLE IF NOT EXISTS nx_accounts (id TEXT PRIMARY KEY, password TEXT NOT NULL, tenant TEXT NOT NULL, epoch BIGINT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS nx_accounts (id TEXT PRIMARY KEY, login_name TEXT UNIQUE, password TEXT, tenant TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','disabled','deleted')), epoch BIGINT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS nx_invites (code_hash TEXT PRIMARY KEY, issuer TEXT NOT NULL, expires BIGINT NOT NULL, redeemed_at BIGINT NULL, redeemed_by TEXT NULL REFERENCES nx_accounts(id))",
     "CREATE TABLE IF NOT EXISTS nx_roles (principal TEXT NOT NULL REFERENCES nx_accounts(id), name TEXT NOT NULL, tenant TEXT NOT NULL, PRIMARY KEY(principal,name,tenant))",
     "CREATE TABLE IF NOT EXISTS nx_sessions (id TEXT PRIMARY KEY, principal TEXT NOT NULL REFERENCES nx_accounts(id), epoch BIGINT NOT NULL, expires BIGINT NOT NULL)",
@@ -729,6 +834,7 @@ const SCHEMA: &[&str] = &[
     "INSERT INTO nx_creation_counter(singleton,value) VALUES(1,0)",
     "CREATE INDEX nx_records_created ON nx_records(resource,created_seq)",
     "CREATE INDEX IF NOT EXISTS nx_records_owner ON nx_records(resource,owner,created_seq)",
+    "CREATE INDEX nx_records_owner_tenant ON nx_records(resource,owner,tenant,created_seq)",
     "CREATE INDEX IF NOT EXISTS nx_records_tenant ON nx_records(resource,tenant,created_seq)",
     "CREATE TABLE IF NOT EXISTS nx_receipts (nonce TEXT PRIMARY KEY, subject TEXT NOT NULL, contract TEXT NOT NULL, action BIGINT NOT NULL, input TEXT NOT NULL, outcome TEXT NOT NULL, expires BIGINT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS nx_clock (singleton BIGINT PRIMARY KEY, observed BIGINT NOT NULL)",
@@ -929,7 +1035,7 @@ mod application_schema_tests {
             .unwrap();
         tx.bind_schema(&source()).await.unwrap();
         tx.execute(
-            "INSERT INTO nx_accounts(id,password,tenant,epoch) VALUES('alice','hash','team',1)",
+            "INSERT INTO nx_accounts(id,password,tenant,state,epoch) VALUES('alice','hash','team','active',1)",
             &[],
         )
         .await

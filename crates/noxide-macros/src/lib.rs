@@ -57,6 +57,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn account_scope_and_nested_mutation_diagnostics() {
+        for fields in [
+            "#[field()] recipient: AccountId",
+            "#[field(scope = anywhere)] recipient: AccountId",
+            "#[field(scope = same_tenant)] recipient: String",
+            "#[field(scope = same_tenant)] recipient: Option<AccountId>",
+        ] {
+            let input = syn::parse_str(&format!(
+                "#[resource(key = \"messages\")] struct Message {{ #[id] id: Id<Self>, {fields} }}"
+            ))
+            .unwrap();
+            assert!(expand_resource(input).is_err());
+        }
+        for kind in ["create", "update", "delete"] {
+            let input = syn::parse_str(&format!("{kind}(Message), allow = any(owner, all(same_tenant, principal_is(recipient))), redirect = index")).unwrap();
+            assert!(
+                expand_action(
+                    input,
+                    syn::parse_quote!(
+                        struct Change;
+                    )
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn initial_create_typed_surface_uses_only_action_projection() {
         let declaration =
             syn::parse_str("create(Article), fields(title), allow = owner, redirect = show")

@@ -321,7 +321,7 @@ async fn public_repository(db: Database, choice: bool) {
             ("secret".into(), "hidden".into()),
         ]);
         tx.allocate_creation().await.unwrap();
-        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,$1,'alice','',$2,'public-fixture',1,(SELECT value FROM nx_creation_counter WHERE singleton=1))", &[id.into(), serde_json::to_string(&fields).unwrap().into()]).await.unwrap();
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,$1,(SELECT id FROM nx_accounts WHERE login_name='alice'),'',$2,'public-fixture',1,(SELECT value FROM nx_creation_counter WHERE singleton=1))", &[id.into(), serde_json::to_string(&fields).unwrap().into()]).await.unwrap();
     }
     tx.commit().await.unwrap();
     for principal in [
@@ -375,14 +375,20 @@ async fn public_repository(db: Database, choice: bool) {
         assert!(!repository::allowed(
             &op.policy,
             &Principal::Anonymous,
-            "",
-            ""
+            crate::policy::Row {
+                owner: "",
+                tenant: "",
+                fields: &Default::default()
+            }
         ));
         assert!(!repository::allowed(
             &op.policy,
             &Principal::Anonymous,
-            "alice",
-            ""
+            crate::policy::Row {
+                owner: "alice",
+                tenant: "",
+                fields: &Default::default()
+            }
         ));
         let mut private = m.clone();
         private.routes[2].operations = vec![op.id];
@@ -409,7 +415,7 @@ async fn public_repository(db: Database, choice: bool) {
         tx,
         &private,
         Principal::User(User {
-            id: "alice".into(),
+            id: crate::test_account(&db, "alice").await,
             tenant: "".into(),
             roles: vec![],
         }),
@@ -660,7 +666,7 @@ async fn public_request_flows(db: Database) {
         .await
         .unwrap();
     tx.execute(
-        "INSERT INTO nx_sessions(id,principal,epoch,expires) VALUES($1,'alice',1,$2)",
+        "INSERT INTO nx_sessions(id,principal,epoch,expires) VALUES($1,(SELECT id FROM nx_accounts WHERE login_name='alice'),1,$2)",
         &[token.nonce.into(), Param::Number(token.expires)],
     )
     .await
@@ -800,7 +806,7 @@ async fn sqlite_initial_create_commit_is_host_owned() {
             Principal::Anonymous
         } else {
             Principal::User(User {
-                id: "alice".into(),
+                id: crate::test_account(&db, "alice").await,
                 tenant: "".into(),
                 roles: vec![],
             })
@@ -871,7 +877,7 @@ async fn sqlite_initial_create_commit_is_host_owned() {
                 .await
                 .unwrap();
             let moderator = Principal::User(User {
-                id: "alice".into(),
+                id: crate::test_account(&db, "alice").await,
                 tenant: "".into(),
                 roles: vec![("moderator".into(), "".into())],
             });

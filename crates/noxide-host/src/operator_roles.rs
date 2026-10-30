@@ -32,7 +32,7 @@ async fn account(tx: &mut Transaction, user: &str) -> Result<String> {
     let tenant = tx.bounded_text("tenant", 32);
     let rows = tx
         .fetch::<1>(
-            &format!("SELECT {tenant} FROM nx_accounts WHERE id=$1"),
+            &format!("SELECT {tenant} FROM nx_accounts WHERE id=$1 AND state<>'deleted'"),
             &[user.into()],
         )
         .await?;
@@ -65,7 +65,7 @@ impl Database {
     /// outcome: reconcile current assignments before retrying against other operators.
     pub async fn grant_role(&self, user: &str, role: &str, scope: RoleScope<'_>) -> Result<bool> {
         ensure!(
-            identifier(user) && identifier(role),
+            crate::auth::account_id(user) && identifier(role),
             "invalid user or role identifier"
         );
         let tenant = scope.tenant()?;
@@ -95,7 +95,7 @@ impl Database {
     /// Revoke only the requested assignment, including obsolete tenant scopes.
     pub async fn revoke_role(&self, user: &str, role: &str, scope: RoleScope<'_>) -> Result<bool> {
         ensure!(
-            identifier(user) && identifier(role),
+            crate::auth::account_id(user) && identifier(role),
             "invalid user or role identifier"
         );
         let tenant = scope.tenant()?;
@@ -115,7 +115,7 @@ impl Database {
 
     /// Read one account's bounded assignments in deterministic order.
     pub async fn list_roles(&self, user: &str) -> Result<Vec<RoleAssignment>> {
-        ensure!(identifier(user), "invalid user identifier");
+        ensure!(crate::auth::account_id(user), "invalid user identifier");
         let mut tx = self
             .begin_read(Instant::now() + Duration::from_secs(5))
             .await?;
