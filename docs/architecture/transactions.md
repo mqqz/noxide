@@ -104,8 +104,10 @@ Admission in `manifest.rs` rejects the manifest unless all of these hold:
   `Value::Constant` is valid for the field's schema. `Value::SignedTarget` and
   `Value::Created(n)` assign only reference fields of the matching target
   resource. `Created(n)` requires `n` to be an earlier create step.
-- `Decrease`/`Increase` assign an integer field declaring both `min` and `max`.
-  Their `by` input satisfies the Inputs rule. The rejection's `input` is declared.
+- `Decrease`/`Increase` appear only in update steps targeting `Signed`; create
+  assignments use `Set`. They assign an integer field declaring both `min` and
+  `max`. Their `by` input satisfies the Inputs rule. The rejection's `input` is
+  declared.
 - `revision` is no weaker than the implied requirement (see Revision rules).
 - An action with more than one step contains no public or capability operation.
   This keeps one anonymous ownership handover per action in this increment.
@@ -274,7 +276,8 @@ transactions with inputs derived from their listed fields.
   Zero, negative and out-of-range amounts fail canonicalization.
 - One input feeds two assignments and appears once in the form and digest.
 - Admission rejects forward `Created`, duplicate or protected assignments,
-  invalid input domains, adjustment of an unbounded or non-integer field, more
+  invalid input domains, adjustments in create steps, adjustment of an unbounded
+  or non-integer field, more
   than four steps or two creates, delete with other steps, wrong reference types,
   undeclared or unused inputs, and multi-step public or capability operations.
 - Action-time `invoke`, `follow-source` and `follow` fail.
