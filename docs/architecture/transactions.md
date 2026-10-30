@@ -75,8 +75,9 @@ guest-produced; they become host receipt types.
 Each input is defined once, with its own type, bounds, optionality and canonical
 encoding, using the existing `FieldKind` vocabulary. `Input.max_bytes` carries the byte
 bound, matching the existing resource field schema; `FieldKind::Text` does not
-carry that bound. `initial` values and account
-or reference kinds are not valid inputs. Canonicalization and the input digest use
+carry that bound. `initial` values and reference kinds are not valid inputs.
+Account inputs and `Set` assignments to account fields are allowed only on creates,
+with the existing host-enforced active-account and tenant-scope binding checks. Canonicalization and the input digest use
 the action's input schema, not a resource's fields. One input may be consumed by
 several assignments; the form contains it once. For example, `quantity` is
 both the stock decrement and the order's stored quantity.
@@ -101,7 +102,7 @@ Admission in `manifest.rs` rejects the manifest unless all of these hold:
 - Each field is assigned at most once per step. A create assigns every writable
   stored field, including its reference. An update assigns a nonempty subset of
   ordinary fields. No step assigns owner, tenant, ID, incarnation, revision,
-  account fields, fields with initial values, or a reference field on update.
+  fields with initial values, account fields on update, or a reference field on update.
 - `Value::Input` names a declared input whose domain fits (see Inputs).
   `Value::Constant` is valid for the field's schema. `Value::SignedTarget` and
   `Value::Created(n)` assign only reference fields of the matching target
