@@ -8,9 +8,20 @@ use anyhow::{Result, ensure};
 use noxide_protocol::*;
 use std::sync::Arc;
 
+#[derive(Debug)]
+pub(crate) struct ReferenceUnavailable;
+impl std::fmt::Display for ReferenceUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("reference unavailable")
+    }
+}
+impl std::error::Error for ReferenceUnavailable {}
+
 pub(crate) const MAX_LIST_DATABASE_CALLS: usize = 4096;
 
 pub(crate) struct Effects {
+    pub provenance: std::collections::BTreeMap<(u32, u32, u64), u64>,
+    pub follow_sources: Vec<(u32, u64)>,
     pub invoked: std::collections::BTreeSet<u32>,
     pub list_bytes: usize,
     pub list_calls: usize,
@@ -127,9 +138,11 @@ pub(crate) async fn read_resource(
         return Ok(None);
     }
     if manifest::is_public(op)
-        && let Some(parent) = manifest::parent_resource(m, op.resource)?
+        && manifest::resource(m, op.resource)?.gate.is_some()
+        && let Some(parent) = manifest::reference_resource(m, op.resource)?
     {
-        let field = manifest::parent_field(manifest::resource(m, op.resource)?).expect("parent");
+        let source_resource = manifest::resource(m, op.resource)?;
+        let field = manifest::reference_field(source_resource).expect("reference");
         let id = stored
             .record
             .fields
@@ -137,7 +150,8 @@ pub(crate) async fn read_resource(
             .ok_or_else(|| anyhow::anyhow!("missing parent"))?
             .parse()?;
         let parent = load(tx, m, parent.id, id).await?;
-        if !parent.is_some_and(|p| manifest::parent_permits(field, &p.record.fields, false)) {
+        if !parent.is_some_and(|p| manifest::gate_permits(source_resource, &p.record.fields, false))
+        {
             return Ok(None);
         }
     }
@@ -204,7 +218,7 @@ pub(crate) async fn authorize_page_resource(
     let mut reads = 0;
     for operation in &route.operations {
         let op = manifest::operation(m, *operation)?;
-        if op.kind == OperationKind::Read && op.resource == resource {
+        if op.kind == OperationKind::Read && op.via.is_none() && op.resource == resource {
             reads += 1;
             if !read_allowed(m, principal, op, &stored)? {
                 return Ok(None);
@@ -212,7 +226,29 @@ pub(crate) async fn authorize_page_resource(
         }
     }
     ensure!(reads > 0, "missing resource read");
-    // Parent resources have no parent themselves in the admitted one-level model.
+    if let Some(gate) = &manifest::resource(m, resource)?.gate
+        && route.operations.iter().any(|id| {
+            manifest::operation(m, *id).is_ok_and(|op| {
+                op.kind == OperationKind::Read
+                    && op.via.is_none()
+                    && op.resource == resource
+                    && manifest::is_public(op)
+            })
+        })
+    {
+        let target = manifest::reference_resource(m, resource)?.expect("gate target");
+        let id = stored.record.fields[&gate.field].parse()?;
+        let target = load(tx, m, target.id, id).await?;
+        if target.is_none_or(|target| {
+            !manifest::gate_permits(
+                manifest::resource(m, resource).expect("admitted resource"),
+                &target.record.fields,
+                false,
+            )
+        }) {
+            return Ok(None);
+        }
+    }
     Ok(Some(stored))
 }
 
@@ -220,6 +256,8 @@ impl Effects {
     #[cfg(test)]
     pub(crate) fn next_request(&mut self) {
         self.invoked.clear();
+        self.provenance.clear();
+        self.follow_sources.clear();
         self.list_bytes = 0;
         self.list_calls = MAX_LIST_DATABASE_CALLS;
         self.see_all.clear();
@@ -238,9 +276,11 @@ impl Effects {
             .iter()
             .filter(|id| !self.invoked.contains(id))
             .filter_map(|id| manifest::operation(&self.manifest, *id).ok())
-            .filter(|op| op.kind == OperationKind::List)
+            .filter(|op| op.kind == OperationKind::List || op.via.is_some())
             .map(|op| {
-                if manifest::is_preview(op) {
+                if op.via.is_some() {
+                    128 // Complete twenty-slot unavailable result plus framing.
+                } else if manifest::is_preview(op) {
                     64
                 } else {
                     MAX_RESULT_BYTES
@@ -272,19 +312,17 @@ impl Effects {
         let clauses = crate::policy::sql(&self.tx, &op.policy, &self.principal, &mut params);
         let visibility = self.visibility_clause(op, &mut params)?;
         let mut parent_clause = String::new();
-        if manifest::parent_resource(&self.manifest, op.resource)?.is_some() {
+        if let Some(scope) = &plan.scope {
             let id = self
                 .request
                 .target
                 .ok_or_else(|| anyhow::anyhow!("missing parent target"))?;
-            let field = manifest::parent_field(manifest::resource(&self.manifest, op.resource)?)
-                .expect("parent");
             params.push(id.to_string().into());
             // A catalog-derived constant lets PostgreSQL's generic plans
             // prove the partial-index predicate despite resource=$1.
             parent_clause = format!(
                 " AND resource={storage_resource} AND {}=${}",
-                self.tx.field_expression(&field.name)?,
+                self.tx.field_expression(scope)?,
                 params.len()
             );
         }
@@ -370,7 +408,7 @@ impl Effects {
                     .join(" OR ");
             let selection = plan.selection_sql(&self.tx, &mut scan_params, &self.request.params)?;
             let mut parent_clause = String::new();
-            if let Some(parent) = &plan.parent {
+            if let Some(parent) = &plan.scope {
                 let target = self
                     .request
                     .target
@@ -439,12 +477,11 @@ impl Effects {
                 last = Some(seq);
                 continue;
             }
-            if let Some(field) =
-                manifest::parent_field(manifest::resource(&self.manifest, op.resource)?)
+            if let Some(field) = &plan.scope
                 && stored
                     .record
                     .fields
-                    .get(&field.name)
+                    .get(field)
                     .and_then(|v| v.parse::<u64>().ok())
                     != self.request.target
             {
@@ -505,10 +542,147 @@ impl Effects {
         Ok(fields)
     }
 
+    pub(crate) fn follow_source(&mut self, resource: u32, id: u64) -> Result<()> {
+        ensure!(self.follow_sources.len() < 20, "follow source budget");
+        self.follow_sources.push((resource, id));
+        Ok(())
+    }
+    pub(crate) async fn follow(&mut self, operation: u32) -> Result<Vec<u8>> {
+        ensure!(self.calls > 0, "database call budget");
+        self.calls -= 1;
+        let op = manifest::operation(&self.manifest, operation)?.clone();
+        let via = op
+            .via
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("follow declaration required"))?;
+        let RequestKind::Route(route) = self.request.kind else {
+            anyhow::bail!("follow outside route")
+        };
+        ensure!(
+            manifest::route(&self.manifest, route)?
+                .operations
+                .contains(&operation),
+            "follow outside request grant"
+        );
+        ensure!(self.invoked.insert(operation), "operation already invoked");
+        let sources = std::mem::take(&mut self.follow_sources);
+        let targets: Vec<u64> = sources
+            .iter()
+            .map(|(resource, id)| {
+                self.provenance
+                    .get(&(via.source, *resource, *id))
+                    .copied()
+                    .ok_or_else(|| anyhow::anyhow!("follow source was not returned"))
+            })
+            .collect::<Result<_>>()?;
+        let unique: std::collections::BTreeSet<_> = targets.iter().copied().collect();
+        let mut records = std::collections::BTreeMap::new();
+        if !unique.is_empty() {
+            self.charge_list_calls(2)?;
+            let storage = self
+                .tx
+                .storage_resource(&self.manifest, op.resource)
+                .await?;
+            let mut params = vec![Param::Number(storage)];
+            let mut slots = Vec::new();
+            for id in unique {
+                params.push(Param::Number(id as i64));
+                slots.push(format!("${}", params.len()));
+            }
+            let sql = format!(
+                "SELECT CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND id IN ({})",
+                self.tx.bounded_text("fields", 20_000),
+                slots.join(",")
+            );
+            let rows = self.tx.fetch::<4>(&sql, &params).await?;
+            // Gate target reads are batched separately below; no per-record round trips.
+            let mut candidates = Vec::new();
+            for [id, owner, tenant, fields] in rows {
+                let fields = serde_json::from_str(&fields)?;
+                manifest::validate_fields(
+                    manifest::resource(&self.manifest, op.resource)?,
+                    &fields,
+                )?;
+                let stored = StoredRecord {
+                    record: Record {
+                        resource: op.resource,
+                        id: id.parse()?,
+                        fields,
+                    },
+                    owner,
+                    tenant,
+                    incarnation: String::new(),
+                    revision: 1,
+                    cap_version: None,
+                };
+                if read_allowed(&self.manifest, &self.principal, &op, &stored)? {
+                    candidates.push(stored.record);
+                }
+            }
+            if manifest::is_public(&op)
+                && let Some(gate) = manifest::resource(&self.manifest, op.resource)?
+                    .gate
+                    .clone()
+            {
+                let target_resource = manifest::reference_resource(&self.manifest, op.resource)?
+                    .expect("gate target")
+                    .id;
+                self.charge_list_calls(2)?;
+                let storage = self
+                    .tx
+                    .storage_resource(&self.manifest, target_resource)
+                    .await?;
+                let mut params = vec![Param::Number(storage)];
+                let mut slots = Vec::new();
+                for record in &candidates {
+                    params.push(Param::Number(record.fields[&gate.field].parse()?));
+                    slots.push(format!("${}", params.len()));
+                }
+                let mut visible = std::collections::BTreeSet::new();
+                if !slots.is_empty() {
+                    let sql = format!(
+                        "SELECT CAST(id AS TEXT),{} FROM nx_records WHERE resource=$1 AND id IN ({})",
+                        self.tx.bounded_text("fields", 20_000),
+                        slots.join(",")
+                    );
+                    for [id, fields] in self.tx.fetch::<2>(&sql, &params).await? {
+                        let fields = serde_json::from_str(&fields)?;
+                        if manifest::gate_permits(
+                            manifest::resource(&self.manifest, op.resource)?,
+                            &fields,
+                            false,
+                        ) {
+                            visible.insert(id);
+                        }
+                    }
+                }
+                candidates.retain(|record| visible.contains(&record.fields[&gate.field]));
+            }
+            for mut record in candidates {
+                if let Some(fields) = &op.fields {
+                    record.fields.retain(|name, _| fields.contains(name));
+                }
+                records.insert(record.id, record);
+            }
+        }
+        let result: Vec<_> = targets.iter().map(|id| records.get(id)).collect();
+        let bytes = serde_json::to_vec(&result)?;
+        ensure!(
+            bytes.len() <= self.list_result_limit(&op)?,
+            "follow result budget"
+        );
+        self.list_bytes += bytes.len();
+        ensure!(
+            self.list_bytes <= MAX_LIST_RESULT_BYTES,
+            "list result budget"
+        );
+        Ok(bytes)
+    }
     pub(crate) async fn invoke(&mut self, operation: u32, target: u64) -> Result<Vec<u8>> {
         ensure!(self.calls > 0, "database call budget");
         self.calls -= 1;
         let op = manifest::operation(&self.manifest, operation)?.clone();
+        ensure!(op.via.is_none(), "follow cannot be invoked by ID");
         match &self.request.kind {
             RequestKind::Route(id) => {
                 let route = manifest::route(&self.manifest, *id)?;
@@ -552,9 +726,10 @@ impl Effects {
         let value = match op.kind {
             OperationKind::Create => {
                 let mut input = self.request.input.clone();
-                if let Some(parent) = manifest::parent_resource(&self.manifest, op.resource)? {
+                let source_resource = manifest::resource(&self.manifest, op.resource)?;
+                if let Some(parent) = manifest::reference_resource(&self.manifest, op.resource)? {
                     let field =
-                        manifest::parent_field(manifest::resource(&self.manifest, op.resource)?)
+                        manifest::reference_field(manifest::resource(&self.manifest, op.resource)?)
                             .expect("parent field");
                     let grant = self
                         .grant
@@ -566,12 +741,33 @@ impl Effects {
                     );
                     let stored = load(&mut self.tx, &self.manifest, parent.id, grant.id)
                         .await?
-                        .ok_or_else(|| anyhow::anyhow!("missing parent"))?;
+                        .ok_or(ReferenceUnavailable)?;
+                    let action_id = match self.request.kind {
+                        RequestKind::Action(id) => id,
+                        _ => anyhow::bail!("missing action"),
+                    };
+                    let bind = manifest::action(&self.manifest, action_id)?
+                        .bind
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("missing binding"))?;
+                    let eligible = manifest::operation(&self.manifest, bind.eligible)?;
+                    ensure!(
+                        read_resource(
+                            &mut self.tx,
+                            &self.manifest,
+                            &self.principal,
+                            eligible,
+                            grant.id
+                        )
+                        .await?
+                        .is_some(),
+                        ReferenceUnavailable
+                    );
                     ensure!(
                         stored.incarnation == grant.incarnation
                             && stored.revision == grant.revision
-                            && manifest::parent_permits(field, &stored.record.fields, true),
-                        "parent unavailable or locked"
+                            && manifest::gate_permits(source_resource, &stored.record.fields, true),
+                        ReferenceUnavailable
                     );
                     ensure!(
                         input
@@ -757,10 +953,10 @@ impl Effects {
                     }
                 } else {
                     for child in &self.manifest.resources {
-                        if manifest::parent_resource(&self.manifest, child.id)?
+                        if manifest::reference_resource(&self.manifest, child.id)?
                             .is_some_and(|p| p.id == op.resource)
                         {
-                            let field = manifest::parent_field(child).expect("parent");
+                            let field = manifest::reference_field(child).expect("parent");
                             let child_storage =
                                 self.tx.storage_resource(&self.manifest, child.id).await?;
                             let expression = self.tx.field_expression(&field.name)?;
@@ -797,8 +993,11 @@ impl Effects {
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("missing list plan"))?;
                 ensure!(plan.operation == op.id, "invalid list plan");
-                if let Some(parent) =
-                    manifest::parent_resource(&self.manifest, op.resource)?.map(|p| p.id)
+                let source_resource = manifest::resource(&self.manifest, op.resource)?.clone();
+                if manifest::is_public(&op)
+                    && source_resource.gate.is_some()
+                    && let Some(parent) =
+                        manifest::reference_resource(&self.manifest, op.resource)?.map(|p| p.id)
                 {
                     self.charge_list_calls(2)?;
                     let id = self
@@ -806,16 +1005,16 @@ impl Effects {
                         .target
                         .ok_or_else(|| anyhow::anyhow!("missing parent target"))?;
                     let field =
-                        manifest::parent_field(manifest::resource(&self.manifest, op.resource)?)
+                        manifest::reference_field(manifest::resource(&self.manifest, op.resource)?)
                             .expect("parent");
                     ensure!(
-                        plan.parent.as_deref() == Some(field.name.as_str()),
+                        plan.scope.as_deref() == Some(field.name.as_str()),
                         "invalid list parent"
                     );
                     let record = load(&mut self.tx, &self.manifest, parent, id).await?;
                     if record.as_ref().is_none_or(|r| {
                         manifest::is_public(&op)
-                            && !manifest::parent_permits(field, &r.record.fields, false)
+                            && !manifest::gate_permits(&source_resource, &r.record.fields, false)
                     }) {
                         let bytes = if plan.preview {
                             self.more = previous_more;
@@ -892,6 +1091,29 @@ impl Effects {
                 bytes
             }
         };
+        if matches!(op.kind, OperationKind::Read | OperationKind::List) {
+            let records: Vec<Record> = if op.kind == OperationKind::Read {
+                serde_json::from_slice::<Option<Record>>(&value)?
+                    .into_iter()
+                    .collect()
+            } else if manifest::is_preview(&op) {
+                serde_json::from_slice::<PreviewResult>(&value)?.items
+            } else {
+                serde_json::from_slice(&value)?
+            };
+            if let Some(field) =
+                manifest::reference_field(manifest::resource(&self.manifest, op.resource)?)
+            {
+                for record in records {
+                    // Projections may omit the reference; such operations cannot be follow sources.
+                    if let Some(target) = record.fields.get(&field.name) {
+                        self.provenance
+                            .insert((op.id, op.resource, record.id), target.parse()?);
+                        ensure!(self.provenance.len() <= 56, "follow provenance budget");
+                    }
+                }
+            }
+        }
         ensure!(value.len() <= MAX_RESULT_BYTES, "repository output budget");
         Ok(value)
     }

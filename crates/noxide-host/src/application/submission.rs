@@ -156,6 +156,9 @@ impl Application {
             }
             if let Some(target) = target {
                 let Some(stored) = self.authorized_target(&mut tx, a, &target, &principal, capability).await? else { return render::unavailable(&self.presentation, &self.manifest).map(navigation::Prepared::ready); };
+                if stored.revision != target.revision && manifest::operation(&self.manifest, a.operation)?.kind == OperationKind::Create {
+                    return render::unavailable(&self.presentation, &self.manifest).map(navigation::Prepared::ready);
+                }
                 if stored.revision != target.revision && !unknown {
                     return self.conflict(a, &session, now, target, &stored, input).map(navigation::Prepared::ready);
                 }
@@ -217,6 +220,11 @@ impl Application {
                 return Ok((None, navigation::Prepared::ready(response)));
             };
             if stored.revision != target.revision {
+                if manifest::operation(&self.manifest, a.operation)?.kind == OperationKind::Create {
+                    let response = render::unavailable(&self.presentation, &self.manifest)?;
+                    tx.rollback().await?;
+                    return Ok((None, navigation::Prepared::ready(response)));
+                }
                 let response = self.conflict(a, &session, now, target.clone(), &stored, input)?;
                 tx.rollback().await?;
                 return Ok((None, navigation::Prepared::ready(response)));
@@ -226,8 +234,14 @@ impl Application {
             self.authorize_create(a, &principal)?;
             None
         };
-        if matches!(a.redirect, Redirect::Parent { .. }) {
-            budget.parent_redirect_attempt()?;
+        if matches!(a.redirect, Redirect::Reference { .. }) {
+            budget.parent_redirect_attempt(
+                manifest::reference_resource(
+                    &self.manifest,
+                    manifest::operation(&self.manifest, a.operation)?.resource,
+                )?
+                .is_some_and(|resource| resource.gate.is_some()),
+            )?;
         }
         let parent_destination = self
             .capture_destination(&mut tx, a, record.as_ref())
@@ -253,6 +267,8 @@ impl Application {
             inspection,
         };
         let effects = Effects {
+            provenance: Default::default(),
+            follow_sources: Vec::new(),
             invoked: Default::default(),
             list_bytes: 0,
             list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
@@ -305,6 +321,15 @@ impl Application {
             Ok(value) => value,
             Err(error) => {
                 effects.tx.rollback().await?;
+                if error.is::<crate::repository::ReferenceUnavailable>() {
+                    return Ok((
+                        None,
+                        navigation::Prepared::ready(render::unavailable(
+                            &self.presentation,
+                            &self.manifest,
+                        )?),
+                    ));
+                }
                 return Err(error);
             }
         };
@@ -432,13 +457,13 @@ pub(super) struct ExecutionBudget {
     parent_navigation_reserved: bool,
 }
 impl ExecutionBudget {
-    fn parent_redirect_attempt(&mut self) -> Result<()> {
+    fn parent_redirect_attempt(&mut self, gated: bool) -> Result<()> {
         // Navigation runs once after the successful commit, outside all retries.
-        // Its quota covers begin/commit and one storage lookup + bounded fetch.
+        // Its quota covers begin/commit, the target lookup and its optional gate.
         if !self.parent_navigation_reserved {
             self.database_calls = self
                 .database_calls
-                .checked_sub(4)
+                .checked_sub(4 + 2 * u32::from(gated))
                 .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
             self.parent_navigation_reserved = true;
         }
@@ -588,10 +613,10 @@ mod parent_redirect_budget_tests {
     fn exhausted_capture_budget_never_refreshes_on_retry() {
         let mut budget = ExecutionBudget::new(&Limits::default(), Instant::now());
         for _ in 0..6 {
-            budget.parent_redirect_attempt().unwrap();
+            budget.parent_redirect_attempt(false).unwrap();
         }
         assert_eq!(budget.database_calls, 0);
-        assert!(budget.parent_redirect_attempt().is_err());
+        assert!(budget.parent_redirect_attempt(false).is_err());
         assert_eq!(budget.database_calls, 0);
     }
 }

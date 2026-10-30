@@ -108,7 +108,7 @@ fn public_query_decodes_only_projected_fields() {
 fn private_query_still_decodes_the_complete_resource() {
     let op = PrivateArticles::operation();
     assert!(op.fields.is_none() && op.visibility.is_none());
-    let article: Article = PrivateArticles::from_record(Record {
+    let article = PrivateArticles::from_record(Record {
         resource: Article::definition().id,
         id: 42,
         fields: Fields::from([

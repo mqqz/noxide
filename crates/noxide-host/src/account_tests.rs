@@ -41,6 +41,8 @@ fn declarations() -> Manifest {
 }
 fn effects(tx: Transaction, m: &Manifest, id: &str, action: bool, recipient: &str) -> Effects {
     Effects {
+        provenance: Default::default(),
+        follow_sources: Vec::new(),
         invoked: Default::default(),
         list_bytes: 0,
         list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,

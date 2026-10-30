@@ -70,7 +70,9 @@ pub(crate) fn expand_query(
             "disclose must name exactly unprojected public filter fields",
         ));
     }
-    let query_trait = if declaration.kind == "list" {
+    let query_trait = if declaration.via.is_some() {
+        quote!(::noxide::FollowQuery)
+    } else if declaration.kind == "list" {
         quote!(::noxide::ListQuery)
     } else {
         quote!(::noxide::ReadQuery)
@@ -101,6 +103,33 @@ pub(crate) fn expand_query(
     };
     let name = &item.ident;
     let resource = &declaration.resource;
+    if declaration.bind.is_some() {
+        return Err(syn::Error::new(item.span(), "bind requires create"));
+    }
+    let scope = if let Some(field) = &declaration.scope {
+        let hash = stable_id(&field.to_string());
+        quote!({
+            const _: () = {
+                assert!(<<#resource as ::noxide::FieldSpec<#hash>>::Value as ::noxide::FieldValue>::REFERENCE, "scope requires reference");
+                assert!(<#resource as ::noxide::ResourceType>::GATE_FIELD == 0 || <#resource as ::noxide::ResourceType>::GATE_FIELD == #hash, "scope must name gate field");
+            };
+            let definition = <#resource as ::noxide::ResourceType>::definition();
+            let field = <#resource as ::noxide::FieldSpec<#hash>>::KEY;
+            assert!(definition.gate.as_ref().is_none_or(|g| g.field == field), "scope must name gate field");
+            Some(field.into())
+        })
+    } else if declaration.kind == "list" {
+        quote!(<#resource as ::noxide::ResourceType>::definition().gate.map(|g| g.field))
+    } else {
+        quote!(None)
+    };
+    let via = if let Some((source, field)) = &declaration.via {
+        let hash = stable_id(&field.to_string());
+        quote!(Some(::noxide::__private::Via { source: <#source as ::noxide::QueryType>::operation().id,
+            field: <<#source as ::noxide::QueryType>::Resource as ::noxide::FieldSpec<#hash>>::KEY.into() }))
+    } else {
+        quote!(None)
+    };
     let policy = policy_tokens(&declaration.policy, &declaration.resource);
     let vis = &item.vis;
     let output_name = format_ident!("{name}Record");
@@ -164,22 +193,33 @@ pub(crate) fn expand_query(
     } else {
         (
             Tokens::new(),
-            quote!(#resource),
-            quote!(<#resource as ::noxide::ResourceType>::from_record(record)),
+            quote!(::noxide::QueryRecord<#name>),
+            quote!(::noxide::QueryRecord::new(<#resource as ::noxide::ResourceType>::from_record(record))),
             quote!(None),
             quote!(None),
         )
     };
+    let identity = if public {
+        quote!(record.id().get())
+    } else {
+        quote!(::noxide::ResourceType::record_id(&**record))
+    };
+    let source = if let Some((source, _)) = &declaration.via {
+        quote!(type Source = #source;)
+    } else {
+        Tokens::new()
+    };
     Ok(quote! {
         #item
         #projection
-        impl #query_trait for #name {}
+        impl #query_trait for #name { #source }
         impl ::noxide::QueryType for #name {
             type Resource = #resource;
             type Output = #output;
+            fn record_id(record: &Self::Output) -> u64 { #identity }
             fn from_record(record: ::noxide::__private::Record) -> Self::Output { #decode }
             fn operation() -> ::noxide::__private::Operation {
-                ::noxide::__private::Operation {
+                ::noxide::__private::Operation { scope: #scope, via: #via,
                     filter: vec![#(#filters),*], disclose: vec![#(#disclosures),*],
                 list: #list, visibility: #visibility, fields: #fields,
                     id: ::noxide::stable_id(concat!("query:", module_path!(), "::", stringify!(#name))),
