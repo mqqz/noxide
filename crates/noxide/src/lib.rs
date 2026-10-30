@@ -35,22 +35,6 @@ impl Context {
     fn follow(&mut self, _operation: u32, _sources: &[(u32, u64)]) -> Vec<Option<Record>> {
         panic!("Noxide applications execute as isolated WebAssembly components")
     }
-    /// Creates exactly the fields validated for the submitted action. The guest
-    /// cannot substitute ownership, a different input, or an unrelated target.
-    pub fn create(&mut self, operation: u32) -> Record {
-        self.invoke(operation, 0)
-    }
-
-    /// Updates the action's bound target with its validated field projection.
-    pub fn update(&mut self, operation: u32) -> ResponseIntent {
-        self.invoke(operation, 0)
-    }
-
-    /// Deletes the action's bound target and returns its semantic outcome.
-    pub fn delete(&mut self, operation: u32) -> ResponseIntent {
-        self.invoke(operation, 0)
-    }
-
     #[cfg(target_arch = "wasm32")]
     fn invoke<T: serde::de::DeserializeOwned>(&mut self, operation: u32, target: u64) -> T {
         let len = bindings::noxide::application::host::invoke(operation, target);
@@ -126,7 +110,7 @@ pub mod __private {
 /// Common application declarations, capabilities, and rendering types.
 pub mod prelude {
     pub use crate::{
-        AccountId, ActionError, ActionResult, Choice, Form, FormFields, FormLayout, Fragment, Id,
+        AccountId, ActionError, Choice, Execute, Form, FormFields, FormLayout, Fragment, Id,
         NotFound, Page, PageResult, Query, Resource, Submission, action, app, application, form,
         html, page, query,
     };

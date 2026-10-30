@@ -24,7 +24,7 @@ EQUIVALENT_APPS = ("private-notes", "task-board", "public-articles", "policy-boa
 ADMISSION_FAILURES = {
     "notes-added-field": b"creation requires every writable field",
     "notes-renamed-field": b"creation requires every writable field",
-    "policy-board-cross-resource-form": b"mutation form requires its record route",
+    "policy-board-cross-resource-form": b"mutation form requires its signed target route",
     "policy-board-public-forms": b"public routes cannot have forms",
 }
 
@@ -98,9 +98,9 @@ fn namespaced_links() {
         "actions: [CreateTask, EditTask, DeleteTask],",
         "actions: [CreateTask, EditTask => inspect_edit, DeleteTask],")
     inspection += r"""
-fn inspect_edit(submission: noxide::Submission<EditTask>) -> noxide::ActionResult<EditTask> {
+fn inspect_edit(submission: noxide::Submission<EditTask>) -> Result<noxide::Execute<EditTask>, noxide::ActionError<EditTask>> {
     let _original_title: &str = &submission.original().unwrap().title;
-    submission.apply()
+    Ok(submission.execute())
 }
 """
     optional = replace_once(source, "priority: Priority,", "priority: Option<Priority>,")
@@ -392,21 +392,21 @@ def validate_contracts(contracts, comparisons, output_dir, host_cli):
     assert all(audit_routes[path] == route for path, route in routes.items()), "adding a query changed existing route grants"
     resource_ids = {resource["name"]: resource["id"] for resource in board["resources"]}
     def mutations(resource):
-        return {original_ops[action["operation"]]["kind"]: action for action in board["actions"]
-                if original_ops[action["operation"]]["resource"] == resource_ids[resource]}
+        return {original_ops[action["steps"][0]["operation"]]["kind"]: action for action in board["actions"]
+                if original_ops[action["steps"][0]["operation"]]["resource"] == resource_ids[resource]}
     def policy_of(action):
-        return original_ops[action["operation"]]["policy"]
+        return original_ops[action["steps"][0]["operation"]]["policy"]
     guest = mutations("guest_posts")
     assert set(guest) == {"create", "update", "delete"}
     assert policy_of(guest["create"]) == {"any": [["public"]]}
     assert policy_of(guest["update"]) == policy_of(guest["delete"]) == {"any": [["capability"]]}
-    assert guest["create"]["fields"] == ["body", "published"]
-    assert guest["update"]["fields"] == ["body"] and guest["delete"]["fields"] == []
+    assert [field["name"] for field in guest["create"]["inputs"]] == ["body", "published"]
+    assert [field["name"] for field in guest["update"]["inputs"]] == ["body"] and [field["name"] for field in guest["delete"]["inputs"]] == []
     tenant = mutations("team_notes")
     assert policy_of(tenant["create"]) == {"any": [["same_tenant", {"role": {"name": "writer", "tenant_scoped": False}}]]}
     assert policy_of(tenant["update"]) == {"any": [["same_tenant", "owner"], ["same_tenant", {"role": {"name": "editor", "tenant_scoped": True}}]]}
     assert policy_of(tenant["delete"]) == {"any": [["same_tenant", {"role": {"name": "admin", "tenant_scoped": True}}]]}
-    assert tenant["create"]["fields"] == ["body", "private_hint"] and tenant["update"]["fields"] == ["body"]
+    assert [field["name"] for field in tenant["create"]["inputs"]] == ["body", "private_hint"] and [field["name"] for field in tenant["update"]["inputs"]] == ["body"]
     hashes = {}
     for name in comparisons:
         result = subprocess.run([str(host_cli.resolve()), "contract-hash", str(output_dir / (name + ".json"))],

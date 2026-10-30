@@ -101,9 +101,9 @@ def main():
             assert operation["list"] == {"order": "created_asc", "page_size": size}
 
     def action(resource, kind, policy):
-        matches = [a for a in declarations["actions"] if operations[a["operation"]]["resource"] == resources[resource]
-                   and operations[a["operation"]]["kind"] == kind
-                   and operations[a["operation"]]["policy"] == {"any": [[policy]]}]
+        matches = [a for a in declarations["actions"] if operations[a["steps"][0]["operation"]]["resource"] == resources[resource]
+                   and operations[a["steps"][0]["operation"]]["kind"] == kind
+                   and operations[a["steps"][0]["operation"]]["policy"] == {"any": [[policy]]}]
         assert len(matches) == 1
         return f'/actions/{matches[0]["id"]}'
 

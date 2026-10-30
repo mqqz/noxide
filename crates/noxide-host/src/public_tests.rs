@@ -65,6 +65,7 @@ fn declarations() -> Manifest {
         ),
     ] {
         m.operations.push(Operation {
+            bind: None,
             scope: None,
             via: None,
             filter: Vec::new(),
@@ -94,11 +95,11 @@ fn declarations() -> Manifest {
 
 fn create_action(m: &mut Manifest) {
     let mut action = fixture::manifest().actions.remove(0);
-    action.fields = m.resources[0]
-        .fields
-        .iter()
-        .map(|field| field.name.clone())
-        .collect();
+    action.inputs.clear();
+    action.steps[0].assign.clear();
+    for field in &m.resources[0].fields {
+        fixture::add_input(&mut action, &m.resources[0], &field.name);
+    }
     m.actions.push(action);
 }
 
@@ -189,6 +190,7 @@ fn manifest_private_operations_forbid_public_metadata() {
 fn manifest_action_inspection_cannot_use_public_read() {
     let mut m = declarations();
     m.operations.push(Operation {
+        bind: None,
         scope: None,
         via: None,
         filter: Vec::new(),
@@ -204,7 +206,8 @@ fn manifest_action_inspection_cannot_use_public_read() {
         fields: None,
     });
     let mut action = fixture::manifest().actions.remove(0);
-    action.operation = 8;
+    action.steps[0].operation = 8;
+    action.steps[0].target = Target::Signed;
     action.inspect = Some(Inspection {
         operation: 2,
         fields: vec!["body".into()],
@@ -289,10 +292,9 @@ fn effects(
             inspection: None,
             available_forms: vec![],
         },
-        outcome: None,
         grant: None,
         capability_grant: None,
-        record: None,
+
         calls: 64,
         cursor: None,
         more: None,
@@ -848,13 +850,18 @@ async fn sqlite_initial_create_commit_is_host_owned() {
             if let Some(value) = supplied {
                 e.request.input.insert("published".into(), value.into());
             }
-            let result = e.invoke(3, 0).await;
+            let result = e.execute_transaction(&m.actions[0]).await;
             if supplied.is_some() {
                 assert!(result.is_err());
                 e.tx.commit().await.unwrap();
                 continue;
             }
-            let record: Record = serde_json::from_slice(&result.unwrap()).unwrap();
+            let outcome = result.unwrap().remove(0);
+            let record = repository::load(&mut e.tx, &m, 1, outcome.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .record;
             assert_eq!(record.fields["published"], "true");
             e.tx.commit().await.unwrap();
             let mut tx = db
@@ -869,6 +876,7 @@ async fn sqlite_initial_create_commit_is_host_owned() {
             tx.commit().await.unwrap();
             let mut updates = m.clone();
             updates.operations.push(Operation {
+                bind: None,
                 scope: None,
                 via: None,
                 filter: Vec::new(),
@@ -886,17 +894,15 @@ async fn sqlite_initial_create_commit_is_host_owned() {
                 visibility: None,
                 fields: None,
             });
-            updates.actions.push(Action {
-                bind: None,
-                id: 2,
-                version: 1,
-                name: "Moderate".into(),
-                operation: 4,
-                redirect: Redirect::Page(2),
-                fields: vec!["published".into()],
-                layout: vec![],
-                inspect: None,
-            });
+            updates.actions.push(fixture::action(
+                2,
+                "Moderate",
+                4,
+                Target::Signed,
+                &updates.resources[0],
+                &["published"],
+                2,
+            ));
             updates.routes[1].forms.push(2);
             manifest::validate(&updates).unwrap();
             let tx = db
@@ -918,8 +924,8 @@ async fn sqlite_initial_create_commit_is_host_owned() {
                 incarnation: stored.incarnation.clone(),
                 revision: stored.revision,
             });
-            e.record = Some(stored);
-            e.invoke(4, 0).await.unwrap();
+
+            e.execute_transaction(&updates.actions[1]).await.unwrap();
             e.tx.commit().await.unwrap();
             let mut tx = db
                 .begin_read(Instant::now() + Duration::from_secs(5))
@@ -931,7 +937,9 @@ async fn sqlite_initial_create_commit_is_host_owned() {
                 .unwrap();
             assert_eq!(updated.record.fields["published"], "false");
             tx.commit().await.unwrap();
-            updates.actions[1].fields = vec!["body".into()];
+            updates.actions[1].inputs.clear();
+            updates.actions[1].steps[0].assign.clear();
+            fixture::add_input(&mut updates.actions[1], &updates.resources[0], "body");
             assert!(
                 manifest::canonical_input(
                     &updates,

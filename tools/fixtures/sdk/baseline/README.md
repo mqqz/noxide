@@ -1,7 +1,8 @@
 # Frozen SDK contracts
 
-Captured with the trusted local SDK harness and re-recorded for the typed
-reference protocol in PR #25. The SDK equivalence fixtures define the application
+Captured with the trusted local SDK harness and re-recorded for declared action
+transactions. Action input schemas, ordered step assignments, revision rules,
+operation reference eligibility and navigation sources replace the prior contract. The SDK equivalence fixtures define the application
 being compared; query-track snapshots may evolve independently. In particular,
 `public-articles-simple.rs` is paired with `public-articles-explicit.rs`, while
 `tools/fixtures/queries/public-articles.rs` covers newer query features.

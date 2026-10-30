@@ -274,7 +274,7 @@ fn decode_form(bytes: &[u8]) -> Result<BTreeMap<String, String>> {
     let mut result = BTreeMap::new();
     let mut decoded_bytes = 0;
     for pair in bytes.split(|b| *b == b'&') {
-        ensure!(result.len() < 12, "field count");
+        ensure!(result.len() < 35, "field count");
         let Some(at) = pair.iter().position(|b| *b == b'=') else {
             anyhow::bail!("field missing value")
         };
@@ -326,7 +326,7 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
             .strip_prefix(&format!("{}/", app.presentation.action_path))
             .and_then(|s| s.parse().ok())
             .and_then(|id| crate::manifest::action(&app.manifest, id).ok())
-            .and_then(|a| crate::manifest::operation(&app.manifest, a.operation).ok())
+            .and_then(|a| crate::manifest::operation(&app.manifest, a.steps[0].operation).ok())
             .is_some_and(crate::manifest::anonymous_action)
     {
         RequestClass::AnonymousAction
@@ -753,7 +753,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     };
     let op = match crate::manifest::action(&gateway.app.manifest, action)
-        .and_then(|a| crate::manifest::operation(&gateway.app.manifest, a.operation))
+        .and_then(|a| crate::manifest::operation(&gateway.app.manifest, a.steps[0].operation))
     {
         Ok(op) => op,
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
@@ -861,7 +861,7 @@ mod tests {
             label: "Extra".into(),
             max_bytes: 4096,
         });
-        m.actions[0].fields.push("extra".into());
+        fixture::add_input(&mut m.actions[0], &m.resources[0], "extra");
         let app = app(Database::sqlite(temp.path().join("forms.db")), m).await;
         let challenge = app.login_challenge().await.unwrap();
         let session = app
@@ -1158,6 +1158,16 @@ mod tests {
         );
     }
     #[test]
+    fn form_parser_bounds_transaction_inputs_and_host_controls() {
+        let form = (0..35)
+            .map(|index| format!("field{index}=x"))
+            .collect::<Vec<_>>()
+            .join("&");
+        assert_eq!(decode_form(form.as_bytes()).unwrap().len(), 35);
+        assert!(decode_form(format!("{form}&extra=x").as_bytes()).is_err());
+    }
+
+    #[test]
     fn origin_has_no_clearnet_default() {
         assert!(Origin::parse("https://example.com").is_err());
         assert!(Origin::parse("http://localhost:8080").is_ok());
@@ -1273,7 +1283,7 @@ mod parent_redirect_disconnect_tests {
             .await
             .unwrap();
         let receipt: serde_json::Value = serde_json::from_str(&row[0][0]).unwrap();
-        let outcome: serde_json::Value = receipt["outcome"].clone();
+        let outcome: serde_json::Value = receipt["handover"].clone();
         let original = app
             .keys
             .edit_secret(

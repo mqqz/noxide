@@ -219,6 +219,10 @@ impl Runtime {
                     let Some(effects) = s.effects.as_mut() else {
                         wasmtime::bail!("no repository grant")
                     };
+                    wasmtime::ensure!(
+                        matches!(effects.request.kind, RequestKind::Route(_)),
+                        "storage import during action"
+                    );
                     match effects.invoke(operation, target).await {
                         Ok(bytes) => {
                             s.result = bytes;
@@ -238,9 +242,15 @@ impl Runtime {
             |mut cx: StoreContextMut<State>, (resource, id): (u32, u64)| {
                 let s = cx.data_mut();
                 s.charge()?;
-                s.effects
+                let effects = s
+                    .effects
                     .as_mut()
-                    .ok_or_else(|| wasmtime::Error::msg("no repository grant"))?
+                    .ok_or_else(|| wasmtime::Error::msg("no repository grant"))?;
+                wasmtime::ensure!(
+                    matches!(effects.request.kind, RequestKind::Route(_)),
+                    "storage import during action"
+                );
+                effects
                     .follow_source(resource, id)
                     .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
                 Ok(())
@@ -257,6 +267,10 @@ impl Runtime {
                         .effects
                         .as_mut()
                         .ok_or_else(|| wasmtime::Error::msg("no repository grant"))?;
+                    wasmtime::ensure!(
+                        matches!(effects.request.kind, RequestKind::Route(_)),
+                        "storage import during action"
+                    );
                     match effects.follow(operation).await {
                         Ok(bytes) => {
                             s.result = bytes;

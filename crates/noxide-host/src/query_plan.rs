@@ -232,7 +232,17 @@ mod tests {
                 initial: None,
                 max_bytes: 5,
             });
-            m.actions[0].fields.push(name.into());
+            m.actions[0].inputs.push(Input {
+                name: name.into(),
+                label: name.into(),
+                kind: FieldKind::Boolean,
+                optional: false,
+                max_bytes: 5,
+            });
+            m.actions[0].steps[0].assign.push(Assignment {
+                field: name.into(),
+                change: Change::Set(Value::Input(name.into())),
+            });
         }
         for mask in 1..=9u32 {
             let mut op = m.operations[0].clone();

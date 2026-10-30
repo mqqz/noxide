@@ -27,7 +27,7 @@ def main():
     manifest = bundle / "manifest.json"
     contract = json.loads(manifest.read_text())
     operations = {op["id"]: op for op in contract["operations"]}
-    actions = {operations[a["operation"]]["kind"]: f'/actions/{a["id"]}' for a in contract["actions"]}
+    actions = {operations[a["steps"][0]["operation"]]["kind"]: f'/actions/{a["id"]}' for a in contract["actions"]}
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]

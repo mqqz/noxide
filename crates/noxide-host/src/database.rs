@@ -697,6 +697,9 @@ impl Drop for Transaction {
 }
 
 pub(crate) fn retryable(error: &anyhow::Error) -> bool {
+    if error.is::<crate::repository::ConditionalConflict>() {
+        return true;
+    }
     #[cfg(test)]
     if error.is::<crate::failure_tests::Aborted>() {
         return true;
@@ -713,7 +716,7 @@ pub(crate) fn retryable(error: &anyhow::Error) -> bool {
     )
 }
 
-const STORAGE_VERSION: i64 = 9;
+const STORAGE_VERSION: i64 = 10;
 const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
     (
         "nx_resource_catalog",
@@ -812,7 +815,7 @@ const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
 
 const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS nx_storage (singleton BIGINT PRIMARY KEY CHECK(singleton=1), version BIGINT NOT NULL)",
-    "INSERT INTO nx_storage(singleton,version) VALUES(1,9)",
+    "INSERT INTO nx_storage(singleton,version) VALUES(1,10)",
     "CREATE TABLE IF NOT EXISTS nx_resource_catalog (storage_id BIGINT PRIMARY KEY, resource_key TEXT NOT NULL UNIQUE)",
     "CREATE TABLE IF NOT EXISTS nx_schema_definition (singleton BIGINT PRIMARY KEY CHECK(singleton=1), definition TEXT NOT NULL, history TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS nx_accounts (id TEXT PRIMARY KEY, login_name TEXT UNIQUE, password TEXT, tenant TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','disabled','deleted')), epoch BIGINT NOT NULL)",
@@ -975,7 +978,9 @@ mod storage_tests {
 mod application_schema_tests {
     use super::*;
     use crate::schema::{self, Conversion, Migration, MigrationOp};
-    use noxide_protocol::{FieldKind, Fields, Manifest, TextField};
+    use noxide_protocol::{
+        Assignment, Change, FieldKind, Fields, Input, Manifest, TextField, Value,
+    };
 
     fn source() -> Manifest {
         crate::test_support::manifest()
@@ -987,6 +992,8 @@ mod application_schema_tests {
             max: Some(100),
         };
         manifest.resources[0].fields[0].max_bytes = 20;
+        manifest.actions[0].inputs[0].kind = manifest.resources[0].fields[0].kind.clone();
+        manifest.actions[0].inputs[0].max_bytes = 20;
         manifest.resources[0].fields.push(TextField {
             name: "completed".into(),
             label: "Completed".into(),
@@ -995,7 +1002,17 @@ mod application_schema_tests {
             optional: false,
             initial: None,
         });
-        manifest.actions[0].fields.push("completed".into());
+        manifest.actions[0].inputs.push(Input {
+            name: "completed".into(),
+            label: "completed".into(),
+            kind: FieldKind::Boolean,
+            optional: false,
+            max_bytes: 5,
+        });
+        manifest.actions[0].steps[0].assign.push(Assignment {
+            field: "completed".into(),
+            change: Change::Set(Value::Input("completed".into())),
+        });
         manifest
     }
     fn migration() -> Migration {

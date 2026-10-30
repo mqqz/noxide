@@ -7,7 +7,7 @@ fn declarations() -> Manifest {
     let mut field = m.resources[0].fields[1].clone();
     field.name = "archived".into();
     m.resources[0].fields.push(field);
-    m.actions[0].fields.push("archived".into());
+    crate::test_support::add_input(&mut m.actions[0], &m.resources[0], "archived");
     m.operations[0].filter.push(Condition {
         field: "archived".into(),
         equals: Operand::Param("flag".into()),
@@ -27,7 +27,7 @@ fn host_rejects_required_parameters_on_index_route() {
         initial: None,
         max_bytes: 5,
     });
-    m.actions[0].fields.push("flag".into());
+    crate::test_support::add_input(&mut m.actions[0], &m.resources[0], "flag");
     m.operations[0].filter.push(Condition {
         field: "flag".into(),
         equals: Operand::Param("flag".into()),
@@ -84,8 +84,13 @@ fn host_rejects_parameterized_mutation_redirects() {
     for kind in [OperationKind::Create, OperationKind::Update] {
         let mut m = crate::test_support::manifest();
         m.resources[0].fields.push(boolean("published"));
-        m.actions[0].fields.push("published".into());
+        crate::test_support::add_input(&mut m.actions[0], &m.resources[0], "published");
         m.operations[2].kind = kind.clone();
+        m.actions[0].steps[0].target = if kind == OperationKind::Create {
+            Target::None
+        } else {
+            Target::Signed
+        };
         m.resources.push(Resource {
             gate: None,
             id: 2,
@@ -128,9 +133,15 @@ fn host_rejects_parameterized_mutation_redirects() {
             m.routes[0].forms.clear();
             m.routes[1].forms.push(1);
         }
-        m.actions[0].redirect = Redirect::Page(3);
+        m.actions[0].redirect = Redirect {
+            route: 3,
+            source: RedirectSource::Step(0),
+        };
         manifest::validate(&m).unwrap();
-        m.actions[0].redirect = Redirect::Page(2);
+        m.actions[0].redirect = Redirect {
+            route: 2,
+            source: RedirectSource::Step(0),
+        };
         reject(&m);
     }
     let mut m = crate::test_support::manifest();
@@ -144,7 +155,9 @@ fn host_rejects_parameterized_mutation_redirects() {
     m.routes[0].forms.clear();
     m.routes[1].forms.push(1);
     m.operations[2].kind = OperationKind::Delete;
-    m.actions[0].fields.clear();
+    m.actions[0].steps[0].target = Target::Signed;
+    m.actions[0].inputs.clear();
+    m.actions[0].steps[0].assign.clear();
     m.routes.push(Route {
         id: 3,
         path: "/".into(),
@@ -154,9 +167,15 @@ fn host_rejects_parameterized_mutation_redirects() {
         access: Access::Authenticated,
         params: vec![],
     });
-    m.actions[0].redirect = Redirect::Page(3);
+    m.actions[0].redirect = Redirect {
+        route: 3,
+        source: RedirectSource::Step(0),
+    };
     manifest::validate(&m).unwrap();
-    m.actions[0].redirect = Redirect::Page(1);
+    m.actions[0].redirect = Redirect {
+        route: 1,
+        source: RedirectSource::Step(0),
+    };
     reject(&m);
 
     for kind in [
@@ -175,8 +194,14 @@ fn host_rejects_parameterized_mutation_redirects() {
             params: vec![],
         });
         m.operations[2].kind = kind.clone();
+        m.actions[0].steps[0].target = if kind == OperationKind::Create {
+            Target::None
+        } else {
+            Target::Signed
+        };
         if kind != OperationKind::Create {
-            m.actions[0].bind = None;
+            m.operations[2].bind = None;
+            m.actions[0].steps[0].assign.retain(|a| a.field != "thread");
             m.operations[2].policy = Policy {
                 any: vec![vec![Predicate::Owner]],
             };
@@ -185,16 +210,23 @@ fn host_rejects_parameterized_mutation_redirects() {
             m.routes[1].access = Access::PublicOptional;
         }
         if kind == OperationKind::Delete {
-            m.actions[0].fields.clear();
+            m.actions[0].inputs.clear();
+            m.actions[0].steps[0].assign.clear();
         }
-        m.actions[0].redirect = Redirect::Reference {
-            field: "thread".into(),
+        m.actions[0].redirect = Redirect {
             route: 4,
+            source: RedirectSource::Reference {
+                step: 0,
+                field: "thread".into(),
+            },
         };
         manifest::validate(&m).unwrap();
-        m.actions[0].redirect = Redirect::Reference {
-            field: "thread".into(),
+        m.actions[0].redirect = Redirect {
             route: 3,
+            source: RedirectSource::Reference {
+                step: 0,
+                field: "thread".into(),
+            },
         };
         reject(&m);
     }
@@ -226,7 +258,7 @@ fn host_rejects_forged_route_parameters() {
     let mut field = both.resources[0].fields.last().unwrap().clone();
     field.name = "second".into();
     both.resources[0].fields.push(field);
-    both.actions[0].fields.push("second".into());
+    crate::test_support::add_input(&mut both.actions[0], &both.resources[0], "second");
     both.operations[0].filter.push(Condition {
         field: "second".into(),
         equals: Operand::Param("flag".into()),
