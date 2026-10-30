@@ -134,20 +134,29 @@ impl Application {
             self.admission(&mut tx, false).await?;
             let now = security::now()?;
             let now = self.observe_clock_write(&mut tx, now).await?;
-            let (token, session, principal) = self.submission_identity(&mut tx, a, cookie, submission, csrf, now).await?;
+            let (token, session, principal) = self
+                .submission_identity(&mut tx, a, cookie, submission, csrf, now)
+                .await?;
             let target = self.submission_target(&token, a)?;
-            let receipt = self.load_receipt(&mut tx, &token.nonce, &session.nonce).await?;
+            let receipt = self
+                .load_receipt(&mut tx, &token.nonce, &session.nonce)
+                .await?;
             if let Some([digest, outcome]) = receipt.as_ref() {
                 let canonical = manifest::canonical_input(&self.manifest, a, input).ok();
-                let expected = canonical.as_ref().map(|input| input_digest(a, input)).transpose()?;
+                let expected = canonical
+                    .as_ref()
+                    .map(|input| input_digest(a, input))
+                    .transpose()?;
 
-                let response = if expected.as_ref() == Some(digest) { self.prepare_response(&mut tx, a, target.as_ref(), outcome, &principal).await.or_else(|_| self.committed_recovery(a, submission, csrf, input))? } else {
-                    let mut response = render::render(&ResponseIntent::Page(Document::new("Form already used", vec![
-                        Instruction::Text("This form already committed different input. Return home to start a new form.".into()),
-                        Instruction::Link { destination: RouteRef { params: Default::default(),
-                        route: self.manifest.routes.iter().find(|r| r.path == "/").expect("index route").id, target: None }, text: "Return home".into() },
-                    ])), &RenderContext { presentation: &self.presentation, manifest: Some(&self.manifest), ..RenderContext::empty() })?;
-                    response.status = 409; navigation::Prepared::ready(response)
+                let response = if expected.as_ref() == Some(digest) {
+                    self.prepare_response(&mut tx, a, target.as_ref(), outcome, &principal)
+                        .await
+                        .or_else(|_| self.committed_recovery(a, submission, csrf, input))?
+                } else {
+                    navigation::Prepared::ready(render::form_already_used(
+                        &self.presentation,
+                        &self.manifest,
+                    )?)
                 };
                 if tx.commit().await.is_err() {
                     return self.committed_recovery(a, submission, csrf, input);
@@ -155,18 +164,50 @@ impl Application {
                 return Ok(response);
             }
             if let Some(target) = target {
-                let Some(stored) = self.authorized_target(&mut tx, a, &target, &principal, capability).await? else { return render::unavailable(&self.presentation, &self.manifest).map(navigation::Prepared::ready); };
+                let Some(stored) = self
+                    .authorized_target(&mut tx, a, &target, &principal, capability)
+                    .await?
+                else {
+                    return self
+                        .settle(a, action::Settled::Unavailable, submission, csrf, input)
+                        .map(navigation::Prepared::ready);
+                };
                 if a.revision == Revision::Exact && stored.revision != target.revision && !unknown {
-                    return self.conflict(a, &session, now, target, &stored, input).map(navigation::Prepared::ready);
+                    return self
+                        .settle(
+                            a,
+                            action::Settled::Conflict {
+                                target,
+                                stored,
+                                session: Box::new(session),
+                                now,
+                            },
+                            submission,
+                            csrf,
+                            input,
+                        )
+                        .map(navigation::Prepared::ready);
                 }
             } else {
                 self.authorize_create(a, &principal)?;
             }
-            let credentials = FormCredentials { csrf: csrf.into(), submission: submission.into(), values: Fields::new() };
-            let rendered = render::recovery(&self.presentation, &self.manifest, action, &credentials, input, render::Recovery::Retry { unknown })?;
+            let credentials = FormCredentials {
+                csrf: csrf.into(),
+                submission: submission.into(),
+                values: Fields::new(),
+            };
+            let rendered = render::recovery(
+                &self.presentation,
+                &self.manifest,
+                action,
+                &credentials,
+                input,
+                render::Recovery::Retry { unknown },
+            )?;
             tx.commit().await?;
             Ok(navigation::Prepared::ready(rendered))
-        }).await??;
+        })
+        .await??;
         Ok(self.finish_navigation(prepared, deadline).await)
     }
 
