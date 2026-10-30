@@ -2072,3 +2072,133 @@ async fn reference_destination_checks_its_own_gate() {
     let tmp = tempfile::tempdir().unwrap();
     gated_destination_case(Database::sqlite(tmp.path().join("gated-destination.db"))).await;
 }
+
+#[tokio::test]
+async fn mixed_destination_reads_match_direct_reads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = Database::sqlite(tmp.path().join("mixed-reads.db"));
+    db.initialize().await.unwrap();
+    let mut m = declarations();
+    let mut own = m.operations[1].clone();
+    own.id = 99;
+    own.policy.any = vec![vec![Predicate::Owner]];
+    own.visibility = None;
+    own.fields = None;
+    m.operations.push(own);
+    m.routes[1].access = Access::PublicOptional;
+    m.routes[1].operations.push(99);
+    manifest::validate(&m).unwrap();
+    seed(&db, &m).await;
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    tx.execute("INSERT INTO nx_accounts(id,password,tenant,state,epoch) VALUES('alice','unused','one','active',1)", &[]).await.unwrap();
+    let storage = tx.storage_resource(&m, 1).await.unwrap();
+    tx.execute(
+        "UPDATE nx_records SET owner='alice',tenant='one' WHERE resource=$1",
+        &[storage.into()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let owner = Principal::User(crate::auth::User {
+        id: "alice".into(),
+        tenant: "one".into(),
+        roles: vec![],
+    });
+    let outsider = Principal::User(crate::auth::User {
+        id: "bob".into(),
+        tenant: "one".into(),
+        roles: vec![],
+    });
+    for published in [false, true] {
+        let mut tx = db
+            .begin(Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+        let fields = serde_json::to_string(&Fields::from([
+            ("body".into(), "reply".into()),
+            ("published".into(), published.to_string()),
+            ("thread".into(), "10".into()),
+        ]))
+        .unwrap();
+        tx.execute(
+            "UPDATE nx_records SET fields=$1 WHERE resource=$2 AND id=2",
+            &[fields.into(), storage.into()],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        for parent_visible in [false, true] {
+            set_parent(&db, &m, parent_visible, false).await;
+            for operations in [vec![2, 99], vec![99, 2]] {
+                m.routes[1].operations = operations;
+                for principal in [&Principal::Anonymous, &owner, &outsider] {
+                    let mut tx = db
+                        .begin_read(Instant::now() + Duration::from_secs(5))
+                        .await
+                        .unwrap();
+                    let mut direct = false;
+                    for id in &m.routes[1].operations {
+                        let op = manifest::operation(&m, *id).unwrap();
+                        direct |= crate::repository::read_resource(&mut tx, &m, principal, op, 2)
+                            .await
+                            .unwrap()
+                            .is_some();
+                    }
+                    let destination = crate::repository::authorize_page_resource(
+                        &mut tx,
+                        &m,
+                        principal,
+                        &m.routes[1],
+                        1,
+                        2,
+                        Some("child"),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        direct,
+                        principal.user().is_ok_and(|u| u.id == "alice")
+                            || (published && parent_visible)
+                    );
+                    assert_eq!(
+                        destination.is_some(),
+                        direct,
+                        "destination must use the same independent read policies and public gate as GET"
+                    );
+                    assert!(
+                        crate::repository::authorize_page_resource(
+                            &mut tx,
+                            &m,
+                            principal,
+                            &m.routes[1],
+                            1,
+                            2,
+                            Some("reincarnated")
+                        )
+                        .await
+                        .unwrap()
+                        .is_none()
+                    );
+                    assert!(
+                        crate::repository::authorize_page_resource(
+                            &mut tx,
+                            &m,
+                            principal,
+                            &m.routes[1],
+                            1,
+                            999,
+                            None
+                        )
+                        .await
+                        .unwrap()
+                        .is_none()
+                    );
+                    tx.commit().await.unwrap();
+                }
+            }
+        }
+    }
+}

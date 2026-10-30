@@ -260,26 +260,28 @@ pub(crate) async fn authorize_page_resource(
         return Ok(None);
     }
     let mut reads = 0;
+    let mut public_read = false;
+    let mut private_read = false;
     for operation in &route.operations {
         let op = manifest::operation(m, *operation)?;
         if op.kind == OperationKind::Read && op.via.is_none() && op.resource == resource {
             reads += 1;
-            if !read_allowed(m, principal, op, &stored)? {
-                return Ok(None);
+            if read_allowed(m, principal, op, &stored)? {
+                if manifest::is_public(op) {
+                    public_read = true;
+                } else {
+                    private_read = true;
+                }
             }
         }
     }
     ensure!(reads > 0, "missing resource read");
-    if let Some(gate) = &manifest::resource(m, resource)?.gate
-        && route.operations.iter().any(|id| {
-            manifest::operation(m, *id).is_ok_and(|op| {
-                op.kind == OperationKind::Read
-                    && op.via.is_none()
-                    && op.resource == resource
-                    && manifest::is_public(op)
-            })
-        })
-    {
+    if !public_read && !private_read {
+        return Ok(None);
+    }
+    // Read operations are independent grants, as on GET. Public-only authority
+    // still requires the parent gate; an authorized private read does not.
+    if !private_read && let Some(gate) = &manifest::resource(m, resource)?.gate {
         let target = manifest::reference_resource(m, resource)?.expect("gate target");
         let id = stored.record.fields[&gate.field].parse()?;
         let target = load(tx, m, target.id, id).await?;
