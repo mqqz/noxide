@@ -1,8 +1,8 @@
 //! Mutation response preparation and bounded post-commit navigation.
 //!
-//! Submission owns canonicalization, authorization, mutation and atomic receipt
-//! persistence. `prepare_response` may prepare recovery/handover data before
-//! commitment; callers deliver it only after commit confirmation or a verified
+//! Action owns authorization, mutation and atomic receipt persistence; submission
+//! owns canonicalization and the web response binding. `prepare_response` may
+//! prepare recovery/handover data before commitment; callers deliver it only after commit confirmation or a verified
 //! committed receipt. An unknown commit outcome stays in receipt recovery.
 //! `finish_navigation` resolves presentation after commitment and cannot undo the write.
 //! Parent destination checks use fresh read authority and the captured incarnation;
@@ -66,16 +66,15 @@ impl Application {
     pub(super) async fn capture_destination(
         &self,
         tx: &mut Transaction,
-        action: &Action,
+        action: ActionCore<'_>,
         signed: Option<&RecordTarget>,
         original: Option<&StoredRecord>,
         outcomes: &[MutationOutcome],
     ) -> Result<Option<ReferenceDestination>> {
-        let route = manifest::route(&self.manifest, action.redirect.route())?;
-        if route.resource.is_none() {
+        if action.destination_resource.is_none() {
             return Ok(None);
         }
-        let (resource, id, incarnation) = match &action.redirect.source {
+        let (resource, id, incarnation) = match action.source {
             RedirectSource::Signed => {
                 let signed =
                     signed.ok_or_else(|| anyhow::anyhow!("missing signed navigation source"))?;
@@ -116,11 +115,11 @@ impl Application {
             }
         };
         ensure!(
-            route.resource == Some(resource),
+            action.destination_resource == Some(resource),
             "navigation resource differs"
         );
         Ok(Some(ReferenceDestination {
-            route: route.id,
+            route: action.destination_route,
             resource,
             id,
             incarnation,
@@ -619,7 +618,11 @@ mod tests {
                 &submission,
                 &csrf,
                 &input,
-                &super::super::submission::input_digest(&m.actions[0], &input).unwrap(),
+                &super::super::submission::input_digest(
+                    ActionCore::of(&m, &m.actions[0]).unwrap(),
+                    &input,
+                )
+                .unwrap(),
                 None,
                 &mut budget,
             )

@@ -301,15 +301,15 @@ pub(crate) async fn authorize_page_resource(
 impl Effects {
     pub(crate) async fn execute_transaction(
         &mut self,
-        action: &Action,
+        action: crate::application::ActionCore<'_>,
     ) -> Result<Vec<MutationOutcome>> {
         ensure!(
             self.request.kind == RequestKind::Action(action.id),
             "transaction outside action"
         );
-        manifest::validate_input(&self.manifest, action, &self.request.input)?;
+        manifest::validate_inputs(action.inputs, &self.request.input)?;
         let mut outcomes = Vec::with_capacity(action.steps.len());
-        for step in &action.steps {
+        for step in action.steps {
             ensure!(self.calls > 0, "database call budget");
             self.calls -= 1;
             let op = manifest::operation(&self.manifest, step.operation)?.clone();
