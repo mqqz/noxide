@@ -655,6 +655,7 @@ mod pagination_tests {
     fn list_settings_are_narrow_and_bounded() {
         for declaration in [
             "list(Reply), order=created_asc, page_size=20",
+            "list(Reply), order=created_desc, page_size=20",
             "list(Reply)",
         ] {
             assert!(

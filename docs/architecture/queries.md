@@ -1,7 +1,7 @@
 # Declarative queries
 
 This is the implementation plan for a small approved query vocabulary, starting
-at main `9917660`. Increments 0 and 1 record compatibility and compile admitted list plans; later
+at main `9917660`. Increments 0–2 record compatibility, compile list plans and add descending order; later
 increments below are planned behavior until their implementation and validation land.
 
 Any approved query has a statically known shape, bounded execution, independently

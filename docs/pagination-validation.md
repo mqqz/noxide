@@ -87,3 +87,12 @@ suite, and the real private-inbox HTTP/component fixture. The exact serialized
 contracts and cursor-scope fixtures remained unchanged. The inbox measurement
 still checks 21 index visits per exact scan on its 100,000-unrelated-record
 fixture; this is a dataset measurement, not a latency or arbitrary-policy bound.
+
+Increment 2 adds descending account pagination and descending parent-scoped byte
+prefix/live-insertion cases on SQLite and PostgreSQL. Ordered parent owner/tenant
+plan checks exercise both directions, including PostgreSQL generic prepared
+plans. On the same inbox dataset, descending exact scans also measured 21 visits
+on each backend. The updated newest-first inbox and the existing forum HTTP
+fixtures passed locally. The original inbox source is retained beside its golden
+manifest so the compatibility producer stays fixed despite the deliberate example
+order change.

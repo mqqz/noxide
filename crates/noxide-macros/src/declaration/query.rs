@@ -59,8 +59,17 @@ pub(crate) fn expand_query(
         quote!(::noxide::ReadQuery)
     };
     let page_size = declaration.page_size.unwrap_or(3);
+    let order = if declaration
+        .order
+        .as_ref()
+        .is_some_and(|o| o == "created_desc")
+    {
+        quote!(::noxide::__private::ListOrder::CreatedDesc)
+    } else {
+        quote!(::noxide::__private::ListOrder::CreatedAsc)
+    };
     let list = if declaration.kind == "list" {
-        quote!(Some(::noxide::__private::ListSettings { order: ::noxide::__private::ListOrder::CreatedAsc, page_size: #page_size }))
+        quote!(Some(::noxide::__private::ListSettings { order: #order, page_size: #page_size }))
     } else {
         quote!(None)
     };

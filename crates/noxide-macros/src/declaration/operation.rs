@@ -60,10 +60,11 @@ impl Parse for OperationDeclaration {
                 "order" => {
                     input.parse::<Token![=]>()?;
                     let order: Ident = input.parse()?;
-                    if order != "created_asc" || result.kind != "list" {
+                    if (order != "created_asc" && order != "created_desc") || result.kind != "list"
+                    {
                         return Err(syn::Error::new(
                             order.span(),
-                            "only list order=created_asc is supported",
+                            "list order must be created_asc or created_desc",
                         ));
                     }
                     result.order = Some(order);

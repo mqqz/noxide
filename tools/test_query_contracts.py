@@ -31,7 +31,8 @@ def main():
                 f'[package]\nname={json.dumps(package)}\nversion="0.0.0"\nedition="2024"\n'
                 f'[dependencies]\nnoxide={{path={json.dumps(str(ROOT / "crates/noxide"))}}}\n[workspace]\n')
             (project / "src").mkdir()
-            (project / "src/lib.rs").write_bytes(source.read_bytes())
+            frozen = GOLDEN / "private-inbox.rs" if key == "example-private-inbox" else source
+            (project / "src/lib.rs").write_bytes(frozen.read_bytes())
             (project / "src/main.rs").write_text(f'fn main() {{ print!("{{}}", {package}::noxide_manifest()); }}\n')
             value = subprocess.check_output(
                 ["cargo", "run", "--offline", "--quiet", "--manifest-path", str(project / "Cargo.toml")], env=env)

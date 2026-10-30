@@ -558,6 +558,11 @@ checks; this API does not provide arbitrary predicates or graph authorization.
 
 A record page may contain one list query, scoped to its parent target. Declare
 `order = created_asc, page_size = 20` on a list query to request up to 20 records.
+Use `order = created_desc` for newest first. Both orders use immutable creation
+sequence keysets; the first page has no continuation predicate. New inserts appear
+on a fresh descending page, not on later pages behind its cursor. Deletions and
+visibility changes remain live; pagination is not a snapshot. The private inbox
+uses descending order on the same bounded account merge path.
 Defaults are ascending creation order and three records; approved page sizes are
 1 through 20. The host applies policy, visibility, and parent filtering first.
 
