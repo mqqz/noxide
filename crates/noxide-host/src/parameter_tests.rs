@@ -87,6 +87,7 @@ fn host_rejects_parameterized_mutation_redirects() {
         m.actions[0].fields.push("published".into());
         m.operations[2].kind = kind.clone();
         m.resources.push(Resource {
+            gate: None,
             id: 2,
             name: "children".into(),
             fields: vec![
@@ -96,16 +97,8 @@ fn host_rejects_parameterized_mutation_redirects() {
                     max_bytes: 20,
                     optional: false,
                     initial: None,
-                    kind: FieldKind::Parent {
+                    kind: FieldKind::Reference {
                         resource: "notes".into(),
-                        visible: Visibility {
-                            field: "published".into(),
-                            equals: "true".into(),
-                        },
-                        create_when: Visibility {
-                            field: "published".into(),
-                            equals: "true".into(),
-                        },
                     },
                 },
                 boolean("flag"),
@@ -114,6 +107,7 @@ fn host_rejects_parameterized_mutation_redirects() {
         let mut list = m.operations[0].clone();
         list.id = 4;
         list.resource = 2;
+        list.scope = Some("note".into());
         list.filter.push(Condition {
             field: "flag".into(),
             equals: Operand::Param("flag".into()),
@@ -182,6 +176,7 @@ fn host_rejects_parameterized_mutation_redirects() {
         });
         m.operations[2].kind = kind.clone();
         if kind != OperationKind::Create {
+            m.actions[0].bind = None;
             m.operations[2].policy = Policy {
                 any: vec![vec![Predicate::Owner]],
             };
@@ -192,9 +187,15 @@ fn host_rejects_parameterized_mutation_redirects() {
         if kind == OperationKind::Delete {
             m.actions[0].fields.clear();
         }
-        m.actions[0].redirect = Redirect::Parent { parent: 4 };
+        m.actions[0].redirect = Redirect::Reference {
+            field: "thread".into(),
+            route: 4,
+        };
         manifest::validate(&m).unwrap();
-        m.actions[0].redirect = Redirect::Parent { parent: 3 };
+        m.actions[0].redirect = Redirect::Reference {
+            field: "thread".into(),
+            route: 3,
+        };
         reject(&m);
     }
 }

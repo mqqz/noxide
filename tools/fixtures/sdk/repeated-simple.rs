@@ -108,12 +108,12 @@ mod repeated {
     }
     // actions
     crud! { Reply {
-        create CreateReply { fields(body), redirect(parent(thread)), handler(create_reply), layout(create_layout) }
-        create CreateAnonymousReply { fields(body), allow = public, redirect(reply), handler(anonymous_reply), layout(anonymous_layout) }
+        create CreateReply { fields(body), bind(thread = target, eligible = ReadThread), redirect(reference(thread, thread)), handler(create_reply), layout(create_layout) }
+        create CreateAnonymousReply { fields(body), bind(thread = target, eligible = ReadThread), allow = public, redirect(reply), handler(anonymous_reply), layout(anonymous_layout) }
         update r#EditReply { fields(body), redirect(reply), handler(edit_reply), layout(edit_layout) }
-        update EditSecret { fields(body), allow = capability, redirect(parent(thread)), handler(edit_secret), layout(secret_layout) }
+        update EditSecret { fields(body), allow = capability, redirect(reference(thread, thread)), handler(edit_secret), layout(secret_layout) }
         update ModerateReply { fields(published), allow = role("moderator"), redirect(reply), handler(moderate_reply), layout(moderate_layout) }
         delete DeleteReply { redirect(index), handler(delete_reply), layout(delete_layout) }
-        delete DeleteSecret { allow = capability, redirect(parent(thread)), handler(delete_secret), layout(remove_layout) }
+        delete DeleteSecret { allow = capability, redirect(reference(thread, thread)), handler(delete_secret), layout(remove_layout) }
     } }
 }

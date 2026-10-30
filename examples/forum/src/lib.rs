@@ -89,8 +89,11 @@ pub mod forum {
     ) -> PageResult {
         let (title, body, locked) = own
             .get(thread)
-            .map(|t| (t.title, t.body, t.locked))
-            .or_else(|| read.get(thread).map(|t| (t.title, t.body, t.locked)))
+            .map(|t| (t.title.clone(), t.body.clone(), t.locked))
+            .or_else(|| {
+                read.get(thread)
+                    .map(|t| (t.title.clone(), t.body.clone(), t.locked))
+            })
             .ok_or(NotFound)?;
         let replies = replies.fetch();
         Ok(Page::new(
@@ -161,8 +164,8 @@ pub mod forum {
     ) -> PageResult {
         let (thread, body) = own
             .get(reply)
-            .map(|r| (r.thread, r.body))
-            .or_else(|| read.get(reply).map(|r| (r.thread, r.body)))
+            .map(|r| (r.thread, r.body.clone()))
+            .or_else(|| read.get(reply).map(|r| (r.thread, r.body.clone())))
             .ok_or(NotFound)?;
         Ok(Page::new(
             "Reply",
@@ -323,8 +326,8 @@ pub mod forum {
     }
 
     crud! { Reply {
-        create CreateReply { fields(body), allow = owner, redirect(show_reply), layout(reply_create_layout), handler(reply_create) }
-        create CreateAnonymousReply { fields(body), allow = public, redirect(show_reply), layout(reply_anonymous_layout), handler(reply_anonymous) }
+        create CreateReply { fields(body), bind(thread = target, eligible = PublicThread), allow = owner, redirect(show_reply), layout(reply_create_layout), handler(reply_create) }
+        create CreateAnonymousReply { fields(body), bind(thread = target, eligible = PublicThread), allow = public, redirect(show_reply), layout(reply_anonymous_layout), handler(reply_anonymous) }
         update EditReply { fields(body), allow = owner, redirect(show_reply), layout(reply_edit_layout), handler(reply_edit) }
         update EditReplyWithSecret { fields(body), allow = capability, redirect(show_reply), layout(reply_secret_layout), handler(reply_secret) }
         update ModerateReply { fields(published), allow = role("moderator"), redirect(review_reply), layout(reply_moderate_layout) }

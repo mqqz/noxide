@@ -14,7 +14,7 @@ use super::*;
 pub(super) struct SemanticReceipt {
     pub version: u32,
     pub outcome: SemanticOutcome,
-    pub destination: Option<ParentDestination>,
+    pub destination: Option<ReferenceDestination>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
@@ -24,7 +24,7 @@ pub(super) enum SemanticOutcome {
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ParentDestination {
+pub(super) struct ReferenceDestination {
     route: u32,
     resource: u32,
     id: u64,
@@ -32,7 +32,7 @@ pub(super) struct ParentDestination {
 }
 pub(super) struct Prepared {
     pub fallback: Rendered,
-    navigation: Option<(ParentDestination, auth::Principal, bool)>,
+    navigation: Option<(ReferenceDestination, auth::Principal, bool)>,
 }
 impl Prepared {
     pub fn ready(fallback: Rendered) -> Self {
@@ -72,15 +72,15 @@ impl Application {
         tx: &mut Transaction,
         action: &Action,
         stored: Option<&StoredRecord>,
-    ) -> Result<Option<ParentDestination>> {
-        let Redirect::Parent { parent: route } = action.redirect else {
+    ) -> Result<Option<ReferenceDestination>> {
+        let Redirect::Reference { route, .. } = action.redirect else {
             return Ok(None);
         };
         let op = manifest::operation(&self.manifest, action.operation)?;
-        let parent = manifest::parent_resource(&self.manifest, op.resource)?
+        let parent = manifest::reference_resource(&self.manifest, op.resource)?
             .ok_or_else(|| anyhow::anyhow!("missing parent"))?;
         let stored = stored.ok_or_else(|| anyhow::anyhow!("missing relationship snapshot"))?;
-        let field = manifest::parent_field(manifest::resource(&self.manifest, op.resource)?)
+        let field = manifest::reference_field(manifest::resource(&self.manifest, op.resource)?)
             .expect("validated parent");
         let id = if op.kind == OperationKind::Create {
             stored.record.id
@@ -95,7 +95,7 @@ impl Application {
         let parent_record = repository::load(tx, &self.manifest, parent.id, id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("missing parent"))?;
-        Ok(Some(ParentDestination {
+        Ok(Some(ReferenceDestination {
             route,
             resource: parent.id,
             id,
@@ -125,7 +125,7 @@ impl Application {
             }
             None => (payload, None),
         };
-        if !matches!(action.redirect, Redirect::Parent { .. }) {
+        if !matches!(action.redirect, Redirect::Reference { .. }) {
             ensure!(destination.is_none(), "unexpected parent destination");
             return Ok(Prepared::ready(
                 self.receipt_response(tx, action, target, outcome).await?,
@@ -137,7 +137,7 @@ impl Application {
         ensure!(
             destination.route == action.redirect.route()
                 && Some(destination.resource)
-                    == manifest::parent_resource(&self.manifest, op.resource)?.map(|p| p.id),
+                    == manifest::reference_resource(&self.manifest, op.resource)?.map(|p| p.id),
             "receipt destination differs"
         );
         let handover = manifest::is_public(op) && op.kind == OperationKind::Create;
@@ -150,7 +150,7 @@ impl Application {
             self.receipt(action, target, outcome)?;
             success()
         };
-        let destination = ParentDestination {
+        let destination = ReferenceDestination {
             route: destination.route,
             resource: destination.resource,
             id: destination.id,
@@ -180,8 +180,8 @@ impl Application {
         if Instant::now() >= deadline {
             return prepared.fallback;
         }
-        // Four navigation calls are reserved once for this request. Capture is
-        // charged separately on each mutation attempt; this path loads one record.
+        // Navigation calls are reserved once, including a possible destination gate.
+        // Capture is charged separately on every mutation attempt.
         let resolved = timeout_at(deadline, async {
             let mut tx = self.database.begin_read(deadline.into_std()).await?;
             let route = manifest::route(&self.manifest, destination.route)?;
@@ -247,9 +247,9 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn frozen_receipt_wire_formats_round_trip() {
-        // Existing receipt representations, including the ordinary pre-envelope
-        // mutation format, remain decodable. Keys and identifiers are test data.
+    fn semantic_receipt_shapes_round_trip() {
+        // Current ordinary and reference receipts round-trip.
+        // Keys and identifiers are test data.
         for raw in [
             r#"{"version":1,"outcome":{"resource":7,"id":9,"cap_version":2,"key_id":3},"destination":null}"#,
             r#"{"version":1,"outcome":{"created":{"resource":7,"id":9,"destination":{"route":4,"target":9}}},"destination":{"route":5,"resource":6,"id":8,"incarnation":"test-incarnation"}}"#,
@@ -277,14 +277,17 @@ mod tests {
             )
             .is_err()
         );
-        for raw in ["4", r#"{"parent":5}"#] {
+        for raw in ["4", r#"{"field":"thread","route":5}"#] {
             let redirect: Redirect = serde_json::from_str(raw).unwrap();
             assert_eq!(
                 serde_json::to_value(redirect).unwrap(),
                 serde_json::from_str::<serde_json::Value>(raw).unwrap()
             );
         }
-        assert!(serde_json::from_str::<Redirect>(r#"{"parent":5,"extra":true}"#).is_err());
+        assert!(
+            serde_json::from_str::<Redirect>(r#"{"field":"thread","route":5,"extra":true}"#)
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -296,7 +299,10 @@ mod tests {
     async fn private_parent_case(db: Database) {
         db.initialize().await.unwrap();
         let mut m = parent_tests::declarations();
-        m.actions[0].redirect = Redirect::Parent { parent: 3 };
+        m.actions[0].redirect = Redirect::Reference {
+            field: "thread".into(),
+            route: 3,
+        };
         let read = &mut m.operations[3];
         read.policy = Policy {
             any: vec![
@@ -371,7 +377,7 @@ mod tests {
                     Prepared {
                         fallback: success(),
                         navigation: Some((
-                            ParentDestination {
+                            ReferenceDestination {
                                 route: 3,
                                 resource: 2,
                                 id: 10,
@@ -402,8 +408,11 @@ mod tests {
         let mut m = parent_tests::declarations();
         m.operations.iter_mut().find(|op| op.id == 4).unwrap().id = 6;
         m.routes[2].operations = vec![6, 1];
+        m.actions[0].bind.as_mut().unwrap().eligible = 6;
         for (id, kind) in [(4, OperationKind::Update), (5, OperationKind::Delete)] {
             m.operations.push(Operation {
+                scope: None,
+                via: None,
                 filter: Vec::new(),
                 disclose: Vec::new(),
                 list: None,
@@ -417,11 +426,15 @@ mod tests {
                 fields: None,
             });
             m.actions.push(Action {
+                bind: None,
                 id: id - 2,
                 version: 1,
                 name: "Change reply".into(),
                 operation: id,
-                redirect: Redirect::Parent { parent: 3 },
+                redirect: Redirect::Reference {
+                    field: "thread".into(),
+                    route: 3,
+                },
                 fields: if id == 4 { vec!["body".into()] } else { vec![] },
                 layout: vec![],
                 inspect: None,

@@ -411,13 +411,13 @@ mod app_policy_tests {
             mod app {
                 #[resource(key = "notes", owner)] struct Note;
                 crud! { Note {
-                    create Create { fields(body), redirect(parent(show)) }
+                    create Create { fields(body), redirect(reference(thread, show)) }
                     create Anonymous { fields(body), allow = public, redirect(show) }
                     update Edit { fields(body), redirect(show) }
-                    update Secret { fields(body), allow = capability, redirect(parent(show)) }
+                    update Secret { fields(body), allow = capability, redirect(reference(thread, show)) }
                     update Moderate { fields(published), allow = role("moderator"), redirect(show) }
                     delete Delete { redirect(index) }
-                    delete Remove { allow = capability, redirect(parent(show)) }
+                    delete Remove { allow = capability, redirect(reference(thread, show)) }
                 } }
                 #[page("/")] fn index() -> Page { todo!() }
             }
@@ -427,7 +427,7 @@ mod app_policy_tests {
         assert_eq!(output.matches("Predicate :: Owner").count(), 3);
         assert_eq!(output.matches("Predicate :: Public").count(), 1);
         assert_eq!(output.matches("Predicate :: Capability").count(), 2);
-        assert_eq!(output.matches("Redirect :: Parent").count(), 3);
+        assert_eq!(output.matches("Redirect :: Reference").count(), 3);
         assert_eq!(output.matches("Redirect :: Page").count(), 4);
     }
 

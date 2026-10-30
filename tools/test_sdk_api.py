@@ -274,7 +274,7 @@ def convenience_fixtures():
         ("repeated-missing-policy", repeated.replace('key = "replies", owner', 'key = "replies"'), "explicit policy or owner resource"),
         ("repeated-delete-fields", repeated.replace("delete DeleteReply {", "delete DeleteReply { fields(body),"), "delete accepts no fields"),
         ("repeated-duplicate-option", repeated.replace("create CreateReply {", "create CreateReply { fields(body),"), "duplicate CRUD option"),
-        ("repeated-missing-redirect", repeated.replace("redirect(parent(thread)), handler(create_reply)", "handler(create_reply)"), "requires redirect"),
+        ("repeated-missing-redirect", repeated.replace("redirect(reference(thread, thread)), handler(create_reply)", "handler(create_reply)"), "requires redirect"),
         ("repeated-wrong-handler", repeated.replace("handler(edit_secret)", "handler(edit_reply)"), "mismatched types"),
         ("repeated-wrong-layout", repeated.replace("layout(secret_layout)", "layout(edit_layout)"), "mismatched types"),
         ("repeated-owner-moderator-field", repeated.rsplit("\n}", 1)[0] + '\n fn forbidden(f: FormFields<r#EditReply>) { let _ = f.published; }\n}\n', "no field"),

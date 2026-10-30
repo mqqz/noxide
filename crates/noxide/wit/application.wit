@@ -6,6 +6,8 @@ interface host {
     request-chunk: func(offset: u32) -> u64;
     emit: func(word: u64, length: u32);
     invoke: func(operation: u32, target: u64) -> u32;
+    follow-source: func(resource-id: u32, id: u64);
+    follow: func(operation: u32) -> u32;
     result-chunk: func(offset: u32) -> u64;
 }
 
