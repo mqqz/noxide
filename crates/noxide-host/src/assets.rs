@@ -143,8 +143,7 @@ impl AssetBundle {
     pub fn from_pack(declarations: &[AssetDeclaration], pack: &[u8]) -> Result<Self> {
         validate_declarations(declarations)?;
         ensure!(
-            declarations.len() <= MAX_ASSETS
-                && pack.len() <= MAX_ASSET_TOTAL_BYTES + MAX_ASSETS * 198 + 10,
+            declarations.len() <= MAX_ASSETS && pack.len() <= MAX_ASSET_PACK_BYTES,
             "asset pack byte limit"
         );
         ensure!(
@@ -167,7 +166,8 @@ impl AssetBundle {
             let name_len = u16::from_le_bytes(header[..2].try_into().unwrap()) as usize;
             let size = u32::from_le_bytes(header[2..6].try_into().unwrap()) as usize;
             ensure!(
-                (1..=192).contains(&name_len) && (1..=MAX_ASSET_BYTES).contains(&size),
+                (1..=MAX_ASSET_NAME_BYTES).contains(&name_len)
+                    && (1..=MAX_ASSET_BYTES).contains(&size),
                 "asset pack entry limit"
             );
             offset += 6;
@@ -307,6 +307,35 @@ mod tests {
             },
             bytes,
         }
+    }
+    #[test]
+    fn names_share_one_bound_in_admission_pack_and_stylesheet_refs() {
+        for bytes in [95, 96, 97] {
+            let name = format!("{}.css", "a".repeat(bytes - 4));
+            let input = input(&name, AssetMediaType::Css, b"p{color:red}".to_vec());
+            let mut pack = b"NXAS\x01\0\0\0".to_vec();
+            pack.extend_from_slice(&1u16.to_le_bytes());
+            pack.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            pack.extend_from_slice(&(input.bytes.len() as u32).to_le_bytes());
+            pack.extend_from_slice(name.as_bytes());
+            pack.extend_from_slice(&input.bytes);
+            let admitted = AssetBundle::admit(vec![input.clone()]);
+            assert_eq!(admitted.is_ok(), bytes <= MAX_ASSET_NAME_BYTES);
+            assert_eq!(
+                AssetBundle::from_pack(std::slice::from_ref(&input.declaration), &pack).is_ok(),
+                bytes <= MAX_ASSET_NAME_BYTES
+            );
+            if let Ok(bundle) = admitted {
+                assert!(document::stylesheet(&name, &bundle).is_ok());
+            }
+        }
+        let name = "a".repeat(97);
+        assert!(
+            document::stylesheet(&name, &AssetBundle::default())
+                .unwrap_err()
+                .to_string()
+                .contains("stylesheet asset name")
+        );
     }
     #[test]
     fn immutable_scoped_css_and_exact_lookup() {

@@ -8,7 +8,12 @@ An asset declaration names a canonical relative package entry, its lowercase
 SHA-256 source digest and one of PNG, JPEG, WebP, WOFF2 or CSS. The complete bundle
 must match the declarations exactly. Admission rejects duplicate names/digests,
 absolute paths, traversal, hidden components, malformed UTF-8, and noncanonical
-names. Limits are 128 files, 4 MiB/file and 16 MiB total, including compiled CSS.
+names. `MAX_ASSET_NAME_BYTES` is 96 bytes for the complete relative logical
+name, including slashes. This one bound applies to protocol declarations, pack
+entries, source snapshots, image references and stylesheet references. With tar's
+`./` prefix and a directory slash it fits USTAR's 100-byte name field; PAX and
+long-name extension records remain forbidden. Limits are 128 files, 4 MiB/file
+and 16 MiB total, including compiled CSS.
 Assets are public: do not package secrets or private attachments.
 
 The host retains immutable admitted bytes. Images and fonts are addressed by
@@ -89,7 +94,13 @@ an uncompressed USTAR archive after compilation/metadata collection. For hostile
 inputs this recipe runs only in the disconnected disposable build VM. The local
 backend remains an explicit trust decision for trusted code/dependencies.
 
-The exporter does not dereference archive symlinks and caps the stream with head.
+The exporter does not dereference archive symlinks. It creates one private
+mode-0600 FIFO outside the public tree, starts a bounded head consumer, runs tar
+in the foreground and retains both exit statuses. It waits for its consumer and
+removes only the known FIFO path. Only successful tar and head statuses permit
+an asset envelope; base64 failure also marks export failed. A tar exit 2 or
+SIGPIPE never promotes a partial archive. Head retains the existing archive cap;
+local process-group/VM deadlines and cleanup cover blocked work and cancellation.
 The host validates raw USTAR framing before parsing members, including entry
 types, octal sizes, extensions and trailing data. It never extracts paths.
 Symlinks, hardlinks, devices, sparse entries, duplicate names, traversal and all

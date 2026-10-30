@@ -9,14 +9,16 @@ import struct
 import tarfile
 
 MAX_ASSETS = 128
+MAX_ASSET_NAME_BYTES = 96
 MAX_SINGLE = 4 * 1024 * 1024
 MAX_TOTAL = 16 * 1024 * 1024
+MAX_ASSET_PACK_BYTES = MAX_TOTAL + MAX_ASSETS * (6 + MAX_ASSET_NAME_BYTES) + 10
 MAX_ARCHIVE = MAX_TOTAL + 1024 * 1024
 MAGIC = b"NXAS\x01\0\0\0"
 
 
 def valid_name(name):
-    return (0 < len(name.encode('utf-8')) <= 192
+    return (0 < len(name.encode('utf-8')) <= MAX_ASSET_NAME_BYTES
             and all(part and part not in ('.', '..') and not part.startswith('.')
                     and all(c.isascii() and (c.isalnum() or c in '_-.') for c in part)
                     for part in name.split('/')))
@@ -98,6 +100,8 @@ def from_tar(archive):
         pack.extend(struct.pack('<HI', len(encoded), len(data)))
         pack.extend(encoded)
         pack.extend(data)
+    if len(pack) > MAX_ASSET_PACK_BYTES:
+        raise ValueError('asset pack byte limit')
     return bytes(pack)
 
 # Base64 wraps at 76 columns. General diagnostics retain their original 16 MiB

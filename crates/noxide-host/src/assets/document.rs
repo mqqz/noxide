@@ -1,5 +1,5 @@
 //! Host-owned rendering for safe rich document subtrees.
-use super::{AssetBundle, AssetMediaType};
+use super::{AssetBundle, AssetMediaType, valid_asset_name};
 use anyhow::{Result, bail, ensure};
 use noxide_protocol::{
     RouteRef,
@@ -29,6 +29,7 @@ pub fn fragment(
     Ok(out)
 }
 pub fn stylesheet(name: &str, bundle: &AssetBundle) -> Result<String> {
+    ensure!(valid_asset_name(name), "stylesheet asset name");
     let asset = bundle
         .get(name)
         .ok_or_else(|| anyhow::anyhow!("undeclared stylesheet"))?;
@@ -197,6 +198,7 @@ fn render(
             alt,
             classes: c,
         } => {
+            ensure!(valid_asset_name(asset), "image asset name");
             ensure!(alt.len() <= 1024, "image alternative text limit");
             let a = bundle
                 .get(asset)

@@ -11,8 +11,8 @@ import struct
 import zlib
 from pathlib import Path
 import tempfile
-from build_assets import MAX_ARCHIVE, MAGIC, from_tar
-from build_vm import Image, artifact, check_build_status, run_vm, command, source_files
+from build_assets import MAX_ARCHIVE, MAGIC, MAX_ASSET_NAME_BYTES, from_tar
+from build_vm import Image, artifact, check_build_status, run_vm, command, source_files, check_asset_status
 from build_recipe import INIT, emission
 
 
@@ -35,6 +35,10 @@ def main():
     (args.output/'regular.declarations.json').write_text(json.dumps(declarations,indent=2))
     cases={
         'regular':('mkdir public\ncp /src/fixtures/* public/\n',True),
+        'name-96':('mkdir public\ncp /src/long-name/* public/\n',True),
+        'name-97':('mkdir public\ncp /src/long-name/* public/\n',False),
+        'producer-long-name':('mkdir public\ncp /src/long-name/* public/\n',False),
+        'consumer-cap':('mkdir public\nn=0\nwhile [ "$n" -lt 5 ]; do head -c 4194304 /dev/zero > "public/large$n.png"; n=$((n+1)); done\n',False),
         'source-target':('cp -r /src/examples/private-notes/. .\ntest ! -e target/build-output\n',True),
         'symlink':('mkdir public\nln -s /src/secret public/leak.css\n',False),
         'linked-root':('ln -s /src public\n',False),
@@ -52,6 +56,9 @@ def main():
         image.add('src/secret',b'VM-only inert canary')
         if name=='regular':
             for filename,(_,data) in payloads.items():image.add('src/fixtures/'+filename,data)
+        if name in ('name-96','name-97','producer-long-name'):
+            size={'name-96':MAX_ASSET_NAME_BYTES,'name-97':MAX_ASSET_NAME_BYTES+1,'producer-long-name':128}[name]
+            image.add('src/long-name/'+('a'*(size-4))+'.css',b'p{color:red}')
         if name=='source-target':
             with tempfile.TemporaryDirectory(prefix='noxide-asset-source-') as source:
                 root=Path(source);(root/'public/target').mkdir(parents=True);(root/'target').mkdir()
@@ -67,12 +74,21 @@ def main():
             path=Path(folder)/'input.cpio.gz';image.write(path)
             output=run_vm(args.kernel,path,args.output/(name+'.log'),60)
         check_build_status(output)
-        try:pack=from_tar(artifact(output,'ASSETS',MAX_ARCHIVE))
+        try:
+            check_asset_status(output)
+            pack=from_tar(artifact(output,'ASSETS',MAX_ARCHIVE))
         except (ValueError,OSError):
             if accepted:raise
+            if name in ('producer-long-name','consumer-cap'):
+                assert b'NOXIDE_ASSETS_BEGIN' not in output
+                assert b'NOXIDE_ASSETS_STATUS=1' in output
+                if name=='producer-long-name':assert b'NOXIDE_ASSETS_TAR_STATUS=2' in output
             print(name+': rejected',flush=True)
         else:
             if not accepted:raise AssertionError(name+': hostile export accepted')
+            if name=='name-96':
+                entry=('a'*(MAX_ASSET_NAME_BYTES-4)+'.css').encode();content=b'p{color:red}'
+                assert pack==MAGIC+struct.pack('<H',1)+struct.pack('<HI',len(entry),len(content))+entry+content
             if name=='source-target':
                 entry=b'target/site.css';content=b'p{color:red}'
                 assert pack==MAGIC+struct.pack('<H',1)+struct.pack('<HI',len(entry),len(content))+entry+content

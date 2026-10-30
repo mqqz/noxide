@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Untrusted executor asset transport regressions; no application code executes."""
 import io
+import re
+import subprocess
+import time
 import struct
 import tarfile
 import unittest
@@ -9,6 +12,8 @@ from pathlib import Path
 from unittest import mock
 import build_vm
 import build_assets as assets
+from build_local import run_local
+from build_recipe import emission
 
 
 def archive(entries):
@@ -26,6 +31,15 @@ def archive(entries):
 
 
 class AssetTransport(unittest.TestCase):
+    def test_name_boundary_is_shared_with_transport(self):
+        self.assertEqual(assets.MAX_ASSET_NAME_BYTES,96)
+        for size in [95,96,97]:
+            name='a'*(size-4)+'.css'
+            self.assertEqual(assets.valid_name(name),size<=assets.MAX_ASSET_NAME_BYTES)
+            data=archive([('./'+name,b'p{color:red}',tarfile.REGTYPE)])
+            if size<=assets.MAX_ASSET_NAME_BYTES:self.assertIn(name.encode(),assets.from_tar(data))
+            else:
+                with self.assertRaises(ValueError):assets.from_tar(data)
     def test_canonical_sorted_pack(self):
         source=archive([('./b.css',b'b',tarfile.REGTYPE),('./images',b'',tarfile.DIRTYPE),('./images/a.png',b'a',tarfile.REGTYPE)])
         pack=assets.from_tar(source)
@@ -51,6 +65,15 @@ class AssetTransport(unittest.TestCase):
         with self.assertRaises(ValueError):assets.from_tar(out.getvalue())
 
 class PublicSourceSnapshot(unittest.TestCase):
+    def test_name_boundary_is_enforced_before_executor_snapshot(self):
+        for size in [95,96,97]:
+            with self.subTest(size=size),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder);(root/'public').mkdir();name='a'*(size-4)+'.css';(root/'public'/name).write_bytes(b'p{color:red}')
+                if size<=assets.MAX_ASSET_NAME_BYTES:
+                    image=build_vm.Image();build_vm.source_files(image,root,'src',public_assets=True)
+                    self.assertEqual(set(image.files),{'src/public/'+name})
+                else:
+                    with self.assertRaisesRegex(ValueError,'public source asset budget or name'):build_vm.source_files(build_vm.Image(),root,'src',public_assets=True)
     def test_public_target_asset_is_preserved_ordinary_targets_stay_excluded(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)
@@ -90,6 +113,65 @@ class PublicSourceSnapshot(unittest.TestCase):
             with mock.patch('build_vm.MAX_PUBLIC_SINGLE',1),self.assertRaises(ValueError):build_vm.source_files(build_vm.Image(),root,'src',public_assets=True)
             asset.unlink();(root/'public/bad name.png').write_bytes(b'a')
             with self.assertRaises(ValueError):build_vm.source_files(build_vm.Image(),root,'src',public_assets=True)
+
+class LocalAssetExport(unittest.TestCase):
+    def test_export_status_requires_exact_success_from_both_processes(self):
+        success=b'NOXIDE_ASSETS_TAR_STATUS=0\nNOXIDE_ASSETS_HEAD_STATUS=0\nNOXIDE_ASSETS_STATUS=0\n'
+        build_vm.check_asset_status(success)
+        for output in [success.replace(b'TAR_STATUS=0',b'TAR_STATUS=2'),success.replace(b'HEAD_STATUS=0',b'HEAD_STATUS=1'),success.replace(b'ASSETS_STATUS=0',b'ASSETS_STATUS=1'),success.split(b'\n',1)[1],success+b'NOXIDE_ASSETS_HEAD_STATUS=0\n']:
+            with self.assertRaisesRegex(ValueError,'asset export failed'):build_vm.check_asset_status(output)
+    def run_export(self,log_path,name=None,commands=None,consumer=None,seconds=10):
+        image=build_vm.Image()
+        if name is not None:image.add('src/fixture/'+name,b'p{color:red}')
+        build='set -eu\nmkdir -p /tmp/work/examples/private-notes/public\ncd /tmp/work/examples/private-notes\nprintf "version = 4\\n" > Cargo.lock\nprintf "{}" > /tmp/work/noxide-contract.json\n'
+        build+=commands if commands is not None else 'cp /src/fixture/* public/\n'
+        export=emission(check=True,metadata=True)
+        if consumer is not None:export=export.replace('head -c '+str(assets.MAX_ARCHIVE+1),consumer)
+        image.add('build-command',build.encode());image.add('artifact-command',export.encode())
+        return run_local(image,Path('/usr'),log_path,seconds)
+    def test_local_export_name_boundaries(self):
+        for size in [95,96,97]:
+            with self.subTest(size=size),tempfile.TemporaryDirectory() as folder:
+                name='a'*(size-4)+'.css';output=self.run_export(Path(folder)/'build.log',name=name)
+                build_vm.check_build_status(output);build_vm.check_asset_status(output)
+                archive=build_vm.artifact(output,'ASSETS',assets.MAX_ARCHIVE)
+                if size<=assets.MAX_ASSET_NAME_BYTES:self.assertIn(name.encode(),assets.from_tar(archive))
+                else:
+                    with self.assertRaises(ValueError):assets.from_tar(archive)
+    def test_tar_exit_two_never_exports_partial_archive(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output=self.run_export(Path(folder)/'build.log',name='a'*124+'.css')
+            self.assertIn(b'NOXIDE_ASSETS_TAR_STATUS=2\n',output)
+            self.assertIn(b'NOXIDE_ASSETS_HEAD_STATUS=0\n',output)
+            self.assertNotIn(b'NOXIDE_ASSETS_BEGIN',output)
+            with self.assertRaisesRegex(ValueError,'asset export failed'):build_vm.check_asset_status(output)
+    def test_consumer_cap_rejects_producer_sigpipe_without_export(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output=self.run_export(Path(folder)/'build.log',commands='n=0\nwhile [ "$n" -lt 5 ]; do head -c 4194304 /dev/zero > "public/large$n.png"; n=$((n+1)); done\n')
+            self.assertIn(b'NOXIDE_ASSETS_HEAD_STATUS=0\n',output)
+            self.assertNotIn(b'NOXIDE_ASSETS_TAR_STATUS=0\n',output)
+            self.assertNotIn(b'NOXIDE_ASSETS_BEGIN',output)
+            with self.assertRaisesRegex(ValueError,'asset export failed'):build_vm.check_asset_status(output)
+    def test_failed_consumer_never_exports_archive(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output=self.run_export(Path(folder)/'build.log',name='site.css',consumer='false -c '+str(assets.MAX_ARCHIVE+1))
+            self.assertIn(b'NOXIDE_ASSETS_HEAD_STATUS=1\n',output)
+            self.assertNotIn(b'NOXIDE_ASSETS_BEGIN',output)
+            with self.assertRaisesRegex(ValueError,'asset export failed'):build_vm.check_asset_status(output)
+    def test_cancelled_export_cleans_up_owned_consumer_process(self):
+        with tempfile.TemporaryDirectory() as folder:
+            log=Path(folder)/'build.log'
+            consumer="sh -c 'echo NOXIDE_TEST_HEAD_PID=$$ >&2; exec sleep 30' --"
+            with self.assertRaises(subprocess.TimeoutExpired):self.run_export(log,name='site.css',consumer=consumer,seconds=1)
+            match=re.search(rb'NOXIDE_TEST_HEAD_PID=(\d+)',log.read_bytes());self.assertIsNotNone(match)
+            pid=int(match[1]);until=time.monotonic()+2
+            while time.monotonic()<until:
+                status=Path('/proc')/str(pid)/'stat'
+                try:state=status.read_text().rsplit(')',1)[1].split()[0]
+                except FileNotFoundError:break
+                if state=='Z':break
+                time.sleep(.01)
+            else:self.fail('owned export consumer survived process-group cancellation')
 
 class ConsoleTransport(unittest.TestCase):
     def test_split_markers_and_general_diagnostics(self):

@@ -14,22 +14,51 @@ def emission(name="private_notes", check=False, metadata=False):
     if metadata:
         text = text.replace("    echo NOXIDE_LOCK_BEGIN\n", "    echo NOXIDE_CONTRACT_BEGIN\n    base64 /tmp/work/noxide-contract.json\n    echo NOXIDE_CONTRACT_END\n    echo NOXIDE_LOCK_BEGIN\n")
     if metadata:
-        # This runs inside the selected executor after native metadata collection.
-        # Tar never follows symlinks; the host rejects link/special/duplicate entries.
-        # Head bounds the artifact even if hostile build code generated huge files.
-        export = f'''    if [ -e /tmp/work/examples/private-notes/public ] || [ -L /tmp/work/examples/private-notes/public ]; then
-        if [ -d /tmp/work/examples/private-notes/public ] && [ ! -L /tmp/work/examples/private-notes/public ]; then
-            tar --format=ustar --sort=name -C /tmp/work/examples/private-notes/public -cf - . | head -c {MAX_ARCHIVE + 1} > /tmp/noxide-assets.tar
+        # Run the producer in the foreground through a private FIFO so both
+        # statuses survive POSIX shell execution. Head retains the archive cap.
+        export = f'''    asset_tar_status=1
+    asset_head_status=1
+    asset_status=1
+    rm -f /tmp/noxide-assets.tar /tmp/noxide-assets.fifo
+    if mkfifo -m 600 /tmp/noxide-assets.fifo; then
+        head -c {MAX_ARCHIVE + 1} < /tmp/noxide-assets.fifo > /tmp/noxide-assets.tar &
+        asset_head_pid=$!
+        if [ -e /tmp/work/examples/private-notes/public ] || [ -L /tmp/work/examples/private-notes/public ]; then
+            if [ -d /tmp/work/examples/private-notes/public ] && [ ! -L /tmp/work/examples/private-notes/public ]; then
+                if tar --format=ustar --sort=name -C /tmp/work/examples/private-notes/public -cf - . > /tmp/noxide-assets.fifo; then
+                    asset_tar_status=0
+                else
+                    asset_tar_status=$?
+                fi
+            else
+                : > /tmp/noxide-assets.fifo
+            fi
         else
-            rm -f /tmp/noxide-assets.tar
+            if tar --format=ustar -cf - --files-from /dev/null > /tmp/noxide-assets.fifo; then
+                asset_tar_status=0
+            else
+                asset_tar_status=$?
+            fi
         fi
-    else
-        tar --format=ustar -cf /tmp/noxide-assets.tar --files-from /dev/null
+        if wait "$asset_head_pid"; then
+            asset_head_status=0
+        else
+            asset_head_status=$?
+        fi
+        rm -f /tmp/noxide-assets.fifo
     fi
-    if [ -f /tmp/noxide-assets.tar ]; then
+    echo "NOXIDE_ASSETS_TAR_STATUS=$asset_tar_status"
+    echo "NOXIDE_ASSETS_HEAD_STATUS=$asset_head_status"
+    if [ "$asset_tar_status" = 0 ] && [ "$asset_head_status" = 0 ]; then
         echo NOXIDE_ASSETS_BEGIN
-        base64 /tmp/noxide-assets.tar
+        if base64 /tmp/noxide-assets.tar; then
+            asset_status=0
+        fi
         echo NOXIDE_ASSETS_END
+    fi
+    echo "NOXIDE_ASSETS_STATUS=$asset_status"
+    if [ "$asset_status" != 0 ]; then
+        rm -f /tmp/noxide-assets.tar
     fi
 '''
         text = text.replace("    echo NOXIDE_LOCK_BEGIN\n", export + "    echo NOXIDE_LOCK_BEGIN\n")

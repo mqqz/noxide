@@ -2,8 +2,11 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_ASSETS: usize = 128;
+pub const MAX_ASSET_NAME_BYTES: usize = 96;
 pub const MAX_ASSET_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_ASSET_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_ASSET_PACK_BYTES: usize =
+    MAX_ASSET_TOTAL_BYTES + MAX_ASSETS * (6 + MAX_ASSET_NAME_BYTES) + 10;
 pub const MAX_IMAGE_PIXELS: u64 = 16_000_000;
 pub const MAX_CSS_BYTES: usize = 65_536;
 pub const ASSET_PATH_PREFIX: &str = "/_noxide/assets/";
@@ -44,7 +47,7 @@ pub struct AssetDeclaration {
 
 pub fn valid_asset_name(name: &str) -> bool {
     !name.is_empty()
-        && name.len() <= 192
+        && name.len() <= MAX_ASSET_NAME_BYTES
         && name.split('/').all(|part| {
             !part.is_empty()
                 && part != "."
@@ -71,6 +74,11 @@ mod tests {
     #[test]
     fn only_canonical_package_names_and_digests() {
         assert!(valid_asset_name("images/banner-2.webp"));
+        assert_eq!(MAX_ASSET_NAME_BYTES, 96);
+        for bytes in [95, 96, 97] {
+            let name = format!("{}.css", "a".repeat(bytes - 4));
+            assert_eq!(valid_asset_name(&name), bytes <= MAX_ASSET_NAME_BYTES);
+        }
         for name in [
             "", "/x", "../x", "a/../x", "a//b", "a/./b", ".x", "a\\b", "x?q", "x#z", "x%2f",
         ] {

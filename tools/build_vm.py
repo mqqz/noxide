@@ -265,7 +265,7 @@ def toolchain(image, path):
         if directory.is_file() and "share" not in directory.parts:
             image.trusted(directory, "toolchain/" + str(directory.relative_to(path)))
     for binary in ("bash", "mount", "mkdir", "chmod", "cp", "setpriv", "env", "cat",
-                   "base64", "tar", "head", "rm", "cmp", "timeout", "poweroff", "gcc", "as", "ld", "ar"):
+                   "base64", "tar", "head", "mkfifo", "rm", "cmp", "timeout", "poweroff", "gcc", "as", "ld", "ar"):
         image.executable(binary)
     image.trusted(shutil.which("bash"), "usr/bin/sh")
     image.trusted(shutil.which("gcc"), "usr/bin/cc")
@@ -300,6 +300,13 @@ def check_build_status(output):
         raise ValueError("build deadline exceeded; inspect build.log")
     if statuses != [b"0"]:
         raise ValueError("application build failed; inspect build.log")
+
+
+def check_asset_status(output):
+    for field in ("TAR_STATUS", "HEAD_STATUS", "STATUS"):
+        statuses = re.findall(rb"(?m)^NOXIDE_ASSETS_" + field.encode() + rb"=(\d+)$", output)
+        if statuses != [b"0"]:
+            raise ValueError("asset export failed; inspect build.log")
 
 
 def limits():
@@ -474,6 +481,7 @@ def main():
             raise ValueError("builder did not produce portable core Wasm")
         outputs.append((f"{options.name}.wasm", wasm))
     if options.metadata:
+        check_asset_status(output)
         contract = artifact(output, "CONTRACT", MAX_CONTRACT)
         if not isinstance(json.loads(contract), dict):
             raise ValueError("builder contract must be a JSON object")
