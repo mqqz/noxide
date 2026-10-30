@@ -119,6 +119,12 @@ pub(crate) async fn seed(db: &Database, m: &Manifest) {
 }
 async fn effects(db: &Database, m: &Manifest, route: u32, target: u64) -> Effects {
     Effects {
+        invoked: Default::default(),
+        list_bytes: 0,
+        list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
+        result_limit: noxide_protocol::MAX_RESULT_BYTES,
+        truncated: false,
+        see_all: Vec::new(),
         tx: db
             .begin(Instant::now() + Duration::from_secs(5))
             .await
@@ -409,6 +415,7 @@ async fn parents_case(db: Database, sqlite: bool) {
             seen.extend(rows.iter().map(|r| r.id));
             assert!(rows.iter().all(|r| r.fields.len() == 1));
             e.cursor = e.more.take();
+            e.next_request();
             if e.cursor.is_none() {
                 break;
             }
@@ -443,6 +450,7 @@ async fn parents_case(db: Database, sqlite: bool) {
             .unwrap()
             .is_none()
     );
+    e.next_request();
     e.request.target = Some(11);
     assert!(
         serde_json::from_slice::<Option<Record>>(&e.invoke(2, 11).await.unwrap())
@@ -928,6 +936,7 @@ async fn chronological_prefix_case(db: Database, descending: bool) {
     db.initialize().await.unwrap();
     let mut m = declarations();
     m.operations[0].list = Some(ListSettings {
+        preview: None,
         order: if descending {
             ListOrder::CreatedDesc
         } else {
@@ -989,6 +998,7 @@ async fn chronological_prefix_case(db: Database, descending: bool) {
         }
     );
     e.cursor = e.more.take();
+    e.next_request();
     assert!(e.cursor.is_some());
     let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
     assert_eq!(
@@ -1046,6 +1056,7 @@ async fn chronological_prefix_case(db: Database, descending: bool) {
     tx.commit().await.unwrap();
     let mut e = effects(&db, &m, 3, 10).await;
     e.cursor = after;
+    e.next_request();
     let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
     assert_eq!(
         rows.iter().map(|r| r.id).collect::<Vec<_>>(),
@@ -1157,6 +1168,7 @@ async fn opaque_cursors_bind_parent_contract_deployment_and_identity() {
     tx.commit().await.unwrap();
     let mut changed = m.clone();
     changed.operations[0].list = Some(ListSettings {
+        preview: None,
         order: ListOrder::CreatedAsc,
         page_size: 4,
     });
@@ -1535,6 +1547,7 @@ async fn filtered_parent_case(db: Database) {
     });
     m.operations[0].disclose.push("archived".into());
     m.operations[0].list = Some(ListSettings {
+        preview: None,
         order: ListOrder::CreatedAsc,
         page_size: 1,
     });
@@ -1622,6 +1635,7 @@ async fn filtered_parent_case(db: Database) {
         tx.commit().await.unwrap();
         let mut e = effects(&db, &m, 3, 10).await;
         e.cursor = after;
+        e.next_request();
         let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
         assert_eq!(
             rows.iter().map(|r| r.id).collect::<Vec<_>>(),

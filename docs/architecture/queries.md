@@ -1,9 +1,10 @@
 # Declarative queries
 
 This is the implementation plan for a small approved query vocabulary, starting
-at main `9917660`. Increments 0–5 record compatibility, compile list plans, add descending order,
-equality selection, operator-reconciled indexes and required route parameters; later
-increments below are planned behavior until their implementation and validation land.
+at main `9917660`. Increments 0–6 record compatibility, compile list plans, add
+descending order,
+equality selection, operator-reconciled indexes, required route parameters and
+bounded previews. Increment 7 remains conditional design work.
 
 Any approved query has a statically known shape, bounded execution, independently
 enforced authorization, and predictable performance. Developers declare intent;
@@ -19,7 +20,7 @@ Three condition kinds remain separate:
   record, including account-reference principal policies.
 - Visibility is `Operation.visibility`: which records exist for a public
   audience. It applies to reads and lists and is checked again on returned rows.
-- Selection is the planned list-only `Operation.filter`: which accessible
+- Selection is the list-only `Operation.filter`: which accessible
   records appear in a list. It cannot widen policy or make an excluded record
   unreadable through an approved read. A sold item can disappear from an
   available-items list while remaining readable on its record page.
@@ -68,15 +69,15 @@ visible record, whether that field equals the literal. A parameter on a Boolean
 or Choice field lets callers try every value and effectively reveals the field's
 value for every visible record.
 
-The planned `disclose(field)` approves only that filter-based inference, not
+`disclose(field)` approves only that filter-based inference, not
 reading the field. Every unprojected public filter must have exactly this approval.
 Private owner, tenant, role and `principal_is` lists need no disclosure declaration:
 the same policy already authorizes reading the complete record.
 
 ## Structure, measurements and bounds
 
-Admission of derived index requirements will prove that an index-compatible
-access path exists. It cannot promise a particular planner decision or latency.
+Admission derives index-compatible access requirements; activation verifies the
+required indexes. Neither promises a particular planner decision or latency.
 `query-metrics` measures index visits on stated datasets; the existing inbox
 benchmark uses 100,000 unrelated records and checks 21 visits per exact scan for
 a 20-record page. Measurements are evidence, not general performance guarantees.
@@ -90,8 +91,8 @@ must retain this behavior and cannot turn a bounded scan into a false end.
 
 ## Cursor binding
 
-Cursor scope uses canonical serialization of the approved list `Operation` and,
-once introduced, canonical parameter values sorted by name. It also binds the
+Cursor scope uses canonical serialization of the approved list `Operation` plus
+canonical parameter values sorted by name. Empty maps retain the original scope. It also binds the
 contract digest, deployment identity, route, target, parent incarnation and current
 account identity. Cursors cannot cross accounts, parent scopes, parameter values,
 orders or changed operations, and do not survive deployments. No separate query

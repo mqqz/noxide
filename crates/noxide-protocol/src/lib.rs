@@ -11,6 +11,7 @@ pub const MAX_OUTPUT_BYTES: usize = 262_144;
 pub const MAX_INPUT_BYTES: usize = 32_768;
 pub const MAX_REQUEST_BYTES: usize = 65_536;
 pub const MAX_RESULT_BYTES: usize = 65_536;
+pub const MAX_LIST_RESULT_BYTES: usize = 131_072;
 pub const MAX_MANIFEST_BYTES: usize = 32_768;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -274,9 +275,24 @@ pub struct Operation {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ListSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<Preview>,
     pub order: ListOrder,
     pub page_size: u8,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Preview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub see_all: Option<u32>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewResult {
+    pub items: Vec<Record>,
+    pub truncated: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Condition {

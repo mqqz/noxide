@@ -497,8 +497,8 @@ change preserves access.
 
 ## Parent relationships and scoped pagination
 
-The [declarative query design](architecture/queries.md) describes planned selection,
-ordering and parameter extensions, with compatibility and execution constraints.
+The [declarative query design](architecture/queries.md) describes selection,
+ordering, parameters and previews, with compatibility and execution constraints.
 
 A child resource can declare one required, immutable parent ID:
 
@@ -556,7 +556,8 @@ against SQLite, with the same cases available in the opt-in PostgreSQL suite.
 Keep these predicates restricted to the declared boolean or choice equality
 checks; this API does not provide arbitrary predicates or graph authorization.
 
-A record page may contain one list query, scoped to its parent target. Declare
+A record page may contain one paginated list and bounded previews, each scoped
+to its parent target. Declare
 `order = created_asc, page_size = 20` on a list query to request up to 20 records.
 Use `order = created_desc` for newest first. Both orders use immutable creation
 sequence keysets; the first page has no continuation predicate. New inserts appear
@@ -564,7 +565,7 @@ on a fresh descending page, not on later pages behind its cursor. Deletions and
 visibility changes remain live; pagination is not a snapshot. The private inbox
 uses descending order on the same bounded account merge path.
 Defaults are ascending creation order and three records; approved page sizes are
-1 through 20. The host applies policy, visibility, and parent filtering first.
+1 through 20. The host applies policy, visibility, parent scope and selection in SQL.
 
 Creation order uses a globally unique, immutable host sequence, separate from
 application fields and random record IDs. A transactional counter prevents a later
@@ -746,7 +747,7 @@ Private lists need no disclosure: their policy already permits complete records.
 Both execution paths bind literal values in SQL and check selection again on
 stored rows. Residual policies retain bounded scans and possible short/empty
 pages with continuation. See the [query design](architecture/queries.md) for the
-planned parameter disclosure rules and index lifecycle.
+parameter disclosure rules and index lifecycle.
 
 ## Required route parameters
 
@@ -788,3 +789,44 @@ public parameter filter on an unprojected Boolean or Choice field effectively
 reveals that field: callers can try each value. `disclose` approves that inference
 without projecting the field. The [public articles example](../examples/public-articles/src/lib.rs)
 includes a category route with these host checks.
+
+## Bounded previews and several lists
+
+A page may declare at most four list operations, with at most one paginated list
+and a combined declared page size of at most 40. Mark the other lists as previews:
+
+```rust
+#[query(list(Item), allow = public, visible(listed = true),
+        filter(category = param(category)), disclose(category), fields(title),
+        page_size = 3, preview(see_all = items))]
+struct CategoryPreview;
+```
+
+`preview` alone omits a full-list destination. Fetch once with
+`let sample = query.fetch_preview()`: `sample.items` contains a strict prefix and
+`sample.truncated` says more may exist. Show an explicit incomplete state when
+truncated, including an empty residual-policy preview. `fetch()` remains the
+paginated API; reuse its returned values instead of invoking an operation again.
+The host permits every route operation, including reads, at most once per request.
+
+Previews ignore the paginated cursor and never generate next-page links. A page
+with only previews also ignores `cursor` after strict query-string validation.
+Truncation is true on row or byte limits, a positive look-ahead, or a bounded
+residual scan. The host renders a checked “See all” link only when truncated and
+`see_all` names a route with an equivalent full list: same resource, policy,
+visibility and selection, with declared parameters drawn from the preview page.
+The link retains those canonical values and existing record-target checks.
+
+All list results share a 131,072-byte serialized budget; each result retains the
+65,536-byte limit. The host reserves room for a pending paginated result and
+preview envelopes, so preview invocation order cannot consume pagination's entire
+allowance. Pages also retain the 16-invocation request cap and deadline; list scans,
+record loads and catalog lookups share an additional 4,096-call work budget.
+Aggregate limits supplement per-list limits and the residual candidate bound.
+Document IR still has its own 65,536-byte limit. Render summaries or selected fields
+when large records across several lists would exceed that limit; fetching bounded
+results does not grant a larger document budget.
+
+The [public articles example](../examples/public-articles/src/lib.rs) includes an
+`/overview` page combining pagination and a category preview, and `/highlights`
+with a preview alone. Neither requires guest-built queries or host prefetch.

@@ -52,6 +52,40 @@ mod articles {
         )
     }
 
+    #[query(list(Article), allow = public, visible(published = true),
+        filter(category = param(category)), disclose(category), fields(title, body),
+        page_size = 1, preview(see_all = category))]
+    struct CategoryPreview;
+
+    #[page(path = "/overview", params(category), access = public)]
+    fn overview(mut articles: Query<CategoryArticles>, mut sample: Query<CategoryPreview>) -> Page {
+        let articles = articles.fetch();
+        let sample = sample.fetch_preview();
+        Page::new(
+            "Overview",
+            html! { main {
+                h1 { "Category overview" }
+                @for article in &articles { p { (&article.title) } }
+                h2 { "Preview" }
+                @for article in &sample.items { p { (&article.title) } }
+                @if sample.truncated { p { "More in category" } }
+            } },
+        )
+    }
+
+    #[page(path = "/highlights", params(category), access = public)]
+    fn highlights(mut sample: Query<CategoryPreview>) -> Page {
+        let sample = sample.fetch_preview();
+        Page::new(
+            "Highlights",
+            html! { main {
+                h1 { "Highlights" }
+                @for article in &sample.items { p { (&article.title) } }
+                @if sample.truncated { p { "More in category" } }
+            } },
+        )
+    }
+
     #[query(read(Article), allow = public, visible(published = true), fields(title, body))]
     struct PublishedArticle;
 

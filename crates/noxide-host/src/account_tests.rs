@@ -33,6 +33,7 @@ fn declarations() -> Manifest {
         }]);
     }
     m.operations[0].list = Some(ListSettings {
+        preview: None,
         order: ListOrder::CreatedAsc,
         page_size: 20,
     });
@@ -40,6 +41,12 @@ fn declarations() -> Manifest {
 }
 fn effects(tx: Transaction, m: &Manifest, id: &str, action: bool, recipient: &str) -> Effects {
     Effects {
+        invoked: Default::default(),
+        list_bytes: 0,
+        list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
+        result_limit: noxide_protocol::MAX_RESULT_BYTES,
+        truncated: false,
+        see_all: Vec::new(),
         tx,
         manifest: Arc::new(m.clone()),
         plans: crate::query_plan::compile_all(m).unwrap(),
@@ -247,6 +254,7 @@ async fn contract(db: Database, descending: bool) {
                 break;
             }
             e.cursor = e.more;
+            e.next_request();
         }
         assert_eq!(seen.len(), expected);
         assert_eq!(
@@ -277,6 +285,7 @@ async fn contract(db: Database, descending: bool) {
         .more
         .expect("bounded residual scan must allow continuation");
     e.cursor = Some(first);
+    e.next_request();
     let page: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
     assert!(page.is_empty());
     assert!(if descending {
@@ -724,6 +733,7 @@ async fn filtered_lists(db: Database) {
                             break;
                         }
                         e.cursor = e.more;
+                        e.next_request();
                     }
                     let expected: Vec<_> = if descending {
                         (1..=100).rev().map(|i| i * 10).collect()
@@ -780,6 +790,7 @@ async fn filtered_lists(db: Database) {
                 "residual bound must not report a false end"
             );
             e.cursor = e.more;
+            e.next_request();
             let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
             assert!(rows.is_empty());
             assert!(e.more.is_none());
@@ -813,6 +824,406 @@ async fn postgres_filtered_account_and_single_lists() {
     let mut case = url::Url::parse(&url).unwrap();
     case.set_path(&name);
     filtered_lists(Database::postgres(case.as_str()).unwrap()).await;
+    sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+}
+
+fn preview_declarations() -> Manifest {
+    let mut m = declarations();
+    m.resources[0].fields.push(TextField {
+        name: "extra".into(),
+        label: "Extra".into(),
+        kind: FieldKind::Text,
+        optional: false,
+        initial: None,
+        max_bytes: 3900,
+    });
+    m.actions[0].fields.push("extra".into());
+    m.operations[0].list.as_mut().unwrap().page_size = 10;
+    for id in 4..=6 {
+        let mut preview = m.operations[0].clone();
+        preview.id = id;
+        preview.list.as_mut().unwrap().preview = Some(noxide_protocol::Preview {
+            see_all: (id == 4).then_some(1),
+        });
+        if id == 5 {
+            preview.policy.any = vec![vec![Predicate::Owner]];
+        }
+        if id == 6 {
+            preview.policy.any = vec![vec![
+                Predicate::Owner,
+                Predicate::PrincipalIs {
+                    field: "recipient".into(),
+                },
+            ]];
+        }
+        m.operations.push(preview);
+        m.routes[0].operations.push(id);
+    }
+    m
+}
+#[test]
+fn host_rejects_forged_preview_shapes_and_destinations() {
+    let m = preview_declarations();
+    manifest::validate(&m).unwrap();
+    let mut bad = m.clone();
+    bad.operations[3].list.as_mut().unwrap().preview = None;
+    assert!(manifest::validate(&bad).is_err());
+    let mut bad = m.clone();
+    bad.operations[0].list.as_mut().unwrap().page_size = 9;
+    let mut fifth = bad.operations[4].clone();
+    fifth.id = 7;
+    fifth.list.as_mut().unwrap().page_size = 1;
+    bad.operations.push(fifth);
+    bad.routes[0].operations.push(7);
+    assert!(manifest::validate(&bad).is_err());
+    let mut bad = m.clone();
+    bad.operations[0].list.as_mut().unwrap().page_size = 11;
+    assert!(manifest::validate(&bad).is_err());
+    for route in [2, 99] {
+        let mut bad = m.clone();
+        bad.operations[3]
+            .list
+            .as_mut()
+            .unwrap()
+            .preview
+            .as_mut()
+            .unwrap()
+            .see_all = Some(route);
+        assert!(manifest::validate(&bad).is_err());
+    }
+    let mut bad = m.clone();
+    bad.operations[3].policy.any = vec![vec![Predicate::Owner]];
+    assert!(manifest::validate(&bad).is_err());
+    let mut selection = m.clone();
+    selection.resources[0].fields.push(TextField {
+        name: "archived".into(),
+        label: "Archived".into(),
+        kind: FieldKind::Boolean,
+        optional: false,
+        initial: Some("false".into()),
+        max_bytes: 5,
+    });
+    selection.operations[3].filter.push(Condition {
+        field: "archived".into(),
+        equals: Operand::Literal("false".into()),
+    });
+    assert!(
+        manifest::validate(&selection)
+            .unwrap_err()
+            .to_string()
+            .contains("preview destination")
+    );
+    let mut visibility = selection.clone();
+    visibility.operations[3].filter.clear();
+    for index in [0, 3] {
+        visibility.operations[index].policy.any = vec![vec![Predicate::Public]];
+        visibility.operations[index].visibility = Some(Visibility {
+            field: "archived".into(),
+            equals: "false".into(),
+        });
+        visibility.operations[index].fields = Some(vec!["body".into()]);
+    }
+    manifest::validate(&visibility).unwrap();
+    visibility.operations[3].visibility.as_mut().unwrap().equals = "true".into();
+    assert!(
+        manifest::validate(&visibility)
+            .unwrap_err()
+            .to_string()
+            .contains("preview destination")
+    );
+    let mut subset = selection.clone();
+    subset.operations[3].filter.clear();
+    let mut extra = subset.operations[4].clone();
+    extra.id = 7;
+    extra.filter.push(Condition {
+        field: "archived".into(),
+        equals: Operand::Param("flag".into()),
+    });
+    subset.operations.push(extra);
+    subset.routes.push(Route {
+        id: 3,
+        path: "/all".into(),
+        resource: None,
+        operations: vec![1, 7],
+        forms: vec![],
+        access: Access::Authenticated,
+        params: vec!["flag".into()],
+    });
+    subset.operations[3]
+        .list
+        .as_mut()
+        .unwrap()
+        .preview
+        .as_mut()
+        .unwrap()
+        .see_all = Some(3);
+    assert!(
+        manifest::validate(&subset)
+            .unwrap_err()
+            .to_string()
+            .contains("preview destination parameters")
+    );
+
+    let mut bad = m;
+    bad.operations[3]
+        .list
+        .as_mut()
+        .unwrap()
+        .preview
+        .as_mut()
+        .unwrap()
+        .see_all = Some(2);
+    assert!(manifest::validate(&bad).is_err());
+}
+async fn previews_case(db: Database) {
+    db.initialize().await.unwrap();
+    let alice = db
+        .create_account("previewalice", "preview test password", "team")
+        .await
+        .unwrap();
+    let bob = db
+        .create_account("previewbob", "preview test password", "team")
+        .await
+        .unwrap();
+    let mut m = preview_declarations();
+    manifest::validate(&m).unwrap();
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(10))
+        .await
+        .unwrap();
+    tx.bind_schema(&m).await.unwrap();
+    for i in 1..=300i64 {
+        let fields = Fields::from([
+            ("body".into(), format!("message {i}")),
+            ("extra".into(), "small".into()),
+            ("recipient".into(), bob.clone()),
+            ("recipient_tenant".into(), bob.clone()),
+        ]);
+        let seq = tx.allocate_creation().await.unwrap();
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,$1,$2,'team',$3,'preview',1,$4)", &[i.into(),alice.as_str().into(),serde_json::to_string(&fields).unwrap().into(),seq.into()]).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    for descending in [false, true] {
+        for op in m
+            .operations
+            .iter_mut()
+            .filter(|op| op.kind == OperationKind::List)
+        {
+            op.list.as_mut().unwrap().order = if descending {
+                ListOrder::CreatedDesc
+            } else {
+                ListOrder::CreatedAsc
+            };
+        }
+        for order in [[1, 4, 5, 6], [4, 6, 5, 1]] {
+            let started = Instant::now();
+            let tx = db
+                .begin_read(started + Duration::from_secs(2))
+                .await
+                .unwrap();
+            let mut e = effects(tx, &m, &alice, false, "");
+            e.calls = 16;
+            e.cursor = Some(150);
+            for id in order {
+                let bytes = e.invoke(id, 0).await.unwrap();
+                assert!(bytes.len() <= MAX_RESULT_BYTES);
+                if id == 1 {
+                    let items: Vec<Record> = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(items.len(), 10);
+                    assert_eq!(items[0].id, if descending { 149 } else { 151 });
+                } else {
+                    let preview: PreviewResult = serde_json::from_slice(&bytes).unwrap();
+                    assert!(preview.truncated);
+                    if id == 6 {
+                        assert!(
+                            preview.items.is_empty(),
+                            "residual empty preview must disclose truncation"
+                        );
+                    } else {
+                        assert_eq!(preview.items.len(), 10);
+                        assert_eq!(preview.items[0].id, if descending { 300 } else { 1 });
+                    }
+                }
+            }
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert_eq!(e.more, Some(if descending { 140 } else { 160 }));
+            assert_eq!(e.see_all.len(), 1);
+            assert_eq!(crate::routing::resolve(&m, &e.see_all[0]).unwrap(), "/");
+            assert!(e.list_bytes <= MAX_LIST_RESULT_BYTES);
+            assert!(e.list_calls < crate::repository::MAX_LIST_DATABASE_CALLS - 100);
+            assert!(
+                e.invoke(4, 0)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("already invoked")
+            );
+            e.tx.rollback().await.unwrap();
+        }
+    }
+    // Maximum declared field sizes force strict per-list and aggregate prefixes.
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(5))
+        .await
+        .unwrap();
+    let fields = Fields::from([
+        ("body".into(), "\\".repeat(4096)),
+        ("extra".into(), "\"".repeat(3900)),
+        ("recipient".into(), bob.clone()),
+        ("recipient_tenant".into(), bob),
+    ]);
+    tx.execute(
+        "UPDATE nx_records SET fields=$1",
+        &[serde_json::to_string(&fields).unwrap().into()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    for order in [[1, 4, 5, 6], [4, 5, 6, 1]] {
+        let tx = db
+            .begin_read(Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        let mut e = effects(tx, &m, &alice, false, "");
+        let mut nodes = Vec::new();
+        for id in order {
+            let bytes = e.invoke(id, 0).await.unwrap();
+            assert!(bytes.len() <= MAX_RESULT_BYTES);
+            let items = if id == 1 {
+                serde_json::from_slice::<Vec<Record>>(&bytes).unwrap()
+            } else {
+                let preview: PreviewResult = serde_json::from_slice(&bytes).unwrap();
+                assert!(preview.truncated);
+                preview.items
+            };
+            assert!(items.len() < 10);
+            for record in items {
+                nodes.extend(record.fields.into_values().map(Instruction::Text));
+            }
+        }
+        assert!(e.list_bytes <= MAX_LIST_RESULT_BYTES);
+        let response = ResponseIntent::Page(Document::new("Too much", nodes));
+        assert!(
+            crate::render::render(&response, &crate::render::RenderContext::empty()).is_err(),
+            "all maximum-sized fields cannot bypass Document IR budget"
+        );
+        e.tx.rollback().await.unwrap();
+    }
+    let tx = db
+        .begin_read(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    let mut e = effects(tx, &m, &alice, false, "");
+    e.list_calls = 0;
+    assert!(
+        e.invoke(4, 0)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("database call budget")
+    );
+    e.tx.rollback().await.unwrap();
+    let mut target = m.clone();
+    target.resources[0].fields.push(TextField {
+        name: "archived".into(),
+        label: "Archived".into(),
+        kind: FieldKind::Boolean,
+        optional: false,
+        initial: Some("false".into()),
+        max_bytes: 5,
+    });
+    for op in target
+        .operations
+        .iter_mut()
+        .filter(|op| op.kind == OperationKind::List)
+    {
+        op.filter.push(Condition {
+            field: "archived".into(),
+            equals: Operand::Literal("false".into()),
+        });
+    }
+    let migration = crate::schema::Migration {
+        version: 1,
+        from: crate::schema::digest(&m.resources).unwrap(),
+        to: crate::schema::digest(&target.resources).unwrap(),
+        operations: vec![crate::schema::MigrationOp::AddField {
+            resource: "notes".into(),
+            field: "archived".into(),
+            value: "false".into(),
+        }],
+    };
+    db.schema_apply(&target, &migration).await.unwrap();
+    let old_indexes: Vec<_> = crate::query_plan::required_indexes(&target)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.name(1))
+        .collect();
+    let mut renamed = target.clone();
+    renamed.resources[0].fields.last_mut().unwrap().name = "saved".into();
+    for op in renamed
+        .operations
+        .iter_mut()
+        .filter(|op| op.kind == OperationKind::List)
+    {
+        op.filter[0].field = "saved".into();
+    }
+    let migration = crate::schema::Migration {
+        version: 1,
+        from: crate::schema::digest(&target.resources).unwrap(),
+        to: crate::schema::digest(&renamed.resources).unwrap(),
+        operations: vec![crate::schema::MigrationOp::RenameField {
+            resource: "notes".into(),
+            from: "archived".into(),
+            to: "saved".into(),
+        }],
+    };
+    db.schema_apply(&renamed, &migration).await.unwrap();
+    let mut tx = db
+        .begin_read(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    tx.bind_schema(&renamed).await.unwrap();
+    let catalog = match db {
+        Database::Sqlite(_) => {
+            "SELECT name FROM sqlite_schema WHERE type='index' AND name GLOB 'nx_q_*'"
+        }
+        Database::Postgres(_) => {
+            "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND left(indexname,5)='nx_q_'"
+        }
+    };
+    let names: Vec<_> = tx
+        .fetch::<1>(catalog, &[])
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|[name]| name)
+        .collect();
+    assert_eq!(names.len(), old_indexes.len());
+    assert!(names.iter().all(|name| !old_indexes.contains(name)));
+    tx.rollback().await.unwrap();
+}
+#[tokio::test]
+async fn sqlite_bounded_page_previews() {
+    let tmp = tempfile::tempdir().unwrap();
+    previews_case(Database::sqlite(tmp.path().join("previews.db"))).await;
+}
+#[tokio::test]
+#[ignore = "requires NOXIDE_TEST_POSTGRES"]
+async fn postgres_bounded_page_previews() {
+    use sqlx::Connection;
+    let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+    let name = format!("nx_preview_{}", crate::security::record_id().unwrap());
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let mut case = url::Url::parse(&url).unwrap();
+    case.set_path(&name);
+    previews_case(Database::postgres(case.as_str()).unwrap()).await;
     sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
         .execute(&mut admin)
         .await

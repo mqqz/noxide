@@ -10,6 +10,7 @@ use std::{collections::BTreeMap, sync::Arc};
 /// and visibility are always read from the operation itself.
 pub(crate) struct ListPlan {
     pub operation: u32,
+    pub preview: bool,
     pub parent: Option<String>,
     pub strategy: ListStrategy,
     pub selection: Vec<CompiledCondition>,
@@ -27,6 +28,7 @@ pub(crate) fn compile(m: &Manifest, op: &Operation) -> Result<ListPlan> {
     let parent = manifest::parent_field(resource).map(|f| f.name.clone());
     Ok(ListPlan {
         operation: op.id,
+        preview: op.list.as_ref().is_some_and(|s| s.preview.is_some()),
         strategy: policy::list_strategy(&op.policy, parent.is_some()),
         parent,
         selection: op

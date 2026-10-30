@@ -264,6 +264,12 @@ fn effects(
     target: Option<u64>,
 ) -> Effects {
     Effects {
+        invoked: Default::default(),
+        list_bytes: 0,
+        list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
+        result_limit: noxide_protocol::MAX_RESULT_BYTES,
+        truncated: false,
+        see_all: Vec::new(),
         tx,
         manifest: Arc::new(m.clone()),
         plans: crate::query_plan::compile_all(m).unwrap(),
@@ -360,6 +366,7 @@ async fn public_repository(db: Database, choice: bool) {
                 break;
             }
             e.cursor = e.more.take();
+            e.next_request();
             if e.cursor.is_none() {
                 break;
             }
@@ -367,6 +374,7 @@ async fn public_repository(db: Database, choice: bool) {
         assert_eq!(ids.len(), 10);
         e.request.kind = RequestKind::Route(2);
         for id in 1..=21 {
+            e.next_request();
             e.request.target = Some(id);
             let record: Option<Record> =
                 serde_json::from_slice(&e.invoke(2, id).await.unwrap()).unwrap();

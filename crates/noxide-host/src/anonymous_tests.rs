@@ -913,6 +913,12 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
             available_forms: vec![],
         };
         let mut effects = crate::repository::Effects {
+            invoked: Default::default(),
+            list_bytes: 0,
+            list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
+            result_limit: noxide_protocol::MAX_RESULT_BYTES,
+            truncated: false,
+            see_all: Vec::new(),
             tx,
             plans: crate::query_plan::compile_all(&m).unwrap(),
             manifest: Arc::new(m),

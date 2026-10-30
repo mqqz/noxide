@@ -1380,7 +1380,7 @@ impl Application {
                 Some((token, principal)) => (Some(token), principal),
                 None => (None, auth::Principal::Anonymous),
             };
-            let list = manifest::route(&self.manifest,route).map_err(|_| RequestError::InvalidRequest)?.operations.iter().filter_map(|id| manifest::operation(&self.manifest,*id).ok()).find(|op| op.kind==OperationKind::List);
+            let list = manifest::route(&self.manifest,route).map_err(|_| RequestError::InvalidRequest)?.operations.iter().filter_map(|id| manifest::operation(&self.manifest,*id).ok()).find(|op| op.kind==OperationKind::List && !manifest::is_preview(op));
             let parent_incarnation = if let (Some(target),Some(op)) = (target,list) {
                 if let Some(parent)=manifest::parent_resource(&self.manifest,op.resource).map_err(|_| RequestError::Rejected)? {
                     crate::repository::load(&mut tx,&self.manifest,parent.id,target).await.map_err(RequestError::database)?.map(|r|r.incarnation)
@@ -1390,7 +1390,8 @@ impl Application {
             let scope=cursor_scope((&self.contract,&self.deployment),route,target,parent_incarnation,list,subject,&params).map_err(|_|RequestError::Rejected)?;
             // A fixed-size digest binds every approved setting without exposing it in URLs.
             let scope=URL_SAFE_NO_PAD.encode(Sha256::digest(scope.as_bytes()));
-            let cursor = cursor.map(|encoded| {
+            let preview_only = list.is_none() && manifest::route(&self.manifest, route).map_err(|_| RequestError::InvalidRequest)?.operations.iter().any(|id| manifest::operation(&self.manifest,*id).is_ok_and(manifest::is_preview));
+            let cursor = cursor.filter(|_| !preview_only).map(|encoded| {
                 let token=self.keys.verify_cursor(encoded,now).map_err(|_|RequestError::InvalidCursor)?;
                 match token.kind { TokenKind::Cursor { scope: bound,after } if list.is_some() && bound==scope && after>0 && after<=i64::MAX as u64 => Ok(after), _=>Err(RequestError::InvalidCursor) }
             }).transpose()?;
@@ -1402,7 +1403,7 @@ impl Application {
             let forms = self.forms(&mut tx, route, target, session.as_ref(), anonymous.as_ref(), &principal, now).await.map_err(|_| RequestError::Rejected)?;
             let request = RequestView {
                 params: params.clone(),
-available_forms: forms
+                available_forms: forms
                     .iter()
                     .filter_map(|(id, form)| form.as_ref().map(|_| *id))
                     .collect(),
@@ -1413,6 +1414,12 @@ available_forms: forms
                 inspection: None,
             };
             let effects = Effects {
+                invoked: Default::default(),
+                list_bytes: 0,
+                list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
+                result_limit: noxide_protocol::MAX_RESULT_BYTES,
+                truncated: false,
+                see_all: Vec::new(),
                 plans: self.plans.clone(),
                 tx,
                 manifest: self.manifest.clone(),
@@ -1465,6 +1472,7 @@ available_forms: forms
                         .as_ref()
                         .map(|session| self.keys.csrf(&session.nonce)),
                     next_page,
+                    preview_links: effects.see_all.clone(),
                 },
             )
             .map_err(|_| RequestError::Rejected)?;
