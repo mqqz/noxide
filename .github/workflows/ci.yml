@@ -57,6 +57,7 @@ jobs:
           python3 tools/test_build_inputs.py
           python3 tools/test_build_local.py
           python3 tools/test_dependencies.py
+          python3 tools/test_lifecycle_http.py
       - name: Lint CI bootstrap
         run: shellcheck tools/ci/setup-vm.sh
 
@@ -126,6 +127,7 @@ jobs:
           python3 tools/test_build_inputs.py
           python3 tools/test_build_local.py
           python3 tools/test_dependencies.py
+          python3 tools/test_lifecycle_http.py
       - name: Lint CI bootstrap
         run: shellcheck tools/ci/setup-vm.sh
 
