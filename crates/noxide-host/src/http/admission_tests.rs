@@ -705,6 +705,9 @@ async fn invalid_query_parameters_obey_circuit_and_request_admission() {
         .unwrap();
     let session_database = fill(&app.admission_limits.session_check.database).await;
     let database = fill(&app.admission_limits.database).await;
+    // Charge all five requests at the same monotonic instant. Real runner
+    // scheduling can otherwise refill a millitoken before the final assertion.
+    tokio::time::pause();
     for _ in 0..5 {
         assert_eq!(
             identity_get(app.clone(), "/?unknown=value", &session, Peer::Circuit(104))
