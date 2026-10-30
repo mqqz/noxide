@@ -15,6 +15,61 @@ pub fn digest(manifest: &Manifest) -> Result<[u8; 32]> {
     Ok(Sha256::digest(serde_json::to_vec(manifest)?).into())
 }
 
+fn validate_selection(m: &Manifest, op: &Operation) -> Result<()> {
+    ensure!(
+        op.filter.is_empty() || op.kind == OperationKind::List,
+        "filter requires list"
+    );
+    ensure!(
+        op.disclose.is_empty() || (op.kind == OperationKind::List && is_public(op)),
+        "disclose requires public list"
+    );
+    ensure!(op.filter.len() <= 4, "filter limit");
+    let resource = resource(m, op.resource)?;
+    let mut filtered = BTreeSet::new();
+    let mut inferred = BTreeSet::new();
+    for condition in &op.filter {
+        ensure!(
+            filtered.insert(condition.field.as_str()),
+            "duplicate filter field"
+        );
+        let field = resource
+            .fields
+            .iter()
+            .find(|f| f.name == condition.field)
+            .ok_or_else(|| anyhow::anyhow!("unknown filter field"))?;
+        ensure!(
+            matches!(field.kind, FieldKind::Boolean | FieldKind::Choice { .. }),
+            "invalid filter kind"
+        );
+        let Operand::Literal(value) = &condition.equals;
+        ensure!(
+            field.canonical(value).is_ok_and(|v| v == *value),
+            "noncanonical filter value"
+        );
+        ensure!(
+            op.visibility
+                .as_ref()
+                .is_none_or(|v| v.field != condition.field),
+            "filter duplicates visibility"
+        );
+        if is_public(op)
+            && op
+                .fields
+                .as_ref()
+                .is_none_or(|p| !p.contains(&condition.field))
+        {
+            inferred.insert(condition.field.as_str());
+        }
+    }
+    let disclosed: BTreeSet<_> = op.disclose.iter().map(String::as_str).collect();
+    ensure!(
+        disclosed.len() == op.disclose.len() && disclosed == inferred,
+        "invalid filter disclosure"
+    );
+    Ok(())
+}
+
 fn unique(ids: impl Iterator<Item = u32>) -> Result<()> {
     let mut seen = BTreeSet::new();
     for id in ids {
@@ -163,6 +218,7 @@ pub fn validate(m: &Manifest) -> Result<()> {
         );
     }
     for op in &m.operations {
+        validate_selection(m, op)?;
         if op.kind == OperationKind::List {
             crate::query_plan::compile(m, op)?;
         }
@@ -593,6 +649,86 @@ pub(crate) fn anonymous_action(op: &Operation) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn host_rejects_forged_selection_and_disclosure() {
+        let mut m = crate::parent_tests::declarations();
+        m.resources[0]
+            .fields
+            .push(field("archived", FieldKind::Boolean, false));
+        m.actions[0].fields.push("archived".into());
+        m.operations[0].filter = vec![Condition {
+            field: "archived".into(),
+            equals: Operand::Literal("false".into()),
+        }];
+        m.operations[0].disclose = vec!["archived".into()];
+        validate(&m).unwrap();
+        let rejects = |bad: Manifest| assert!(validate(&bad).is_err());
+        let mut bad = m.clone();
+        bad.operations[1].filter = bad.operations[0].filter.clone();
+        rejects(bad);
+        let mut bad = m.clone();
+        bad.operations[1].disclose = vec!["archived".into()];
+        rejects(bad);
+        let mut bad = m.clone();
+        bad.operations[0].filter = vec![m.operations[0].filter[0].clone(); 5];
+        rejects(bad);
+        let mut bad = m.clone();
+        bad.operations[0]
+            .filter
+            .push(m.operations[0].filter[0].clone());
+        rejects(bad);
+        for name in ["missing", "body", "thread", "published"] {
+            let mut bad = m.clone();
+            bad.operations[0].filter[0].field = name.into();
+            bad.operations[0].disclose = vec![name.into()];
+            rejects(bad);
+        }
+        for value in ["False", "0", " true "] {
+            let mut bad = m.clone();
+            bad.operations[0].filter[0].equals = Operand::Literal(value.into());
+            rejects(bad);
+        }
+        for kind in [
+            FieldKind::Integer {
+                min: None,
+                max: None,
+            },
+            FieldKind::Account {
+                scope: AccountScope::SameTenant,
+            },
+        ] {
+            let mut bad = m.clone();
+            bad.resources[0].fields.last_mut().unwrap().kind = kind;
+            rejects(bad);
+        }
+        let mut bad = m.clone();
+        bad.operations[0].disclose.clear();
+        rejects(bad);
+        let mut bad = m.clone();
+        bad.operations[0].disclose.push("body".into());
+        rejects(bad);
+        let mut bad = m.clone();
+        bad.operations[0].disclose.push("archived".into());
+        rejects(bad);
+        let mut bad = m.clone();
+        bad.operations[0]
+            .fields
+            .as_mut()
+            .unwrap()
+            .push("archived".into());
+        rejects(bad);
+        let mut bad = m.clone();
+        bad.operations[0].policy.any = vec![vec![Predicate::Owner]];
+        bad.operations[0].visibility = None;
+        bad.operations[0].fields = None;
+        rejects(bad);
+        let mut selected = m.operations[0].clone();
+        selected.filter[0].equals = Operand::Literal("true".into());
+        let mut changed = m.clone();
+        changed.operations[0] = selected;
+        assert_ne!(digest(&m).unwrap(), digest(&changed).unwrap());
+    }
+
     #[test]
     fn query_contract_bytes_and_digests_are_unchanged() {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};

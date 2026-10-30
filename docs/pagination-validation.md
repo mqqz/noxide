@@ -96,3 +96,16 @@ on each backend. The updated newest-first inbox and the existing forum HTTP
 fixtures passed locally. The original inbox source is retained beside its golden
 manifest so the compatibility producer stays fixed despite the deliberate example
 order change.
+
+## Literal filter baseline
+
+Before derived indexes, the increment 3 instrumented fixture measured 210 index
+visits on both SQLite and PostgreSQL to return 21 owner candidates from 1,000
+caller records with one in ten matching `archived = false`. The fixture also has
+one matching unauthorized record. These are baseline measurements, not asserted
+performance limits. The separate unfiltered inbox fixture retains its 100,000
+unrelated records and 21-visit assertion. Filter regressions cover both orders,
+exact and residual account policies, read/list authorization equivalence, public
+projection/disclosure, parent visibility and records changing selection between
+pages. Workspace tests with PostgreSQL and the instrumented SQLite suite passed
+locally on 2026-10-30; SDK positive/negative and compatibility producers passed.

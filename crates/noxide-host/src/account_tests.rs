@@ -431,3 +431,195 @@ async fn postgres_case(descending: bool) {
         .await
         .unwrap();
 }
+
+async fn filtered_lists(db: Database) {
+    db.initialize().await.unwrap();
+    let alice = db
+        .create_account("filteralice", "filter test password", "team")
+        .await
+        .unwrap();
+    let bob = db
+        .create_account("filterbob", "filter test password", "team")
+        .await
+        .unwrap();
+    let eve = db
+        .create_account("filtereve", "filter test password", "team")
+        .await
+        .unwrap();
+    let mut m = declarations();
+    m.resources[0].fields.push(TextField {
+        name: "archived".into(),
+        label: "Archived".into(),
+        kind: FieldKind::Boolean,
+        optional: false,
+        initial: None,
+        max_bytes: 5,
+    });
+    m.actions[0].fields.push("archived".into());
+    m.operations[0].filter.push(Condition {
+        field: "archived".into(),
+        equals: Operand::Literal("false".into()),
+    });
+    manifest::validate(&m).unwrap();
+    let mut tx = db
+        .begin(Instant::now() + Duration::from_secs(30))
+        .await
+        .unwrap();
+    tx.bind_schema(&m).await.unwrap();
+    for i in 1..=1001i64 {
+        let owner = if i == 1001 { &eve } else { &alice };
+        let recipient = if i == 1001 { &eve } else { &bob };
+        let fields = Fields::from([
+            ("body".into(), format!("message {i}")),
+            ("recipient".into(), recipient.clone()),
+            ("recipient_tenant".into(), recipient.clone()),
+            ("archived".into(), (i % 10 != 0 && i != 1001).to_string()),
+        ]);
+        let seq = tx.allocate_creation().await.unwrap();
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES(1,$1,$2,'team',$3,'filtered',1,$4)", &[i.into(), owner.as_str().into(), serde_json::to_string(&fields).unwrap().into(), seq.into()]).await.unwrap();
+    }
+    #[cfg(feature = "query-metrics")]
+    {
+        let expression = tx.field_expression("archived").unwrap();
+        let sql = format!(
+            "SELECT id FROM nx_records WHERE resource=1 AND owner='{alice}' AND {expression}='false' ORDER BY created_seq ASC LIMIT 21"
+        );
+        eprintln!(
+            "filtered inbox baseline (1000 caller records, one in ten matches): {} visits",
+            tx.examined_rows(&sql).await.unwrap()
+        );
+    }
+    tx.commit().await.unwrap();
+    for descending in [false, true] {
+        m.operations[0].list.as_mut().unwrap().order = if descending {
+            ListOrder::CreatedDesc
+        } else {
+            ListOrder::CreatedAsc
+        };
+        for tenant in [false, true] {
+            m.operations[0].policy.any[1] = vec![Predicate::PrincipalIs {
+                field: "recipient".into(),
+            }];
+            if tenant {
+                m.operations[0].policy.any[1].push(Predicate::SameTenant);
+            }
+            m.operations[1].policy = m.operations[0].policy.clone();
+            for (id, single) in [(&bob, false), (&alice, true)] {
+                let mut selected = m.clone();
+                if single {
+                    selected.operations[0].policy.any = vec![vec![Predicate::Owner]];
+                    selected.operations[1].policy = selected.operations[0].policy.clone();
+                }
+                let tx = db
+                    .begin_read(Instant::now() + Duration::from_secs(10))
+                    .await
+                    .unwrap();
+                let mut e = effects(tx, &selected, id, false, "");
+                let mut ids = Vec::new();
+                loop {
+                    let rows: Vec<Record> =
+                        serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+                    assert_eq!(rows.len(), (100 - ids.len()).min(20));
+                    for row in rows {
+                        assert_eq!(row.fields["archived"], "false");
+                        assert!(
+                            repository::read_resource(
+                                &mut e.tx,
+                                &selected,
+                                &e.principal,
+                                &selected.operations[1],
+                                row.id
+                            )
+                            .await
+                            .unwrap()
+                            .is_some()
+                        );
+                        ids.push(row.id);
+                    }
+                    if e.more.is_none() {
+                        break;
+                    }
+                    e.cursor = e.more;
+                }
+                let expected: Vec<_> = if descending {
+                    (1..=100).rev().map(|i| i * 10).collect()
+                } else {
+                    (1..=100).map(|i| i * 10).collect()
+                };
+                assert_eq!(ids, expected);
+                assert!(
+                    repository::read_resource(
+                        &mut e.tx,
+                        &selected,
+                        &e.principal,
+                        &selected.operations[1],
+                        1
+                    )
+                    .await
+                    .unwrap()
+                    .is_some()
+                );
+                assert!(
+                    repository::read_resource(
+                        &mut e.tx,
+                        &selected,
+                        &e.principal,
+                        &selected.operations[1],
+                        1001
+                    )
+                    .await
+                    .unwrap()
+                    .is_none()
+                );
+                e.tx.rollback().await.unwrap();
+            }
+        }
+        let mut residual = m.clone();
+        residual.operations[0].policy.any = vec![vec![
+            Predicate::Owner,
+            Predicate::PrincipalIs {
+                field: "recipient".into(),
+            },
+        ]];
+        let tx = db
+            .begin_read(Instant::now() + Duration::from_secs(10))
+            .await
+            .unwrap();
+        let mut e = effects(tx, &residual, &alice, false, "");
+        let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+        assert!(rows.is_empty());
+        assert!(
+            e.more.is_some(),
+            "residual bound must not report a false end"
+        );
+        e.cursor = e.more;
+        let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+        assert!(rows.is_empty());
+        assert!(e.more.is_none());
+        e.tx.rollback().await.unwrap();
+    }
+}
+#[tokio::test]
+async fn sqlite_filtered_account_and_single_lists() {
+    let tmp = tempfile::tempdir().unwrap();
+    filtered_lists(Database::sqlite(tmp.path().join("filters.db"))).await;
+}
+#[tokio::test]
+#[ignore = "requires NOXIDE_TEST_POSTGRES"]
+async fn postgres_filtered_account_and_single_lists() {
+    use sqlx::Connection;
+    let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+    let name = format!("nx_filter_{}", crate::security::record_id().unwrap());
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let mut case = url::Url::parse(&url).unwrap();
+    case.set_path(&name);
+    filtered_lists(Database::postgres(case.as_str()).unwrap()).await;
+    sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+}

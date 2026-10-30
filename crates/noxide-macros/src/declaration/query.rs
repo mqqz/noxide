@@ -53,6 +53,23 @@ pub(crate) fn expand_query(
             "query declarations accept only an operation and allow policy",
         ));
     }
+    let inferred: std::collections::BTreeSet<_> = declaration
+        .filter
+        .iter()
+        .filter(|(f, _)| public && !declaration.fields.contains(f))
+        .map(|(f, _)| f.to_string())
+        .collect();
+    let disclosed: std::collections::BTreeSet<_> = declaration
+        .disclose
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    if inferred != disclosed || disclosed.len() != declaration.disclose.len() {
+        return Err(syn::Error::new(
+            item.span(),
+            "disclose must name exactly unprojected public filter fields",
+        ));
+    }
     let query_trait = if declaration.kind == "list" {
         quote!(::noxide::ListQuery)
     } else {
@@ -78,6 +95,22 @@ pub(crate) fn expand_query(
     let policy = policy_tokens(&declaration.policy, &declaration.resource);
     let vis = &item.vis;
     let output_name = format_ident!("{name}Record");
+    let filters: Vec<_> = declaration.filter.iter().map(|(field, value)| {
+        let hash = stable_id(&field.to_string());
+        quote!({
+            const _: () = assert!(<<#resource as ::noxide::FieldSpec<#hash>>::Value as ::noxide::FieldValue>::FILTERABLE, "filter requires boolean or choice");
+            let value: &<#resource as ::noxide::FieldSpec<#hash>>::Value = &(#value);
+            ::noxide::__private::Condition { field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into(), equals: ::noxide::__private::Operand::Literal(::noxide::FieldValue::encode(value)) }
+        })
+    }).collect();
+    let disclosures: Vec<_> = declaration
+        .disclose
+        .iter()
+        .map(|field| {
+            let hash = stable_id(&field.to_string());
+            quote!(<#resource as ::noxide::FieldSpec<#hash>>::KEY.into())
+        })
+        .collect();
     let (projection, output, decode, visibility, fields) = if public {
         let names = &declaration.fields;
         let mut identity = "__noxide_record_id".to_owned();
@@ -122,21 +155,22 @@ pub(crate) fn expand_query(
         )
     };
     Ok(quote! {
-        #item
-        #projection
-        impl #query_trait for #name {}
-        impl ::noxide::QueryType for #name {
-            type Resource = #resource;
-            type Output = #output;
-            fn from_record(record: ::noxide::__private::Record) -> Self::Output { #decode }
-            fn operation() -> ::noxide::__private::Operation {
-                ::noxide::__private::Operation {
-                    list: #list, visibility: #visibility, fields: #fields,
-                    id: ::noxide::stable_id(concat!("query:", module_path!(), "::", stringify!(#name))),
-                    resource: <#resource as ::noxide::ResourceType>::definition().id,
-                    kind: #kind, policy: #policy,
+            #item
+            #projection
+            impl #query_trait for #name {}
+            impl ::noxide::QueryType for #name {
+                type Resource = #resource;
+                type Output = #output;
+                fn from_record(record: ::noxide::__private::Record) -> Self::Output { #decode }
+                fn operation() -> ::noxide::__private::Operation {
+                    ::noxide::__private::Operation {
+                        filter: vec![#(#filters),*], disclose: vec![#(#disclosures),*],
+    list: #list, visibility: #visibility, fields: #fields,
+                        id: ::noxide::stable_id(concat!("query:", module_path!(), "::", stringify!(#name))),
+                        resource: <#resource as ::noxide::ResourceType>::definition().id,
+                        kind: #kind, policy: #policy,
+                    }
                 }
             }
-        }
-    })
+        })
 }

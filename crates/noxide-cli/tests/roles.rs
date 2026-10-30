@@ -18,6 +18,8 @@ fn manifest() -> Manifest {
             }],
         }],
         operations: vec![Operation {
+            filter: Vec::new(),
+            disclose: Vec::new(),
             id: 1,
             resource: 1,
             kind: OperationKind::List,

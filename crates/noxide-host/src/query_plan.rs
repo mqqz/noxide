@@ -16,7 +16,10 @@ pub(crate) struct ListPlan {
     pub order: ListOrder,
     pub limit: u8,
 }
-pub(crate) enum CompiledCondition {}
+pub(crate) struct CompiledCondition {
+    pub field: String,
+    pub equals: noxide_protocol::Operand,
+}
 
 pub(crate) fn compile(m: &Manifest, op: &Operation) -> Result<ListPlan> {
     ensure!(op.kind == OperationKind::List, "expected list operation");
@@ -26,7 +29,14 @@ pub(crate) fn compile(m: &Manifest, op: &Operation) -> Result<ListPlan> {
         operation: op.id,
         strategy: policy::list_strategy(&op.policy, parent.is_some()),
         parent,
-        selection: Vec::new(),
+        selection: op
+            .filter
+            .iter()
+            .map(|c| CompiledCondition {
+                field: c.field.clone(),
+                equals: c.equals.clone(),
+            })
+            .collect(),
         order: op
             .list
             .as_ref()
@@ -62,5 +72,35 @@ impl ListPlan {
                 params.len()
             )
         })
+    }
+}
+
+impl ListPlan {
+    pub(crate) fn selection_sql(
+        &self,
+        tx: &crate::database::Transaction,
+        params: &mut Vec<crate::database::Param>,
+    ) -> Result<String> {
+        let mut sql = String::new();
+        for condition in &self.selection {
+            let noxide_protocol::Operand::Literal(value) = &condition.equals;
+            params.push(value.as_str().into());
+            sql.push_str(&format!(
+                " AND {}=${}",
+                tx.field_expression(&condition.field)?,
+                params.len()
+            ));
+        }
+        Ok(sql)
+    }
+    pub(crate) fn check_selection(&self, fields: &noxide_protocol::Fields) -> Result<()> {
+        for condition in &self.selection {
+            let noxide_protocol::Operand::Literal(value) = &condition.equals;
+            ensure!(
+                fields.get(&condition.field) == Some(value),
+                "selection invariant"
+            );
+        }
+        Ok(())
     }
 }

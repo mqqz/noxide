@@ -238,6 +238,7 @@ impl Effects {
                 params.len()
             );
         }
+        let selection = plan.selection_sql(&self.tx, &mut params)?;
         let mut records = Vec::new();
         let mut last = self.cursor;
         self.more = None;
@@ -248,13 +249,14 @@ impl Effects {
             let mut page_params = params.clone();
             let keyset = plan.keyset(last, &mut page_params);
             let sql = format!(
-                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND ({}){parent_clause}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT {batch}",
+                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND ({}){parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT {batch}",
                 self.tx.bounded_text("fields", 20_000),
                 clauses.join(" OR ")
             );
             let rows = self.tx.fetch::<5>(&sql, &page_params).await?;
             let count = rows.len();
             for [seq, id, owner, tenant, fields] in rows {
+                plan.check_selection(&serde_json::from_str(&fields)?)?;
                 ensure!(
                     allowed(
                         &op.policy,
@@ -285,7 +287,7 @@ impl Effects {
         if self.more.is_none() && records.len() == size {
             let mut page_params = params.clone();
             let keyset = plan.keyset(last, &mut page_params);
-            let next=self.tx.fetch::<1>(&format!("SELECT CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND ({}){parent_clause}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT 1",clauses.join(" OR ")),&page_params).await?;
+            let next=self.tx.fetch::<1>(&format!("SELECT CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND ({}){parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT 1",clauses.join(" OR ")),&page_params).await?;
             if !next.is_empty() {
                 self.more = last;
             }
@@ -311,6 +313,21 @@ impl Effects {
             let clause =
                 crate::policy::sql(&self.tx, &scan_policy, &self.principal, &mut scan_params)
                     .join(" OR ");
+            let selection = plan.selection_sql(&self.tx, &mut scan_params)?;
+            let mut parent_clause = String::new();
+            if let Some(parent) = &plan.parent {
+                let target = self
+                    .request
+                    .target
+                    .ok_or_else(|| anyhow::anyhow!("missing parent target"))?;
+                scan_params.push(target.to_string().into());
+                parent_clause = format!(
+                    " AND {}=${}",
+                    self.tx.field_expression(parent)?,
+                    scan_params.len()
+                );
+            }
+            let visibility = self.visibility_clause(op, &mut scan_params)?;
             let keyset = plan.keyset(self.cursor, &mut scan_params);
             let limit = if exact {
                 size + 1
@@ -318,7 +335,7 @@ impl Effects {
                 (256 / op.policy.any.len()).min(64)
             };
             let sql = format!(
-                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({clause}){keyset} ORDER BY nx_records.created_seq {direction} LIMIT {limit}"
+                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({clause}){visibility}{parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT {limit}"
             );
             let rows = self.tx.fetch::<2>(&sql, &scan_params).await?;
             if !exact && rows.len() == limit {
@@ -377,7 +394,10 @@ impl Effects {
                 last = Some(seq);
                 continue;
             }
-            if records.len() == size || !append_prefix(&mut records, stored.record)? {
+            plan.check_selection(&stored.record.fields)?;
+            let mut record = stored.record;
+            record.fields = self.visible_fields(op, record.fields)?;
+            if records.len() == size || !append_prefix(&mut records, record)? {
                 self.more = last;
                 break;
             }
@@ -706,10 +726,7 @@ impl Effects {
                     .get(&op.id)
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("missing list plan"))?;
-                ensure!(
-                    plan.operation == op.id && plan.selection.is_empty(),
-                    "invalid list plan"
-                );
+                ensure!(plan.operation == op.id, "invalid list plan");
                 if let Some(parent) = manifest::parent_resource(&self.manifest, op.resource)? {
                     let id = self
                         .request
