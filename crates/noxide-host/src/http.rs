@@ -317,16 +317,6 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
         .copied()
         .unwrap_or(Peer::Local);
     let path = request.uri().path();
-    if request.method() == axum::http::Method::GET
-        && let Some(route) = app
-            .manifest
-            .routes
-            .iter()
-            .find(|r| crate::routing::match_path(r, path).is_some())
-        && parse_query(&app.manifest, route, request.uri().query()).is_err()
-    {
-        return finish(StatusCode::NOT_FOUND.into_response());
-    }
     let class = if request.method() == axum::http::Method::GET {
         RequestClass::Get
     } else if path == app.presentation.login_path || path == presentation.registration_path {
@@ -353,6 +343,19 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
         .charge_circuit(context.peer, context.class)
     {
         return finish(busy());
+    }
+    if request.method() == axum::http::Method::GET
+        && let Some(route) = app
+            .manifest
+            .routes
+            .iter()
+            .find(|r| crate::routing::match_path(r, path).is_some())
+        && parse_query(&app.manifest, route, request.uri().query()).is_err()
+    {
+        let Ok(_permit) = app.admission_limits.requests.request().await else {
+            return finish(busy());
+        };
+        return finish(StatusCode::NOT_FOUND.into_response());
     }
     let public = (path == presentation.registration_path
         && app.registration == crate::Registration::Closed)
