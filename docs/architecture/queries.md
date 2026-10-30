@@ -1,8 +1,8 @@
 # Declarative queries
 
 This is the implementation plan for a small approved query vocabulary, starting
-at main `9917660`. Increment 0 records compatibility; later increments below are
-planned behavior until their implementation and validation land.
+at main `9917660`. Increments 0 and 1 record compatibility and compile admitted list plans; later
+increments below are planned behavior until their implementation and validation land.
 
 Any approved query has a statically known shape, bounded execution, independently
 enforced authorization, and predictable performance. Developers declare intent;
@@ -52,6 +52,12 @@ scan reaches its bound, even if the page is short or empty.
 Descending order, filters, parameters and previews must work in both paths. Do
 not extend merge execution to other policies without the conditional design in
 increment 7. No additional execution engine or host-managed index table is planned.
+
+The host compiles an immutable plan map at manifest load. A plan retains only
+operation ID, parent field, scan strategy, selection, order and limit. It does not
+copy policy, resource, visibility or projection. `policy.rs` classifies exact and
+residual scans independently of the current principal and constructs their scan
+policies. Execution still takes authority from the approved operation.
 
 ## Disclosure semantics
 

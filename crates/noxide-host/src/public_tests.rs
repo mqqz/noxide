@@ -261,6 +261,7 @@ fn effects(
     Effects {
         tx,
         manifest: Arc::new(m.clone()),
+        plans: crate::query_plan::compile_all(m).unwrap(),
         principal,
         request: RequestView {
             version: VERSION,

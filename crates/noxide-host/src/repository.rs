@@ -11,6 +11,7 @@ use std::sync::Arc;
 pub(crate) struct Effects {
     pub tx: Transaction,
     pub manifest: Arc<Manifest>,
+    pub plans: std::collections::BTreeMap<u32, Arc<crate::query_plan::ListPlan>>,
     pub principal: Principal,
     pub request: RequestView,
     pub outcome: Option<ResponseIntent>,
@@ -203,6 +204,174 @@ pub(crate) async fn authorize_page_resource(
 }
 
 impl Effects {
+    async fn list_single(
+        &mut self,
+        op: &Operation,
+        storage_resource: i64,
+        size: usize,
+    ) -> Result<Vec<u8>> {
+        let mut params = vec![Param::Number(storage_resource)];
+        let mut clauses = crate::policy::sql(&self.tx, &op.policy, &self.principal, &mut params);
+        if manifest::is_public(op) {
+            clauses = vec![
+                self.visibility_clause(op, &mut params)?
+                    .trim_start_matches(" AND ")
+                    .to_owned(),
+            ];
+        }
+        let mut parent_clause = String::new();
+        if manifest::parent_resource(&self.manifest, op.resource)?.is_some() {
+            let id = self
+                .request
+                .target
+                .ok_or_else(|| anyhow::anyhow!("missing parent target"))?;
+            let field = manifest::parent_field(manifest::resource(&self.manifest, op.resource)?)
+                .expect("parent");
+            params.push(id.to_string().into());
+            // A catalog-derived constant lets PostgreSQL's generic plans
+            // prove the partial-index predicate despite resource=$1.
+            parent_clause = format!(
+                " AND resource={storage_resource} AND {}=${}",
+                self.tx.field_expression(&field.name)?,
+                params.len()
+            );
+        }
+        params.push(Param::Number(self.cursor.unwrap_or(0) as i64));
+        let mut records = Vec::new();
+        let mut last = self.cursor.unwrap_or(0);
+        self.more = None;
+        // At most three bounded stored rows per database transfer. The
+        // approved page size bounds both iterations and total row work.
+        'page: while records.len() < size {
+            let batch = (size - records.len()).min(3);
+            *params.last_mut().expect("cursor") = Param::Number(last as i64);
+            let sql = format!(
+                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND ({}){parent_clause} AND created_seq>${} ORDER BY nx_records.created_seq ASC LIMIT {batch}",
+                self.tx.bounded_text("fields", 20_000),
+                clauses.join(" OR "),
+                params.len()
+            );
+            let rows = self.tx.fetch::<5>(&sql, &params).await?;
+            let count = rows.len();
+            for [seq, id, owner, tenant, fields] in rows {
+                ensure!(
+                    allowed(
+                        &op.policy,
+                        &self.principal,
+                        crate::policy::Row {
+                            owner: &owner,
+                            tenant: &tenant,
+                            fields: &serde_json::from_str(&fields)?
+                        }
+                    ),
+                    "policy invariant"
+                );
+                let record = Record {
+                    resource: op.resource,
+                    id: id.parse()?,
+                    fields: self.visible_fields(op, serde_json::from_str(&fields)?)?,
+                };
+                if !append_prefix(&mut records, record)? {
+                    self.more = Some(last);
+                    break 'page;
+                }
+                last = seq.parse()?;
+            }
+            if count < batch {
+                break;
+            }
+        }
+        if self.more.is_none() && records.len() == size {
+            *params.last_mut().expect("cursor") = Param::Number(last as i64);
+            let next=self.tx.fetch::<1>(&format!("SELECT CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND ({}){parent_clause} AND created_seq>${} ORDER BY nx_records.created_seq ASC LIMIT 1",clauses.join(" OR "),params.len()),&params).await?;
+            if !next.is_empty() {
+                self.more = Some(last);
+            }
+        }
+        Ok(serde_json::to_vec(&records)?)
+    }
+    async fn list_merge(
+        &mut self,
+        op: &Operation,
+        storage_resource: i64,
+        size: usize,
+        scans: &[crate::policy::ScanRule],
+    ) -> Result<Vec<u8>> {
+        let mut candidates = std::collections::BTreeMap::new();
+        let mut boundary = u64::MAX;
+        let mut bounded_more = false;
+        for scan in scans {
+            let exact = scan.exact;
+            let scan_policy = crate::policy::scan_policy(&op.policy, scan);
+            let mut scan_params = vec![Param::Number(storage_resource)];
+            let clause =
+                crate::policy::sql(&self.tx, &scan_policy, &self.principal, &mut scan_params)
+                    .join(" OR ");
+            scan_params.push(Param::Number(self.cursor.unwrap_or(0) as i64));
+            let limit = if exact {
+                size + 1
+            } else {
+                (256 / op.policy.any.len()).min(64)
+            };
+            let sql = format!(
+                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({clause}) AND created_seq>${} ORDER BY nx_records.created_seq ASC LIMIT {limit}",
+                scan_params.len()
+            );
+            let rows = self.tx.fetch::<2>(&sql, &scan_params).await?;
+            if !exact && rows.len() == limit {
+                boundary = boundary.min(rows.last().expect("nonempty")[0].parse()?);
+                bounded_more = true;
+            }
+            for [seq, id] in rows {
+                candidates.insert(seq.parse::<u64>()?, id.parse::<u64>()?);
+            }
+        }
+        let mut records = Vec::new();
+        let mut last = self.cursor.unwrap_or(0);
+        self.more = None;
+        for (seq, id) in candidates {
+            if seq > boundary {
+                break;
+            }
+            let stored = load(&mut self.tx, &self.manifest, op.resource, id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("record disappeared"))?;
+            if !allowed(
+                &op.policy,
+                &self.principal,
+                crate::policy::Row {
+                    owner: &stored.owner,
+                    tenant: &stored.tenant,
+                    fields: &stored.record.fields,
+                },
+            ) {
+                last = seq;
+                continue;
+            }
+            if let Some(field) =
+                manifest::parent_field(manifest::resource(&self.manifest, op.resource)?)
+                && stored
+                    .record
+                    .fields
+                    .get(&field.name)
+                    .and_then(|v| v.parse::<u64>().ok())
+                    != self.request.target
+            {
+                last = seq;
+                continue;
+            }
+            if records.len() == size || !append_prefix(&mut records, stored.record)? {
+                self.more = Some(last);
+                break;
+            }
+            last = seq;
+        }
+        if self.more.is_none() && bounded_more {
+            self.more = Some(boundary);
+        }
+        Ok(serde_json::to_vec(&records)?)
+    }
+
     fn visibility_clause(&self, op: &Operation, params: &mut Vec<Param>) -> Result<String> {
         if !manifest::is_public(op) {
             return Ok(String::new());
@@ -491,7 +660,7 @@ impl Effects {
                             let field = manifest::parent_field(child).expect("parent");
                             let child_storage =
                                 self.tx.storage_resource(&self.manifest, child.id).await?;
-                            let expression = self.tx.parent_expression(&field.name)?;
+                            let expression = self.tx.field_expression(&field.name)?;
                             let rows = self.tx.fetch::<1>(&format!("SELECT CAST(id AS TEXT) FROM nx_records WHERE resource={child_storage} AND {expression}=$1 LIMIT 1"), &[grant.id.to_string().into()]).await?;
                             ensure!(rows.is_empty(), "parent has children");
                         }
@@ -515,17 +684,18 @@ impl Effects {
                 &read_resource(&mut self.tx, &self.manifest, &self.principal, &op, target).await?,
             )?,
             OperationKind::List => {
-                let mut params = vec![Param::Number(storage_resource)];
-                let mut clauses =
-                    crate::policy::sql(&self.tx, &op.policy, &self.principal, &mut params);
-                if manifest::is_public(&op) {
-                    clauses = vec![
-                        self.visibility_clause(&op, &mut params)?
-                            .trim_start_matches(" AND ")
-                            .to_owned(),
-                    ];
+                let plan = self
+                    .plans
+                    .get(&op.id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("missing list plan"))?;
+                ensure!(
+                    plan.operation == op.id && plan.selection.is_empty(),
+                    "invalid list plan"
+                );
+                match plan.order {
+                    ListOrder::CreatedAsc => {}
                 }
-                let mut parent_clause = String::new();
                 if let Some(parent) = manifest::parent_resource(&self.manifest, op.resource)? {
                     let id = self
                         .request
@@ -534,6 +704,10 @@ impl Effects {
                     let field =
                         manifest::parent_field(manifest::resource(&self.manifest, op.resource)?)
                             .expect("parent");
+                    ensure!(
+                        plan.parent.as_deref() == Some(field.name.as_str()),
+                        "invalid list parent"
+                    );
                     let record = load(&mut self.tx, &self.manifest, parent.id, id).await?;
                     if record.as_ref().is_none_or(|r| {
                         manifest::is_public(&op)
@@ -541,180 +715,17 @@ impl Effects {
                     }) {
                         return Ok(serde_json::to_vec(&Vec::<Record>::new())?);
                     }
-                    params.push(id.to_string().into());
-                    // A catalog-derived constant lets PostgreSQL's generic plans
-                    // prove the partial-index predicate despite resource=$1.
-                    parent_clause = format!(
-                        " AND resource={storage_resource} AND {}=${}",
-                        self.tx.parent_expression(&field.name)?,
-                        params.len()
-                    );
                 }
-                let size = op.list.as_ref().map_or(3, |s| s.page_size) as usize;
-                params.push(Param::Number(self.cursor.unwrap_or(0) as i64));
-                if op
-                    .policy
-                    .any
-                    .iter()
-                    .flatten()
-                    .any(|p| matches!(p, Predicate::PrincipalIs { .. }))
-                {
-                    let mut candidates = std::collections::BTreeMap::new();
-                    let mut boundary = u64::MAX;
-                    let mut bounded_more = false;
-                    for rule in &op.policy.any {
-                        let identities = rule
-                            .iter()
-                            .filter(|p| {
-                                matches!(p, Predicate::Owner | Predicate::PrincipalIs { .. })
-                            })
-                            .count();
-                        // One identity equality plus optional tenant equality has
-                        // an ordered composite index. Multiple equalities need a
-                        // bounded residual-filter scan instead.
-                        let exact = identities <= 1 && parent_clause.is_empty();
-                        let scan_rule = if exact {
-                            rule.clone()
-                        } else {
-                            rule.iter()
-                                .find(|p| {
-                                    matches!(p, Predicate::PrincipalIs { .. } | Predicate::Owner)
-                                })
-                                .cloned()
-                                .into_iter()
-                                .collect::<Vec<_>>()
-                        };
-                        let scan_policy = Policy {
-                            any: vec![if scan_rule.is_empty() {
-                                vec![Predicate::Public]
-                            } else {
-                                scan_rule
-                            }],
-                        };
-                        let mut scan_params = vec![Param::Number(storage_resource)];
-                        let clause = crate::policy::sql(
-                            &self.tx,
-                            &scan_policy,
-                            &self.principal,
-                            &mut scan_params,
-                        )
-                        .join(" OR ");
-                        scan_params.push(Param::Number(self.cursor.unwrap_or(0) as i64));
-                        let limit = if exact {
-                            size + 1
-                        } else {
-                            (256 / op.policy.any.len()).min(64)
-                        };
-                        let sql = format!(
-                            "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({clause}) AND created_seq>${} ORDER BY nx_records.created_seq ASC LIMIT {limit}",
-                            scan_params.len()
-                        );
-                        let rows = self.tx.fetch::<2>(&sql, &scan_params).await?;
-                        if !exact && rows.len() == limit {
-                            boundary = boundary.min(rows.last().expect("nonempty")[0].parse()?);
-                            bounded_more = true;
-                        }
-                        for [seq, id] in rows {
-                            candidates.insert(seq.parse::<u64>()?, id.parse::<u64>()?);
-                        }
-                    }
-                    let mut records = Vec::new();
-                    let mut last = self.cursor.unwrap_or(0);
-                    self.more = None;
-                    for (seq, id) in candidates {
-                        if seq > boundary {
-                            break;
-                        }
-                        let stored = load(&mut self.tx, &self.manifest, op.resource, id)
+                match &plan.strategy {
+                    crate::policy::ListStrategy::Single => {
+                        self.list_single(&op, storage_resource, plan.limit as usize)
                             .await?
-                            .ok_or_else(|| anyhow::anyhow!("record disappeared"))?;
-                        if !allowed(
-                            &op.policy,
-                            &self.principal,
-                            crate::policy::Row {
-                                owner: &stored.owner,
-                                tenant: &stored.tenant,
-                                fields: &stored.record.fields,
-                            },
-                        ) {
-                            last = seq;
-                            continue;
-                        }
-                        if let Some(field) =
-                            manifest::parent_field(manifest::resource(&self.manifest, op.resource)?)
-                            && stored
-                                .record
-                                .fields
-                                .get(&field.name)
-                                .and_then(|v| v.parse::<u64>().ok())
-                                != self.request.target
-                        {
-                            last = seq;
-                            continue;
-                        }
-                        if records.len() == size || !append_prefix(&mut records, stored.record)? {
-                            self.more = Some(last);
-                            break;
-                        }
-                        last = seq;
                     }
-                    if self.more.is_none() && bounded_more {
-                        self.more = Some(boundary);
-                    }
-                    return Ok(serde_json::to_vec(&records)?);
-                }
-                let mut records = Vec::new();
-                let mut last = self.cursor.unwrap_or(0);
-                self.more = None;
-                // At most three bounded stored rows per database transfer. The
-                // approved page size bounds both iterations and total row work.
-                'page: while records.len() < size {
-                    let batch = (size - records.len()).min(3);
-                    *params.last_mut().expect("cursor") = Param::Number(last as i64);
-                    let sql = format!(
-                        "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND ({}){parent_clause} AND created_seq>${} ORDER BY nx_records.created_seq ASC LIMIT {batch}",
-                        self.tx.bounded_text("fields", 20_000),
-                        clauses.join(" OR "),
-                        params.len()
-                    );
-                    let rows = self.tx.fetch::<5>(&sql, &params).await?;
-                    let count = rows.len();
-                    for [seq, id, owner, tenant, fields] in rows {
-                        ensure!(
-                            allowed(
-                                &op.policy,
-                                &self.principal,
-                                crate::policy::Row {
-                                    owner: &owner,
-                                    tenant: &tenant,
-                                    fields: &serde_json::from_str(&fields)?
-                                }
-                            ),
-                            "policy invariant"
-                        );
-                        let record = Record {
-                            resource: op.resource,
-                            id: id.parse()?,
-                            fields: self.visible_fields(&op, serde_json::from_str(&fields)?)?,
-                        };
-                        if !append_prefix(&mut records, record)? {
-                            self.more = Some(last);
-                            break 'page;
-                        }
-                        last = seq.parse()?;
-                    }
-                    if count < batch {
-                        break;
+                    crate::policy::ListStrategy::Merge(scans) => {
+                        self.list_merge(&op, storage_resource, plan.limit as usize, scans)
+                            .await?
                     }
                 }
-                if self.more.is_none() && records.len() == size {
-                    *params.last_mut().expect("cursor") = Param::Number(last as i64);
-                    let next=self.tx.fetch::<1>(&format!("SELECT CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND ({}){parent_clause} AND created_seq>${} ORDER BY nx_records.created_seq ASC LIMIT 1",clauses.join(" OR "),params.len()),&params).await?;
-                    if !next.is_empty() {
-                        self.more = Some(last);
-                    }
-                }
-                serde_json::to_vec(&records)?
             }
         };
         ensure!(value.len() <= MAX_RESULT_BYTES, "repository output budget");

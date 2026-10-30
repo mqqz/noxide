@@ -251,6 +251,7 @@ impl Application {
             inspection,
         };
         let effects = Effects {
+            plans: self.plans.clone(),
             tx,
             manifest: self.manifest.clone(),
             principal,

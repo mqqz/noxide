@@ -163,6 +163,9 @@ pub fn validate(m: &Manifest) -> Result<()> {
         );
     }
     for op in &m.operations {
+        if op.kind == OperationKind::List {
+            crate::query_plan::compile(m, op)?;
+        }
         ensure!(
             op.list
                 .as_ref()

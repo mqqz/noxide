@@ -77,3 +77,13 @@ to a disposable local cluster with `CREATE DATABASE` permission. Use a backend
 name prefix in the test filter to run one backend only. Benchmark databases live
 in temporary directories or uniquely named PostgreSQL databases; dispose of the
 cluster after collecting evidence.
+
+## Compiled list compatibility
+
+Increment 1 keeps the two existing execution paths and cursor contract. Local
+validation on 2026-10-30 ran the workspace suite with ignored PostgreSQL tests
+(excluding crash-worker and browser entry points), the instrumented SQLite host
+suite, and the real private-inbox HTTP/component fixture. The exact serialized
+contracts and cursor-scope fixtures remained unchanged. The inbox measurement
+still checks 21 index visits per exact scan on its 100,000-unrelated-record
+fixture; this is a dataset measurement, not a latency or arbitrary-policy bound.

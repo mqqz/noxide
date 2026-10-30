@@ -570,8 +570,8 @@ impl Transaction {
         .await?;
         Ok(candidate)
     }
-    pub(crate) fn parent_expression(&self, field: &str) -> Result<String> {
-        ensure!(crate::manifest::identifier(field), "invalid parent field");
+    pub(crate) fn field_expression(&self, field: &str) -> Result<String> {
+        ensure!(crate::manifest::identifier(field), "invalid field");
         Ok(match self.backend {
             Backend::Sqlite(_) => format!("json_extract(fields, '$.\"{field}\"')"),
             Backend::Postgres(_) => format!("(fields::jsonb ->> '{field}')"),
