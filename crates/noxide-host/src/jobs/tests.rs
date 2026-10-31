@@ -123,7 +123,7 @@ async fn setup(database: &Database) {
         tx.execute(&sql, &[]).await.unwrap();
     }
     tx.execute("INSERT INTO nx_deployment(singleton,contract,incarnation,generation) VALUES(1,'contract','incarnation','deployment') ON CONFLICT(singleton) DO UPDATE SET contract='contract',incarnation='incarnation',generation='deployment'", &[]).await.unwrap();
-    tx.execute("INSERT INTO nx_job_runtime(singleton,deployment,contract,epoch,state) VALUES(1,'deployment','contract','epoch','active') ON CONFLICT(singleton) DO UPDATE SET deployment='deployment',contract='contract',epoch='epoch',state='active'", &[]).await.unwrap();
+    tx.execute("INSERT INTO nx_job_runtime(singleton,deployment,contract,epoch,state,pending_limit,tenant_limit,concurrency) VALUES(1,'deployment','contract','epoch','active',1000,1000,2) ON CONFLICT(singleton) DO UPDATE SET deployment='deployment',contract='contract',epoch='epoch',state='active'", &[]).await.unwrap();
     tx.execute("INSERT INTO nx_job_queue(singleton,claim_seq) VALUES(1,0) ON CONFLICT(singleton) DO NOTHING", &[]).await.unwrap();
     for tenant in ["alpha", "beta"] {
         let grant = grant(tenant);
