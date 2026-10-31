@@ -17,7 +17,8 @@ python3 tools/test_query_http.py --bundle "$RUNNER_TEMP/noxide-query-bundle" --o
 python3 tools/test_query_http.py --bundle "$RUNNER_TEMP/noxide-query-bundle" --output "$RUNNER_TEMP/noxide-query-postgres" --host-cli target/debug/noxide --postgres "$NOXIDE_QUERY_POSTGRES"
 ```
 
-The harness creates synthetic accounts and records through host actions, checks
+The harness explicitly activates declared indexes with `noxide schema indexes`
+before serving. It creates synthetic accounts and records through host actions, checks
 canonical equivalent tokens and authenticated cursor scopes, reads a filtered-out
 record through its independent Read operation, and checks exact/empty aggregates
 and typed sum overflow. Every GET compares complete persisted record, receipt,

@@ -147,6 +147,9 @@ def main():
     config["approved_contract"] = approval["deployment_digest"]
     write_config()
     command("init", config_path)
+    # Native query indexes are an explicit operator setup action, never a guest
+    # request side effect. This fresh fixture has no pre-existing rows to rebuild.
+    command("schema", "indexes", config_path)
     password = "isolated query fixture password"
     secret = output / "password.txt"
     secret.write_text(password)
