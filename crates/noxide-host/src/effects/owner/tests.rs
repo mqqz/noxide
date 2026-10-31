@@ -10,7 +10,10 @@ fn directory() -> std::path::PathBuf {
         .tempdir_in(root)
         .unwrap()
         .keep();
-    std::fs::canonicalize(path).unwrap()
+    let path = std::fs::canonicalize(path).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    path
 }
 fn owner(path: &Path, store: &str) -> Arc<DeliveryOwner> {
     let deadline = Instant::now() + Duration::from_secs(5);

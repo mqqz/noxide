@@ -121,6 +121,7 @@ async fn actual_effect_cli_reconciles_explicitly_preserves_keys_and_redacts_payl
         .unwrap()
         .keep();
     let root = std::fs::canonicalize(root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     eprintln!("retained actual effects CLI fixture: {}", root.display());
     let db = Database::sqlite(root.join("runtime.db"));
     db.initialize().await.unwrap();
