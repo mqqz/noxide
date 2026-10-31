@@ -59,6 +59,50 @@ struct PlaceOrder;
 #[action(update(Product), fields(stock), allow = owner, redirect = show_order)]
 struct SetStock;
 
+#[action(update(Product), fields(stock), allow = owner, redirect = show_order,
+    inspect = ReadProduct, inspect_fields(stock))]
+struct InspectAndSetStock;
+
+fn conflicting_resource_id() -> noxide::TargetDeclarations {
+    let mut resource = Product::definition();
+    resource.name = "different_declared_name".into();
+    noxide::TargetDeclarations {
+        resources: vec![resource],
+        ..Default::default()
+    }
+}
+fn conflicting_resource_name() -> noxide::TargetDeclarations {
+    let mut resource = Product::definition();
+    resource.id ^= 1;
+    noxide::TargetDeclarations {
+        resources: vec![resource],
+        ..Default::default()
+    }
+}
+#[action(inputs(stock: i64 = 0..=100), targets = conflicting_resource_id,
+    transaction(product = create(Product, set(stock = stock))),
+    allow = owner, redirect = show_order(product))]
+struct ConflictingResourceId;
+#[action(inputs(stock: i64 = 0..=100), targets = conflicting_resource_name,
+    transaction(product = create(Product, set(stock = stock))),
+    allow = owner, redirect = show_order(product))]
+struct ConflictingResourceName;
+
+#[test]
+fn single_action_deduplicates_identical_inspection_resource() {
+    assert_eq!(InspectAndSetStock::resources(), vec![Product::definition()]);
+}
+#[test]
+#[should_panic(expected = "conflicting resource declarations")]
+fn action_rejects_conflicting_resource_id_instead_of_keeping_first() {
+    let _ = ConflictingResourceId::resources();
+}
+#[test]
+#[should_panic(expected = "conflicting resource declarations")]
+fn action_rejects_conflicting_resource_name_instead_of_keeping_last() {
+    let _ = ConflictingResourceName::resources();
+}
+
 #[test]
 fn transaction_lowering_keeps_shared_input_and_created_step_identity() {
     let action = PlaceOrder::definition();

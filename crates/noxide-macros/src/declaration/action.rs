@@ -265,7 +265,15 @@ pub(crate) fn expand_action(
                 let mut resources = vec![<#resource as ::noxide::ResourceType>::definition()];
                 resources.extend(#policy_resources);
                 #(#read_resources)*
-                resources
+                let mut unique: Vec<::noxide::__private::Resource> = Vec::new();
+                for resource in resources {
+                    if let Some(old) = unique.iter().find(|old| old.id == resource.id || old.name == resource.name) {
+                        assert_eq!(old, &resource, "conflicting resource declarations");
+                    } else {
+                        unique.push(resource);
+                    }
+                }
+                unique
             }
             fn operations() -> Vec<::noxide::__private::Operation> {
                 vec![::noxide::__private::Operation { bind: #bind, scope: None, via: None,
@@ -1062,7 +1070,15 @@ fn expand_transaction(
                 #(#step_policy_resources)*
                 #(#read_policy_resources)*
                 resources.extend(#custom_resources);
-                resources
+                let mut unique: Vec<::noxide::__private::Resource> = Vec::new();
+                for resource in resources {
+                    if let Some(old) = unique.iter().find(|old| old.id == resource.id || old.name == resource.name) {
+                        assert_eq!(old, &resource, "conflicting resource declarations");
+                    } else {
+                        unique.push(resource);
+                    }
+                }
+                unique
             }
             fn operations() -> Vec<::noxide::__private::Operation> { let mut operations = vec![#(#operations,)* #(#eligibility_operations),*]; operations.extend(#custom_operations); operations }
             fn inspection() -> Option<::noxide::__private::Operation> { #inspection_operation }
