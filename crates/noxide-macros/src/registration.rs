@@ -270,6 +270,7 @@ pub(crate) fn expand_application(registration: Registration) -> syn::Result<Toke
             #(
                 for resource in <#services as ::noxide::ActionType>::resources() { builder.resource(resource); }
                 for operation in <#services as ::noxide::ActionType>::operations() { builder.operation(operation); }
+                if let Some(operation) = <#services as ::noxide::ActionType>::inspection() { builder.operation(operation); }
                 builder.action(<#services as ::noxide::ActionType>::definition());
             )*
             #(builder.operation(#operations());)*
