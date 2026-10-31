@@ -129,6 +129,9 @@ pub(crate) struct Effects {
     pub request: RequestView,
     pub grants: std::collections::BTreeMap<String, RecordTarget>,
     pub target_rows: std::collections::BTreeMap<(u32, u64), StoredRecord>,
+    /// Final rows this transaction wrote. Its own write locks keep them current,
+    /// so later steps and job sealing reuse their data, never their authority.
+    pub written_rows: std::collections::BTreeMap<(u32, u64), StoredRecord>,
     pub capability_grant: Option<RecordTarget>,
     pub calls: u32,
     pub cursor: Option<CursorKey>,
@@ -155,6 +158,7 @@ fn append_prefix(
 }
 
 #[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub(crate) struct StoredRecord {
     pub record: Record,
     pub owner: String,
@@ -498,19 +502,24 @@ impl Effects {
                     "duplicate assignment"
                 );
             }
-            let outcome = match op.kind {
+            let (outcome, written) = match op.kind {
                 OperationKind::Create => {
-                    self.create_step(&op, step, values, &outcomes, action, &context)
-                        .await?
+                    let (outcome, row) = self
+                        .create_step(&op, step, values, &outcomes, action, &context)
+                        .await?;
+                    (outcome, Some(row))
                 }
                 OperationKind::Update => {
-                    self.update_step(&op, stored.as_ref().ok_or(ReferenceUnavailable)?, values)
-                        .await?
+                    let (outcome, row) = self
+                        .update_step(&op, stored.as_ref().ok_or(ReferenceUnavailable)?, values)
+                        .await?;
+                    (outcome, Some(row))
                 }
-                OperationKind::Delete => {
+                OperationKind::Delete => (
                     self.delete_step(&op, stored.as_ref().ok_or(ReferenceUnavailable)?)
-                        .await?
-                }
+                        .await?,
+                    None,
+                ),
                 _ => anyhow::bail!("transaction requires mutation"),
             };
             for (field, locked) in attachments {
@@ -534,11 +543,31 @@ impl Effects {
             }
             self.authority.invalidate();
             self.target_rows.remove(&(outcome.resource, outcome.id));
+            match written {
+                Some(row) => self
+                    .written_rows
+                    .insert((outcome.resource, outcome.id), row),
+                None => self.written_rows.remove(&(outcome.resource, outcome.id)),
+            };
             outcomes.push(outcome);
             #[cfg(test)]
             crate::failure_tests::after_effect(&mut self.tx).await?;
         }
         Ok(outcomes)
+    }
+
+    /// Every reused final row must equal what a fresh load would return.
+    #[cfg(test)]
+    pub(crate) async fn assert_written_rows_current(&mut self) {
+        let written = self.written_rows.clone();
+        assert!(!written.is_empty(), "no written row to compare");
+        for ((resource, id), row) in written {
+            let loaded = load(&mut self.tx, &self.manifest, resource, id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(loaded, row, "written row diverged from stored row");
+        }
     }
 
     async fn authorize_step(
@@ -582,7 +611,7 @@ impl Effects {
         outcomes: &[MutationOutcome],
         action: crate::application::ActionCore<'_>,
         context: &computation::Context,
-    ) -> Result<MutationOutcome> {
+    ) -> Result<(MutationOutcome, StoredRecord)> {
         let m = self.manifest.clone();
         let resource = manifest::resource(&m, op.resource)?;
         for reference in manifest::reference_fields(resource) {
@@ -592,7 +621,11 @@ impl Effects {
                 .get(&reference.name)
                 .ok_or(ReferenceUnavailable)?
                 .parse()?;
-            let stored = if let Some(stored) = self.target_rows.get(&(parent.id, id)) {
+            let cached = self
+                .written_rows
+                .get(&(parent.id, id))
+                .or_else(|| self.target_rows.get(&(parent.id, id)));
+            let stored = if let Some(stored) = cached {
                 stored.clone()
             } else {
                 ensure!(self.calls >= 2, "database call budget");
@@ -715,17 +748,31 @@ impl Effects {
         if public {
             self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version,created_seq) VALUES($1,$2,NULL,'',$3,$4,1,1,$5)", &[storage_resource.into(), (id as i64).into(), serde_json::to_string(&fields)?.into(), incarnation.as_str().into(), created_seq.into()]).await?;
         } else {
-            let user = user.expect("authorized private creation");
+            let user = user.as_ref().expect("authorized private creation");
             self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,$3,$4,$5,$6,1,$7)", &[storage_resource.into(), (id as i64).into(), user.id.as_str().into(), user.tenant.as_str().into(), serde_json::to_string(&fields)?.into(), incarnation.as_str().into(), created_seq.into()]).await?;
         }
         self.update_search(op.resource, storage_resource, id, &incarnation, 1, &fields)
             .await?;
-        Ok(MutationOutcome {
+        let (owner, tenant) = user.map_or_else(Default::default, |user| (user.id, user.tenant));
+        let row = StoredRecord {
+            record: Record {
+                resource: op.resource,
+                id,
+                fields,
+            },
+            owner,
+            tenant,
+            incarnation: incarnation.clone(),
+            revision: 1,
+            cap_version: public.then_some(1),
+        };
+        let outcome = MutationOutcome {
             kind: MutationKind::Created,
             resource: op.resource,
             id,
             incarnation,
-        })
+        };
+        Ok((outcome, row))
     }
 
     async fn update_step(
@@ -733,7 +780,7 @@ impl Effects {
         op: &Operation,
         stored: &StoredRecord,
         assignments: Fields,
-    ) -> Result<MutationOutcome> {
+    ) -> Result<(MutationOutcome, StoredRecord)> {
         let schema = manifest::resource(&self.manifest, op.resource)?;
         for name in assignments.keys() {
             let field = schema
@@ -766,12 +813,21 @@ impl Effects {
             &fields,
         )
         .await?;
-        Ok(MutationOutcome {
+        let outcome = MutationOutcome {
             kind: MutationKind::Updated,
             resource: op.resource,
             id: stored.record.id,
             incarnation: stored.incarnation.clone(),
-        })
+        };
+        let row = StoredRecord {
+            record: Record {
+                fields,
+                ..stored.record.clone()
+            },
+            revision: next,
+            ..stored.clone()
+        };
+        Ok((outcome, row))
     }
 
     async fn delete_step(

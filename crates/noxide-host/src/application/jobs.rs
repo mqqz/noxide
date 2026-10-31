@@ -511,8 +511,9 @@ impl Application {
             },
         };
         // Only queue bookkeeping follows; no resource row can change while these
-        // two fixed effects are sealed. Deduplicate data loads, never authorization.
-        let mut final_rows = BTreeMap::new();
+        // two fixed effects are sealed. Deduplicate data loads, never authorization:
+        // rows this transaction wrote are already final and write-locked.
+        let mut final_rows = effects.written_rows.clone();
         // These are authoritative row-lock proofs within this transaction, not
         // configuration metadata. No resource writes occur between fixed effects.
         let mut locked_grants = BTreeMap::new();

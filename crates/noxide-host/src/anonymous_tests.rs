@@ -1034,6 +1034,7 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
             request,
             grants: std::collections::BTreeMap::from([("target".into(), grant)]),
             target_rows: Default::default(),
+            written_rows: Default::default(),
             capability_grant: None,
 
             calls: 16,

@@ -352,6 +352,7 @@ impl Application {
             capability_grant,
             grants: sealed.clone(),
             target_rows: records,
+            written_rows: Default::default(),
             calls: budget.database_calls,
             cursor: None,
             more: None,

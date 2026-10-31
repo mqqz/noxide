@@ -1262,6 +1262,7 @@ async fn follow_provenance_keeps_each_reference_field_separate() {
         },
         grants: Default::default(),
         target_rows: Default::default(),
+        written_rows: Default::default(),
         capability_grant: None,
         calls: 16,
         cursor: None,
@@ -1378,6 +1379,7 @@ async fn picker_query_ignores_and_preserves_unrelated_route_pagination() {
         },
         grants: Default::default(),
         target_rows: Default::default(),
+        written_rows: Default::default(),
         capability_grant: None,
         calls: 16,
         cursor: Some(noxide_protocol::query::CursorKey::Created {

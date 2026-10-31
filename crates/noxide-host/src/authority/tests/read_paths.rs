@@ -108,6 +108,7 @@ fn effects(tx: Transaction, m: &Manifest, time: AttemptTime) -> Effects {
         },
         grants: Default::default(),
         target_rows: Default::default(),
+        written_rows: Default::default(),
         capability_grant: None,
         calls: 64,
         cursor: None,

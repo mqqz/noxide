@@ -173,6 +173,7 @@ async fn effects(db: &Database, m: &Manifest, route: u32, target: u64) -> Effect
         },
         grants: Default::default(),
         target_rows: Default::default(),
+        written_rows: Default::default(),
         capability_grant: None,
 
         calls: 64,
@@ -324,6 +325,7 @@ async fn mutation_case(db: Database) {
     )
     .await
     .unwrap();
+    e.assert_written_rows_current().await;
     e.tx.commit().await.unwrap();
     let mut e = effects(&db, &m, 2, 12).await;
     let stored = crate::repository::load(&mut e.tx, &m, 1, 12)

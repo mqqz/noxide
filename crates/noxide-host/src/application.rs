@@ -1616,6 +1616,7 @@ impl Application {
                 request: request.clone(),
                 grants: BTreeMap::new(),
                 target_rows: BTreeMap::new(),
+                written_rows: Default::default(),
                 capability_grant: None,
                 calls: 16,
                 cursor,

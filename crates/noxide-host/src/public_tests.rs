@@ -309,6 +309,7 @@ fn effects(
         },
         grants: Default::default(),
         target_rows: Default::default(),
+        written_rows: Default::default(),
         capability_grant: None,
 
         calls: 64,
@@ -885,6 +886,7 @@ async fn sqlite_initial_create_commit_is_host_owned() {
                 continue;
             }
             let outcome = result.unwrap().remove(0);
+            e.assert_written_rows_current().await;
             let record = repository::load(&mut e.tx, &m, 1, outcome.id)
                 .await
                 .unwrap()
