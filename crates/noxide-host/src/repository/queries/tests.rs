@@ -440,6 +440,9 @@ async fn hundred_thousand_case(db: Database) {
     let mut read = m.operations[1].clone();
     read.id = 5;
     read.resource = 2;
+    read.policy = Policy {
+        any: vec![vec![Predicate::SameTenant]],
+    };
     m.operations.push(read);
     m.operations[2].bind.insert("workspace".into(), 5);
     m.routes.push(Route {
@@ -592,6 +595,7 @@ async fn hundred_thousand_case(db: Database) {
     scoped.operations[3].scope = Some("workspace".into());
     scoped.routes[0].params.clear();
     scoped.routes[0].resource = Some(2);
+    scoped.routes[0].operations.push(5);
     scoped.routes[0].path = "/workspaces/{workspace}/search".into();
     db.reconcile_query_indexes(&scoped).await.unwrap();
     owner().await.run(async {
