@@ -70,3 +70,13 @@ on fresh SQLite/PostgreSQL fixtures: exit0, two passed/zero ignored,
 `schema-pair-providers.log`. Added native cases accept pending/paired, reject
 an unknown state and a missing pair ID; metadata/FS commit ordering remains an
 independent runtime gate. Source formatting and diff checks pass.
+
+Independent review found a dormant PostgreSQL verifier error: expected index
+ownership was derived from the actual catalog table, permitting a required
+name on an unrelated compatible table. The reviewer's native expected-rejection
+test failed on5081d12 (fresh fixture retained). The correction takes only the
+quoted namespace from the catalog and pins the table from the host declaration.
+C adopted the independent test unchanged: both provider cases now pass with the
+spoofed index rejected, zero blob rows, and normal native constraints still
+verified. Evidence: schema-pinned-table-providers.log. Independent correction
+verification remains required before accepting this slice.

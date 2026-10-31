@@ -41,6 +41,31 @@ async fn contract(db: Database) {
     db.initialize().await.unwrap();
     db.initialize().await.unwrap();
     let begin = || db.begin(Instant::now() + Duration::from_secs(5));
+    // Independent adversarial review: named indexes must belong to their fixed
+    // framework table, even when an unrelated table has compatible columns.
+    let mut tx = begin().await.unwrap();
+    if matches!(tx.backend, Backend::Postgres(_)) {
+        tx.execute(
+            "CREATE TABLE shadow_blob_handles (upload_handle TEXT NOT NULL)",
+            &[],
+        )
+        .await
+        .unwrap();
+        tx.execute("DROP INDEX nx_blobs_handle", &[]).await.unwrap();
+        tx.execute(
+            "CREATE UNIQUE INDEX nx_blobs_handle ON shadow_blob_handles(upload_handle)",
+            &[],
+        )
+        .await
+        .unwrap();
+        let accepted = tx.check_blob_layout().await.is_ok();
+        let state = tx.fetch::<3>("SELECT t.relname,pg_catalog.pg_get_indexdef(i.indexrelid),CAST((SELECT count(*) FROM nx_blobs) AS TEXT) FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class t ON t.oid=i.indrelid JOIN pg_catalog.pg_class x ON x.oid=i.indexrelid WHERE x.relname='nx_blobs_handle'", &[]).await.unwrap();
+        eprintln!(
+            "P08 wrong-table probe: verifier_accepted={accepted}; table/index/blob_rows={state:?}"
+        );
+        assert!(!accepted, "index on wrong table accepted");
+    }
+    tx.rollback().await.unwrap();
     for (index, replacement) in [
         ("nx_blobs_handle", None),
         (

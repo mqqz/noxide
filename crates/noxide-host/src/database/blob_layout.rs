@@ -178,26 +178,29 @@ impl Transaction {
                 "SELECT name,CASE WHEN length(CAST(sql AS BLOB))<=2048 THEN sql ELSE NULL END,'','1' FROM sqlite_schema WHERE type='index' AND name IN ({names}) ORDER BY name LIMIT 11"
             ),
             Backend::Postgres(_) => format!(
-                "SELECT x.relname,CASE WHEN octet_length(pg_catalog.pg_get_indexdef(i.indexrelid))<=2048 THEN pg_catalog.pg_get_indexdef(i.indexrelid) ELSE NULL END,pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(t.relname),CASE WHEN i.indisvalid AND i.indisready AND i.indislive AND NOT i.indisexclusion THEN '1' ELSE '0' END FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class t ON t.oid=i.indrelid JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace JOIN pg_catalog.pg_class x ON x.oid=i.indexrelid WHERE n.nspname=current_schema() AND x.relname IN ({names}) ORDER BY x.relname LIMIT 11"
+                "SELECT x.relname,CASE WHEN octet_length(pg_catalog.pg_get_indexdef(i.indexrelid))<=2048 THEN pg_catalog.pg_get_indexdef(i.indexrelid) ELSE NULL END,pg_catalog.quote_ident(n.nspname),CASE WHEN i.indisvalid AND i.indisready AND i.indislive AND NOT i.indisexclusion THEN '1' ELSE '0' END FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class t ON t.oid=i.indrelid JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace JOIN pg_catalog.pg_class x ON x.oid=i.indexrelid WHERE n.nspname=current_schema() AND x.relname IN ({names}) ORDER BY x.relname LIMIT 11"
             ),
         };
         let mut actual: std::collections::BTreeMap<_, _> = self
             .fetch::<4>(&sql, &[])
             .await?
             .into_iter()
-            .map(|[name, ddl, table, usable]| (name, (ddl, table, usable)))
+            .map(|[name, ddl, namespace, usable]| (name, (ddl, namespace, usable)))
             .collect();
         ensure!(
             actual.len() == INDEXES.len(),
             "missing blob metadata indexes"
         );
         for (name, expected) in INDEXES {
-            let (ddl, table, usable) = actual
+            let (ddl, namespace, usable) = actual
                 .remove(*name)
                 .context("missing blob metadata index")?;
-            let expected = if table.is_empty() {
+            let expected = if namespace.is_empty() {
                 (*expected).to_owned()
             } else {
+                // The namespace comes from the provider; the owning table
+                // remains pinned by our declaration. A same-named index on
+                // an unrelated table must never satisfy this requirement.
                 let logical = if expected.contains(" ON nx_blobs(") {
                     "nx_blobs"
                 } else {
@@ -206,7 +209,7 @@ impl Transaction {
                 expected
                     .replace(
                         &format!(" ON {logical}("),
-                        &format!(" ON {table} USING btree ("),
+                        &format!(" ON {namespace}.{logical} USING btree ("),
                     )
                     .replace(
                         "state IN ('uploading','staged')",
