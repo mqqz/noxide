@@ -77,6 +77,13 @@ entries per batch. It rejects unknown names and nonregular entries rather than
 following or recursively deleting them. The background scanner, durable orphan
 observations/grace and SQL GC claims remain to be integrated.
 
+`blob_transport.rs` normalizes bounded filenames to at most 80 safe ASCII bytes
+and constructs attachment-only header values. Its monotonic transfer accounting
+enforces exact remaining bytes, 64 KiB chunks, 15-second idle and 120-second total
+ceilings, clamped to the existing request deadline. Empty polls cannot renew idle
+time. The eventual transport must enforce timers even when the client stops
+polling; a budget object alone cannot wake or cancel a stalled HTTP connection.
+
 ## Required integration
 
 The approved browser flow is one NoJS multipart POST to an existing web action.
@@ -140,11 +147,13 @@ python3 tools/test_blob_leaves.py \
 It includes the actual leaf sources without registering them, verifies that the
 entire resolved dependency identity/version/checksum closure is a subset of the
 workspace lock, and runs tests offline with two compiler jobs and one test thread.
-The initial checkpoint has 32 passing tests: exact file/buffer limits, immutable
+The frozen foundation has 35 passing tests: exact file/buffer limits, immutable
 round trips, no-follow/special-file/hardlink/mode negatives, create/rename
 collisions, finalization fault points, retained descriptors/leases, bounded scans,
-quota and object counts, corrupt metadata arithmetic, expiry, foreign handle binding, rollback reuse,
-association/GC generations, worker cancellation, stuck-worker capacity and panic.
+quota and object counts, corrupt metadata arithmetic, expiry, foreign handle
+binding, rollback reuse, association/GC generations, worker cancellation,
+stuck-worker capacity, panic, filename/header injection and monotonic idle,
+total and outer-deadline accounting.
 This does not prove provider transactions, HTTP, NoJS browser behavior, packaged
 SDK lowering or an enabled P08 capability. Those gates and independent review
 remain required.
