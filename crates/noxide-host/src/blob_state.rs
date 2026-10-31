@@ -56,7 +56,7 @@ pub(crate) struct Association {
     pub(crate) field: String,
 }
 impl Association {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             self.resource > 0
                 && self.id > 0
@@ -323,13 +323,16 @@ impl Metadata {
         Ok(transition)
     }
     fn finalized_handle(&self, object: &DurableObject) -> Result<UploadHandle> {
+        self.expected_handle(object.bytes(), object.sha256())
+    }
+    pub(crate) fn expected_handle(&self, bytes: u64, sha256: [u8; 32]) -> Result<UploadHandle> {
         let mut digest = Sha256::new();
         digest.update(b"noxide/finalized-upload/v1\0");
         digest.update(self.binding.slot.as_str().as_bytes());
         digest.update(self.key.as_str().as_bytes());
         digest.update(self.blob.as_str().as_bytes());
-        digest.update(object.bytes().to_be_bytes());
-        digest.update(object.sha256());
+        digest.update(bytes.to_be_bytes());
+        digest.update(sha256);
         let bytes = digest.finalize();
         let mut token = String::from("u1_");
         const HEX: &[u8; 16] = b"0123456789abcdef";

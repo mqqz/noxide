@@ -122,6 +122,30 @@ impl BlobStore {
         regular(&lease, 0o600, Some(0))?;
         fs::flock(&lease, FlockOperation::NonBlockingLockExclusive)
             .context("blob store already owned")?;
+        // A configured private directory is not automatically an object store.
+        // Refuse unrelated root entries rather than adopt/clean an operator's
+        // existing data. The six fixed layout names plus dots bound this scan.
+        let mut entries = fs::Dir::read_from(&root)?;
+        let mut count = 0;
+        for entry in &mut entries {
+            count += 1;
+            ensure!(count <= 8, "unexpected blob store root layout");
+            let entry = entry?;
+            let name = entry.file_name().to_bytes();
+            ensure!(
+                matches!(
+                    name,
+                    b"." | b".."
+                        | b"identity"
+                        | b"lock"
+                        | b"partial"
+                        | b"objects"
+                        | b"pair"
+                        | b"pair.pending"
+                ),
+                "unexpected blob store root entry"
+            );
+        }
         let identity = identity(&root)?;
         let partial = private_dir(&root, "partial")?;
         let objects = private_dir(&root, "objects")?;
@@ -482,6 +506,12 @@ fn identity(root: &OwnedFd) -> Result<ObjectKey> {
         Err(error) => Err(error).context("create blob store identity"),
     }
 }
+
+#[path = "blob_pairing.rs"]
+mod pairing;
+pub(crate) use pairing::{
+    DurablePairMarker, PairId, PairObservation, PairPhase, PairRecord, PairStep,
+};
 
 #[cfg(test)]
 #[path = "blob_store_tests.rs"]

@@ -316,3 +316,18 @@ fn malformed_keys_never_become_paths() {
         assert!(ObjectKey::parse(bad).is_err());
     }
 }
+
+#[test]
+fn unrelated_private_directory_is_refused_without_adopting_or_removing_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("store");
+    stdfs::create_dir(&root).unwrap();
+    stdfs::set_permissions(&root, stdfs::Permissions::from_mode(0o700)).unwrap();
+    let private = root.join("old-private-data");
+    stdfs::write(&private, b"retained operator data").unwrap();
+    assert!(BlobStore::open(&root).is_err());
+    assert_eq!(stdfs::read(&private).unwrap(), b"retained operator data");
+    assert!(!root.join("identity").exists());
+    assert!(!root.join("objects").exists());
+    assert!(!root.join("partial").exists());
+}
