@@ -43,6 +43,8 @@ fn bundle(root: &Path) -> String {
     )
     .unwrap();
     fs::write(bundle.join("app.component.wasm"), support::component(None)).unwrap();
+    // Empty canonical pack: the strict bundle contract still includes assets.
+    fs::write(bundle.join("assets.pack"), b"NXAS\x01\0\0\0\0\0").unwrap();
     URL_SAFE_NO_PAD.encode(noxide_host::manifest::digest(&manifest).unwrap())
 }
 #[test]
@@ -122,6 +124,11 @@ fn build_provenance_does_not_bypass_component_admission() {
             b"invalid component",
         )
         .unwrap();
-        assert!(!run(&root, &["approve", &digest]).status.success());
+        let rejected = run(&root, &["approve", &digest]);
+        assert!(!rejected.status.success());
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr)
+                .contains("not an admitted portable component")
+        );
     }
 }
