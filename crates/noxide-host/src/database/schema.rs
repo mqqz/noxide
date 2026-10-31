@@ -48,6 +48,14 @@ impl Database {
 }
 
 impl Transaction {
+    pub(crate) fn query_provider(&self) -> Result<crate::query_plan::NativeProvider> {
+        match &self.backend {
+            Backend::Sqlite(_) => Ok(crate::query_plan::NativeProvider::Sqlite),
+            Backend::Postgres(_) => Ok(crate::query_plan::NativeProvider::Postgres),
+            Backend::Closed => anyhow::bail!(lifecycle::Unavailable::Closed),
+        }
+    }
+
     pub(super) async fn schema_definition(
         &mut self,
     ) -> Result<
