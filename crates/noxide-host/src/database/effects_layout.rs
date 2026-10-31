@@ -417,3 +417,6 @@ impl Transaction {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;
