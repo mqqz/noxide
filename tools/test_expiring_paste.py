@@ -292,7 +292,8 @@ def main():
                      "limits": {"pending_per_app": 64, "pending_per_tenant": 64, "worker_concurrency": 1}},
             "effects": {"grants": [{"endpoint": "synthetic_events", "tenant": "", "host": SYNTHETIC_HOST, "port": 443, "path": "/published"}],
                         "secrets": [{"slot": "synthetic_events_token", "path": "synthetic-token"}], "tor_proxy": proxy.address,
-                        "limits": {"pending_per_app": 64, "pending_per_tenant": 64, "worker_concurrency": 1}},
+                        # One pending capture lets a second paste prove cross-feature rollback.
+                        "limits": {"pending_per_app": 64 if args.await_expiry else 1, "pending_per_tenant": 64 if args.await_expiry else 1, "worker_concurrency": 1}},
         }
         config_path.write_text(json.dumps(config, indent=2) + "\n")
         approval = json.loads(command("deployment-hash", config_path))
@@ -354,6 +355,17 @@ def main():
             while rows("SELECT state,attempts FROM nx_outbox") != [["pending", "1"]]:
                 assert time.monotonic() < deadline, "outbox did not settle a bounded retry after proxy rejection"
                 time.sleep(.02)  # committed outbox state determines completion
+            if not args.await_expiry:
+                # The outbox quota rejects the second capture after the record,
+                # blob attachment and cleanup job were staged in the same
+                # transaction; all of them and the receipt roll back together.
+                _, _, home = read(creator, "/", "quota-create-form")
+                before = snapshot()
+                upload(creator, upload_form(home), "Second paste", "Second body", "second.bin", b"second bytes", "outbox-quota-rollback", (409, 422, 503))
+                after = snapshot()
+                assert {key: after[key] for key in ("records", "receipts", "jobs", "effects")} == {key: before[key] for key in ("records", "receipts", "jobs", "effects")}, "quota failure committed part of the action"
+                assert sorted(row[0] for row in rows("SELECT state FROM nx_blobs")) == ["attached", "staged"], "the rejected upload was attached or discarded"
+                report["cross_feature_rollback"] = "outbox_quota_rolled_back_record_blob_job_receipt"
             report["normal_forms"] = True
             if args.await_expiry:
                 original_jobs = {row[0] for row in rows("SELECT id FROM nx_jobs")}
