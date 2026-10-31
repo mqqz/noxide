@@ -97,6 +97,7 @@ impl Transaction {
         contract: &str,
         effective: Option<&EffectiveJobDeployment>,
         declarations: Option<&JobContract>,
+        effects_enabled: bool,
     ) -> Result<()> {
         self.maintenance_checkpoint()?;
         ensure!(
@@ -106,7 +107,7 @@ impl Transaction {
         let epoch = crate::security::random_id()?;
         let limits = effective.map(|e| e.limits).unwrap_or_default();
         limits.validate()?;
-        self.execute("INSERT INTO nx_job_runtime(singleton,deployment,contract,epoch,state,pending_limit,tenant_limit,concurrency) VALUES(1,$1,$2,$3,$4,$5,$6,$7) ON CONFLICT(singleton) DO NOTHING", &[generation.into(), contract.into(), epoch.into(), if effective.is_some() { "active" } else { "paused" }.into(), i64::from(limits.pending_per_app).into(), i64::from(limits.pending_per_tenant).into(), i64::from(limits.worker_concurrency).into()]).await?;
+        self.execute("INSERT INTO nx_job_runtime(singleton,deployment,contract,epoch,state,pending_limit,tenant_limit,concurrency) VALUES(1,$1,$2,$3,$4,$5,$6,$7) ON CONFLICT(singleton) DO NOTHING", &[generation.into(), contract.into(), epoch.into(), if effective.is_some() || effects_enabled { "active" } else { "paused" }.into(), i64::from(limits.pending_per_app).into(), i64::from(limits.pending_per_tenant).into(), i64::from(limits.worker_concurrency).into()]).await?;
         // Deployment changes are allowed only here, after central deployment
         // admission; ordinary operator commands remain generation-fenced.
         self.execute(
@@ -136,7 +137,7 @@ impl Transaction {
         // pause until an explicit current-generation grant, even when approval
         // bytes are unchanged.
         let preserve_pause = generation_changed && old_state == "paused";
-        let runtime_state = if effective.is_some() && !preserve_pause {
+        let runtime_state = if (effective.is_some() || effects_enabled) && !preserve_pause {
             "active"
         } else {
             "paused"
@@ -157,6 +158,7 @@ impl Transaction {
             old_epoch.clone()
         };
         if changed {
+            self.pause_effects_for_epoch().await?;
             self.execute("UPDATE nx_jobs SET state='paused',reason='approval_changed',lease_until_ms=0 WHERE state IN ('pending','running')", &[]).await?;
             self.execute(
                 "UPDATE nx_job_recurring SET state='paused' WHERE state='active'",
@@ -330,6 +332,7 @@ impl Transaction {
             &[generation.into()],
         )
         .await?;
+        self.pause_effects_for_epoch().await?;
         Ok(())
     }
 

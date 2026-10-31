@@ -26,6 +26,7 @@ impl Application {
                 self.keys.signing_edit_key()?;
             }
             self.presentation.validate(&self.manifest)?;
+            self.prepare_effect_delivery(deadline.into_std()).await?;
             lease.begin(&self.database).await?;
             let tx = lease.tx();
             tx.check_storage().await?;
@@ -42,11 +43,23 @@ impl Application {
                 &self.contract,
                 self.jobs.as_ref().map(|jobs| jobs.effective()),
                 self.manifest.jobs.as_ref(),
+                self.effects.is_some(),
+            )
+            .await?;
+            tx.activate_effects(
+                &generation,
+                &self.contract,
+                self.effects.as_ref().map(|effects| effects.effective()),
+                self.effects
+                    .as_ref()
+                    .map(|effects| effects.owner_directory_digest())
+                    .transpose()?,
             )
             .await?;
             let outcome = lifecycle_clock::tick(tx, &self.clock).await;
             lease.finish().await?;
             let tick = outcome?;
+            self.activate_effect_delivery(deadline.into_std()).await?;
             self.activate_blobs(deadline).await?;
             // No process readiness on a failed/unknown commit acknowledgement.
             ensure!(

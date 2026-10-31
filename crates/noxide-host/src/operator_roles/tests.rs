@@ -304,6 +304,7 @@ async fn fresh_forms(db: &Database) {
         HostKeys::generate().unwrap(),
         Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
@@ -624,6 +625,7 @@ async fn ordinary_actions_cannot_write_moderator_fields_or_reuse_credential() {
             keys,
             Limits::default(),
             crate::DeploymentResources {
+                effects: None,
                 jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,

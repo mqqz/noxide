@@ -556,6 +556,7 @@ async fn application(
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                effects: None,
                 jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,

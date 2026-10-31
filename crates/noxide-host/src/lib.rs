@@ -3,8 +3,11 @@ pub mod assets;
 mod blob_inspect;
 mod blob_io;
 pub mod deployment;
+pub mod effect_deployment;
 pub mod job_deployment;
 pub use deployment::{BlobDeployment, DeploymentResources};
+pub use effect_deployment::{EffectDeployment, EffectGrant, EffectLimits, EffectSecret};
+pub use effects::{EffectOperatorCommand, EffectOperatorResult, EffectSummary};
 pub use job_deployment::{JobDeployment, JobGrant, JobLimits};
 pub use jobs::{JobOperatorCommand, JobOperatorResult, JobSummary};
 mod blob_metadata;
@@ -13,6 +16,7 @@ mod blob_state;
 mod blob_store;
 mod blob_transport;
 mod database;
+mod effects;
 mod jobs;
 mod lifecycle_clock;
 pub mod manifest;
@@ -29,7 +33,7 @@ pub use security::HostKeys;
 mod application;
 mod repository;
 pub use application::{
-    ActionRejection, Application, JobRunOutcome, LoginChallenge, RequestError,
+    ActionRejection, Application, EffectRunOutcome, JobRunOutcome, LoginChallenge, RequestError,
     ValidatedActionRejection,
 };
 pub mod http;

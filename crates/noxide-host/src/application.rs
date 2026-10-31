@@ -9,6 +9,9 @@ pub use action::{ActionRejection, ValidatedActionRejection};
 use action::{CanonicalActionInput, ExecutionBudget};
 mod capabilities;
 mod clock;
+mod effect_worker;
+pub use effect_worker::EffectRunOutcome;
+mod effects;
 mod jobs;
 mod navigation;
 mod submission;
@@ -308,6 +311,7 @@ pub struct Application {
     pub(crate) keys: Arc<HostKeys>,
     database: Database,
     jobs: Option<job_worker::JobRuntime>,
+    effects: Option<effect_worker::EffectRuntime>,
     runtime: Runtime,
     contract: String,
     deployment: String,
@@ -725,6 +729,7 @@ impl Application {
             &m,
             resources.blobs.as_ref().map(|b| &b.ceilings),
             resources.jobs.as_ref(),
+            resources.effects.as_ref(),
         )?;
         let digest = approval.digest;
         ensure!(
@@ -759,6 +764,9 @@ impl Application {
             assets: Arc::new(resources.assets),
             blobs,
             jobs: approval.effective_jobs.map(job_worker::JobRuntime::new),
+            effects: approval
+                .effective_effects
+                .map(effect_worker::EffectRuntime::new),
             asset_responses: Arc::new(tokio::sync::Semaphore::new(8)),
             registration: auth::Registration::Closed,
             plans: crate::query_plan::compile_all(&m)?,
@@ -1700,6 +1708,7 @@ mod clock_tests {
                 HostKeys::generate().unwrap(),
                 Limits::default(),
                 crate::DeploymentResources {
+                    effects: None,
                     jobs: None,
                     assets: crate::assets::AssetBundle::default(),
                     blobs: None,
@@ -1816,6 +1825,7 @@ mod clock_tests {
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                effects: None,
                 jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
@@ -1988,6 +1998,7 @@ mod clock_tests {
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                effects: None,
                 jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
@@ -2078,6 +2089,7 @@ mod identity_time_tests {
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                effects: None,
                 jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,

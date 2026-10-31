@@ -185,7 +185,8 @@ async fn actual_jobs_cli_reconciles_explicitly_and_preserves_fork_pause() {
         }],
         limits: JobLimits::default(),
     };
-    let approved = noxide_host::deployment::approval_digest(&m, None, Some(&deployment)).unwrap();
+    let approved =
+        noxide_host::deployment::approval_digest(&m, None, Some(&deployment), None).unwrap();
     let component = support::component(None);
     let manifest_bytes = serde_json::to_vec(&m).unwrap();
     let keys = serde_json::to_vec(&HostKeys::generate().unwrap()).unwrap();
@@ -214,6 +215,7 @@ async fn actual_jobs_cli_reconciles_explicitly_and_preserves_fork_pause() {
         serde_json::from_slice(&keys).unwrap(),
         Limits::default(),
         DeploymentResources {
+            effects: None,
             assets: Default::default(),
             blobs: None,
             jobs: Some(deployment),

@@ -696,6 +696,7 @@ async fn contract(db: Database) {
         crate::HostKeys::generate().unwrap(),
         crate::runtime::Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,

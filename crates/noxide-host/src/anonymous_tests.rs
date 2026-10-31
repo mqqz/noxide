@@ -156,6 +156,7 @@ async fn app(db: Database) -> Arc<Application> {
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                effects: None,
                 jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
@@ -255,6 +256,7 @@ async fn lifecycle(db: Database) {
         rotated_keys,
         Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
@@ -281,6 +283,7 @@ async fn lifecycle(db: Database) {
         removed,
         Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
@@ -586,6 +589,7 @@ async fn public_create_rejects_guest_outcomes_and_requires_an_edit_signing_key()
         HostKeys::generate().unwrap(),
         Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
@@ -624,6 +628,7 @@ async fn public_create_rejects_guest_outcomes_and_requires_an_edit_signing_key()
         keys,
         Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
@@ -926,6 +931,7 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
             keys,
             Limits::default(),
             crate::DeploymentResources {
+                effects: None,
                 jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
@@ -1090,6 +1096,7 @@ async fn persistent_resource_secret_contract(db: Database) {
         keys,
         Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
@@ -1169,6 +1176,7 @@ async fn persistent_resource_secret_contract(db: Database) {
         keys,
         Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
@@ -1738,6 +1746,7 @@ async fn sqlite_initial_fields_reject_clients_and_stale_contracts() {
                     serde_json::from_slice(&keys).unwrap(),
                     Limits::default(),
                     crate::DeploymentResources {
+                        effects: None,
                         jobs: None,
                         assets: crate::assets::AssetBundle::default(),
                         blobs: None,

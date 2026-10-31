@@ -23,12 +23,14 @@ pub struct DeploymentResources {
     pub assets: AssetBundle,
     pub blobs: Option<BlobDeployment>,
     pub jobs: Option<crate::job_deployment::JobDeployment>,
+    pub effects: Option<crate::effect_deployment::EffectDeployment>,
 }
 
 pub struct DeploymentApproval {
     pub manifest_digest: [u8; 32],
     pub effective: Option<BlobPolicy>,
     pub effective_jobs: Option<crate::job_deployment::EffectiveJobDeployment>,
+    pub effective_effects: Option<crate::effect_deployment::EffectiveEffectDeployment>,
     pub digest: [u8; 32],
 }
 
@@ -38,6 +40,7 @@ pub fn approval(
     manifest: &Manifest,
     ceilings: Option<&BlobCeilings>,
     jobs: Option<&crate::job_deployment::JobDeployment>,
+    effects: Option<&crate::effect_deployment::EffectDeployment>,
 ) -> Result<DeploymentApproval> {
     let manifest_digest = manifest::digest(manifest)?;
     let effective = match (&manifest.blobs, ceilings) {
@@ -58,6 +61,14 @@ pub fn approval(
         }
         (None, Some(_)) => anyhow::bail!("job configuration has no declared workers"),
     };
+    let effective_effects = match (&manifest.effects, effects) {
+        (None, None) => None,
+        (Some(contract), Some(approved)) => Some(approved.effective(contract)?),
+        (Some(_), None) => {
+            anyhow::bail!("effect declarations require explicit endpoint deployment approval")
+        }
+        (None, Some(_)) => anyhow::bail!("effect configuration has no declared endpoints"),
+    };
     let base = compose(manifest_digest, effective.as_ref())?;
     let digest = if let Some(jobs) = &effective_jobs {
         let bytes = jobs.approval_bytes()?;
@@ -70,10 +81,22 @@ pub fn approval(
     } else {
         base
     };
+    let digest = if let Some(effects) = &effective_effects {
+        let bytes = effects.approval_bytes()?;
+        let mut hash = Sha256::new();
+        hash.update(b"noxide/effect-deployment/v1\0");
+        hash.update(digest);
+        hash.update((bytes.len() as u64).to_be_bytes());
+        hash.update(bytes);
+        hash.finalize().into()
+    } else {
+        digest
+    };
     Ok(DeploymentApproval {
         manifest_digest,
         effective,
         effective_jobs,
+        effective_effects,
         digest,
     })
 }
@@ -81,8 +104,9 @@ pub fn approval_digest(
     manifest: &Manifest,
     ceilings: Option<&BlobCeilings>,
     jobs: Option<&crate::job_deployment::JobDeployment>,
+    effects: Option<&crate::effect_deployment::EffectDeployment>,
 ) -> Result<[u8; 32]> {
-    Ok(approval(manifest, ceilings, jobs)?.digest)
+    Ok(approval(manifest, ceilings, jobs, effects)?.digest)
 }
 
 fn compose(requested: [u8; 32], effective: Option<&BlobPolicy>) -> Result<[u8; 32]> {
@@ -126,12 +150,15 @@ mod tests {
     fn no_blob_has_one_natural_identity_and_rejects_unused_store_configuration() {
         let manifest = crate::test_support::manifest();
         let expected = manifest::digest(&manifest).unwrap();
-        let result = approval(&manifest, None, None).unwrap();
+        let result = approval(&manifest, None, None, None).unwrap();
         assert_eq!(result.digest, expected);
         assert_eq!(result.manifest_digest, expected);
         assert!(result.effective.is_none());
-        assert_eq!(approval_digest(&manifest, None, None).unwrap(), expected);
-        assert!(approval(&manifest, Some(&BlobCeilings::default()), None).is_err());
+        assert_eq!(
+            approval_digest(&manifest, None, None, None).unwrap(),
+            expected
+        );
+        assert!(approval(&manifest, Some(&BlobCeilings::default()), None, None).is_err());
     }
     #[test]
     fn composite_hash_binds_effective_quota_and_requested_contract() {

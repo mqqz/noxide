@@ -372,6 +372,7 @@ async fn invalid_parameters_are_not_found_before_database_or_session_lookup() {
         keys,
         Default::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,

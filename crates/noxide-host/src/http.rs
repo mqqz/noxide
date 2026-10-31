@@ -948,6 +948,7 @@ mod tests {
                     HostKeys::generate().unwrap(),
                     Limits::default(),
                     crate::DeploymentResources {
+                        effects: None,
                         jobs: None,
                         assets: crate::assets::AssetBundle::default(),
                         blobs: None,
@@ -1126,6 +1127,7 @@ mod tests {
                     HostKeys::generate().unwrap(),
                     Limits::default(),
                     crate::DeploymentResources {
+                        effects: None,
                         jobs: None,
                         assets: crate::assets::AssetBundle::default(),
                         blobs: None,

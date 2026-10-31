@@ -22,6 +22,7 @@ async fn app(db: Database, m: Manifest) -> Arc<Application> {
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                effects: None,
                 jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
@@ -312,6 +313,7 @@ async fn restart_clock_app(db: &Database, keys: &crate::HostKeys) -> Arc<Applica
             serde_json::from_slice(&serde_json::to_vec(keys).unwrap()).unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                effects: None,
                 jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
@@ -595,6 +597,7 @@ async fn read_only_clock_and_schema(db: Database) {
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                effects: None,
                 jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,

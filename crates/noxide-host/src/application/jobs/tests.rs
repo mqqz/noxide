@@ -160,7 +160,8 @@ impl Case {
             }],
             limits: JobLimits::default(),
         };
-        let approved = crate::deployment::approval_digest(&m, None, Some(&job_deployment)).unwrap();
+        let approved =
+            crate::deployment::approval_digest(&m, None, Some(&job_deployment), None).unwrap();
         let app = Arc::new(
             Application::new(
                 &component,
@@ -170,6 +171,7 @@ impl Case {
                 HostKeys::generate().unwrap(),
                 Limits::default(),
                 crate::DeploymentResources {
+                    effects: None,
                     assets: crate::assets::AssetBundle::default(),
                     blobs: None,
                     jobs: Some(job_deployment),

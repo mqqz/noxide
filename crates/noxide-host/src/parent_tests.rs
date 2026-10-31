@@ -534,6 +534,7 @@ async fn forms_case(db: Database, _sqlite: bool) {
         HostKeys::generate().unwrap(),
         Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
@@ -845,6 +846,7 @@ async fn optional_auth_pages_omit_declared_owner_forms_for_anonymous_visitors() 
         HostKeys::generate().unwrap(),
         Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
@@ -1227,6 +1229,7 @@ async fn opaque_cursors_bind_parent_contract_deployment_and_identity() {
         serde_json::from_slice(&serde_json::to_vec(&keys).unwrap()).unwrap(),
         Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
@@ -1317,6 +1320,7 @@ async fn opaque_cursors_bind_parent_contract_deployment_and_identity() {
         serde_json::from_slice(&serde_json::to_vec(&keys).unwrap()).unwrap(),
         Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
@@ -1340,6 +1344,7 @@ async fn opaque_cursors_bind_parent_contract_deployment_and_identity() {
         keys,
         Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
@@ -1371,6 +1376,7 @@ async fn full_creation_benchmark(db: Database) {
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                effects: None,
                 jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
@@ -1515,6 +1521,7 @@ pub(crate) async fn redirect_app(db: Database) -> (Application, Manifest) {
         HostKeys::generate().unwrap(),
         Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,

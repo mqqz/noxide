@@ -167,7 +167,7 @@ async fn contract(db: Database) {
             .await
             .unwrap_err()
             .to_string()
-            .contains("storage 14 requires")
+            .contains("storage 15 requires")
     );
     let mut tx = begin().await.unwrap();
     assert_eq!(

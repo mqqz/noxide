@@ -1,4 +1,5 @@
 mod deps;
+mod effects;
 mod jobs;
 mod lifecycle;
 mod project;
@@ -32,6 +33,8 @@ struct Config {
     blobs: Option<noxide_host::BlobDeployment>,
     #[serde(default)]
     jobs: Option<noxide_host::JobDeployment>,
+    #[serde(default)]
+    effects: Option<noxide_host::EffectDeployment>,
     approved_contract: String,
     origin: String,
     listen: ListenConfig,
@@ -51,6 +54,17 @@ struct Config {
     presentation: noxide_host::Presentation,
 }
 impl Config {
+    /// Resolve only host-owned resources after pure approval. Paths and secret
+    /// material are excluded from capability summaries and deployment identity.
+    fn effect_deployment(&self, base: &Path) -> Option<noxide_host::EffectDeployment> {
+        self.effects.clone().map(|mut effects| {
+            for secret in &mut effects.secrets {
+                secret.path = base.join(&secret.path);
+            }
+            let keys = base.join(&self.keys);
+            effects.with_runtime_directory(keys.parent().unwrap_or(base).to_owned())
+        })
+    }
     fn approval(
         &self,
         manifest: &noxide::__private::Manifest,
@@ -59,6 +73,7 @@ impl Config {
             manifest,
             self.blobs.as_ref().map(|blobs| &blobs.ceilings),
             self.jobs.as_ref(),
+            self.effects.as_ref(),
         )
     }
 }
@@ -204,7 +219,7 @@ async fn main() -> Result<()> {
         }
         "help" | "--help" | "-h" => {
             println!(
-                "Noxide {}\n\nCommands:\n  new NEW_DIRECTORY\n  setup [--kernel FILE] [--toolchain DIRECTORY]\n  dev [BUILD_OPTIONS]\n  approve [--dev] CONTRACT_DIGEST\n  check|test|build [--app APP] [--name CRATE] [--output NEW_DIR] [--isolated --kernel KERNEL --toolchain TOOLCHAIN] [--framework CHECKOUT]\n  deps check [--app APP] [BUILD_ENVIRONMENT_OPTIONS]\n  deps resolve [--app APP] --output NEW_DIRECTORY [BUILD_ENVIRONMENT_OPTIONS]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  schema indexes CONFIG\n  init CONFIG.json\n  account CONFIG.json LOGIN PASSWORD_FILE [TENANT]\n  account-lookup CONFIG.json LOGIN\n  account-disable|account-enable|account-delete CONFIG.json ACCOUNT_ID\n  role grant|revoke CONFIG.json USER ROLE (--global | --tenant TENANT)\n  role list CONFIG.json USER\n  contract-hash MANIFEST.json\n  deployment-hash CONFIG.json\n  jobs inspect CONFIG [AFTER] | cancel|reconcile CONFIG ID\n  jobs grant|revoke CONFIG TENANT WORKER | fork|worker-once CONFIG\n  component CORE.wasm COMPONENT.wasm\n  serve [CONFIG.json]\n  maintain CONFIG.json\n  recover-clock CONFIG.json (stop serving first; configure a fresh host key)\n  keygen NEW_KEYS.json\n  edit-key-rotate KEYS.json\n  invite CONFIG.json [--expires-days N]\n\nBUILD_ENVIRONMENT_OPTIONS: --framework CHECKOUT, --cargo-home DIRECTORY, --toolchain DIRECTORY, --seconds N, --isolated [--kernel FILE]. Dependency commands resolve offline without compiling or approving; resolve emits a candidate lock for review.\n\nApplication builds run locally with host access. Use --isolated for untrusted apps or dependencies. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
+                "Noxide {}\n\nCommands:\n  new NEW_DIRECTORY\n  setup [--kernel FILE] [--toolchain DIRECTORY]\n  dev [BUILD_OPTIONS]\n  approve [--dev] CONTRACT_DIGEST\n  check|test|build [--app APP] [--name CRATE] [--output NEW_DIR] [--isolated --kernel KERNEL --toolchain TOOLCHAIN] [--framework CHECKOUT]\n  deps check [--app APP] [BUILD_ENVIRONMENT_OPTIONS]\n  deps resolve [--app APP] --output NEW_DIRECTORY [BUILD_ENVIRONMENT_OPTIONS]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  schema indexes CONFIG\n  init CONFIG.json\n  account CONFIG.json LOGIN PASSWORD_FILE [TENANT]\n  account-lookup CONFIG.json LOGIN\n  account-disable|account-enable|account-delete CONFIG.json ACCOUNT_ID\n  role grant|revoke CONFIG.json USER ROLE (--global | --tenant TENANT)\n  role list CONFIG.json USER\n  contract-hash MANIFEST.json\n  deployment-hash CONFIG.json\n  jobs inspect CONFIG [AFTER] | cancel|reconcile CONFIG ID\n  jobs grant|revoke CONFIG TENANT WORKER | fork|worker-once CONFIG\n  effects inspect CONFIG [AFTER] | cancel|retry|resume CONFIG ID\n  effects grant|revoke CONFIG TENANT ENDPOINT | revoke-secret CONFIG SLOT\n  effects worker-once|fork CONFIG\n  component CORE.wasm COMPONENT.wasm\n  serve [CONFIG.json]\n  maintain CONFIG.json\n  recover-clock CONFIG.json (stop serving first; configure a fresh host key)\n  keygen NEW_KEYS.json\n  edit-key-rotate KEYS.json\n  invite CONFIG.json [--expires-days N]\n\nBUILD_ENVIRONMENT_OPTIONS: --framework CHECKOUT, --cargo-home DIRECTORY, --toolchain DIRECTORY, --seconds N, --isolated [--kernel FILE]. Dependency commands resolve offline without compiling or approving; resolve emits a candidate lock for review.\n\nApplication builds run locally with host access. Use --isolated for untrusted apps or dependencies. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
                 env!("CARGO_PKG_VERSION")
             );
         }
@@ -222,6 +237,14 @@ async fn main() -> Result<()> {
             let manifest =
                 noxide_host::manifest::parse(&read(&base.join(&config.manifest), 32_768)?)?;
             let approval = config.approval(&manifest)?;
+            let effect_disclosures = manifest
+                .actions
+                .iter()
+                .map(|action| {
+                    noxide_host::manifest::effect_disclosures(&manifest, action.id)
+                        .map(|fields| (action.id, fields))
+                })
+                .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -230,6 +253,10 @@ async fn main() -> Result<()> {
                     "effective_blobs": approval.effective,
                     "requested_jobs": manifest.jobs,
                     "effective_jobs": approval.effective_jobs,
+                    "requested_effects": manifest.effects,
+                    "effective_effects": approval.effective_effects,
+                    "effect_transport": manifest.effects.as_ref().map(|_| "HTTPS POST JSON via Tor SOCKS remote RESOLVE and numeric CONNECT"),
+                    "effect_disclosures": effect_disclosures,
                     "deployment_digest": URL_SAFE_NO_PAD.encode(approval.digest),
                 }))?
             );
@@ -259,6 +286,7 @@ async fn main() -> Result<()> {
             println!("Added a signing edit key. Previous edit keys remain verify-only.");
         }
         "jobs" => jobs::run(&args[1..]).await?,
+        "effects" => effects::run(&args[1..]).await?,
         "recover-clock" => {
             ensure!(
                 args.len() == 2,
@@ -400,13 +428,14 @@ async fn main() -> Result<()> {
             };
             let app = Arc::new(
                 Application::new(
-                    &read(&base.join(config.component), 2 * 1024 * 1024)?,
+                    &read(&base.join(&config.component), 2 * 1024 * 1024)?,
                     &declarations,
                     approved,
                     database(&config.database, &base)?,
                     keys,
                     Limits::default(),
                     noxide_host::DeploymentResources {
+                        effects: config.effect_deployment(&base),
                         jobs: config.jobs.clone(),
                         assets,
                         blobs: config.blobs.as_ref().map(|deployment| {

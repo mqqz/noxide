@@ -243,6 +243,20 @@ pub async fn serve(
             return Err(error);
         }
     };
+    let effects = match app.start_effect_service() {
+        Ok(effects) => effects,
+        Err(error) => {
+            let jobs_stopped = if let Some(jobs) = jobs {
+                jobs.shutdown().await
+            } else {
+                Ok(())
+            };
+            let clock_stopped = checkpoint.shutdown().await;
+            jobs_stopped?;
+            clock_stopped?;
+            return Err(error);
+        }
+    };
     let ordinary = app.request_lifecycle();
     let router = router(app, origin);
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
@@ -288,6 +302,11 @@ pub async fn serve(
     .await;
     connections.abort_all();
     while connections.join_next().await.is_some() {}
+    let effects_stopped = if let Some(effects) = effects {
+        effects.shutdown().await
+    } else {
+        Ok(())
+    };
     let jobs_stopped = if let Some(jobs) = jobs {
         jobs.shutdown().await
     } else {
@@ -295,6 +314,7 @@ pub async fn serve(
     };
     let ordinary_stopped = ordinary.shutdown().await;
     let clock_stopped = checkpoint.shutdown().await;
+    effects_stopped?;
     jobs_stopped?;
     ordinary_stopped?;
     clock_stopped?;

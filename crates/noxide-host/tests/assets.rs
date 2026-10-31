@@ -80,6 +80,7 @@ fn constructor_cannot_substitute_empty_bundle_for_approved_assets() {
             HostKeys::generate().unwrap(),
             Default::default(),
             noxide_host::DeploymentResources {
+                effects: None,
                 jobs: None,
                 assets: AssetBundle::default(),
                 blobs: None
@@ -162,6 +163,7 @@ async fn public_assets_are_exact_no_store_typed_and_bounded_until_body_drop() {
             HostKeys::generate().unwrap(),
             Default::default(),
             noxide_host::DeploymentResources {
+                effects: None,
                 jobs: None,
                 assets: bundle,
                 blobs: None,

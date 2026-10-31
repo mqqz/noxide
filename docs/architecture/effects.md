@@ -48,6 +48,10 @@ socket stopped. Reuse the existing host process-fence primitive if required to
 retain slots through actual cancellation; do not add another workflow executor
 or replay subsystem. The proposed 60-second outbox lease covers a 30-second
 attempt; job leases remain 30 seconds. Connect is bounded to ten seconds.
+A separate delivery request root has a single 30-second total deadline across
+claim, authorization, secrets, transport and finalization, with two seconds
+reserved for finalization/cleanup. It retains the existing 16 logical calls and
+256 actual-statement ceiling; it never extends the source action deadline.
 
 Up to five automatic attempts fit within 24 hours of first eligibility, using
 bounded backoff/Retry-After. Validated 2xx means delivered even if response discard

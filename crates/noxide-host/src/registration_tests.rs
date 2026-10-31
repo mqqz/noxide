@@ -25,6 +25,7 @@ async fn app(db: Database, mode: Registration) -> Arc<Application> {
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                effects: None,
                 jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
@@ -117,7 +118,7 @@ async fn invitation_contract(db: Database) {
         tx.fetch::<1>("SELECT CAST(version AS TEXT) FROM nx_storage", &[])
             .await
             .unwrap()[0][0],
-        "14"
+        "15"
     );
     let invites=tx.fetch::<4>("SELECT issuer,CAST(expires AS TEXT),CASE WHEN redeemed_at IS NULL THEN 'fresh' ELSE 'used' END,CASE WHEN redeemed_by IS NULL THEN 'none' ELSE redeemed_by END FROM nx_invites ORDER BY expires DESC",&[]).await.unwrap();
     assert_eq!(invites.len(), 2);
@@ -601,6 +602,7 @@ async fn clock_recovery_invites_contract(db: Database) {
         keys,
         Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,

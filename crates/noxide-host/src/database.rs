@@ -2,6 +2,7 @@ mod blob_layout;
 #[cfg(test)]
 mod bootstrap_close_tests;
 mod commit;
+mod effects_layout;
 mod jobs_layout;
 pub(crate) mod lifecycle;
 mod maintenance;
@@ -402,9 +403,11 @@ impl Database {
                 .chain(blob_layout::TABLE_SQL)
                 .chain(search_layout::table_sql(&tx)?)
                 .chain(jobs_layout::table_sql(&tx)?)
+                .chain(effects_layout::table_sql(&tx)?)
                 .chain(blob_layout::INDEXES.iter().map(|(_, sql)| sql))
                 .chain(search_layout::INDEXES.iter().map(|(_, sql)| sql))
                 .chain(jobs_layout::INDEXES.iter().map(|(_, sql)| sql))
+                .chain(effects_layout::INDEXES.iter().map(|(_, sql)| sql))
             {
                 tx.execute(sql, &[]).await?;
             }
@@ -421,6 +424,7 @@ impl Database {
             tx.check_blob_layout().await?;
             tx.check_search_layout().await?;
             tx.check_job_layout().await?;
+            tx.check_effect_layout().await?;
         } else {
             tx.check_storage().await?;
             tx.check_layout().await?;
@@ -476,6 +480,7 @@ impl Database {
             &[],
         )
         .await?;
+        tx.pause_effects_for_epoch().await?;
         let now = crate::security::now()?;
         let generation = crate::security::random_id()?;
         tx.execute(
@@ -530,6 +535,7 @@ impl Transaction {
             .chain(blob_layout::TABLES)
             .chain(search_layout::TABLES)
             .chain(jobs_layout::TABLES)
+            .chain(effects_layout::TABLES)
         {
             let columns = columns
                 .iter()
@@ -667,7 +673,7 @@ impl Transaction {
         ).await?;
         ensure!(
             rows.as_slice() == [["1".to_owned(), STORAGE_VERSION.to_string()]],
-            "unsupported framework storage version; storage 14 requires an explicit reviewed migration or a new empty database; existing data is unchanged"
+            "unsupported framework storage version; storage 15 requires an explicit reviewed migration or a new empty database; existing data is unchanged"
         );
         Ok(())
     }
@@ -709,6 +715,7 @@ impl Transaction {
             .chain(blob_layout::TABLES)
             .chain(search_layout::TABLES)
             .chain(jobs_layout::TABLES)
+            .chain(effects_layout::TABLES)
             .map(|(name, _)| (*name).to_owned())
             .collect();
         expected.sort();
@@ -721,6 +728,7 @@ impl Transaction {
             .chain(blob_layout::TABLES)
             .chain(search_layout::TABLES)
             .chain(jobs_layout::TABLES)
+            .chain(effects_layout::TABLES)
         {
             let sql = match self.backend {
                 Backend::Closed => unreachable!("closed maintenance transaction"),
@@ -741,7 +749,7 @@ impl Transaction {
             {
                 // SQLite reports implicit single-column primary keys as nullable.
                 // PostgreSQL marks primary keys non-null.
-                let implicit_key = expected_name == "singleton"
+                let implicit_key = (expected_name == "singleton" && table != "nx_effect_queue")
                     || expected_name == "storage_id"
                     || (matches!(table, "nx_accounts" | "nx_sessions") && expected_name == "id")
                     || (table == "nx_receipts" && expected_name == "nonce")
@@ -770,7 +778,8 @@ impl Transaction {
         }
         self.check_blob_layout().await?;
         self.check_search_layout().await?;
-        self.check_job_layout().await
+        self.check_job_layout().await?;
+        self.check_effect_layout().await
     }
 
     pub(crate) async fn deployment(
@@ -1072,7 +1081,7 @@ pub(crate) fn retryable(error: &anyhow::Error) -> bool {
     )
 }
 
-const STORAGE_VERSION: i64 = 14;
+const STORAGE_VERSION: i64 = 15;
 const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
     (
         "nx_resource_catalog",
@@ -1176,7 +1185,7 @@ const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
 
 const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS nx_storage (singleton BIGINT PRIMARY KEY CHECK(singleton=1), version BIGINT NOT NULL)",
-    "INSERT INTO nx_storage(singleton,version) VALUES(1,14)",
+    "INSERT INTO nx_storage(singleton,version) VALUES(1,15)",
     "CREATE TABLE IF NOT EXISTS nx_resource_catalog (storage_id BIGINT PRIMARY KEY, resource_key TEXT NOT NULL UNIQUE)",
     "CREATE TABLE IF NOT EXISTS nx_schema_definition (singleton BIGINT PRIMARY KEY CHECK(singleton=1), definition TEXT NOT NULL, history TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS nx_accounts (id TEXT PRIMARY KEY, login_name TEXT UNIQUE, password TEXT, tenant TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','disabled','deleted')), epoch BIGINT NOT NULL)",

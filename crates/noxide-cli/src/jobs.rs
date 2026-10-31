@@ -105,6 +105,7 @@ async fn load(path: &Path) -> Result<Application> {
         keys,
         Default::default(),
         noxide_host::DeploymentResources {
+            effects: None,
             assets,
             blobs: config
                 .blobs

@@ -110,7 +110,13 @@ async fn activate_generation(
         .unwrap_or_else(|error| panic!("P10 operator activation phase={phase} begin: {error:#}"));
     lease
         .tx()
-        .activate_jobs(generation, contract, Some(effective), Some(declaration))
+        .activate_jobs(
+            generation,
+            contract,
+            Some(effective),
+            Some(declaration),
+            false,
+        )
         .await
         .unwrap();
     lease.tx().commit().await.unwrap();

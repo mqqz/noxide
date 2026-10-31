@@ -30,6 +30,7 @@ async fn auth_http_committed_lost_ack_is_unknown_and_preserves_durable_state() {
                 HostKeys::generate().unwrap(),
                 Limits::default(),
                 crate::DeploymentResources {
+                    effects: None,
                     jobs: None,
                     assets: crate::assets::AssetBundle::default(),
                     blobs: None,

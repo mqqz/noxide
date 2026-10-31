@@ -277,7 +277,7 @@ async fn app_fixture(database: &Database) -> Application {
             .collect(),
         limits: crate::JobLimits::default(),
     };
-    let approved = crate::deployment::approval_digest(&m, None, Some(&jobs)).unwrap();
+    let approved = crate::deployment::approval_digest(&m, None, Some(&jobs), None).unwrap();
     database.initialize().await.unwrap();
     database.reconcile_query_indexes(&m).await.unwrap();
     let app = Application::new(
@@ -288,6 +288,7 @@ async fn app_fixture(database: &Database) -> Application {
         HostKeys::generate().unwrap(),
         Limits::default(),
         crate::DeploymentResources {
+            effects: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
             jobs: Some(jobs),
