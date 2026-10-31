@@ -46,7 +46,7 @@ The host separates three parts of an action:
   response mapping, conflict and rejection forms, recovery and handover delivery.
 - The response expresses success, validation errors and an optional destination.
 
-Protocol 6 retains the split between canonical `Action` execution declarations and
+Protocol 12 retains the split between canonical `Action` execution declarations and
 `WebBinding` presentation. Routes carry binding IDs; bindings reference action IDs.
 Several bindings can present the same action. A canonical action can have no web
 binding, route or redirect; a headless-only manifest may have zero routes.
@@ -60,8 +60,9 @@ host-created invocation context. Browser admission authenticates the cookie,
 verifies CSRF, the signed submission and binding/version, and seals the target
 identity. It does not reauthorize the target before receipt recovery. Private
 context and target-grant fields prevent an adapter from supplying a principal or
-turning a raw record ID into authority. Service admission has no constructor until
-P10 implements authoritative persisted grant/job/fence checks.
+turning a raw record ID into authority. Service admission verifies authoritative
+persisted job, grant, fence and runtime state in the execution transaction; see
+[durable jobs](jobs.md). It never synthesizes browser credentials.
 
 Each Page target explicitly declares eligible reads. Its web grant also
 requires a matching read operation on the issuing route; current policy is checked
@@ -83,19 +84,19 @@ fuel, host-call and database-call allowance across retries. The WASM permit stay
 held through result preparation and receipt persistence. Web preparation captures
 navigation and handover before receipt write, deadline check and commit. A
 headless execution has no navigation source and requires bounded non-rendering
-result preparation before the same write/check/commit sequence. There is no
-production headless execution adapter yet.
+result preparation before the same write/check/commit sequence. The production
+job adapter uses this path with a stable invocation identity across retries; its
+changing claim fence is an execution precondition.
 
 Semantic receipt version 3 represents named navigation sources and target maps.
-Framework storage remains version 11 from clock service integration; reference
-indexes retain their existing format and this change adds no storage migration.
-Protocol 5 contracts and semantic receipt 2 are deliberately incompatible. Rebuild
-protocol-6 development contracts and explicitly reapprove/reactivate deployments;
-old signed forms and previous-contract receipts are invalidated by the contract
-and deployment-generation seal. There is no compatibility executor. Operators
-must resolve outstanding submissions under their original deployment before
-switching contracts when recovery is required. Persisted rows and handover keys
-remain subject to the existing schema/deployment lifecycle.
+Framework storage is version 14 and the wire contract is version 12. Earlier
+stores and contracts are deliberately incompatible. Explicitly create a new
+disposable development store, with its paired blob store, or arrange a separately
+reviewed migration. Rebuild and reapprove application contracts; old signed forms
+are invalidated. Resolve outstanding submissions under their original deployment
+when recovery is required. There is no compatibility executor or automatic
+operator-database reset. Contract changes pause captured jobs for explicit
+reconciliation; [job operations](jobs-operations.md) describes the controls.
 
 ## Protocol shape
 

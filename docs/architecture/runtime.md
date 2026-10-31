@@ -649,3 +649,13 @@ uses shared identity binding for stored-row checks and parameterized SQL.
 Application declarations and SDK types are not authorization evidence. Account
 fields have per-resource expression indexes; the inbox merges ordered owner and
 recipient scans. Residual-policy scans are bounded separately from result count.
+
+## Background action runtime
+
+Approved workers use the existing action executor under a distinct host service
+identity, with durable job/grant/fence checks and semantic receipts. Claim and
+execution share one original deadline, logical call allowance and actual database
+work meter. Worker concurrency is capped at two per application; a dedicated
+request registry drains physical provider cleanup during shutdown while clock
+maintenance retains its reserved capacity. Jobs grant no guest networking.
+See [jobs](jobs.md) and [operator controls](jobs-operations.md).

@@ -860,3 +860,16 @@ results does not grant a larger document budget.
 The [public articles example](../examples/public-articles/src/lib.rs) includes an
 `/overview` page combining pagination and a category preview, and `/highlights`
 with a preview alone. Neither requires guest-built queries or host prefetch.
+
+## Declared background actions
+
+`ApplicationDefinition::jobs(JobContract)` registers explicit workers, schedules
+and recurring selections through the canonical protocol. A headless `ActionType`
+has no web binding, route, redirect or dummy input. Service policies and typed
+service targets lower through the same action declarations and host executor;
+operator grants supply no user ownership or browser credentials. The SDK
+`explicit_jobs_lower_without_web_bindings_or_placeholder_inputs` fixture compares
+the explicit registered contract.
+See [durable jobs](architecture/jobs.md) for limits and authorization, and
+[job operations](architecture/jobs-operations.md) for approval and reconciliation.
+Scheduling conveniences remain tracked separately under P12.

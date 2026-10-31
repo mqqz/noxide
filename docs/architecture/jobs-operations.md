@@ -3,9 +3,9 @@
 The integrated P10 worker executes declared actions through the existing host action
 executor. Each service has an explicit worker identity, tenant and approved action
 subset. It receives no user account, browser credentials, edit secret, filesystem or
-network authority. P10 acceptance remains open; consult the
-[implementation ledger](implementation-ledger.md#p10-integrated-runtime-evidence-and-remaining-corrections)
-for current evidence and remaining gates.
+network authority. P10 scoped acceptance and exact-source test evidence are in the
+[implementation ledger](implementation-ledger.md#p10-closure-at85ef201). Final
+combined operational and proof-application gates remain P13/P14.
 
 ## Deployment approval
 

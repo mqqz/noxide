@@ -2,9 +2,9 @@
 
 The P10 integration runs declared background actions through the existing action
 executor. It includes operator approval, durable queues, recurring selection and
-worker shutdown. P10 remains unaccepted until its integrated tests and independent
-review gates finish. The [implementation ledger](implementation-ledger.md#p10-integration-checkpoint-unaccepted)
-records evidence, remaining gates and earlier preparation history.
+worker shutdown. P10 scoped acceptance passed at `85ef201`; the
+[implementation ledger](implementation-ledger.md#p10-closure-at85ef201) records
+exact-source evidence and earlier preparation history.
 
 ## Authority and capture
 
@@ -163,7 +163,8 @@ reconciliation checks current approval, canonical input and fresh target eligibi
 before creating a protected link to a new job identity. The [operations guide](jobs-operations.md)
 covers commands, clock recovery and restore fencing.
 
-Focused native tests and retained failed fixtures are recorded in the ledger. They
-do not establish full P10 acceptance, a security audit or deployment readiness.
-Remaining integrated/current-SHA, independent review and proof-app gates still apply.
-P11 outbox delivery and its transport/revocation acceptance remain future work.
+The complete serial host suite passed 601 tests at the accepted source, including
+both providers; independent source review and focused crash/budget/clock gates
+are recorded in the ledger. This is scoped P10 acceptance. Final proof-application
+and combined browser/package/build-VM gates remain P12–P14; no security audit or
+deployment readiness is claimed. P11 outbox delivery remains unfinished.
