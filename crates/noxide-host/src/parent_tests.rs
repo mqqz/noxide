@@ -2196,10 +2196,11 @@ async fn mixed_destination_reads_match_direct_reads() {
                     let mut direct = false;
                     for id in &m.routes[1].operations {
                         let op = manifest::operation(&m, *id).unwrap();
-                        direct |= crate::repository::test_read_resource(&mut tx, &m, principal, op, 2)
-                            .await
-                            .unwrap()
-                            .is_some();
+                        direct |=
+                            crate::repository::test_read_resource(&mut tx, &m, principal, op, 2)
+                                .await
+                                .unwrap()
+                                .is_some();
                     }
                     let destination = crate::repository::test_authorize_page_resource(
                         &mut tx,

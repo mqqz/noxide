@@ -1,5 +1,5 @@
-mod computation;
 mod authority;
+mod computation;
 use anyhow::{Result, ensure};
 pub use computation::{ComputationDisclosure, ComputationSource, action_disclosures};
 use noxide_protocol::*;

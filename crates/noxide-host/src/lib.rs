@@ -36,11 +36,11 @@ mod anonymous_tests;
 #[cfg(test)]
 mod registration_tests;
 
-mod form_layout;
-mod policy;
-mod membership;
-mod expiry;
 mod authority;
+mod expiry;
+mod form_layout;
+mod membership;
+mod policy;
 mod routing;
 
 #[cfg(test)]
