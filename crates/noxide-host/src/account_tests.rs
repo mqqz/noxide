@@ -1309,7 +1309,12 @@ async fn previews_case(db: Database) {
             assert_eq!(e.see_all.len(), 1);
             assert_eq!(crate::routing::resolve(&m, &e.see_all[0]).unwrap(), "/");
             assert!(e.list_bytes <= MAX_LIST_RESULT_BYTES);
-            assert!(e.list_calls < crate::repository::MAX_LIST_DATABASE_CALLS - 100);
+            let spent = crate::repository::MAX_LIST_DATABASE_CALLS
+                .checked_sub(e.list_calls)
+                .expect("database allowance cannot grow");
+            eprintln!(
+                "bounded-preview provider calls: {spent}, descending={descending}, order={order:?}"
+            );
             assert!(
                 e.invoke(4, 0)
                     .await
@@ -1318,6 +1323,32 @@ async fn previews_case(db: Database) {
                     .contains("already invoked")
             );
             e.tx.rollback().await.unwrap();
+            // Complete candidate groups now use batched primary-key reads.
+            // Exercise exhaustion during residual preparation and during the
+            // single-path continuation check after the visible page is ready.
+            for (operation, allowance) in [(6, 10), (5, 5)] {
+                let tx = db
+                    .begin_read(Instant::now() + Duration::from_secs(2))
+                    .await
+                    .unwrap();
+                let mut limited = effects(tx, &m, &alice, false, "");
+                limited.list_calls = allowance;
+                let error = limited.invoke(operation, 0).await.unwrap_err();
+                assert!(error.to_string().contains("list database call budget"));
+                assert_eq!(
+                    limited.list_calls, 0,
+                    "actual charges cannot exceed the original allowance"
+                );
+                assert_eq!(
+                    limited.list_bytes, 0,
+                    "failed preparation returns no partial page"
+                );
+                assert!(
+                    limited.provenance.is_empty(),
+                    "failed candidate preparation grants no provenance"
+                );
+                limited.tx.rollback().await.unwrap();
+            }
         }
     }
     // Maximum declared field sizes force strict per-list and aggregate prefixes.
