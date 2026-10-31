@@ -403,6 +403,22 @@ jobs:
             --bundle "$RUNNER_TEMP/noxide-ci/shop" \
             --output "$RUNNER_TEMP/noxide-ci/shop-postgres" \
             --host-cli target/debug/noxide --postgres "$NOXIDE_SHOP_POSTGRES"
+      - name: Build and test named reference selection
+        if: matrix.suite == 'examples'
+        run: |
+          target/debug/noxide build --framework "$PWD" \
+            --app examples/catalog-links --name catalog_links \
+            --output "$RUNNER_TEMP/noxide-ci/catalog"
+          python3 tools/test_catalog_links.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/catalog" \
+            --output "$RUNNER_TEMP/noxide-ci/catalog-sqlite" \
+            --host-cli target/debug/noxide
+          psql "$NOXIDE_TEST_POSTGRES" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE noxide_catalog'
+          python3 tools/test_catalog_links.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/catalog" \
+            --output "$RUNNER_TEMP/noxide-ci/catalog-postgres" \
+            --host-cli target/debug/noxide \
+            --postgres "${NOXIDE_TEST_POSTGRES%/*}/noxide_catalog"
       - name: Test NoJS browser flow with SQLite
         if: matrix.suite == 'sdk'
         run: |
