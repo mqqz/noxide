@@ -52,7 +52,11 @@ wait; a failed BEGIN waits for the SQLx worker close acknowledgement before
 returning. Ordinary request connections retain their existing busy timeout.
 PostgreSQL takes the clock row with `FOR UPDATE NOWAIT`, uses a 1ms lock timeout
 for other locks, and updates statement timeouts from the remaining work budget.
-Ordinary request settings remain unchanged. This reserves host admission and
+Maintenance timeouts use session settings on the private connection so they
+survive COMMIT. Post-COMMIT advisory unlock refreshes that setting from, and is
+bounded by, the same original work deadline; it receives no fresh timeout.
+Ordinary request settings and their 500ms gate-cleanup default remain unchanged.
+This reserves host admission and
 connection capacity; external database locks or server-wide connection exhaustion can still
 prevent progress, bounded by the deadline. Missed intervals skip backlog. Unavailable
 capacity, failed startup, stale progress or inconsistent durable state make

@@ -734,9 +734,19 @@ impl Transaction {
         .await?
     }
     async fn release_gate(&mut self) -> Result<()> {
-        if let Backend::Postgres(connection) = &mut self.backend {
-            // A completed transaction must release its session lock before its
-            // caller starts another transaction, even if this handle stays alive.
+        if self.maintenance.is_some() {
+            // COMMIT ends transaction-local settings. This private connection's
+            // session setting must still use the remaining original work time.
+            self.maintenance_timeout().await?;
+            if let Backend::Postgres(connection) = &mut self.backend {
+                tokio::time::timeout_at(
+                    self.deadline,
+                    sqlx::query("SELECT pg_advisory_unlock_all()").execute(connection),
+                )
+                .await??;
+            }
+        } else if let Backend::Postgres(connection) = &mut self.backend {
+            // Ordinary request cleanup retains its existing independent bound.
             tokio::time::timeout(
                 Duration::from_millis(500),
                 sqlx::query("SELECT pg_advisory_unlock_all()").execute(connection),
@@ -745,6 +755,7 @@ impl Transaction {
         }
         Ok(())
     }
+
     pub(crate) async fn commit(&mut self) -> Result<()> {
         self.execute_internal("COMMIT", &[]).await?;
         #[cfg(test)]

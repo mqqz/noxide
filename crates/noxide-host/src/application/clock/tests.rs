@@ -517,3 +517,82 @@ async fn aborted_service_keeps_unknown_owner_and_temporal_readiness_quarantined(
     assert!(matches!(temporal(&app).await, Err(RequestError::Busy)));
     assert!(app.start_clock_service().is_err());
 }
+
+#[tokio::test]
+#[ignore = "requires NOXIDE_TEST_POSTGRES disposable local server"]
+async fn postgres_post_commit_gate_release_keeps_original_budget_and_no_freshness() {
+    use sqlx::{Connection, Row};
+    let (_, url) = postgres_fixture("gate_budget").await;
+    let mut configured = url::Url::parse(&url).unwrap();
+    configured
+        .query_pairs_mut()
+        .append_pair("options", "-c search_path=public,pg_catalog");
+    let database = Database::postgres(configured.as_str()).unwrap();
+    let app = Arc::new(build(database.clone(), HostKeys::generate().unwrap()).await);
+    app.activate().await.unwrap();
+    let activated = tokio::time::Instant::now();
+    let before = clock(&database).await;
+    let mut monitor = sqlx::PgConnection::connect(configured.as_str())
+        .await
+        .unwrap();
+    // Trusted-provider fault injection, matching R's exact production repro:
+    // spend 80ms before COMMIT, then pause the actual post-COMMIT unlock query.
+    sqlx::query("CREATE FUNCTION public.pg_advisory_unlock_all() RETURNS void LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_catalog.pg_sleep(0.3); PERFORM pg_catalog.pg_advisory_unlock_all(); END $$").execute(&mut monitor).await.unwrap();
+    sqlx::query("CREATE FUNCTION nx_clock_pause() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.lifecycle_version != OLD.lifecycle_version THEN PERFORM pg_catalog.pg_sleep(0.08); END IF; RETURN NEW; END $$").execute(&mut monitor).await.unwrap();
+    sqlx::query("CREATE TRIGGER nx_clock_pause BEFORE UPDATE ON nx_clock FOR EACH ROW EXECUTE FUNCTION nx_clock_pause()").execute(&mut monitor).await.unwrap();
+    let listener = crate::http::Listener::loopback("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let (stop, shutdown) = tokio::sync::oneshot::channel();
+    let serving = app.clone();
+    let server = tokio::spawn(async move {
+        crate::http::serve(
+            listener,
+            serving,
+            crate::http::Origin::parse("http://localhost:8080").unwrap(),
+            async {
+                let _ = shutdown.await;
+            },
+        )
+        .await
+    });
+    let (pid,age_ms)=tokio::time::timeout(Duration::from_secs(3),async {
+        loop {
+            let rows=sqlx::query("SELECT pid,CAST(extract(epoch FROM(pg_catalog.clock_timestamp()-backend_start))*1000 AS BIGINT) FROM pg_catalog.pg_stat_activity WHERE datname=pg_catalog.current_database() AND application_name LIKE 'nx-clock-%' AND wait_event='PgSleep' AND query LIKE 'SELECT pg_advisory_unlock_all%'").fetch_all(&mut monitor).await.unwrap();
+            if let Some(row)=rows.first(){break (row.get::<i32,_>(0),row.get::<i64,_>(1));}
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    let observed = std::time::Instant::now();
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_millis(250), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        age_ms as u128 + observed.elapsed().as_millis() <= 200,
+        "post-COMMIT unlock enlarged the original 200ms maintenance budget"
+    );
+    let present: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE pid=$1")
+            .bind(pid)
+            .fetch_one(&mut monitor)
+            .await
+            .unwrap();
+    assert_eq!(present, 0);
+    assert!(app.maintenance.try_acquire().is_ok());
+    assert!(!app.maintenance_running.load(Ordering::Acquire));
+    assert_eq!(
+        clock(&database).await[2],
+        before[2] + 1,
+        "the COMMIT is durable even though gate release was interrupted"
+    );
+    // Advance beyond the startup lease but before a falsely renewed tick lease
+    // would expire. This is deadline advancement, not a race-ordering sleep.
+    tokio::time::sleep_until(activated + Duration::from_millis(5_050)).await;
+    assert!(
+        matches!(temporal(&app).await, Err(RequestError::Busy)),
+        "a post-COMMIT cleanup failure must not renew temporal freshness"
+    );
+}

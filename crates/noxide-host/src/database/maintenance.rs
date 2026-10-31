@@ -103,7 +103,7 @@ impl Transaction {
             if let Backend::Postgres(connection) = &mut self.backend {
                 tokio::time::timeout_at(
                     self.deadline,
-                    sqlx::query(&format!("SET LOCAL statement_timeout = '{timeout}ms'"))
+                    sqlx::query(&format!("SET statement_timeout = '{timeout}ms'"))
                         .execute(connection),
                 )
                 .await??;
