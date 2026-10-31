@@ -1,6 +1,7 @@
 //! Versioned semantic protocol shared by the guest SDK and trusted host.
 
 pub mod assets;
+pub mod blobs;
 pub mod computation;
 pub mod document;
 pub mod expiry;
@@ -11,7 +12,7 @@ pub use computation::{Comparison, Guard, GuardCondition, GuardRejection, Literal
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const VERSION: u32 = 9;
+pub const VERSION: u32 = 10;
 pub const MAX_IR_BYTES: usize = 65_536;
 pub const MAX_NODES: usize = 1_024;
 pub const MAX_DEPTH: usize = 32;
@@ -63,6 +64,7 @@ pub enum Instruction {
     EndLink,
     Form { action: u32 },
     Stylesheet { asset: String },
+    Download(blobs::DocumentDownload),
     Rich(document::PresentationNode),
 }
 
@@ -191,6 +193,12 @@ pub enum FieldKind {
         scope: AccountScope,
     },
     Boolean,
+    Blob {
+        max_bytes: u64,
+    },
+    UploadHandle {
+        max_bytes: u64,
+    },
     Timestamp,
     Duration {
         max_millis: i64,
@@ -222,6 +230,7 @@ pub enum Control {
     Textarea { rows: u8 },
     Checkbox,
     Select,
+    File,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -539,6 +548,8 @@ pub struct Inspection {
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub assets: Vec<assets::AssetDeclaration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blobs: Option<blobs::BlobPolicy>,
     pub version: u32,
     pub resources: Vec<Resource>,
     pub operations: Vec<Operation>,
@@ -581,13 +592,19 @@ pub struct RequestView {
 impl TextField {
     /// Host-defined canonical scalar encoding; optional absence is the empty string.
     pub fn canonical(&self, input: &str) -> Result<String, String> {
+        if matches!(self.kind, FieldKind::UploadHandle { .. }) {
+            return Err("upload handles are action inputs only".into());
+        }
         canonical_scalar(&self.kind, self.optional, self.max_bytes, input)
     }
 }
 
 impl Input {
     pub fn canonical(&self, input: &str) -> Result<String, String> {
-        if matches!(self.kind, FieldKind::Reference { .. }) {
+        if matches!(
+            self.kind,
+            FieldKind::Reference { .. } | FieldKind::Blob { .. }
+        ) {
             return Err("invalid input kind".into());
         }
         canonical_scalar(&self.kind, self.optional, self.max_bytes, input)
@@ -604,6 +621,10 @@ fn canonical_scalar(
         return Ok(String::new());
     }
     let value = match kind {
+        FieldKind::Blob { .. } => blobs::BlobRef::parse(input.to_owned())?.as_str().to_owned(),
+        FieldKind::UploadHandle { .. } => blobs::UploadHandle::parse(input.to_owned())?
+            .as_str()
+            .to_owned(),
         FieldKind::Account { .. } => {
             if !account_id(input) {
                 return Err("invalid account reference".into());
@@ -683,6 +704,64 @@ pub fn identifier(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blob_tokens_are_distinct_input_and_storage_domains() {
+        let blob = format!("b1_{}", "a".repeat(64));
+        let upload = format!("u1_{}", "b".repeat(64));
+        let field = TextField {
+            kind: FieldKind::Blob { max_bytes: 1024 },
+            optional: false,
+            initial: None,
+            name: "attachment".into(),
+            label: "Attachment".into(),
+            max_bytes: 67,
+        };
+        let input = Input {
+            kind: FieldKind::UploadHandle { max_bytes: 1024 },
+            optional: false,
+            name: "file".into(),
+            label: "File".into(),
+            max_bytes: 67,
+        };
+        assert_eq!(field.canonical(&blob).unwrap(), blob);
+        assert!(field.canonical(&upload).is_err());
+        assert_eq!(input.canonical(&upload).unwrap(), upload);
+        assert!(input.canonical(&blob).is_err());
+        assert!(
+            TextField {
+                kind: input.kind.clone(),
+                ..field.clone()
+            }
+            .canonical(&upload)
+            .is_err()
+        );
+        assert!(
+            Input {
+                kind: field.kind.clone(),
+                ..input.clone()
+            }
+            .canonical(&blob)
+            .is_err()
+        );
+        assert!(
+            Input {
+                max_bytes: 66,
+                ..input.clone()
+            }
+            .canonical(&upload)
+            .is_err()
+        );
+        assert_eq!(
+            Input {
+                optional: true,
+                ..input
+            }
+            .canonical("")
+            .unwrap(),
+            ""
+        );
+    }
 
     #[test]
     fn transaction_input_canonicalization_enforces_quantity_and_byte_bounds() {

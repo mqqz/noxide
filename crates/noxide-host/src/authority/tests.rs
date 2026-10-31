@@ -97,6 +97,7 @@ fn manifest() -> Manifest {
     );
     create_membership.bind.insert("workspace".into(), 6);
     Manifest {
+        blobs: None,
         version: noxide_protocol::VERSION,
         assets: Vec::new(),
         resources: vec![

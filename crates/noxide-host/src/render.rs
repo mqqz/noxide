@@ -215,6 +215,7 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
         }
         match node {
             Instruction::Stylesheet { .. } => {}
+            Instruction::Download(_) => anyhow::bail!("blob downloads are not available"),
             Instruction::Rich(node) => {
                 ensure!(
                     link_depth.is_none()

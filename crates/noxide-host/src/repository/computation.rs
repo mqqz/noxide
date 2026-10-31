@@ -242,10 +242,20 @@ impl Values<'_> {
     }
 }
 fn scalar(kind: &FieldKind, optional: bool, text: &str) -> Result<Scalar> {
+    ensure!(
+        !matches!(
+            kind,
+            FieldKind::Blob { .. } | FieldKind::UploadHandle { .. }
+        ),
+        "opaque blob identity is not a scalar operand"
+    );
     if optional && text.is_empty() {
         return Ok(Scalar::Missing(kind.clone()));
     }
     Ok(match kind {
+        FieldKind::Blob { .. } | FieldKind::UploadHandle { .. } => {
+            anyhow::bail!("opaque blob identity is not a scalar operand")
+        }
         FieldKind::Text => Scalar::Text(text.into()),
         FieldKind::Integer { .. } => Scalar::Integer(text.parse()?),
         FieldKind::Boolean => {

@@ -77,6 +77,7 @@ pub(crate) fn validate(m: &Manifest, action: &Action, layout: &[FormInstruction]
                 ensure!(seen.insert(name), "duplicate form field");
                 ensure!(
                     match control {
+                        Control::File => false,
                         Control::Auto => true,
                         Control::TextInput => matches!(
                             f.kind,

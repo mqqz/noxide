@@ -17,6 +17,9 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest> {
 pub fn digest(manifest: &Manifest) -> Result<[u8; 32]> {
     validate(manifest)?;
     let mut canonical = manifest.clone();
+    if let Some(blobs) = &mut canonical.blobs {
+        blobs.uploads.sort_by_key(|u| u.id);
+    }
     canonical.assets.sort_by(|a, b| a.name.cmp(&b.name));
     canonical.resources.sort_by(|a, b| a.name.cmp(&b.name));
     canonical.operations.sort_by_key(|operation| operation.id);
@@ -207,6 +210,10 @@ pub use noxide_protocol::identifier;
 
 pub fn validate(m: &Manifest) -> Result<()> {
     ensure!(m.version == VERSION, "unsupported manifest version");
+    // Wire10 shapes are frozen before integration. No blob declaration is
+    // admitted until upload, transactional association and download enforcement
+    // land together; accepting a policy now would enable a placeholder grant.
+    ensure!(m.blobs.is_none(), "blob runtime is not available");
     crate::assets::validate_declarations(&m.assets)?;
     ensure!(
         m.routes
@@ -278,6 +285,9 @@ pub fn validate(m: &Manifest) -> Result<()> {
             );
             ensure!(f.max_bytes > 0 && f.max_bytes <= 4096, "field limit");
             match &f.kind {
+                FieldKind::Blob { .. } | FieldKind::UploadHandle { .. } => {
+                    anyhow::bail!("blob runtime is not available")
+                }
                 FieldKind::Reference { resource: key } => {
                     ensure!(
                         !f.optional && f.initial.is_none() && f.max_bytes >= 19,
@@ -1114,6 +1124,9 @@ fn validate_input_schema(input: &Input) -> Result<()> {
         "input byte limit"
     );
     match &input.kind {
+        FieldKind::Blob { .. } | FieldKind::UploadHandle { .. } => {
+            anyhow::bail!("blob runtime is not available")
+        }
         FieldKind::Text => {}
         FieldKind::Timestamp => ensure!(input.max_bytes >= 20, "timestamp input budget"),
         FieldKind::Duration { max_millis } => ensure!(

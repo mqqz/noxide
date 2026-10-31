@@ -152,6 +152,9 @@ fn render_field(
 ) -> Result<()> {
     let mut control = match requested {
         Control::Auto => match &field.kind {
+            FieldKind::Blob { .. } | FieldKind::UploadHandle { .. } => {
+                anyhow::bail!("blob controls are not available")
+            }
             FieldKind::Text => Control::Textarea { rows: 4 },
             FieldKind::Account { .. } => Control::TextInput,
             FieldKind::Boolean if !field.optional => Control::Checkbox,
@@ -206,6 +209,7 @@ fn render_field(
     out.push("\">")?;
     out.text(&field.label)?;
     match &control {
+        Control::File => anyhow::bail!("blob controls are not available"),
         Control::Textarea { rows } => {
             ensure!(*rows > 0 && *rows <= 64, "textarea rows");
             out.push(&format!(
@@ -313,6 +317,9 @@ fn render_field(
             out.text(error)?;
         } else {
             out.text(&match &field.kind {
+                FieldKind::Blob { .. } | FieldKind::UploadHandle { .. } => {
+                    anyhow::bail!("blob controls are not available")
+                }
                 FieldKind::Text | FieldKind::Account { .. } => format!(
                     "Enter {}at most {} UTF-8 bytes.",
                     if field.optional {

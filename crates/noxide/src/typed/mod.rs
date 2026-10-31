@@ -122,6 +122,7 @@ impl ApplicationDefinition {
             action.targets.sort_by(|a, b| a.name.cmp(&b.name));
         }
         Manifest {
+            blobs: None,
             assets: self.assets.into_values().collect(),
             version: VERSION,
             resources: self.resources.into_values().collect(),

@@ -9,19 +9,33 @@ pub(super) struct Domain {
     pub max_bytes: u32,
 }
 impl Domain {
-    fn field(field: &TextField) -> Self {
-        Self {
+    fn field(field: &TextField) -> Result<Self> {
+        ensure!(
+            !matches!(
+                field.kind,
+                FieldKind::Blob { .. } | FieldKind::UploadHandle { .. }
+            ),
+            "opaque blob identity is not an expression operand"
+        );
+        Ok(Self {
             kind: field.kind.clone(),
             optional: field.optional,
             max_bytes: field.max_bytes,
-        }
+        })
     }
-    fn input(input: &Input) -> Self {
-        Self {
+    fn input(input: &Input) -> Result<Self> {
+        ensure!(
+            !matches!(
+                input.kind,
+                FieldKind::Blob { .. } | FieldKind::UploadHandle { .. }
+            ),
+            "opaque blob identity is not an expression operand"
+        );
+        Ok(Self {
             kind: input.kind.clone(),
             optional: input.optional,
             max_bytes: input.max_bytes,
-        }
+        })
     }
     fn integer(min: i64, max: i64) -> Self {
         Self {
@@ -86,7 +100,7 @@ impl Admission {
                     .find(|input| input.name == *name)
                     .ok_or_else(|| anyhow::anyhow!("undeclared input"))?;
                 used.insert(input.name.as_str());
-                Domain::input(input)
+                Domain::input(input)?
             }
             Value::Literal(literal) => literal_domain(literal)?,
             Value::Principal => {
@@ -171,7 +185,7 @@ impl Admission {
                         .iter()
                         .find(|candidate| candidate.name == *field)
                         .ok_or_else(|| anyhow::anyhow!("unknown expression field"))?,
-                )
+                )?
             }
             Value::Add { left, right }
             | Value::Subtract { left, right }
