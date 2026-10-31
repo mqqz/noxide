@@ -36,6 +36,26 @@ pub(crate) enum FailureResult {
     Recovered(String),
 }
 
+/// An active enqueue grant read and locked in the originating transaction.
+/// It is not execution authority and cannot be constructed by an adapter.
+pub(crate) struct VerifiedScheduleGrant {
+    grant: Grant,
+}
+impl VerifiedScheduleGrant {
+    pub(crate) fn grant(&self) -> &Grant {
+        &self.grant
+    }
+}
+
+struct RuntimeSnapshot {
+    contract: String,
+    epoch: String,
+    state: String,
+    pending_limit: u16,
+    tenant_limit: u16,
+    concurrency: u8,
+}
+
 struct Row {
     job: CapturedJob,
     state: String,
@@ -57,24 +77,49 @@ impl QueueContext<'_> {
         &mut self,
         scope: &JobScope,
     ) -> Result<(String, String, String)> {
+        let runtime = self.runtime_snapshot(scope).await?;
+        Ok((runtime.contract, runtime.epoch, runtime.state))
+    }
+    async fn runtime_snapshot(&mut self, scope: &JobScope) -> Result<RuntimeSnapshot> {
         self.checkpoint()?;
-        let query = match self.tx.query_provider()? {
-            NativeProvider::Postgres => {
-                "SELECT deployment,contract,epoch,state FROM nx_job_runtime WHERE singleton=1 AND EXISTS(SELECT 1 FROM nx_deployment WHERE singleton=1 AND generation=nx_job_runtime.deployment) FOR SHARE"
-            }
-            NativeProvider::Sqlite => {
-                "SELECT deployment,contract,epoch,state FROM nx_job_runtime WHERE singleton=1 AND EXISTS(SELECT 1 FROM nx_deployment WHERE singleton=1 AND generation=nx_job_runtime.deployment)"
-            }
+        let suffix = match self.tx.query_provider()? {
+            NativeProvider::Postgres => " FOR SHARE",
+            NativeProvider::Sqlite => "",
         };
-        let rows = self.tx.fetch::<4>(query, &[]).await?;
-        let [deployment, contract, epoch, state] =
-            rows.first().context("job runtime unavailable")?;
-        let state = if deployment == &scope.deployment {
-            state.clone()
-        } else {
-            "changed".into()
-        };
-        Ok((contract.clone(), epoch.clone(), state))
+        let query = format!(
+            "SELECT deployment,contract,epoch,state,CAST(pending_limit AS TEXT),CAST(tenant_limit AS TEXT),CAST(concurrency AS TEXT) FROM nx_job_runtime WHERE singleton=1 AND EXISTS(SELECT 1 FROM nx_deployment WHERE singleton=1 AND generation=nx_job_runtime.deployment){suffix}"
+        );
+        let rows = self.tx.fetch::<7>(&query, &[]).await?;
+        let [
+            deployment,
+            contract,
+            epoch,
+            state,
+            pending,
+            tenant,
+            concurrency,
+        ] = rows.first().context("job runtime unavailable")?;
+        let pending_limit = u16::try_from(integer(pending)?)?;
+        let tenant_limit = u16::try_from(integer(tenant)?)?;
+        let concurrency = u8::try_from(integer(concurrency)?)?;
+        ensure!(
+            (1..=MAX_PENDING_JOBS).contains(&pending_limit)
+                && (1..=pending_limit).contains(&tenant_limit)
+                && (1..=MAX_WORKERS_PER_APP).contains(&concurrency),
+            "invalid authoritative queue limits"
+        );
+        Ok(RuntimeSnapshot {
+            contract: contract.clone(),
+            epoch: epoch.clone(),
+            state: if deployment == &scope.deployment {
+                state.clone()
+            } else {
+                "changed".into()
+            },
+            pending_limit,
+            tenant_limit,
+            concurrency,
+        })
     }
     pub(super) async fn lock_grant(
         &mut self,
@@ -123,7 +168,7 @@ impl QueueContext<'_> {
             ensure!(changed == 1, "job claim superseded");
         }
         let payload = self.tx.bounded_text("payload", MAX_JOB_BYTES);
-        let rows = self.tx.fetch::<16>(&format!("SELECT {payload},payload_digest,state,CAST(attempts AS TEXT),CAST(first_eligible_ms AS TEXT),CAST(fence AS TEXT),CAST(lease_until_ms AS TEXT),contract,epoch,worker,CAST(action AS TEXT),CAST(grant_version AS TEXT),CAST(due_ms AS TEXT),CAST(eligible_ms AS TEXT),origin,CAST(ordinal AS TEXT) FROM nx_jobs WHERE id=$1 AND deployment=$2 AND tenant=$3"), &[claim.id.as_str().into(), claim.scope.deployment.as_str().into(), claim.scope.tenant.as_str().into()]).await?;
+        let rows = self.tx.fetch::<17>(&format!("SELECT {payload},payload_digest,state,CAST(attempts AS TEXT),CAST(first_eligible_ms AS TEXT),CAST(fence AS TEXT),CAST(lease_until_ms AS TEXT),contract,epoch,worker,CAST(action AS TEXT),CAST(grant_version AS TEXT),CAST(due_ms AS TEXT),CAST(eligible_ms AS TEXT),origin,CAST(ordinal AS TEXT),COALESCE(reconciled_from,'') FROM nx_jobs WHERE id=$1 AND deployment=$2 AND tenant=$3"), &[claim.id.as_str().into(), claim.scope.deployment.as_str().into(), claim.scope.tenant.as_str().into()]).await?;
         let [
             payload,
             digest,
@@ -141,6 +186,7 @@ impl QueueContext<'_> {
             eligible,
             origin,
             ordinal,
+            reconciled_from,
         ] = rows.first().context("job unavailable")?;
         let job: CapturedJob = serde_json::from_str(payload)?;
         job.validate()?;
@@ -158,7 +204,8 @@ impl QueueContext<'_> {
                 && job.grant_version == integer(grant_version)?
                 && job.due.unix_millis() == integer(due)?
                 && job.origin == *origin
-                && i64::from(job.ordinal) == integer(ordinal)?,
+                && i64::from(job.ordinal) == integer(ordinal)?
+                && job.reconciled_from().unwrap_or("") == reconciled_from,
             "job indexed metadata differs from capture"
         );
         ensure!(
@@ -233,6 +280,57 @@ impl QueueContext<'_> {
         ensure!(changed == 1, "job finalization superseded");
         Ok(())
     }
+    /// Receipt recovery deliberately requires no fresh lifecycle sample or current
+    /// target authority. Retained runtime/grant rows provide lock serialization,
+    /// while the original capture and core decoder bind committed evidence.
+    pub(crate) async fn recover_receipt(
+        &mut self,
+        claim: &Claim,
+        validate: impl Fn(&CapturedJob, &str) -> Result<()>,
+    ) -> Result<(CapturedJob, Option<String>)> {
+        self.charge()?;
+        self.lock_runtime(&claim.scope).await?;
+        let preview = self.row(claim, false).await?;
+        self.lock_grant(&claim.scope, &preview.job.worker).await?;
+        let row = self.row(claim, true).await?;
+        let receipt = self
+            .receipt(&row, &|payload| validate(&row.job, payload))
+            .await?;
+        if receipt.is_some() {
+            if row.state == "running" {
+                self.transition(claim, "succeeded", "", row.first_eligible)
+                    .await?;
+            } else {
+                ensure!(
+                    row.state == "succeeded",
+                    "receipt with inconsistent job state"
+                );
+            }
+        }
+        Ok((row.job, receipt))
+    }
+
+    /// Current operator intersection for a fixed admitted transactional schedule.
+    pub(crate) async fn schedule_grant(
+        &mut self,
+        scope: &JobScope,
+        worker: &str,
+        contract: &str,
+    ) -> Result<VerifiedScheduleGrant> {
+        self.charge()?;
+        let (current_contract, epoch, state) = self.lock_runtime(scope).await?;
+        ensure!(
+            state == "active" && current_contract == contract,
+            "job runtime changed"
+        );
+        let (grant, state) = self.lock_grant(scope, worker).await?;
+        ensure!(
+            state == "active" && grant.contract == contract && grant.epoch == epoch,
+            "service grant changed"
+        );
+        Ok(VerifiedScheduleGrant { grant })
+    }
+
     /// Caller has separately authorized the originating schedule declaration and
     /// evaluated/canonicalized every input and resolved target in this transaction.
     /// Enqueue and action mutations/receipt commit together. Never commits here.
@@ -254,9 +352,11 @@ impl QueueContext<'_> {
             "job schedule horizon"
         );
         // Lock the singleton only during queue admission/claim, not action work.
-        let (contract, epoch, runtime_state) = self.lock_runtime(&job.scope).await?;
+        let runtime = self.runtime_snapshot(&job.scope).await?;
         ensure!(
-            runtime_state == "active" && contract == job.contract && epoch == job.epoch,
+            runtime.state == "active"
+                && runtime.contract == job.contract
+                && runtime.epoch == job.epoch,
             "job runtime paused or changed"
         );
         let changed = self
@@ -290,13 +390,13 @@ impl QueueContext<'_> {
         // Old paused contracts count until explicitly reconciled by the operator.
         let counts = self.tx.fetch::<2>("SELECT CAST(COUNT(*) AS TEXT),CAST(COALESCE(SUM(CASE WHEN tenant=$1 THEN 1 ELSE 0 END),0) AS TEXT) FROM (SELECT tenant FROM nx_jobs WHERE state IN ('pending','running','paused') LIMIT 1001) AS active_jobs", &[job.scope.tenant.as_str().into()]).await?;
         ensure!(
-            integer(&counts[0][0])? < i64::from(MAX_PENDING_JOBS)
-                && integer(&counts[0][1])? < i64::from(tenant_limit),
+            integer(&counts[0][0])? < i64::from(runtime.pending_limit)
+                && integer(&counts[0][1])? < i64::from(tenant_limit.min(runtime.tenant_limit)),
             "job queue full"
         );
         self.tx.execute("INSERT INTO nx_job_tenants(deployment,tenant,claim_seq) VALUES($1,$2,0) ON CONFLICT(deployment,tenant) DO NOTHING", &[job.scope.deployment.as_str().into(), job.scope.tenant.as_str().into()]).await?;
         let payload = serde_json::to_string(job)?;
-        self.tx.execute("INSERT INTO nx_jobs(id,deployment,tenant,origin,ordinal,worker,action,contract,epoch,grant_version,payload,payload_digest,due_ms,eligible_ms,first_eligible_ms,attempts,fence,lease_until_ms,state,reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,0,0,0,'pending','')", &[id.into(), job.scope.deployment.as_str().into(), job.scope.tenant.as_str().into(), job.origin.as_str().into(), i64::from(job.ordinal).into(), job.worker.as_str().into(), i64::from(job.action).into(), job.contract.as_str().into(), job.epoch.as_str().into(), job.grant_version.into(), payload.into(), digest.into(), job.due.unix_millis().into(), now.max(job.due).unix_millis().into()]).await?;
+        self.tx.execute("INSERT INTO nx_jobs(id,deployment,tenant,origin,ordinal,worker,action,contract,epoch,grant_version,payload,payload_digest,due_ms,eligible_ms,first_eligible_ms,attempts,fence,lease_until_ms,state,reason,reconciled_from) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,0,0,0,'pending','',NULLIF($15,''))", &[id.into(), job.scope.deployment.as_str().into(), job.scope.tenant.as_str().into(), job.origin.as_str().into(), i64::from(job.ordinal).into(), job.worker.as_str().into(), i64::from(job.action).into(), job.contract.as_str().into(), job.epoch.as_str().into(), job.grant_version.into(), payload.into(), digest.into(), job.due.unix_millis().into(), now.max(job.due).unix_millis().into(), job.reconciled_from().unwrap_or("").into()]).await?;
         Ok(true)
     }
     /// One fair bounded claim. Commit this short transaction before launching
@@ -310,12 +410,19 @@ impl QueueContext<'_> {
         self.charge()?;
         self.checkpoint()?;
         ensure!(opaque(deployment), "invalid job deployment");
+        let runtime = self
+            .runtime_snapshot(&JobScope {
+                deployment: deployment.into(),
+                tenant: String::new(),
+            })
+            .await?;
+        ensure!(runtime.state == "active", "job runtime unavailable");
         let changed = self.tx.execute("UPDATE nx_job_queue SET claim_seq=claim_seq+1 WHERE singleton=1 AND claim_seq<9223372036854775807 AND EXISTS(SELECT 1 FROM nx_job_runtime WHERE singleton=1 AND deployment=$1 AND state='active' AND EXISTS(SELECT 1 FROM nx_deployment WHERE singleton=1 AND generation=nx_job_runtime.deployment))", &[deployment.into()]).await?;
         ensure!(changed == 1, "job runtime unavailable");
         // Counting all running rows prevents lease expiry from freeing capacity
         // while an old execution transaction might still be alive.
         let running = self.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM (SELECT id FROM nx_jobs WHERE state='running' LIMIT 3) AS running_jobs", &[]).await?;
-        let capacity = integer(&running[0][0])? < i64::from(MAX_WORKERS_PER_APP);
+        let capacity = integer(&running[0][0])? < i64::from(runtime.concurrency);
         // Never wait on a job row while retaining the queue lock: an existing
         // action may hold that row and enqueue its own admitted next action.
         let suffix = match self.tx.query_provider()? {

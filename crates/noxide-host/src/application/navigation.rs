@@ -135,20 +135,23 @@ impl Application {
         }))
     }
 
-    pub(super) fn validate_receipt(
+    /// Pure outcome and identity checks shared by browser and job recovery.
+    pub(super) fn validate_core_receipt(
         &self,
-        action: &manifest::WebAction<'_>,
+        action: action::ActionCore<'_>,
         targets: &BTreeMap<String, RecordTarget>,
         payload: &str,
-    ) -> Result<ValidatedReceipt> {
+    ) -> Result<SemanticReceipt> {
+        ensure!(
+            payload.len() <= noxide_protocol::MAX_RESULT_BYTES,
+            "receipt size limit"
+        );
         let receipt: SemanticReceipt = serde_json::from_str(payload)?;
         ensure!(
-            receipt.version == 3
-                && receipt.outcomes.len() == action.steps.len()
-                && receipt.source.as_ref() == Some(&action.redirect.source),
+            receipt.version == 3 && receipt.outcomes.len() == action.steps.len(),
             "receipt contract differs"
         );
-        for (outcome, step) in receipt.outcomes.iter().zip(&action.steps) {
+        for (outcome, step) in receipt.outcomes.iter().zip(action.steps) {
             let op = manifest::operation(&self.manifest, step.operation)?;
             let kind = match op.kind {
                 OperationKind::Create => MutationKind::Created,
@@ -194,6 +197,21 @@ impl Application {
                 "handover identity differs"
             );
         }
+        Ok(receipt)
+    }
+
+    pub(super) fn validate_receipt(
+        &self,
+        action: &manifest::WebAction<'_>,
+        targets: &BTreeMap<String, RecordTarget>,
+        payload: &str,
+    ) -> Result<ValidatedReceipt> {
+        let receipt =
+            self.validate_core_receipt(action::ActionCore::of(action.core)?, targets, payload)?;
+        ensure!(
+            receipt.source.as_ref() == Some(&action.redirect.source),
+            "receipt navigation source differs"
+        );
         let route = manifest::route(&self.manifest, action.redirect.route())?;
         if let Some(destination) = &receipt.destination {
             ensure!(

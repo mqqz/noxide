@@ -14,7 +14,7 @@ impl std::fmt::Display for CalculationUnavailable {
 impl std::error::Error for CalculationUnavailable {}
 
 #[derive(Clone, Debug)]
-pub(super) enum Scalar {
+pub(crate) enum Scalar {
     Text(String),
     Integer(i64),
     Boolean(bool),
@@ -68,7 +68,7 @@ pub(super) struct Context {
     pub time: Option<AttemptTime>,
 }
 
-pub(super) struct Values<'a> {
+pub(crate) struct Values<'a> {
     pub manifest: &'a Manifest,
     pub input: &'a Fields,
     pub principal: &'a Principal,

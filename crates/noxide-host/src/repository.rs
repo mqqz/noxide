@@ -12,7 +12,9 @@ use anyhow::{Result, ensure};
 pub(crate) use authority::{ReadBudget, ReadContext};
 #[cfg(test)]
 pub(crate) use authority::{test_authorize_page_resource, test_read_resource};
-pub(crate) use computation::CalculationUnavailable;
+pub(crate) use computation::{
+    CalculationUnavailable, Scalar as ScheduleScalar, Values as ScheduleValues,
+};
 use noxide_protocol::query::CursorKey;
 use noxide_protocol::*;
 use std::sync::Arc;

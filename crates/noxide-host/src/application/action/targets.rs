@@ -144,6 +144,7 @@ impl Application {
                 TargetGrant {
                     target: target.clone(),
                     expires: None,
+                    service: false,
                 },
             );
         }
@@ -211,6 +212,7 @@ impl Application {
                     TargetGrant {
                         target,
                         expires: Some(proof.expires),
+                        service: false,
                     },
                 );
             }
@@ -356,7 +358,28 @@ impl Application {
                 capability_grant = Some(target.clone());
             }
             match &declaration.source {
-                TargetSource::Service { .. } => anyhow::bail!(repository::ReferenceUnavailable),
+                TargetSource::Service { eligible } => {
+                    ensure!(
+                        proof.service && matches!(principal, auth::Principal::Service(_)),
+                        repository::ReferenceUnavailable
+                    );
+                    ensure!(
+                        self.target_read(tx, authority, principal, *eligible, stored, budget)
+                            .await?,
+                        repository::ReferenceUnavailable
+                    );
+                }
+                TargetSource::Reference { eligible, .. } if proof.service => {
+                    ensure!(
+                        matches!(principal, auth::Principal::Service(_)),
+                        repository::ReferenceUnavailable
+                    );
+                    ensure!(
+                        self.target_read(tx, authority, principal, *eligible, stored, budget)
+                            .await?,
+                        repository::ReferenceUnavailable
+                    );
+                }
                 TargetSource::Page { reads } if !edit => {
                     let route = manifest::route(
                         &self.manifest,

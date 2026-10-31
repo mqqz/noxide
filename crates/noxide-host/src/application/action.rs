@@ -88,6 +88,7 @@ impl CanonicalActionInput {
 pub(super) struct TargetGrant {
     target: RecordTarget,
     expires: Option<i64>,
+    service: bool,
 }
 
 impl TargetGrant {
@@ -110,6 +111,7 @@ pub(super) struct InvocationContext<'a> {
     expires: i64,
     navigation: Option<NavigationPlan<'a>>,
     upload: Option<super::blobs::UploadScope>,
+    time: Option<crate::lifecycle_clock::AttemptTime>,
 }
 
 #[derive(Clone, Copy)]
@@ -182,6 +184,7 @@ impl Application {
             expires,
             navigation,
             upload,
+            time: admitted_time,
         } = context;
         let sealed: std::collections::BTreeMap<_, _> = grants
             .iter()
@@ -211,7 +214,16 @@ impl Application {
                 },
             });
         }
-        let time = if a.uses_time() || crate::authority::uses_time(&self.manifest) {
+        let time = if admitted_time.is_some() {
+            admitted_time
+        } else if a.uses_time()
+            || crate::authority::uses_time(&self.manifest)
+            || self.manifest.jobs.as_ref().is_some_and(|jobs| {
+                jobs.schedules
+                    .iter()
+                    .any(|schedule| schedule.source_action == a.id)
+            })
+        {
             budget.spend(1)?;
             Some(self.temporal_after_admission(&mut tx).await?)
         } else {
@@ -408,6 +420,15 @@ impl Application {
             }
         };
         budget.database_calls = effects.calls;
+        if let Err(error) = self
+            .enqueue_action_jobs(&mut effects, a, &original, &outcomes, time, &nonce)
+            .await
+        {
+            budget.database_calls = effects.calls;
+            effects.tx.rollback().await?;
+            return Err(error);
+        }
+        budget.database_calls = effects.calls;
         let destination = if let Some(plan) = navigation {
             self.capture_destination(&mut effects.tx, plan, &sealed, &original, &outcomes)
                 .await?
@@ -500,8 +521,119 @@ impl Application {
             subject: session.nonce.clone(),
             expires: token.expires,
             navigation: Some(NavigationPlan::web(&self.manifest, binding)?),
+            time: None,
         };
         Ok((context, session, now))
+    }
+
+    /// Only an authoritative queue lock can construct service authority. Captured
+    /// IDs are seals, while all eligible reads and policies are checked again by
+    /// the existing resolver and ordered transaction executor.
+    pub(super) fn admit_job_invocation<'a>(
+        &'a self,
+        verified: &crate::jobs::VerifiedJob,
+        time: crate::lifecycle_clock::AttemptTime,
+    ) -> Result<InvocationContext<'a>> {
+        let (id, version) = verified.action();
+        let action = manifest::action(&self.manifest, id)?;
+        ensure!(
+            action.version == version && verified.captured().contract() == self.contract,
+            repository::ReferenceUnavailable
+        );
+        let canonical = manifest::canonical_input(&self.manifest, action, verified.input())?;
+        manifest::validate_input(&self.manifest, action, &canonical)?;
+        ensure!(
+            &canonical == verified.input(),
+            "noncanonical captured job input"
+        );
+        let rule = verified
+            .grant()
+            .worker
+            .actions
+            .iter()
+            .find(|rule| rule.action == id)
+            .ok_or(repository::ReferenceUnavailable)?;
+        ensure!(
+            rule.targets.len() == action.targets.len()
+                && verified.targets().len() == action.targets.len(),
+            repository::ReferenceUnavailable
+        );
+        let mut targets = std::collections::BTreeMap::new();
+        for declaration in &action.targets {
+            let seal = verified
+                .targets()
+                .get(&declaration.name)
+                .ok_or(repository::ReferenceUnavailable)?;
+            let rule = rule
+                .targets
+                .get(&declaration.name)
+                .ok_or(repository::ReferenceUnavailable)?;
+            let eligible = match declaration.source {
+                TargetSource::Service { eligible } | TargetSource::Reference { eligible, .. } => {
+                    eligible
+                }
+                _ => anyhow::bail!(repository::ReferenceUnavailable),
+            };
+            ensure!(
+                rule.resource == declaration.resource
+                    && rule.eligible == eligible
+                    && seal.resource == declaration.resource
+                    && seal.id > 0
+                    && seal.id <= i64::MAX as u64
+                    && !seal.incarnation.is_empty()
+                    && seal.incarnation.len() <= 64
+                    && match declaration.revision {
+                        Revision::Exact => seal.revision > 0,
+                        Revision::Identity => seal.revision >= 0,
+                    },
+                repository::ReferenceUnavailable
+            );
+            targets.insert(
+                declaration.name.clone(),
+                TargetGrant {
+                    target: RecordTarget {
+                        resource: seal.resource,
+                        id: seal.id,
+                        incarnation: seal.incarnation.clone(),
+                        revision: seal.revision,
+                        route: None,
+                    },
+                    expires: None,
+                    service: true,
+                },
+            );
+        }
+        ensure!(
+            action
+                .steps
+                .iter()
+                .all(
+                    |step| manifest::operation(&self.manifest, step.operation).is_ok_and(
+                        |operation| matches!(
+                            operation.kind,
+                            OperationKind::Update | OperationKind::Delete
+                        )
+                    )
+                ),
+            repository::ReferenceUnavailable
+        );
+        Ok(InvocationContext {
+            action: ActionCore::of(action)?,
+            input: canonical,
+            principal: auth::Principal::from_verified_job(verified),
+            targets,
+            capability: None,
+            observed: time.timestamp().unix_seconds_floor(),
+            identity: verified.invocation_digest()?,
+            nonce: verified.receipt_nonce()?,
+            subject: verified.receipt_subject()?,
+            // Job receipts are durable recovery evidence; queue retention controls
+            // their lifecycle. No browser credential expiry is fabricated.
+            expires: i64::MAX,
+            navigation: None,
+            upload: None,
+            time: Some(time),
+        })
     }
 
     pub(super) fn web_invocation_identity(
@@ -1074,6 +1206,7 @@ mod tests {
             TargetGrant {
                 target,
                 expires: None,
+                service: false,
             },
         )]);
         let mut budget = ExecutionBudget::new(
