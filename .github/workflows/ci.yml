@@ -446,6 +446,22 @@ jobs:
             --output "$RUNNER_TEMP/noxide-ci/reservations-postgres" \
             --host-cli target/debug/noxide \
             --postgres "${NOXIDE_TEST_POSTGRES%/*}/noxide_reservations"
+      - name: Build and test expiring paste uploads, jobs and outbox
+        if: matrix.suite == 'examples'
+        run: |
+          target/debug/noxide build --framework "$PWD" \
+            --app examples/expiring-paste --name expiring_paste \
+            --output "$RUNNER_TEMP/noxide-ci/expiring-paste"
+          python3 tools/test_expiring_paste.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/expiring-paste" \
+            --output "$RUNNER_TEMP/noxide-ci/expiring-paste-sqlite" \
+            --host-cli target/debug/noxide
+          psql "$NOXIDE_TEST_POSTGRES" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE noxide_expiring_paste'
+          python3 tools/test_expiring_paste.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/expiring-paste" \
+            --output "$RUNNER_TEMP/noxide-ci/expiring-paste-postgres" \
+            --host-cli target/debug/noxide \
+            --postgres "${NOXIDE_TEST_POSTGRES%/*}/noxide_expiring_paste"
       - name: Build and test record membership
         if: matrix.suite == 'examples'
         run: |
