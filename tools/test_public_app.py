@@ -24,9 +24,10 @@ def main():
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--host-cli", type=Path, default=ROOT / "target/debug/noxide")
     args = parser.parse_args()
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
-    binary = ROOT / "target/debug/noxide"
+    binary = args.host_cli.resolve()
     digest = subprocess.check_output(
         [binary, "contract-hash", args.manifest.resolve()], text=True, timeout=10).strip()
     with socket.socket() as probe:
