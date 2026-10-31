@@ -701,3 +701,67 @@ fn corrupt_metadata_cannot_wrap_signed_quota_arithmetic() {
         .is_err()
     );
 }
+
+#[test]
+fn canonical_handle_binds_first_finalized_slot_object_and_content() {
+    let (upload, _) = reserve(100);
+    let original = upload
+        .stage(
+            upload.generation,
+            durable(&upload, b"first"),
+            now(),
+            &binding(),
+        )
+        .unwrap()
+        .next;
+    assert_ne!(original.handle, upload.handle);
+    let identical = upload
+        .stage(
+            upload.generation,
+            durable(&upload, b"first"),
+            now(),
+            &binding(),
+        )
+        .unwrap()
+        .next;
+    assert_eq!(identical.handle, original.handle);
+    let different = upload
+        .stage(
+            upload.generation,
+            durable(&upload, b"other"),
+            now(),
+            &binding(),
+        )
+        .unwrap()
+        .next;
+    assert_ne!(different.handle, original.handle);
+    let mut other_slot = upload.clone();
+    other_slot.binding.slot = commitment('1');
+    assert_ne!(
+        other_slot
+            .stage(
+                other_slot.generation,
+                durable(&other_slot, b"first"),
+                now(),
+                &other_slot.binding
+            )
+            .unwrap()
+            .next
+            .handle,
+        original.handle
+    );
+    let (other_object, _) = reserve(100);
+    assert_ne!(
+        other_object
+            .stage(
+                other_object.generation,
+                durable(&other_object, b"first"),
+                now(),
+                &binding()
+            )
+            .unwrap()
+            .next
+            .handle,
+        original.handle
+    );
+}

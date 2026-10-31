@@ -9,6 +9,7 @@ use noxide_protocol::{
     },
     time::{Duration, Timestamp},
 };
+use sha2::{Digest, Sha256};
 use std::fmt;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -36,7 +37,9 @@ impl fmt::Debug for Commitment {
 
 /// Host-created commitments after origin/CSRF/ticket/canonical input checks.
 /// Subject counts account or anonymous form capability, never circuit identity.
-/// Context commits deployment, session/capability, web binding and upload input.
+/// Context commits deployment, session/capability and web binding. `input`
+/// identifies the NAMED UploadHandle input, never canonical scalar/selection
+/// values: the existing serialized semantic receipt claim owns those values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct UploadBinding {
     pub(crate) slot: Commitment,
@@ -206,7 +209,7 @@ impl GcClaim {
 impl Metadata {
     pub(crate) fn reserve(
         blob: BlobRef,
-        handle: UploadHandle,
+        pending_handle: UploadHandle,
         key: ObjectKey,
         binding: UploadBinding,
         now: Timestamp,
@@ -245,7 +248,10 @@ impl Metadata {
         Ok((
             Self {
                 blob,
-                handle,
+                // Private Uploading identity is never returned to a guest or
+                // accepted by attach. Stage publication replaces it with the
+                // canonical object/digest-bound handle exactly once.
+                handle: pending_handle,
                 key,
                 binding,
                 state: State::Uploading,
@@ -313,7 +319,25 @@ impl Metadata {
         transition.next.reserved = 0;
         transition.next.bytes = object.bytes();
         transition.next.digest = Some(object.sha256());
+        transition.next.handle = self.finalized_handle(&object)?;
         Ok(transition)
+    }
+    fn finalized_handle(&self, object: &DurableObject) -> Result<UploadHandle> {
+        let mut digest = Sha256::new();
+        digest.update(b"noxide/finalized-upload/v1\0");
+        digest.update(self.binding.slot.as_str().as_bytes());
+        digest.update(self.key.as_str().as_bytes());
+        digest.update(self.blob.as_str().as_bytes());
+        digest.update(object.bytes().to_be_bytes());
+        digest.update(object.sha256());
+        let bytes = digest.finalize();
+        let mut token = String::from("u1_");
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        for byte in bytes {
+            token.push(HEX[(byte >> 4) as usize] as char);
+            token.push(HEX[(byte & 15) as usize] as char);
+        }
+        UploadHandle::parse(token).map_err(anyhow::Error::msg)
     }
     pub(crate) fn attach(
         &self,
