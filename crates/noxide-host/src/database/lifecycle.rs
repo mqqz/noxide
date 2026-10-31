@@ -166,7 +166,9 @@ tokio::task_local! { static ADMISSION: AdmissionOwner; }
 #[cfg(test)]
 tokio::task_local! { static OBSERVED_ROOTS: Arc<Mutex<Vec<RequestScope>>>; }
 #[cfg(test)]
-async fn observe_roots<T>(future: impl std::future::Future<Output = T>) -> (T, Vec<RequestScope>) {
+pub(crate) async fn observe_roots<T>(
+    future: impl std::future::Future<Output = T>,
+) -> (T, Vec<RequestScope>) {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let result = OBSERVED_ROOTS.scope(observed.clone(), future).await;
     let roots = std::mem::take(&mut *observed.lock().unwrap());
@@ -174,6 +176,11 @@ async fn observe_roots<T>(future: impl std::future::Future<Output = T>) -> (T, V
 }
 
 impl RequestScope {
+    #[cfg(test)]
+    pub(crate) fn statement_snapshot(&self) -> (u16, u16, u16) {
+        self.root.meter.snapshot()
+    }
+
     pub(crate) fn new(
         registry: Arc<Registry>,
         outer: tokio::time::Instant,
