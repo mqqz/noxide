@@ -126,3 +126,27 @@ are deferred; an empty authorized page must not advance past them. Aliases merge
 as identities but remain in raw/planned work, without refunds. The helper requires
 a work checkpoint and creates no counter. Runtime must charge the original shared
 request's planned window before SQL and advance only through fully consumed seeds.
+
+Opaque internal facts are limited to aggregate/search candidate policy and expiry.
+Their host-computed spec includes every policy OR branch, expiry, gate reference,
+scope, visibility, selection, scalar range/order and approved aggregate operand.
+Protected native identity/owner/tenant/incarnation/revision remain separate from
+guest fields. Required selected keys must all exist; optional absence retains its
+canonical empty-string representation rather than a fabricated default.
+
+Facts bind the exact declaration/contract, principal, spec identity and a private
+attempt/mutation epoch. New attempts, principal mismatches and mutation invalidation
+reject old facts. Witness-only eviction creates no row mutation and preserves the
+epoch. The existing policy/expiry formula is factored once; ordinary full-row
+authorization still performs complete canonical field validation. Visibility,
+parent gates, scope and selection remain their existing repository checks, and
+must all finish before operand/count/output. Partial policy success is never a
+Read grant and the facts API cannot produce Record/StoredRecord or serve Create,
+Read, Update or Delete purposes.
+
+Facts rely on the invariant that host writes and operator activation maintain
+canonical stored rows. They validate all eligibility inputs, but cannot assert the
+validity of omitted business data after out-of-band database corruption. The full
+row validator still rejects such corruption. Pure spec/ordinary-predicate tests do
+not prove membership, gate, durable expiry, SQL equivalence or aggregate budget fit;
+those differential provider gates remain required.

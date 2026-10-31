@@ -11,6 +11,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::{Fields, Manifest, Operation, membership::ExistsRelated};
 use std::collections::BTreeMap;
+pub(crate) mod projection;
 
 #[derive(Clone)]
 pub(crate) struct DeploymentScope {
@@ -36,6 +37,7 @@ pub(crate) struct Authority {
     storage: BTreeMap<String, i64>,
     witnesses: Option<Witnesses>,
     witness_principal: Option<(String, String)>,
+    projection_epoch: std::sync::Arc<()>,
 }
 
 #[derive(Clone, Copy)]
@@ -76,6 +78,10 @@ impl Authority {
         self.time
     }
     pub(crate) fn invalidate(&mut self) {
+        self.projection_epoch = std::sync::Arc::new(());
+        self.clear_witnesses();
+    }
+    fn clear_witnesses(&mut self) {
         if let Some(witnesses) = &mut self.witnesses {
             witnesses.invalidate();
         }
@@ -117,18 +123,36 @@ impl Authority {
         calls: &mut usize,
     ) -> Result<Vec<bool>> {
         ensure!(rows.len() <= membership::MAX_BATCH, "authority batch limit");
+        let resource = manifest::resource(manifest, operation.resource)?;
+        for row in rows {
+            manifest::validate_fields(resource, row.fields)?;
+        }
+        self.evaluate_policy_expiry(tx, manifest, principal, operation, rows, calls)
+            .await
+    }
+
+    // Only full-validated rows or opaque InternalFacts enter this one evaluator.
+    // Public visibility, parent gates, scope and selection remain repository
+    // checks. A true result here is not a complete Read/output grant.
+    async fn evaluate_policy_expiry(
+        &mut self,
+        tx: &mut Transaction,
+        manifest: &Manifest,
+        principal: &Principal,
+        operation: &Operation,
+        rows: &[Row<'_>],
+        calls: &mut usize,
+    ) -> Result<Vec<bool>> {
+        ensure!(rows.len() <= membership::MAX_BATCH, "authority batch limit");
         let principal_key = principal
             .user()
             .ok()
             .map(|user| (user.id.clone(), user.tenant.clone()));
         if self.witness_principal != principal_key {
-            self.invalidate();
+            self.clear_witnesses();
         }
         self.witness_principal = principal_key.clone();
         let resource = manifest::resource(manifest, operation.resource)?;
-        for row in rows {
-            manifest::validate_fields(resource, row.fields)?;
-        }
         let visible: Vec<_> = if operation.kind == noxide_protocol::OperationKind::Create {
             for row in rows {
                 expiry::check_write(resource, None, row.fields, self.time)?;
@@ -200,7 +224,7 @@ impl Authority {
                     .checked_add(incoming)
                     .is_none_or(|count| count > membership::MAX_WITNESSES)
             }) {
-                self.invalidate();
+                self.clear_witnesses();
                 self.witness_principal = principal_key;
             }
             if self.witnesses.is_none() {
