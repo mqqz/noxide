@@ -10,6 +10,7 @@ import contextlib
 import copy
 import csv
 import hashlib
+import http.cookiejar
 from html.parser import HTMLParser
 import io
 import json
@@ -21,8 +22,18 @@ import sqlite3
 import subprocess
 import time
 import urllib.parse
+import urllib.request
 
-from test_blob_http import Browser
+from test_blob_http import Browser as FormBrowser, NoRedirect
+
+
+class Browser(FormBrowser):
+    def __init__(self, origin):
+        self.origin = origin
+        # Environment proxy settings must not send this loopback proof elsewhere.
+        self.opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()), NoRedirect())
 
 
 class Document(HTMLParser):
