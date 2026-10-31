@@ -1,7 +1,7 @@
 use crate::effect_deployment::EffectiveEffectGrant;
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use noxide_protocol::{FieldKind, effects::*, time::Timestamp};
+use noxide_protocol::{FieldKind, Input, TextField, effects::*, time::Timestamp};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -106,6 +106,7 @@ pub(crate) struct CapturedEffect {
     pub(super) secret_version: i64,
     pub(super) binding: EffectiveEffectGrant,
     pub(super) schema_digest: String,
+    pub(super) fields: Vec<Input>,
     pub(super) body: String,
     pub(super) created: Timestamp,
 }
@@ -141,6 +142,11 @@ impl CapturedEffect {
             secret_version: proof.grant.secret_version,
             binding: proof.grant.binding.clone(),
             schema_digest: digest(&("effect-schema-v1", declaration))?,
+            fields: declaration
+                .fields
+                .iter()
+                .map(|f| f.schema.clone())
+                .collect(),
             body: String::from_utf8(canonical_json)?,
             created: now,
         };
@@ -169,6 +175,7 @@ impl CapturedEffect {
             value.is_object() && serde_json::to_string(&value)? == self.body,
             "noncanonical captured JSON object"
         );
+        validate_fields(&self.fields, self.body.as_bytes())?;
         ensure!(
             serde_json::to_vec(self)?.len() <= MAX_CAPTURE_BYTES,
             "effect capture limit"
@@ -219,19 +226,39 @@ fn validate_body(declaration: &EmitEffect, bytes: &[u8]) -> Result<()> {
             && bytes.len() <= MAX_EFFECT_BODY_BYTES,
         "effect capture limits"
     );
+    validate_fields(
+        &declaration
+            .fields
+            .iter()
+            .map(|f| f.schema.clone())
+            .collect::<Vec<_>>(),
+        bytes,
+    )
+}
+fn validate_fields(schemas: &[Input], bytes: &[u8]) -> Result<()> {
+    ensure!(
+        schemas.len() <= MAX_PAYLOAD_FIELDS && bytes.len() <= MAX_EFFECT_BODY_BYTES,
+        "effect capture limits"
+    );
     let fields: BTreeMap<String, serde_json::Value> = serde_json::from_slice(bytes)?;
     ensure!(
-        serde_json::to_vec(&fields)? == bytes && fields.len() == declaration.fields.len(),
+        serde_json::to_vec(&fields)? == bytes && fields.len() == schemas.len(),
         "noncanonical effect object"
     );
     let mut seen = BTreeSet::new();
-    for field in &declaration.fields {
-        let schema = &field.schema;
+    for schema in schemas {
         ensure!(
             noxide_protocol::identifier(&schema.name) && seen.insert(&schema.name),
             "invalid effect field name"
         );
         let value = fields.get(&schema.name).context("effect field missing")?;
+        ensure!(
+            !matches!(
+                schema.kind,
+                FieldKind::Blob { .. } | FieldKind::UploadHandle { .. }
+            ),
+            "effect handle disclosure refused"
+        );
         if value.is_null() {
             ensure!(schema.optional, "required effect field is null");
             continue;
@@ -266,6 +293,23 @@ fn validate_body(declaration: &EmitEffect, bytes: &[u8]) -> Result<()> {
             FieldKind::Blob { .. } | FieldKind::UploadHandle { .. } => false,
         };
         ensure!(valid, "effect scalar differs from declared schema");
+        let scalar = match value {
+            serde_json::Value::String(s) => s.clone(),
+            _ => value.to_string(),
+        };
+        let validator = TextField {
+            immutable: false,
+            kind: schema.kind.clone(),
+            optional: false,
+            initial: None,
+            name: schema.name.clone(),
+            label: schema.label.clone(),
+            max_bytes: schema.max_bytes,
+        };
+        let canonical = validator
+            .canonical(&scalar)
+            .map_err(|_| anyhow::anyhow!("invalid effect scalar"))?;
+        ensure!(canonical == scalar, "noncanonical effect scalar");
     }
     Ok(())
 }
@@ -314,5 +358,23 @@ mod tests {
         ] {
             assert!(validate_body(&d, bytes).is_err());
         }
+    }
+    #[test]
+    fn independent_capture_reuses_scalar_grammar_without_normalizing() {
+        let mut d = declaration();
+        d.fields[0].schema.kind = FieldKind::Text;
+        d.fields[0].schema.max_bytes = 64;
+        for bytes in [
+            br#"{"count":""}"#.as_slice(),
+            br#"{"count":"a\rb"}"#,
+            br#"{"count":"a\u0001b"}"#,
+        ] {
+            assert!(validate_body(&d, bytes).is_err());
+        }
+        assert!(validate_body(&d, br#"{"count":"a\nb"}"#).is_ok());
+        d.fields[0].schema.kind = FieldKind::Account {
+            scope: noxide_protocol::AccountScope::SameTenant,
+        };
+        assert!(validate_body(&d, br#"{"count":"x"}"#).is_err());
     }
 }
