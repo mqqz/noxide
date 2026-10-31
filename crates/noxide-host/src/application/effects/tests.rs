@@ -361,6 +361,11 @@ impl Case {
             .keep()
             .canonicalize()
             .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let db = database.unwrap_or_else(|| Database::sqlite(path.join("runtime.db")));
         db.initialize().await.unwrap();
         let actor = db
