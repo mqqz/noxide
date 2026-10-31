@@ -10,7 +10,7 @@ mod types;
 pub use operator::{JobOperatorCommand, JobOperatorResult, JobSummary};
 #[cfg(test)]
 mod operator_tests;
-pub(crate) use admission::validate_contract;
+pub(crate) use admission::{validate_contract, validate_recurring_targets};
 #[cfg(test)]
 pub(crate) use recurrence::occurrence_key;
 pub(crate) use store::{Execution, Failure, FailureResult, QueueContext, VerifiedScheduleGrant};

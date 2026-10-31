@@ -116,8 +116,11 @@ closed, the registry stays closed: restarting this service requires a new activa
 ## Recurring selection
 
 Recurring schedules use fixed intervals between 60 seconds and 30 days. Missed ticks
-coalesce. A schedule may be target-free or select exactly one approved target through
-the existing indexed query adapter. Fanout is capped at 20 occurrences per batch and
+coalesce. A schedule may be target-free or select one approved Service root through
+the existing indexed query adapter. Its declared one-hop immutable Reference
+bindings are resolved and independently read-authorized in that transaction,
+within the existing four-target bound. Row data may be reused across aliases;
+read authority is checked for each alias. Fanout is capped at 20 occurrences per batch and
 also consumes the existing queue and request budgets.
 
 The selection subset is deliberately narrow: creation ascending/descending order,

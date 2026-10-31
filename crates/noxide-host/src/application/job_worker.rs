@@ -298,7 +298,7 @@ impl Application {
                 }).collect();
                 let input = self.canonical_job_input(declaration.action, &input).map_err(RequestError::database)?;
                 let version = manifest::action(&self.manifest, declaration.action).map_err(RequestError::database)?.version;
-                let next = if let Some(selection) = &declaration.selection {
+                let next = if declaration.selection.is_some() {
                     // Query/finalization reserves remain in the existing budget;
                     // fanout 20 never grants twenty additional database calls.
                     let limit = batch.remaining();
@@ -317,7 +317,7 @@ impl Application {
                         // Q returns an independently List-authorized row sealed
                         // through A's current eligible-read helper. Reauthorizing
                         // it here would spend the same budget twice.
-                        let targets = BTreeMap::from([(selection.target.clone(), item.target)]);
+                        let targets = item.targets;
                         QueueContext { tx: &mut tx, calls: &mut calls }.emit_recurrence(&mut batch, version, input.clone(), targets, item.expiry, jobs.effective.limits.pending_per_tenant).await.map_err(RequestError::database)?;
                     }
                     page.next_cursor

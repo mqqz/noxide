@@ -263,9 +263,8 @@ fn declarations() -> Manifest {
     });
     m
 }
-async fn app_fixture(database: &Database) -> Application {
-    let m = declarations();
-    manifest::validate(&m).unwrap();
+async fn fixture_application(database: &Database, m: &Manifest) -> Application {
+    manifest::validate(m).unwrap();
     let jobs = crate::JobDeployment {
         grants: ["alpha", "beta"]
             .into_iter()
@@ -277,12 +276,12 @@ async fn app_fixture(database: &Database) -> Application {
             .collect(),
         limits: crate::JobLimits::default(),
     };
-    let approved = crate::deployment::approval_digest(&m, None, Some(&jobs), None).unwrap();
+    let approved = crate::deployment::approval_digest(m, None, Some(&jobs), None).unwrap();
     database.initialize().await.unwrap();
-    database.reconcile_query_indexes(&m).await.unwrap();
+    database.reconcile_query_indexes(m).await.unwrap();
     let app = Application::new(
         &crate::test_support::component(None),
-        &serde_json::to_vec(&m).unwrap(),
+        &serde_json::to_vec(m).unwrap(),
         approved,
         database.clone(),
         HostKeys::generate().unwrap(),
@@ -296,6 +295,11 @@ async fn app_fixture(database: &Database) -> Application {
     )
     .unwrap();
     app.activate().await.unwrap();
+    app
+}
+async fn app_fixture(database: &Database) -> Application {
+    let m = declarations();
+    let app = fixture_application(database, &m).await;
     let mut tx = database
         .begin(std::time::Instant::now() + Duration::from_secs(30))
         .await
@@ -427,7 +431,7 @@ async fn provider(database: Database) {
             assert_eq!(
                 page.items
                     .iter()
-                    .map(|item| item.target.id)
+                    .map(|item| item.targets["order"].id)
                     .collect::<Vec<_>>(),
                 [1, 2]
             );
@@ -435,7 +439,7 @@ async fn provider(database: Database) {
             let cursor = page.next_cursor.unwrap();
             assert!(cursor.len() <= 4096);
             for item in page.items {
-                assert_eq!(item.target.revision, 1);
+                assert_eq!(item.targets["order"].revision, 1);
                 assert!(item.expiry.unwrap() <= batch.cutoff());
                 assert!(
                     QueueContext {
@@ -446,7 +450,7 @@ async fn provider(database: Database) {
                         &mut batch,
                         1,
                         Fields::new(),
-                        BTreeMap::from([("order".into(), item.target)]),
+                        item.targets,
                         item.expiry,
                         1000
                     )
@@ -700,4 +704,252 @@ async fn postgres_recurring_selector_cutoffs_scope_budget_and_native_frontier() 
     case.set_path(&name);
     eprintln!("retained P10 selector database {name}");
     provider(Database::postgres(case.as_str()).unwrap()).await;
+}
+
+fn derived_declarations() -> Manifest {
+    use noxide_protocol::jobs::WorkerTarget;
+    let mut m = declarations();
+    let mut product = m.resources[0].clone();
+    product.id = 2;
+    product.name = "products".into();
+    m.resources.push(product);
+    m.resources[0].fields.push(TextField {
+        name: "product".into(),
+        label: "Product".into(),
+        kind: FieldKind::Reference {
+            resource: "products".into(),
+        },
+        immutable: true,
+        optional: false,
+        initial: None,
+        max_bytes: 64,
+    });
+    let mut read = m.operations.iter().find(|op| op.id == 8).unwrap().clone();
+    read.id = 11;
+    read.resource = 2;
+    read.maintenance = false;
+    m.operations.push(read);
+    m.actions[0].targets.push(ActionTarget {
+        name: "product".into(),
+        resource: 2,
+        source: TargetSource::Reference {
+            target: "order".into(),
+            field: "product".into(),
+            eligible: 11,
+        },
+        revision: Revision::Identity,
+        projection: Some(Inspection {
+            operation: 11,
+            fields: vec![],
+        }),
+        inspect: None,
+    });
+    m.jobs.as_mut().unwrap().workers[0].actions[0]
+        .targets
+        .insert(
+            "product".into(),
+            WorkerTarget {
+                resource: 2,
+                eligible: 11,
+            },
+        );
+    m
+}
+#[test]
+fn recurring_selection_accepts_only_one_service_root_and_its_independent_references() {
+    let m = derived_declarations();
+    manifest::validate(&m).unwrap();
+    let jobs = m.jobs.as_ref().unwrap();
+    let selection = jobs.recurring[0].selection.as_ref().unwrap();
+    let rule = &jobs.workers[0].actions[0];
+    crate::jobs::validate_recurring_targets(&m, rule, selection).unwrap();
+    for forged in 0..5 {
+        let mut invalid = m.clone();
+        match forged {
+            0 => {
+                invalid.jobs.as_mut().unwrap().recurring[0]
+                    .selection
+                    .as_mut()
+                    .unwrap()
+                    .target = "product".into()
+            }
+            1 => invalid.actions[0].targets[1].source = TargetSource::Service { eligible: 11 },
+            2 => {
+                invalid.actions[0].targets[1].source = TargetSource::Reference {
+                    target: "product".into(),
+                    field: "product".into(),
+                    eligible: 11,
+                }
+            }
+            3 => {
+                invalid.jobs.as_mut().unwrap().workers[0].actions[0]
+                    .targets
+                    .get_mut("product")
+                    .unwrap()
+                    .eligible = 8;
+            }
+            4 => {
+                invalid.jobs.as_mut().unwrap().workers[0].actions[0]
+                    .targets
+                    .remove("product");
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            manifest::validate(&invalid).is_err(),
+            "forged recurrence {forged} admitted"
+        );
+    }
+}
+async fn derived_provider(database: Database) {
+    use crate::jobs::CapturedJob;
+    let m = derived_declarations();
+    let app = Arc::new(fixture_application(&database, &m).await);
+    let mut tx = database
+        .begin(std::time::Instant::now() + Duration::from_secs(10))
+        .await
+        .unwrap();
+    let order = tx.storage_resource(&m, 1).await.unwrap();
+    let product = tx.storage_resource(&m, 2).await.unwrap();
+    let now = tx
+        .fetch::<1>(
+            "SELECT CAST(lifecycle_ms AS TEXT) FROM nx_clock WHERE singleton=1",
+            &[],
+        )
+        .await
+        .unwrap()[0][0]
+        .parse::<i64>()
+        .unwrap();
+    let alice = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let bob = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA";
+    for (account, tenant) in [(alice, "alpha"), (bob, "beta")] {
+        tx.execute(
+            "INSERT INTO nx_accounts(id,tenant,state,epoch) VALUES($1,$2,'active',1)",
+            &[account.into(), tenant.into()],
+        )
+        .await
+        .unwrap();
+    }
+    // Product2 is expired; Product3 belongs to another tenant. Neither may be
+    // sealed merely because its referring expired order was selected.
+    for (id, tenant, expires) in [
+        (1i64, "alpha", now + 1_000_000),
+        (2, "alpha", now - 1),
+        (3, "beta", now + 1_000_000),
+    ] {
+        let fields = Fields::from([
+            ("body".into(), "product".into()),
+            ("expires".into(), expires.to_string()),
+            ("ready".into(), "true".into()),
+        ]);
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,$3,$4,$5,$6,1,$2)", &[product.into(),id.into(),if tenant=="alpha" {alice} else {bob}.into(),tenant.into(),serde_json::to_string(&fields).unwrap().into(),format!("product_{id}").into()]).await.unwrap();
+        let fields = Fields::from([
+            ("body".into(), "order".into()),
+            ("expires".into(), (now - 1).to_string()),
+            ("ready".into(), "true".into()),
+            ("product".into(), id.to_string()),
+        ]);
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,$3,'alpha',$4,$5,1,3+$2)", &[order.into(),id.into(),alice.into(),serde_json::to_string(&fields).unwrap().into(),format!("order_{id}").into()]).await.unwrap();
+    }
+    tx.execute(
+        "UPDATE nx_creation_counter SET value=6 WHERE singleton=1",
+        &[],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    app.checkpoint_clock().await.unwrap();
+    // Each call has its normal worker request root, database meter and logical
+    // budget. Short pages retain the frontier across denied related targets.
+    for _ in 0..6 {
+        if !app.run_recurrence_once().await.unwrap() {
+            break;
+        }
+    }
+    let mut tx = database
+        .begin_read(std::time::Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    let payloads = tx
+        .fetch::<1>("SELECT payload FROM nx_jobs ORDER BY id", &[])
+        .await
+        .unwrap();
+    assert_eq!(payloads.len(), 1);
+    let captured: CapturedJob = serde_json::from_str(&payloads[0][0]).unwrap();
+    assert_eq!(captured.targets().len(), 2);
+    assert_eq!(captured.targets()["order"].resource, 1);
+    assert_eq!(captured.targets()["order"].id, 1);
+    assert_eq!(captured.targets()["order"].incarnation, "order_1");
+    assert_eq!(captured.targets()["product"].resource, 2);
+    assert_eq!(captured.targets()["product"].id, 1);
+    assert_eq!(captured.targets()["product"].incarnation, "product_1");
+    tx.commit().await.unwrap();
+    assert!(matches!(
+        app.run_job_once().await.unwrap(),
+        Some(crate::application::JobRunOutcome::Completed {
+            recovered: false,
+            ..
+        })
+    ));
+    assert!(app.run_job_once().await.unwrap().is_none());
+    let mut tx = database
+        .begin_read(std::time::Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        tx.fetch::<1>(
+            "SELECT CAST(id AS TEXT) FROM nx_records WHERE resource=$1 ORDER BY id",
+            &[order.into()]
+        )
+        .await
+        .unwrap(),
+        [["2".to_string()], ["3".to_string()]]
+    );
+    assert_eq!(
+        tx.fetch::<2>("SELECT state,CAST(attempts AS TEXT) FROM nx_jobs", &[])
+            .await
+            .unwrap(),
+        [["succeeded".to_string(), "1".to_string()]]
+    );
+    assert_eq!(
+        tx.fetch::<1>(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM nx_receipts WHERE action=2",
+            &[]
+        )
+        .await
+        .unwrap(),
+        [["1".to_string()]]
+    );
+    tx.commit().await.unwrap();
+}
+#[tokio::test]
+async fn sqlite_recurring_derived_targets_recheck_current_read_and_expiry() {
+    let root = std::env::temp_dir().join("noxide-recurring-derived");
+    std::fs::create_dir_all(&root).unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("selector-")
+        .tempdir_in(root)
+        .unwrap()
+        .keep();
+    eprintln!("retained derived recurrence fixture {}", dir.display());
+    derived_provider(Database::sqlite(dir.join("runtime.db"))).await;
+}
+#[tokio::test]
+#[ignore = "requires NOXIDE_TEST_POSTGRES"]
+async fn postgres_recurring_derived_targets_recheck_current_read_and_expiry() {
+    use sqlx::Connection;
+    let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+    let name = format!(
+        "nx_derived_select_{}",
+        crate::security::record_id().unwrap()
+    );
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let mut case = url::Url::parse(&url).unwrap();
+    case.set_path(&name);
+    eprintln!("retained derived recurrence database {name}");
+    derived_provider(Database::postgres(case.as_str()).unwrap()).await;
 }

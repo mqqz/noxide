@@ -22,7 +22,7 @@ const CURSOR_BYTES: usize = 4096;
 const EMIT_STATEMENTS: u16 = 9;
 
 pub(crate) struct SelectedTarget {
-    pub(crate) target: SealedTarget,
+    pub(crate) targets: BTreeMap<String, SealedTarget>,
     pub(crate) expiry: Option<Timestamp>,
 }
 pub(crate) struct SelectionPage {
@@ -171,7 +171,8 @@ impl Application {
             .iter()
             .find(|action| action.action == schedule.action)
             .ok_or_else(|| anyhow::anyhow!("recurring action not granted"))?;
-        ensure!(action.targets.len() == 1, "recurrence selects one target");
+        crate::jobs::validate_recurring_targets(&self.manifest, action, selection)?;
+        let called = manifest::action(&self.manifest, schedule.action)?;
         let target = action
             .targets
             .get(&selection.target)
@@ -240,12 +241,26 @@ impl Application {
             *budget >= 1 && statements >= 1,
             "recurring cursor persistence budget"
         );
-        let cap = candidate_cap(
-            limit.min(plan.limit),
-            *budget,
-            statements,
+        // Authorize the source before deriving, then seal every alias using its
+        // independent read. Reserve both source checks and all derived loads.
+        let binding_work = called.targets.iter().try_fold(
             read_work(&self.manifest, eligible)?,
-        );
+            |work, declared| -> Result<u32> {
+                let binding = action
+                    .targets
+                    .get(&declared.name)
+                    .ok_or(repository::ReferenceUnavailable)?;
+                let read = manifest::operation(&self.manifest, binding.eligible)?;
+                Ok(work
+                    + read_work(&self.manifest, read)?
+                    + if declared.name == selection.target {
+                        0
+                    } else {
+                        2
+                    })
+            },
+        )?;
+        let cap = candidate_cap(limit.min(plan.limit), *budget, statements, binding_work);
         if cap == 0 {
             return Ok(SelectionPage {
                 items: Vec::new(),
@@ -300,7 +315,53 @@ impl Application {
                 frontier.after = Some(candidate.key);
                 continue;
             }
-            let rows = BTreeMap::from([(selection.target.clone(), stored)]);
+            if !repository::authorize_stored_read(&mut context, eligible, &stored).await? {
+                frontier.after = Some(candidate.key);
+                continue;
+            }
+            let mut records =
+                BTreeMap::from([((stored.record.resource, stored.record.id), stored.clone())]);
+            let mut rows = BTreeMap::from([(selection.target.clone(), stored)]);
+            let mut unavailable = false;
+            for declared in called
+                .targets
+                .iter()
+                .filter(|target| target.name != selection.target)
+            {
+                let TargetSource::Reference {
+                    target: parent,
+                    field,
+                    ..
+                } = &declared.source
+                else {
+                    anyhow::bail!("recurrence derived source changed");
+                };
+                let id = rows
+                    .get(parent)
+                    .and_then(|row| row.record.fields.get(field))
+                    .and_then(|raw| raw.parse::<u64>().ok())
+                    .filter(|id| *id > 0);
+                let Some(id) = id else {
+                    unavailable = true;
+                    break;
+                };
+                let key = (declared.resource, id);
+                let related = if let Some(related) = records.get(&key) {
+                    related.clone()
+                } else {
+                    let Some(related) = context.load(declared.resource, id).await? else {
+                        unavailable = true;
+                        break;
+                    };
+                    records.insert(key, related.clone());
+                    related
+                };
+                rows.insert(declared.name.clone(), related);
+            }
+            if unavailable {
+                frontier.after = Some(candidate.key);
+                continue;
+            }
             let sealed = match self
                 .seal_job_target_rows(&mut context, locked, schedule.action, &rows)
                 .await
@@ -333,10 +394,7 @@ impl Application {
                 None
             };
             items.push(SelectedTarget {
-                target: sealed
-                    .get(&selection.target)
-                    .ok_or_else(|| anyhow::anyhow!("sealed recurring target missing"))?
-                    .clone(),
+                targets: sealed,
                 expiry,
             });
             frontier.after = Some(candidate.key);

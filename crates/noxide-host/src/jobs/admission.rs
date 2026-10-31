@@ -165,10 +165,7 @@ pub(crate) fn validate_contract(
         );
         match &schedule.selection {
             Some(selection) => {
-                ensure!(
-                    action.targets.len() == 1 && action.targets.contains_key(&selection.target),
-                    "recurrence selects exactly one approved target"
-                );
+                validate_recurring_targets(manifest, action, selection)?;
                 let query = manifest::operation(manifest, selection.operation)?;
                 ensure!(
                     query.kind == OperationKind::List
@@ -249,6 +246,63 @@ fn safe_value(value: &Value, depth: usize, nodes: &mut usize) -> Result<()> {
             safe_value(right, depth + 1, nodes)?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// One indexed service root may carry the action's already admitted one-hop
+/// immutable bindings. Every alias retains its own independent eligible read.
+pub(crate) fn validate_recurring_targets(
+    m: &Manifest,
+    rule: &WorkerAction,
+    selection: &RecurringSelection,
+) -> Result<()> {
+    let action = manifest::action(m, rule.action)?;
+    ensure!(
+        !action.targets.is_empty()
+            && action.targets.len() <= 4
+            && rule.targets.len() == action.targets.len(),
+        "recurrence target bound differs from action"
+    );
+    let root = action
+        .targets
+        .iter()
+        .find(|target| target.name == selection.target)
+        .context("recurrence service root missing")?;
+    ensure!(
+        matches!(root.source, TargetSource::Service { .. }),
+        "recurrence must select its service root"
+    );
+    for target in &action.targets {
+        let eligible = match &target.source {
+            TargetSource::Service { eligible } if target.name == root.name => *eligible,
+            TargetSource::Reference {
+                target: parent,
+                field,
+                eligible,
+            } if parent == &root.name => {
+                ensure!(
+                    manifest::reference_resource(m, root.resource, field)?
+                        .map(|resource| resource.id)
+                        == Some(target.resource),
+                    "recurrence derived resource mismatch"
+                );
+                *eligible
+            }
+            _ => anyhow::bail!("recurrence requires one service root and one-hop references"),
+        };
+        let binding = rule
+            .targets
+            .get(&target.name)
+            .context("recurrence binding missing")?;
+        let read = manifest::operation(m, eligible)?;
+        ensure!(
+            binding.resource == target.resource
+                && binding.eligible == eligible
+                && read.kind == OperationKind::Read
+                && read.resource == target.resource,
+            "recurrence independent read mismatch"
+        );
     }
     Ok(())
 }

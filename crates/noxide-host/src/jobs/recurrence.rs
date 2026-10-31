@@ -196,8 +196,16 @@ impl QueueContext<'_> {
         match &batch.declaration.selection {
             Some(selection) => {
                 ensure!(
-                    targets.len() == 1
+                    !targets.is_empty()
+                        && targets.len() <= 4
                         && targets.contains_key(&selection.target)
+                        && batch
+                            .grant
+                            .worker
+                            .actions
+                            .iter()
+                            .find(|action| action.action == batch.declaration.action)
+                            .is_some_and(|action| action.targets.keys().eq(targets.keys()))
                         && selection.expiry_repair == expiry.is_some(),
                     "recurring target or expiry mismatch"
                 );
