@@ -18,6 +18,7 @@ pub(crate) struct DeploymentScope {
     pub incarnation: String,
     pub generation: String,
 }
+
 impl DeploymentScope {
     fn borrowed(&self) -> Deployment<'_> {
         Deployment {
@@ -247,3 +248,6 @@ impl Authority {
             .collect())
     }
 }
+
+#[cfg(test)]
+mod tests;
