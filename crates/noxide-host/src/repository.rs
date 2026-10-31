@@ -626,6 +626,15 @@ impl Effects {
                 .get(&(parent.id, id))
                 .or_else(|| self.target_rows.get(&(parent.id, id)));
             let stored = if let Some(stored) = cached {
+                #[cfg(test)]
+                if self.written_rows.contains_key(&(parent.id, id)) {
+                    let loaded = load(&mut self.tx, &m, parent.id, id).await?;
+                    assert_eq!(
+                        loaded.as_ref(),
+                        Some(stored),
+                        "reused reference row diverged"
+                    );
+                }
                 stored.clone()
             } else {
                 ensure!(self.calls >= 2, "database call budget");

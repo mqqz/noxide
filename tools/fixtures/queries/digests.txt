@@ -4,7 +4,7 @@ example-forum.json x0Des1yHdH0OA14eqloAJamXnAVJIifSKLrvuqYaUpY
 example-private-inbox.json U5fCKNuCkNxJCnoEIXtTmjpbclM-amrJ1B2J-yA0HbA
 example-private-notes.json jAjbXl4j45d51VooIJ5DwttidwcLVkwbZI5LyQyILYE
 example-public-articles.json A3iPHu3v68ssUI-8Dr8sseGZG2WyL3CYKULHjDsN6qI
-example-reservations.json vn2p7lCfB27od8ViGgQNPEw-E3fcWUoKYm4R52OQR4I
+example-reservations.json iCdqtucsj85sS1AOSeYKEIneyaoBcIHGdlkVRCNbGpc
 example-shop.json vYmObLykb_879maeD_vKAcOK1zFaZ2jFSgEullpc5Mc
 example-task-board.json JhyqxRQXsvVax3c0IVbMEMZHyIdnAJUO50qNJRm-7og
 example-team-documents.json LDV7OTrle6EauqNpCDENbA5GTWK6aD5FcPRXZTCRzQ8

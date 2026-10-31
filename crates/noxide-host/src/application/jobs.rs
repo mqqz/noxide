@@ -514,6 +514,11 @@ impl Application {
         // two fixed effects are sealed. Deduplicate data loads, never authorization:
         // rows this transaction wrote are already final and write-locked.
         let mut final_rows = effects.written_rows.clone();
+        #[cfg(test)]
+        for ((resource, id), row) in &final_rows {
+            let loaded = repository::load(&mut effects.tx, &self.manifest, *resource, *id).await?;
+            assert_eq!(loaded.as_ref(), Some(row), "reused job target row diverged");
+        }
         // These are authoritative row-lock proofs within this transaction, not
         // configuration metadata. No resource writes occur between fixed effects.
         let mut locked_grants = BTreeMap::new();
