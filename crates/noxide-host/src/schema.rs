@@ -18,6 +18,16 @@ pub struct Migration {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MigrationOp {
+    /// Activate the approved index only after an explicit canonical rebuild.
+    AddSearchIndex {
+        resource: String,
+    },
+    RebuildSearchIndex {
+        resource: String,
+    },
+    RemoveSearchIndex {
+        resource: String,
+    },
     AddResource {
         resource: String,
     },
@@ -172,6 +182,10 @@ pub(crate) fn transition(
                 current.push(resource(&target, key)?.clone());
             }
             MigrationOp::DropResource { resource: key } => {
+                ensure!(
+                    resource(&current, key)?.search.is_none(),
+                    "search resource removal requires explicit RemoveSearchIndex"
+                );
                 ensure!(
                     !resource(&current, key)?
                         .fields
@@ -340,6 +354,44 @@ pub(crate) fn transition(
                     );
                 }
                 *r.fields.iter_mut().find(|f| &f.name == name).unwrap() = destination.clone();
+            }
+            MigrationOp::AddSearchIndex { resource: key } => {
+                let destination = resource(&target, key)?
+                    .search
+                    .clone()
+                    .context("AddSearchIndex requires an approved target index")?;
+                let r = current
+                    .iter_mut()
+                    .find(|r| &r.name == key)
+                    .context("unknown migration resource")?;
+                ensure!(r.search.is_none(), "search index already exists");
+                r.search = Some(destination);
+            }
+            MigrationOp::RebuildSearchIndex { resource: key } => {
+                let destination = resource(&target, key)?
+                    .search
+                    .clone()
+                    .context("RebuildSearchIndex requires an approved target index")?;
+                let r = current
+                    .iter_mut()
+                    .find(|r| &r.name == key)
+                    .context("unknown migration resource")?;
+                ensure!(r.search.is_some(), "search index does not exist");
+                r.search = Some(destination);
+            }
+            MigrationOp::RemoveSearchIndex { resource: key } => {
+                ensure!(
+                    target
+                        .iter()
+                        .find(|r| &r.name == key)
+                        .is_none_or(|r| r.search.is_none()),
+                    "RemoveSearchIndex requires no target index"
+                );
+                let r = current
+                    .iter_mut()
+                    .find(|r| &r.name == key)
+                    .context("unknown migration resource")?;
+                ensure!(r.search.take().is_some(), "search index does not exist");
             }
             MigrationOp::ChangeResourceAuthority { resource: key } => {
                 let destination = resource(&target, key)?;
@@ -754,6 +806,126 @@ mod tests {
                     resource: "notes".into(),
                     field: "body".into()
                 },]
+            )
+            .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod search_transition_tests {
+    use super::*;
+    fn source() -> Vec<Resource> {
+        crate::test_support::manifest().resources
+    }
+    fn index(max_bytes: u32) -> noxide_protocol::query::SearchIndex {
+        noxide_protocol::query::SearchIndex {
+            tokenizer: noxide_protocol::query::TOKENIZER_ID.into(),
+            fields: vec!["body".into()],
+            max_bytes,
+        }
+    }
+    #[test]
+    fn search_activation_changes_require_exact_explicit_operations() {
+        let before = source();
+        let key = before[0].name.clone();
+        let mut indexed = before.clone();
+        indexed[0].search = Some(index(4096));
+        let add = MigrationOp::AddSearchIndex {
+            resource: key.clone(),
+        };
+        let rebuild = MigrationOp::RebuildSearchIndex {
+            resource: key.clone(),
+        };
+        let remove = MigrationOp::RemoveSearchIndex {
+            resource: key.clone(),
+        };
+        let authority = MigrationOp::ChangeResourceAuthority {
+            resource: key.clone(),
+        };
+        assert!(transition(&before, &indexed, &[]).is_err());
+        assert!(transition(&before, &indexed, &[authority.clone()]).is_err());
+        assert!(transition(&before, &indexed, &[rebuild.clone()]).is_err());
+        transition(&before, &indexed, &[add.clone()]).unwrap();
+        assert!(transition(&indexed, &indexed, &[add]).is_err());
+        let mut changed = indexed.clone();
+        changed[0].search = Some(index(2048));
+        assert!(transition(&indexed, &changed, &[authority]).is_err());
+        transition(&indexed, &changed, &[rebuild]).unwrap();
+        assert!(transition(&indexed, &changed, &[remove.clone()]).is_err());
+        transition(&indexed, &before, &[remove.clone()]).unwrap();
+        assert!(transition(&before, &before, &[remove]).is_err());
+    }
+    #[test]
+    fn search_removal_precedes_drop_and_rename_preserves_storage_semantics() {
+        let mut indexed = source();
+        let key = indexed[0].name.clone();
+        indexed[0].search = Some(index(4096));
+        let drop = MigrationOp::DropResource {
+            resource: key.clone(),
+        };
+        let remove = MigrationOp::RemoveSearchIndex {
+            resource: key.clone(),
+        };
+        assert!(transition(&indexed, &[], &[drop.clone()]).is_err());
+        assert!(transition(&indexed, &[], &[drop.clone(), remove.clone()]).is_err());
+        transition(&indexed, &[], &[remove, drop]).unwrap();
+        let mut renamed = indexed.clone();
+        renamed[0].name = "renamed_notes".into();
+        transition(
+            &indexed,
+            &renamed,
+            &[MigrationOp::RenameResource {
+                from: key,
+                to: "renamed_notes".into(),
+            }],
+        )
+        .unwrap();
+        transition(
+            &[],
+            &indexed,
+            &[MigrationOp::AddResource {
+                resource: indexed[0].name.clone(),
+            }],
+        )
+        .unwrap();
+    }
+    #[test]
+    fn indexed_field_rename_requires_explicit_metadata_rebuild_and_same_schema_stays_denied() {
+        let mut before = source();
+        let key = before[0].name.clone();
+        before[0].search = Some(index(4096));
+        let mut after = before.clone();
+        after[0].fields[0].name = "text".into();
+        after[0].search.as_mut().unwrap().fields = vec!["text".into()];
+        let rename = MigrationOp::RenameField {
+            resource: key.clone(),
+            from: "body".into(),
+            to: "text".into(),
+        };
+        assert!(transition(&before, &after, &[rename.clone()]).is_err());
+        transition(
+            &before,
+            &after,
+            &[rename, MigrationOp::RebuildSearchIndex { resource: key }],
+        )
+        .unwrap();
+        let digest = digest(&before).unwrap();
+        assert!(
+            Migration {
+                version: 1,
+                from: digest.clone(),
+                to: digest,
+                operations: vec![MigrationOp::RebuildSearchIndex {
+                    resource: before[0].name.clone()
+                }]
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<MigrationOp>(
+                r#"{"op":"add_search_index","resource":"notes","unchecked":true}"#
             )
             .is_err()
         );
