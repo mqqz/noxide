@@ -3,6 +3,7 @@
 mod computation_tests;
 #[cfg(test)]
 mod membership_tests;
+mod rejection;
 mod targets;
 use super::{Application, EditReceipt, RequestError, navigation};
 use crate::{
@@ -17,6 +18,7 @@ use noxide_protocol::{
     Action, ActionTarget, Fields, Input, OperationKind, RedirectSource, RequestKind, RequestView,
     ResponseIntent, Revision, Step, TargetSource, VERSION,
 };
+pub(crate) use rejection::{ActionRejection, MAX_ACTION_REJECTION_BYTES, ValidatedActionRejection};
 pub(super) use targets::ReviewConflict;
 use tokio::time::Instant;
 
@@ -155,14 +157,7 @@ pub(super) enum Settled {
         stored: StoredRecord,
     },
     TargetConflict,
-    Rejected {
-        field_errors: Fields,
-        message: String,
-    },
-    GuardRejected {
-        input: Option<String>,
-        message: String,
-    },
+    Rejected(ValidatedActionRejection),
 }
 
 impl Application {
@@ -375,10 +370,14 @@ impl Application {
         } = &outcome
         {
             effects.tx.rollback().await?;
-            return Ok(Attempt::Settled(Settled::Rejected {
-                field_errors: field_errors.clone(),
-                message: message.clone(),
-            }));
+            let rejection = ValidatedActionRejection::new(
+                manifest::action(&self.manifest, a.id)?,
+                ActionRejection::Rejected {
+                    field_errors: field_errors.clone(),
+                    message: message.clone(),
+                },
+            )?;
+            return Ok(Attempt::Settled(Settled::Rejected(rejection)));
         }
         ensure!(
             outcome == ResponseIntent::Execute,
@@ -396,10 +395,14 @@ impl Application {
                     return Err(RequestError::InvalidRequest.into());
                 }
                 if let Some(guard) = error.downcast_ref::<repository::GuardFailure>() {
-                    return Ok(Attempt::Settled(Settled::GuardRejected {
-                        input: guard.input.clone(),
-                        message: guard.message.clone(),
-                    }));
+                    let rejection = ValidatedActionRejection::new(
+                        manifest::action(&self.manifest, a.id)?,
+                        ActionRejection::GuardRejected {
+                            input: guard.input.clone(),
+                            message: guard.message.clone(),
+                        },
+                    )?;
+                    return Ok(Attempt::Settled(Settled::Rejected(rejection)));
                 }
                 return Err(error);
             }
@@ -514,6 +517,7 @@ impl Application {
         use sha2::Digest;
         let subject = match principal {
             auth::Principal::Anonymous => ("anonymous", "", ""),
+            auth::Principal::Service(_) => anyhow::bail!(RequestError::InvalidRequest),
             auth::Principal::User(user) => ("user", user.id.as_str(), user.tenant.as_str()),
         };
         let action = manifest::action(&self.manifest, binding.action)?;

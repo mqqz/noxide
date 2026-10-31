@@ -189,6 +189,7 @@ impl Application {
             return Ok(None);
         };
         let subject = match principal {
+            auth::Principal::Service(_) => anyhow::bail!(RequestError::InvalidRequest),
             auth::Principal::User(user) => {
                 commitment("noxide/upload-account/v1", &[&self.deployment, &user.id])?
             }

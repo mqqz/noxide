@@ -277,6 +277,7 @@ pub(crate) fn expand_action(
             }
             fn operations() -> Vec<::noxide::__private::Operation> {
                 vec![::noxide::__private::Operation {
+                    maintenance: false,
                     query: None, bind: #bind, scope: None, via: None,
                     filter: Vec::new(), disclose: Vec::new(),
                 list: None, visibility: None, fields: None,
@@ -942,6 +943,7 @@ fn expand_transaction(
         }
         let policy = policy_tokens(rules, resource);
         operations.push(quote!(::noxide::__private::Operation {
+            maintenance: false,
             query: None, bind: #bind, scope: None, via: None, filter: Vec::new(), disclose: Vec::new(), list: None, id: #operation_id, resource: <#resource as ::noxide::ResourceType>::definition().id, kind: #kind, policy: #policy, visibility: None, fields: None }));
         let guards = &step.guards;
         steps.push(quote!(::noxide::__private::Step { guards: vec![#(#guards),*], operation: #operation_id, target: #target, assign: vec![#(#assignments),*] }));

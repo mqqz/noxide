@@ -72,6 +72,7 @@ impl Application {
         use sha2::Digest;
         let identity = match principal {
             auth::Principal::Anonymous => ("anonymous", session.nonce.as_str(), ""),
+            auth::Principal::Service(_) => anyhow::bail!(RequestError::InvalidRequest),
             auth::Principal::User(user) => ("user", user.id.as_str(), user.tenant.as_str()),
         };
         Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -304,14 +305,28 @@ impl Application {
                 );
             }
             let stored = &records[&key];
-            ensure!(
+            let eligible = match &declaration.source {
+                TargetSource::Service { eligible } | TargetSource::Reference { eligible, .. } => {
+                    Some(manifest::operation(&self.manifest, *eligible)?)
+                }
+                _ => None,
+            };
+            let unexpired = if let Some(operation) = eligible {
+                crate::expiry::available_to(
+                    manifest::resource(&self.manifest, stored.record.resource)?,
+                    &stored.record.fields,
+                    authority.time(),
+                    operation,
+                    principal,
+                )?
+            } else {
                 crate::expiry::available(
                     manifest::resource(&self.manifest, stored.record.resource)?,
                     &stored.record.fields,
-                    authority.time()
-                )?,
-                repository::ReferenceUnavailable
-            );
+                    authority.time(),
+                )?
+            };
+            ensure!(unexpired, repository::ReferenceUnavailable);
             ensure!(
                 stored.incarnation == target.incarnation,
                 repository::ReferenceUnavailable
@@ -341,6 +356,7 @@ impl Application {
                 capability_grant = Some(target.clone());
             }
             match &declaration.source {
+                TargetSource::Service { .. } => anyhow::bail!(repository::ReferenceUnavailable),
                 TargetSource::Page { reads } if !edit => {
                     let route = manifest::route(
                         &self.manifest,

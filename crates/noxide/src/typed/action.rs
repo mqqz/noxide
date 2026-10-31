@@ -235,6 +235,22 @@ impl TargetDeclarations {
         );
         self
     }
+    pub fn service<Q: super::query::ReadQuery>(
+        mut self,
+        name: &str,
+        revision: noxide_protocol::Revision,
+        fields: &[&str],
+    ) -> Self {
+        self.add::<Q>(
+            name,
+            revision,
+            noxide_protocol::TargetSource::Service {
+                eligible: Q::operation().id,
+            },
+            fields,
+        );
+        self
+    }
     pub fn selected<L, Q>(
         mut self,
         name: &str,

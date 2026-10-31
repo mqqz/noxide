@@ -541,6 +541,7 @@ mod tests {
         m.operations[2].bind.insert("thread".into(), 6);
         for (id, kind) in [(4, OperationKind::Update), (5, OperationKind::Delete)] {
             m.operations.push(Operation {
+                maintenance: false,
                 query: None,
                 bind: Default::default(),
                 scope: None,

@@ -24,12 +24,68 @@ pub enum Registration {
 pub(crate) enum Principal {
     Anonymous,
     User(User),
+    Service(ServiceIdentity),
+}
+
+/// Constructed only from the queue's authoritative, transaction-locked grant.
+/// A worker has no account ID, user roles, session, or ownership identity.
+#[derive(Clone, Debug)]
+pub(crate) struct ServiceIdentity {
+    deployment: String,
+    tenant: String,
+    worker: String,
+}
+impl ServiceIdentity {
+    pub(crate) fn deployment(&self) -> &str {
+        &self.deployment
+    }
+    pub(crate) fn tenant(&self) -> &str {
+        &self.tenant
+    }
+    pub(crate) fn worker(&self) -> &str {
+        &self.worker
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PrincipalKey {
+    Anonymous,
+    User {
+        id: String,
+        tenant: String,
+    },
+    Service {
+        deployment: String,
+        tenant: String,
+        worker: String,
+    },
 }
 impl Principal {
+    pub(crate) fn authority_key(&self) -> PrincipalKey {
+        match self {
+            Self::Anonymous => PrincipalKey::Anonymous,
+            Self::User(user) => PrincipalKey::User {
+                id: user.id.clone(),
+                tenant: user.tenant.clone(),
+            },
+            Self::Service(service) => PrincipalKey::Service {
+                deployment: service.deployment.clone(),
+                tenant: service.tenant.clone(),
+                worker: service.worker.clone(),
+            },
+        }
+    }
+    pub(crate) fn from_verified_job(job: &crate::jobs::VerifiedJob) -> Self {
+        Self::Service(ServiceIdentity {
+            deployment: job.deployment().to_owned(),
+            tenant: job.tenant().to_owned(),
+            worker: job.worker().to_owned(),
+        })
+    }
     pub(crate) fn user(&self) -> Result<&User> {
         match self {
             Self::User(user) => Ok(user),
-            Self::Anonymous => anyhow::bail!("policy denied"),
+            Self::Anonymous | Self::Service(_) => anyhow::bail!("policy denied"),
         }
     }
 }

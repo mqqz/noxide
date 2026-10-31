@@ -13,6 +13,7 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest> {
     let mut manifest: Manifest = serde_json::from_slice(bytes)?;
     validate(&manifest)?;
     canonical_targets(&mut manifest);
+    canonical_jobs(&mut manifest);
     query::canonicalize(&mut manifest);
     Ok(manifest)
 }
@@ -30,6 +31,7 @@ pub fn digest(manifest: &Manifest) -> Result<[u8; 32]> {
     canonical.actions.sort_by_key(|action| action.id);
     canonical.web_bindings.sort_by_key(|binding| binding.id);
     canonical_targets(&mut canonical);
+    canonical_jobs(&mut canonical);
     query::canonicalize(&mut canonical);
     for resource in &mut canonical.resources {
         resource.unique.sort();
@@ -40,6 +42,18 @@ pub fn digest(manifest: &Manifest) -> Result<[u8; 32]> {
         }
     }
     Ok(Sha256::digest(serde_json::to_vec(&canonical)?).into())
+}
+
+fn canonical_jobs(manifest: &mut Manifest) {
+    if let Some(jobs) = &mut manifest.jobs {
+        jobs.workers.sort_by(|a, b| a.name.cmp(&b.name));
+        for worker in &mut jobs.workers {
+            worker.actions.sort_by_key(|action| action.action);
+        }
+        jobs.schedules
+            .sort_by_key(|schedule| (schedule.source_action, schedule.ordinal));
+        jobs.recurring.sort_by(|a, b| a.name.cmp(&b.name));
+    }
 }
 
 fn canonical_targets(manifest: &mut Manifest) {
@@ -275,6 +289,23 @@ pub use noxide_protocol::identifier;
 
 pub fn validate(m: &Manifest) -> Result<()> {
     ensure!(m.version == VERSION, "unsupported manifest version");
+    // Fail closed while the isolated job contract/queue is being integrated.
+    // Remove only with the complete service adapter and deployment approval.
+    ensure!(
+        m.jobs.is_none()
+            && m.operations.iter().all(|operation| !operation.maintenance
+                && operation
+                    .policy
+                    .any
+                    .iter()
+                    .flatten()
+                    .all(|predicate| !matches!(predicate, Predicate::Service { .. })))
+            && m.actions
+                .iter()
+                .flat_map(|action| &action.targets)
+                .all(|target| !matches!(target.source, TargetSource::Service { .. })),
+        "background jobs are unavailable"
+    );
     query::validate_declarations(m)?;
     crate::assets::validate_declarations(&m.assets)?;
     ensure!(
@@ -895,6 +926,7 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
                 );
                 None
             }
+            TargetSource::Service { eligible } => Some(*eligible),
             TargetSource::Selected {
                 query,
                 eligible,

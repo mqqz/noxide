@@ -3,6 +3,7 @@ use std::{path::Path, process::Output};
 
 fn manifest() -> Manifest {
     Manifest {
+        jobs: None,
         version: VERSION,
         assets: Vec::new(),
         blobs: None,
@@ -24,6 +25,7 @@ fn manifest() -> Manifest {
             unique: Vec::new(),
         }],
         operations: vec![Operation {
+            maintenance: false,
             query: None,
             id: 1,
             resource: 1,

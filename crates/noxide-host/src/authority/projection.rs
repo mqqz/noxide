@@ -27,7 +27,7 @@ pub(crate) struct NativeFacts {
 pub(crate) struct InternalFacts {
     shape: Arc<Shape>,
     epoch: Arc<()>,
-    principal: Option<(String, String)>,
+    principal: crate::auth::PrincipalKey,
     native: NativeFacts,
     fields: Fields,
 }
@@ -255,11 +255,8 @@ impl Spec {
         Ok(())
     }
 }
-fn principal_key(principal: &Principal) -> Option<(String, String)> {
-    match principal {
-        Principal::Anonymous => None,
-        Principal::User(user) => Some((user.id.clone(), user.tenant.clone())),
-    }
+fn principal_key(principal: &Principal) -> crate::auth::PrincipalKey {
+    principal.authority_key()
 }
 impl Authority {
     /// Policy+expiry only: caller still needs fresh visibility/gate/scope/selection

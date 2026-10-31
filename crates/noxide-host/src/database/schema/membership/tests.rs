@@ -55,6 +55,7 @@ fn declarations() -> Manifest {
         field("expires", FieldKind::Timestamp),
     ]);
     m.operations.push(noxide_protocol::Operation {
+        maintenance: false,
         query: None,
         id: 1,
         resource: 2,

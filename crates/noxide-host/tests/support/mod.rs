@@ -9,6 +9,7 @@ pub fn manifest() -> Manifest {
         any: vec![vec![Predicate::Owner]],
     };
     Manifest {
+        jobs: None,
         blobs: None,
         assets: Vec::new(),
         version: VERSION,
@@ -31,6 +32,7 @@ pub fn manifest() -> Manifest {
         }],
         operations: vec![
             Operation {
+                maintenance: false,
                 query: None,
                 bind: Default::default(),
                 scope: None,
@@ -46,6 +48,7 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
+                maintenance: false,
                 query: None,
                 bind: Default::default(),
                 scope: None,
@@ -61,6 +64,7 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
+                maintenance: false,
                 query: None,
                 bind: Default::default(),
                 scope: None,

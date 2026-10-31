@@ -55,6 +55,27 @@ pub(crate) fn available(
     }
 }
 
+/// This selects lifecycle visibility only. The caller must still evaluate the
+/// operation's normal policy under the transaction-verified service grant.
+pub(crate) fn available_to(
+    resource: &Resource,
+    fields: &Fields,
+    time: Option<AttemptTime>,
+    operation: &noxide_protocol::Operation,
+    principal: &crate::auth::Principal,
+) -> Result<bool> {
+    if operation.maintenance && matches!(principal, crate::auth::Principal::Service(_)) {
+        if resource.expiry.is_some() {
+            time.ok_or(TemporalUnavailable::NotStarted)?;
+            // Validate the stored expiry even for explicitly approved maintenance.
+            value(resource, fields)?.context("missing expiry")?;
+        }
+        Ok(true)
+    } else {
+        available(resource, fields, time)
+    }
+}
+
 /// Called after canonical assignments on create or update, before any write.
 /// Past/equal expiry is valid but is immediately unavailable to ordinary reads.
 pub(crate) fn check_write(

@@ -281,6 +281,7 @@ impl Effects {
         let principal = self.principal.clone();
         let (owner, tenant) = match &principal {
             Principal::Anonymous => ("", ""),
+            Principal::Service(_) => anyhow::bail!(ReferenceUnavailable),
             Principal::User(user) => (user.id.as_str(), user.tenant.as_str()),
         };
         // Creation of an immediately expired row is legal. Its policy still

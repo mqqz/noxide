@@ -325,6 +325,7 @@ pub(crate) fn expand_query(
             fn from_record(record: ::noxide::__private::Record) -> Self::Output { #decode }
             fn operation() -> ::noxide::__private::Operation {
                 ::noxide::__private::Operation {
+                    maintenance: false,
                     query: #query, bind: Default::default(), scope: #scope, via: #via,
                     filter: vec![#(#filters),*], disclose: vec![#(#disclosures),*],
                 list: #list, visibility: #visibility, fields: #fields,

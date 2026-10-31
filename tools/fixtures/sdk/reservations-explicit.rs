@@ -127,6 +127,7 @@ pub mod reservations {
         policy: noxide::__private::Policy,
     ) -> noxide::__private::Operation {
         noxide::__private::Operation {
+            maintenance: false,
             query: None,
             id,
             resource,

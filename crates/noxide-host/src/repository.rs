@@ -85,6 +85,7 @@ pub(crate) fn create_prerequisites(operation: &Operation, principal: &Principal)
             && rule.iter().all(|predicate| match predicate {
                 Predicate::PrincipalIs { .. } | Predicate::ExistsRelated(_) => true,
                 Predicate::Public
+                | Predicate::Service { .. }
                 | Predicate::Capability
                 | Predicate::Owner
                 | Predicate::SameTenant

@@ -542,12 +542,13 @@ pub(crate) fn recovery(
         }
     }
     if let Recovery::Rejected { errors, message } = &reason {
-        ensure!(
-            message.len() <= 1024
-                && errors.len() <= 8
-                && errors.values().all(|e| !e.is_empty() && e.len() <= 256),
-            "rejection limit"
-        );
+        crate::application::ValidatedActionRejection::new(
+            a.core,
+            crate::application::ActionRejection::Rejected {
+                field_errors: (*errors).clone(),
+                message: (*message).to_owned(),
+            },
+        )?;
         out.push("<p class=\"application-error\">")?;
         out.text(message)?;
         out.push("</p>")?;

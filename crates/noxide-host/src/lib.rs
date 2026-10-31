@@ -10,6 +10,7 @@ mod blob_state;
 mod blob_store;
 mod blob_transport;
 mod database;
+mod jobs;
 mod lifecycle_clock;
 pub mod manifest;
 pub mod render;

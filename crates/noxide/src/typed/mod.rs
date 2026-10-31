@@ -15,12 +15,15 @@ mod assets;
 pub use assets::*;
 mod blobs;
 pub use blobs::*;
+mod jobs;
+pub use jobs::*;
 mod page;
 pub use page::*;
 /// Untrusted build metadata; the trusted host independently admits its output.
 #[doc(hidden)]
 #[derive(Default)]
 pub struct ApplicationDefinition {
+    jobs: Option<noxide_protocol::jobs::JobContract>,
     blobs: Option<noxide_protocol::blobs::BlobPolicy>,
     assets: BTreeMap<String, noxide_protocol::assets::AssetDeclaration>,
     resources: BTreeMap<String, Resource>,
@@ -125,6 +128,7 @@ impl ApplicationDefinition {
             action.targets.sort_by(|a, b| a.name.cmp(&b.name));
         }
         Manifest {
+            jobs: self.jobs,
             blobs: self.blobs,
             assets: self.assets.into_values().collect(),
             version: VERSION,

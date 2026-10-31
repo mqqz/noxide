@@ -444,21 +444,23 @@ impl Application {
                     refresh.ok_or_else(|| anyhow::anyhow!("missing web refresh identity"))?;
                 return self.conflict(a, session, now, target, &stored, input);
             }
-            Settled::Rejected {
-                field_errors,
-                message,
-            } => (field_errors, message),
-            Settled::GuardRejected {
-                input: Some(input),
-                message,
-            } => (
-                Fields::from([(input, message)]),
-                "Review the highlighted fields.".into(),
-            ),
-            Settled::GuardRejected {
-                input: None,
-                message,
-            } => (Fields::new(), message),
+            Settled::Rejected(rejection) => match rejection.into_rejection() {
+                ActionRejection::Rejected {
+                    field_errors,
+                    message,
+                } => (field_errors, message),
+                ActionRejection::GuardRejected {
+                    input: Some(input),
+                    message,
+                } => (
+                    Fields::from([(input, message)]),
+                    "Review the highlighted fields.".into(),
+                ),
+                ActionRejection::GuardRejected {
+                    input: None,
+                    message,
+                } => (Fields::new(), message),
+            },
         };
         render::recovery(
             &self.presentation,

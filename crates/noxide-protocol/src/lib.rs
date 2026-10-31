@@ -5,6 +5,7 @@ pub mod blobs;
 pub mod computation;
 pub mod document;
 pub mod expiry;
+pub mod jobs;
 pub mod membership;
 pub mod query;
 pub mod time;
@@ -122,8 +123,17 @@ pub enum Predicate {
     Capability,
     Owner,
     SameTenant,
-    PrincipalIs { field: String },
-    Role { name: String, tenant_scoped: bool },
+    /// A host-verified application worker; this never matches a browser account.
+    Service {
+        worker: String,
+    },
+    PrincipalIs {
+        field: String,
+    },
+    Role {
+        name: String,
+        tenant_scoped: bool,
+    },
     ExistsRelated(membership::ExistsRelated),
 }
 
@@ -286,6 +296,9 @@ pub enum OperationKind {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
+    /// Service-only maintenance may inspect expired rows; ordinary routes cannot.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub maintenance: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<query::Query>,
     #[serde(
@@ -468,6 +481,10 @@ pub enum TargetSource {
     Page {
         reads: Vec<u32>,
     },
+    /// Persisted, incarnation-sealed target admitted only by the job adapter.
+    Service {
+        eligible: u32,
+    },
     Selected {
         query: u32,
         eligible: u32,
@@ -571,6 +588,8 @@ pub struct Inspection {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jobs: Option<jobs::JobContract>,
     pub assets: Vec<assets::AssetDeclaration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blobs: Option<blobs::BlobPolicy>,

@@ -10,6 +10,7 @@ pub(crate) enum PolicyAtom {
     Owner,
     PrincipalIs(Ident),
     Tenant,
+    Service(LitStr),
     Role(LitStr, bool),
     ExistsRelated(Box<RelatedDeclaration>),
 }
@@ -39,6 +40,15 @@ pub(crate) fn policy(input: ParseStream<'_>) -> syn::Result<Vec<Vec<PolicyAtom>>
         }
         "owner" => Ok(vec![vec![PolicyAtom::Owner]]),
         "same_tenant" => Ok(vec![vec![PolicyAtom::Tenant]]),
+        "service" => {
+            let content;
+            parenthesized!(content in input);
+            let worker = key(content.parse()?)?;
+            if !content.is_empty() {
+                return Err(content.error("expected one worker identity"));
+            }
+            Ok(vec![vec![PolicyAtom::Service(worker)]])
+        }
         "exists_related" => {
             let content;
             parenthesized!(content in input);
@@ -109,7 +119,7 @@ pub(crate) fn policy(input: ParseStream<'_>) -> syn::Result<Vec<Vec<PolicyAtom>>
         }
         _ => Err(syn::Error::new(
             name.span(),
-            "expected owner, same_tenant, role, tenant_role, all, or any",
+            "expected owner, same_tenant, service, role, tenant_role, all, or any",
         )),
     }
     .and_then(|rules| {
@@ -238,6 +248,7 @@ pub(crate) fn policy_tokens(rules: &[Vec<PolicyAtom>], resource: &syn::Type) -> 
             }
             PolicyAtom::Owner => quote!(::noxide::__private::Predicate::Owner),
             PolicyAtom::Tenant => quote!(::noxide::__private::Predicate::SameTenant),
+            PolicyAtom::Service(worker) => quote!(::noxide::__private::Predicate::Service { worker: #worker.into() }),
             PolicyAtom::Role(name, tenant_scoped) => quote!(::noxide::__private::Predicate::Role { name: #name.into(), tenant_scoped: #tenant_scoped }),
             PolicyAtom::ExistsRelated(related) => related_tokens(related, resource),
         });

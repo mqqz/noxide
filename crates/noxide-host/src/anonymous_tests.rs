@@ -41,6 +41,7 @@ fn declarations() -> Manifest {
     }
     for (id, kind) in [(4, OperationKind::Update), (5, OperationKind::Delete)] {
         m.operations.push(Operation {
+            maintenance: false,
             query: None,
             bind: Default::default(),
             scope: None,
@@ -886,6 +887,7 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
         let mut m = declarations();
         if inspect {
             m.operations.push(Operation {
+                maintenance: false,
                 query: None,
                 bind: Default::default(),
                 scope: None,

@@ -36,7 +36,7 @@ pub(crate) struct Authority {
     deployment: Option<DeploymentScope>,
     storage: BTreeMap<String, i64>,
     witnesses: Option<Witnesses>,
-    witness_principal: Option<(String, String)>,
+    witness_principal: Option<crate::auth::PrincipalKey>,
     projection_epoch: std::sync::Arc<()>,
 }
 
@@ -49,7 +49,8 @@ pub(crate) struct Row<'a> {
 }
 
 pub(crate) fn uses_time(manifest: &Manifest) -> bool {
-    manifest.blobs.is_some()
+    manifest.jobs.is_some()
+        || manifest.blobs.is_some()
         || manifest.resources.iter().any(|resource| {
             resource.expiry.is_some()
                 || resource
@@ -151,10 +152,7 @@ impl Authority {
         calls: &mut usize,
     ) -> Result<Vec<bool>> {
         ensure!(rows.len() <= membership::MAX_BATCH, "authority batch limit");
-        let principal_key = principal
-            .user()
-            .ok()
-            .map(|user| (user.id.clone(), user.tenant.clone()));
+        let principal_key = Some(principal.authority_key());
         if self.witness_principal != principal_key {
             self.clear_witnesses();
         }
@@ -167,7 +165,9 @@ impl Authority {
             vec![true; rows.len()]
         } else {
             rows.iter()
-                .map(|row| expiry::available(resource, row.fields, self.time))
+                .map(|row| {
+                    expiry::available_to(resource, row.fields, self.time, operation, principal)
+                })
                 .collect::<Result<_>>()?
         };
         let plans = membership::plans(manifest, operation)?;
@@ -321,13 +321,15 @@ impl Authority {
                 plan.exists_sql(tx, *storage, &scope, true, params)
             },
         )?;
-        let expires = expiry::sql(
-            tx,
-            manifest::resource(manifest, operation.resource)?,
-            self.time,
-            "nx_records",
-            params,
-        )?;
+        let resource = manifest::resource(manifest, operation.resource)?;
+        let expires = if operation.maintenance && matches!(principal, Principal::Service(_)) {
+            if resource.expiry.is_some() {
+                self.time.ok_or(TemporalUnavailable::NotStarted)?;
+            }
+            String::new()
+        } else {
+            expiry::sql(tx, resource, self.time, "nx_records", params)?
+        };
         Ok(clauses
             .into_iter()
             .map(|clause| format!("({clause}){expires}"))

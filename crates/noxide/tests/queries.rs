@@ -58,6 +58,7 @@ fn declarations_equal_explicit_canonical_query_shapes() {
     assert_eq!(
         Entries::operation(),
         p::Operation {
+            maintenance: false,
             query: Some(q::Query {
                 search: Some(q::Search {
                     fields: vec!["body".into(), "heading".into()],

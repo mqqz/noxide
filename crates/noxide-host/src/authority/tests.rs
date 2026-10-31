@@ -72,6 +72,7 @@ fn related(target: RelatedTarget) -> Predicate {
 }
 fn operation(id: u32, resource: u32, kind: OperationKind, predicate: Predicate) -> Operation {
     Operation {
+        maintenance: false,
         query: None,
         id,
         resource,
@@ -100,6 +101,7 @@ fn manifest() -> Manifest {
     );
     create_membership.bind.insert("workspace".into(), 6);
     Manifest {
+        jobs: None,
         blobs: None,
         version: noxide_protocol::VERSION,
         assets: Vec::new(),

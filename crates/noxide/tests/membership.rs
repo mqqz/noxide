@@ -126,6 +126,7 @@ fn scoped_account_input_matches_explicit_input_and_operation() {
         InviteMember::operations(),
         vec![
             Operation {
+                maintenance: false,
                 query: None,
                 id: noxide::stable_id(concat!("mutation:", module_path!(), "::InviteMember:0u8")),
                 resource: Membership::definition().id,

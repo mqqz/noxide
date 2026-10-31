@@ -84,7 +84,18 @@ enum Condition<'a> {
 
 fn bind<'a>(predicate: &'a Predicate, principal: &'a Principal) -> Condition<'a> {
     match (principal, predicate) {
+        (Principal::Service(service), Predicate::Public | Predicate::SameTenant) => {
+            Condition::Tenant(service.tenant())
+        }
         (_, Predicate::Public) => Condition::Allow,
+        (Principal::Service(service), Predicate::Service { worker }) => {
+            if service.worker() == worker {
+                Condition::Tenant(service.tenant())
+            } else {
+                Condition::Deny
+            }
+        }
+        (_, Predicate::Service { .. }) | (Principal::Service(_), _) => Condition::Deny,
         (_, Predicate::Capability) | (Principal::Anonymous, _) => Condition::Deny,
         (Principal::User(user), Predicate::PrincipalIs { field }) => Condition::Account {
             field,

@@ -66,6 +66,7 @@ pub(crate) fn declarations() -> Manifest {
         }
     }
     m.operations.push(Operation {
+        maintenance: false,
         query: None,
         bind: Default::default(),
         scope: None,
@@ -235,6 +236,7 @@ async fn mutation_case(db: Database) {
     db.initialize().await.unwrap();
     let mut m = declarations();
     m.operations.push(Operation {
+        maintenance: false,
         query: None,
         bind: Default::default(),
         scope: None,
@@ -621,6 +623,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         tenant_scoped: false,
     };
     m.operations.push(Operation {
+        maintenance: false,
         query: None,
         bind: Default::default(),
         scope: None,

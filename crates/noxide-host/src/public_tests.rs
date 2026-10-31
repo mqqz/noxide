@@ -68,6 +68,7 @@ fn declarations() -> Manifest {
         ),
     ] {
         m.operations.push(Operation {
+            maintenance: false,
             query: None,
             bind: Default::default(),
             scope: None,
@@ -196,6 +197,7 @@ fn manifest_private_operations_forbid_public_metadata() {
 fn manifest_action_inspection_cannot_use_public_read() {
     let mut m = declarations();
     m.operations.push(Operation {
+        maintenance: false,
         query: None,
         bind: Default::default(),
         scope: None,
@@ -900,6 +902,7 @@ async fn sqlite_initial_create_commit_is_host_owned() {
             tx.commit().await.unwrap();
             let mut updates = m.clone();
             updates.operations.push(Operation {
+                maintenance: false,
                 query: None,
                 bind: Default::default(),
                 scope: None,

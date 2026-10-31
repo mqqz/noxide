@@ -2,7 +2,9 @@ mod action;
 mod authority;
 pub(crate) mod blobs;
 use crate::database::lifecycle::{AdmissionOwner, Registry, RequestScope};
-pub(crate) use action::ActionCore;
+pub(crate) use action::{
+    ActionCore, ActionRejection, MAX_ACTION_REJECTION_BYTES, ValidatedActionRejection,
+};
 use action::{CanonicalActionInput, ExecutionBudget};
 mod capabilities;
 mod clock;
