@@ -779,6 +779,33 @@ fn expand_transaction(
                     kind = quote!(::noxide::__private::FieldKind::Duration { max_millis: #millis });
                     max_bytes = quote!(20u32);
                 }
+                syn::Expr::Call(call)
+                    if matches!(&*call.func,syn::Expr::Path(path) if path.path.is_ident("bytes"))
+                        && call.args.len() == 1 =>
+                {
+                    let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Int(bytes),
+                        ..
+                    }) = &call.args[0]
+                    else {
+                        return Err(syn::Error::new(
+                            bound.span(),
+                            "upload bound requires literal bytes",
+                        ));
+                    };
+                    let bytes = bytes.base10_parse::<u64>()?;
+                    if bytes == 0 {
+                        return Err(syn::Error::new(
+                            bound.span(),
+                            "upload bound must be positive",
+                        ));
+                    }
+                    kind = quote!({
+                        assert!(matches!(<#ty as ::noxide::FieldValue>::kind(), ::noxide::__private::FieldKind::UploadHandle { .. }), "bytes bound requires UploadHandle input");
+                        assert!(#bytes <= ::noxide::__private::blobs::MAX_UPLOAD_BYTES, "upload bound exceeds the host maximum");
+                        ::noxide::__private::FieldKind::UploadHandle { max_bytes: #bytes }
+                    });
+                }
                 syn::Expr::Range(range)
                     if matches!(range.limits, syn::RangeLimits::Closed(_))
                         && range.start.is_some()

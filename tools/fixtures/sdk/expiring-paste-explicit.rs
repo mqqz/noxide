@@ -103,7 +103,7 @@ pub mod expiring_paste {
                     input(
                         "file",
                         FieldKind::UploadHandle {
-                            max_bytes: 10 << 20,
+                            max_bytes: 1 << 20,
                         },
                         67,
                     ),

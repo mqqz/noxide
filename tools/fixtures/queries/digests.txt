@@ -1,12 +1,15 @@
 example-catalog-links.json 9PZXGzIlLNAGuuF_3ZFqm3eoI8ivK_cQoZ1eSwjbpBs
+example-expiring-paste.json 6q4feUTWDlnBRyoreENI0BkRKoFXvhR0QaDTx4853Vg
 example-forum.json x0Des1yHdH0OA14eqloAJamXnAVJIifSKLrvuqYaUpY
 example-private-inbox.json U5fCKNuCkNxJCnoEIXtTmjpbclM-amrJ1B2J-yA0HbA
 example-private-notes.json jAjbXl4j45d51VooIJ5DwttidwcLVkwbZI5LyQyILYE
 example-public-articles.json A3iPHu3v68ssUI-8Dr8sseGZG2WyL3CYKULHjDsN6qI
-example-reservations.json iCdqtucsj85sS1AOSeYKEIneyaoBcIHGdlkVRCNbGpc
+example-reservations.json vn2p7lCfB27od8ViGgQNPEw-E3fcWUoKYm4R52OQR4I
 example-shop.json vYmObLykb_879maeD_vKAcOK1zFaZ2jFSgEullpc5Mc
 example-task-board.json JhyqxRQXsvVax3c0IVbMEMZHyIdnAJUO50qNJRm-7og
 example-team-documents.json LDV7OTrle6EauqNpCDENbA5GTWK6aD5FcPRXZTCRzQ8
+sdk-expiring-paste-explicit.json OkXMchzIuyRSyQo_--mJ_Kt1osG-OjYKz6Tq486sk_A
+sdk-expiring-paste-simple.json OkXMchzIuyRSyQo_--mJ_Kt1osG-OjYKz6Tq486sk_A
 sdk-forum-explicit.json 2ix1Sh5pa0hfoINUYBNeGlA2U7XfXu6iaj33T0A1qZQ
 sdk-forum-layout-explicit.json FC71MxZcIitp5WT2hrcXSb3rsS3a8gCKp22PLrI7KRM
 sdk-forum-simple.json 2ix1Sh5pa0hfoINUYBNeGlA2U7XfXu6iaj33T0A1qZQ
@@ -17,8 +20,8 @@ sdk-public-articles-explicit.json SDtH0acyVxlrF1HnxgKcHFyCOCO35EiZFWQwEmj95YU
 sdk-public-articles-simple.json SDtH0acyVxlrF1HnxgKcHFyCOCO35EiZFWQwEmj95YU
 sdk-repeated-explicit.json CGnMpWVbfzKUQhBXE2qgKul9DfpHW11XWjV3Z9vXfgQ
 sdk-repeated-simple.json CGnMpWVbfzKUQhBXE2qgKul9DfpHW11XWjV3Z9vXfgQ
-sdk-reservations-explicit.json d03Kqiw9tUY3zLidPruTPFLJJCpkOdPjy4ayf8ArL5I
-sdk-reservations-simple.json d03Kqiw9tUY3zLidPruTPFLJJCpkOdPjy4ayf8ArL5I
+sdk-reservations-explicit.json k7zIohvuzFz1tLDH9zBT65hUEP5PgoxFf8NGJyLHKZ8
+sdk-reservations-simple.json k7zIohvuzFz1tLDH9zBT65hUEP5PgoxFf8NGJyLHKZ8
 sdk-shop.json 3Quv9ymnlLG-AqBpZThTI2r6dQJJQePoJyjKVCpwHiM
 sdk-task-board-advanced.json qWsw4GXWRYkTY8GCGYFIPSaYKvkYL74YPI_WOKbdI4o
 sdk-task-board-explicit.json JhyqxRQXsvVax3c0IVbMEMZHyIdnAJUO50qNJRm-7og

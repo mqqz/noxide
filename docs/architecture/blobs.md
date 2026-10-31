@@ -16,7 +16,9 @@ security or transport-anonymity certification.
 A resource stores a `BlobRef` or `Option<BlobRef>`. An explicit action declares one
 `UploadHandle` input and assigns it to one compatible Blob field in a Create step.
 The SDK's `.file()` control and `download::<ReadQuery>(record, field, text)` helper
-lower to the same protocol shapes. See the complete
+lower to the same protocol shapes. An `UploadHandle` input declares the 10 MiB host
+maximum unless `file: UploadHandle = bytes(N)` narrows it; admission requires the
+declared size to fit the policy's `file_bytes`. See the complete
 [explicit SDK fixture](../../tools/fixtures/blob-app/src/lib.rs) and its
 [production HTTP harness](../../tools/test_blob_http.py).
 

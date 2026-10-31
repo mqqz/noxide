@@ -42,6 +42,18 @@ struct InvalidSimpleAttach;
 #[action(inputs(file: BlobRef), transaction(attachment = create(Attachment, set(file = file))),
     allow = owner, redirect = show(attachment))]
 struct InvalidBlobInput;
+#[action(inputs(file: PendingFile = bytes(1_048_576)),
+    transaction(attachment = create(Attachment, set(file = file))),
+    allow = owner, redirect = show(attachment))]
+struct BoundedAttach;
+#[action(inputs(file: PendingFile = bytes(10_485_761)),
+    transaction(attachment = create(Attachment, set(file = file))),
+    allow = owner, redirect = show(attachment))]
+struct OversizedAttach;
+#[action(inputs(title: String = bytes(64)),
+    transaction(attachment = create(Attachment, set(title = title))),
+    allow = owner, redirect = show(attachment))]
+struct TextBytesBound;
 #[query(read(Attachment), allow = owner)]
 struct ReadAttachment;
 struct TitleOnly;
@@ -229,4 +241,28 @@ fn simple_create_cannot_copy_blob_storage_kind_into_an_input() {
 #[should_panic(expected = "Blob references cannot be action inputs; use UploadHandle")]
 fn explicit_blob_ref_is_not_an_upload_input() {
     let _ = InvalidBlobInput::definition();
+}
+
+#[test]
+fn upload_bytes_bound_narrows_only_the_declared_handle() {
+    let input = &BoundedAttach::definition().inputs[0];
+    assert_eq!(
+        input.kind,
+        FieldKind::UploadHandle {
+            max_bytes: 1_048_576
+        }
+    );
+    assert_eq!(input.max_bytes, 67);
+}
+
+#[test]
+#[should_panic(expected = "upload bound exceeds the host maximum")]
+fn upload_bytes_bound_cannot_exceed_the_host_maximum() {
+    let _ = OversizedAttach::definition();
+}
+
+#[test]
+#[should_panic(expected = "bytes bound requires UploadHandle input")]
+fn bytes_bound_requires_an_upload_handle() {
+    let _ = TextBytesBound::definition();
 }

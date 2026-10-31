@@ -32,7 +32,7 @@ pub mod expiring_paste {
         fields(title, body, file, created_at, expires_at))]
     struct PublishedPaste;
 
-    #[action(inputs(title: String = 128, body: String = 4096, file: UploadHandle),
+    #[action(inputs(title: String = 128, body: String = 4096, file: UploadHandle = bytes(1_048_576)),
         transaction(paste = create(Paste, set(title = title, body = body, file = file,
             created_at = transaction_time(), expires_at = transaction_time() + seconds(3600)))),
         allow = public, redirect = show(paste))]
