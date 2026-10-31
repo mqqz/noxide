@@ -117,3 +117,12 @@ groups. Failure injection at every reachable boundary returns no query/postings.
 The callback type and pure tests do not prove real host ownership: registration
 requires every production call site to pass the existing required RequestScope
 checkpoint or a valid OperatorCheckpoint from its bounded transaction.
+
+The bounded posting frontier factors the existing conservative list-merge cutoff:
+at most four ordered streams of64 raw seeds, validated signed identities and
+incarnation/revision facts. It seals the earliest saturated-stream boundary in
+ascending order (latest in descending order). Rows fetched beyond that boundary
+are deferred; an empty authorized page must not advance past them. Aliases merge
+as identities but remain in raw/planned work, without refunds. The helper requires
+a work checkpoint and creates no counter. Runtime must charge the original shared
+request's planned window before SQL and advance only through fully consumed seeds.

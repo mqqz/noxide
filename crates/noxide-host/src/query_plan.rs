@@ -6,6 +6,7 @@ use anyhow::{Result, ensure};
 use noxide_protocol::{ListOrder, Manifest, Operation, OperationKind};
 use std::{collections::BTreeMap, sync::Arc};
 pub(crate) mod aggregate;
+pub(crate) mod frontier;
 pub(crate) mod scalar;
 
 /// Compiled from an admitted list operation. Grants nothing; authorization
