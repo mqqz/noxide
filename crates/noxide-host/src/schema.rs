@@ -57,6 +57,10 @@ pub enum MigrationOp {
         resource: String,
         field: String,
     },
+    /// Explicitly adopt only the approved target's gate, expiry and unique tuples.
+    ChangeResourceAuthority {
+        resource: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -90,6 +94,9 @@ pub fn normalized(resources: &[Resource]) -> Vec<Resource> {
             }
         }
         resource.fields.sort_by(|a, b| a.name.cmp(&b.name));
+        resource
+            .unique
+            .sort_by(|a, b| (&a.reference, &a.account).cmp(&(&b.reference, &b.account)));
     }
     resources.sort_by(|a, b| a.name.cmp(&b.name));
     resources
@@ -241,6 +248,19 @@ pub(crate) fn transition(
                 {
                     gate.field = to.clone();
                 }
+                if let Some(expiry) = &mut r.expiry
+                    && expiry.field == *from
+                {
+                    expiry.field = to.clone();
+                }
+                for unique in &mut r.unique {
+                    if unique.reference == *from {
+                        unique.reference = to.clone();
+                    }
+                    if unique.account == *from {
+                        unique.account = to.clone();
+                    }
+                }
                 // Keep the source schema here. A following explicit operation
                 // may convert or constrain the renamed field; the final equality
                 // check rejects undeclared schema changes.
@@ -298,6 +318,16 @@ pub(crate) fn transition(
                 }
                 *r.fields.iter_mut().find(|f| &f.name == name).unwrap() = destination.clone();
             }
+            MigrationOp::ChangeResourceAuthority { resource: key } => {
+                let destination = resource(&target, key)?;
+                let r = current
+                    .iter_mut()
+                    .find(|r| &r.name == key)
+                    .context("unknown migration resource")?;
+                r.gate = destination.gate.clone();
+                r.expiry = destination.expiry.clone();
+                r.unique = destination.unique.clone();
+            }
             MigrationOp::ChangeField {
                 resource: key,
                 field: name,
@@ -353,6 +383,148 @@ mod tests {
 
     fn source() -> Vec<Resource> {
         crate::test_support::manifest().resources
+    }
+
+    fn authority_source() -> Vec<Resource> {
+        let mut resources = source();
+        let mut parent = resources[0].clone();
+        parent.id = 2;
+        parent.name = "parents".into();
+        parent.fields[0].kind = FieldKind::Boolean;
+        for (name, kind) in [
+            (
+                "workspace",
+                FieldKind::Reference {
+                    resource: "parents".into(),
+                },
+            ),
+            (
+                "project",
+                FieldKind::Reference {
+                    resource: "parents".into(),
+                },
+            ),
+            (
+                "account",
+                FieldKind::Account {
+                    scope: noxide_protocol::AccountScope::SameTenant,
+                },
+            ),
+            ("expires", FieldKind::Timestamp),
+        ] {
+            resources[0].fields.push(TextField {
+                name: name.into(),
+                label: name.into(),
+                kind,
+                optional: false,
+                initial: None,
+                max_bytes: 64,
+            });
+        }
+        resources.push(parent);
+        resources
+    }
+
+    #[test]
+    fn authority_is_hashed_canonically_and_requires_explicit_adoption() {
+        use noxide_protocol::{
+            expiry::ResourceExpiry, membership::MembershipUnique, time::Duration,
+        };
+        let source = authority_source();
+        let mut target = source.clone();
+        target[0].expiry = Some(ResourceExpiry {
+            field: "expires".into(),
+            max_after: Duration::from_secs(60).unwrap(),
+        });
+        target[0].unique = vec![
+            MembershipUnique {
+                reference: "workspace".into(),
+                account: "account".into(),
+            },
+            MembershipUnique {
+                reference: "project".into(),
+                account: "account".into(),
+            },
+        ];
+        target[0].gate = Some(noxide_protocol::Gate {
+            field: "workspace".into(),
+            visible: noxide_protocol::Visibility {
+                field: "body".into(),
+                equals: "true".into(),
+            },
+            create_when: noxide_protocol::Visibility {
+                field: "body".into(),
+                equals: "true".into(),
+            },
+        });
+        assert_ne!(digest(&source).unwrap(), digest(&target).unwrap());
+        let mut reversed = target.clone();
+        reversed[0].unique.reverse();
+        assert_eq!(digest(&target).unwrap(), digest(&reversed).unwrap());
+        assert!(transition(&source, &target, &[]).is_err());
+        let adopt = MigrationOp::ChangeResourceAuthority {
+            resource: "notes".into(),
+        };
+        transition(&source, &target, std::slice::from_ref(&adopt)).unwrap();
+        reversed[0].expiry.as_mut().unwrap().max_after = Duration::from_secs(61).unwrap();
+        assert_ne!(digest(&target).unwrap(), digest(&reversed).unwrap());
+        // An authority operation cannot silently alter field storage or names.
+        target[0].fields[0].max_bytes += 1;
+        assert!(transition(&source, &target, &[adopt]).is_err());
+    }
+
+    #[test]
+    fn field_rename_preserves_local_authority_bindings() {
+        use noxide_protocol::{
+            expiry::ResourceExpiry, membership::MembershipUnique, time::Duration,
+        };
+        let mut source = authority_source();
+        source[0].expiry = Some(ResourceExpiry {
+            field: "expires".into(),
+            max_after: Duration::ZERO,
+        });
+        source[0].unique = vec![MembershipUnique {
+            reference: "workspace".into(),
+            account: "account".into(),
+        }];
+        source[0].gate = Some(noxide_protocol::Gate {
+            field: "workspace".into(),
+            visible: noxide_protocol::Visibility {
+                field: "body".into(),
+                equals: "true".into(),
+            },
+            create_when: noxide_protocol::Visibility {
+                field: "body".into(),
+                equals: "true".into(),
+            },
+        });
+        let mut target = source.clone();
+        let renames = [
+            ("workspace", "group"),
+            ("account", "member"),
+            ("expires", "until"),
+        ];
+        for (from, to) in renames {
+            target[0]
+                .fields
+                .iter_mut()
+                .find(|f| f.name == from)
+                .unwrap()
+                .name = to.into();
+        }
+        target[0].expiry.as_mut().unwrap().field = "until".into();
+        target[0].gate.as_mut().unwrap().field = "group".into();
+        target[0].unique[0].reference = "group".into();
+        target[0].unique[0].account = "member".into();
+        let operations: Vec<_> = renames
+            .into_iter()
+            .map(|(from, to)| MigrationOp::RenameField {
+                resource: "notes".into(),
+                from: from.into(),
+                to: to.into(),
+            })
+            .collect();
+        transition(&source, &target, &operations).unwrap();
     }
 
     #[test]

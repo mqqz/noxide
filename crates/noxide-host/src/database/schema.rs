@@ -1,4 +1,5 @@
 use super::*;
+mod membership;
 
 impl Database {
     /// Reconcile operation-derived indexes under the operator maintenance lock.
@@ -8,6 +9,7 @@ impl Database {
         tx.check_storage().await?;
         tx.bind_schema_catalog(target).await?;
         tx.reconcile_query_indexes(target).await?;
+        tx.reconcile_membership_indexes(&target.resources).await?;
         tx.commit().await
     }
 
@@ -144,7 +146,9 @@ impl Transaction {
 
     pub(crate) async fn bind_schema(&mut self, manifest: &noxide_protocol::Manifest) -> Result<()> {
         self.bind_schema_catalog(manifest).await?;
-        self.validate_query_indexes(manifest).await
+        self.validate_query_indexes(manifest).await?;
+        self.preflight_membership(&manifest.resources).await?;
+        self.validate_membership_indexes(&manifest.resources).await
     }
 
     async fn bind_schema_catalog(&mut self, manifest: &noxide_protocol::Manifest) -> Result<()> {
@@ -174,6 +178,7 @@ impl Transaction {
             .await?;
         }
         self.reference_indexes(&manifest.resources).await?;
+        self.initial_membership_indexes(&manifest.resources).await?;
         self.store_schema(&manifest.resources, &[]).await
     }
 
@@ -327,12 +332,11 @@ impl Transaction {
                 &[storage.into(), id.into()],
             )
             .await?;
-        serde_json::from_str(
+        membership::parse_fields(
             &rows
                 .first()
                 .context("record disappeared during migration")?[0],
         )
-        .map_err(Into::into)
     }
 
     async fn transform_records(
@@ -370,11 +374,7 @@ impl Transaction {
         resources: &[noxide_protocol::Resource],
     ) -> Result<()> {
         for resource in resources {
-            let storage = self.storage_key(&resource.name).await?;
-            self.transform_records(storage, |fields| {
-                crate::manifest::validate_fields(resource, fields)
-            })
-            .await?;
+            self.validate_resource_rows(resource).await?;
         }
         Ok(())
     }
@@ -400,6 +400,8 @@ impl Transaction {
                 .last()
                 .is_some_and(|last| last.digest == migration_digest)
         {
+            self.preflight_membership(&target.resources).await?;
+            self.validate_membership_indexes(&target.resources).await?;
             return Ok(());
         }
         ensure!(
@@ -408,6 +410,9 @@ impl Transaction {
         );
         ensure!(history.len() < 128, "migration history limit");
         schema::transition(&source, &target.resources, &migration.operations)?;
+        // Validate source bytes before any transformation can erase ambiguity.
+        self.validate_stored_resources(&source).await?;
+        self.drop_membership_indexes().await?;
         for name in self.query_indexes().await? {
             ensure!(
                 name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'),
@@ -555,13 +560,14 @@ impl Transaction {
                     })
                     .await?;
                 }
-                MigrationOp::ChangeField { .. } => {}
+                MigrationOp::ChangeField { .. } | MigrationOp::ChangeResourceAuthority { .. } => {}
             }
         }
         self.validate_stored_resources(&target.resources).await?;
         self.validate_references(&target.resources).await?;
         self.reference_indexes(&target.resources).await?;
         self.reconcile_query_indexes(target).await?;
+        self.reconcile_membership_indexes(&target.resources).await?;
         history.push(schema::AppliedMigration {
             from: migration.from.clone(),
             to: migration.to.clone(),
