@@ -358,7 +358,9 @@ impl Case {
             .prefix("effects-")
             .tempdir_in(base)
             .unwrap()
-            .keep();
+            .keep()
+            .canonicalize()
+            .unwrap();
         let db = database.unwrap_or_else(|| Database::sqlite(path.join("runtime.db")));
         db.initialize().await.unwrap();
         let actor = db
