@@ -590,7 +590,7 @@ async fn actual_clock_recovery_contract(db: &Database) {
     let effective = approval();
     setup(db, &effective).await;
     let initial = noxide_protocol::time::Timestamp::from_system_time(SystemTime::now()).unwrap();
-    let capture = phase(db, async |tx: &mut Transaction| {
+    let (capture, pending) = phase(db, async |tx: &mut Transaction| {
         tx.execute(
             "UPDATE nx_clock SET lifecycle_ms=$1,lifecycle_version=7 WHERE singleton=1",
             &[initial.unix_millis().into()],
@@ -620,19 +620,41 @@ async fn actual_clock_recovery_contract(db: &Database) {
             initial,
         )?;
         outbox.enqueue(&captured, initial).await?;
-        Ok(captured)
+        let proof = outbox
+            .endpoint_grant(
+                &EffectScope {
+                    deployment: "deployment".into(),
+                    tenant: "beta".into(),
+                },
+                "events",
+                "contract",
+            )
+            .await?;
+        let pending = CapturedEffect::capture(
+            &effective.contract.emissions[0],
+            "actual-clock-pending".into(),
+            1,
+            &proof,
+            b"{}".to_vec(),
+            initial,
+        )?;
+        outbox.enqueue(&pending, initial).await?;
+        Ok((captured, pending))
     })
     .await
     .unwrap();
     let _old = claim(db, initial.unix_millis()).await;
+    phase(db,async |tx:&mut Transaction| {assert_eq!(tx.fetch::<2>("SELECT CAST((SELECT COUNT(*) FROM nx_outbox WHERE state='pending') AS TEXT),CAST((SELECT COUNT(*) FROM nx_outbox WHERE state='running') AS TEXT)",&[]).await?,[[String::from("1"),String::from("1")]]);Ok(())}).await.unwrap();
     db.recover_clock(&crate::HostKeys::generate().unwrap())
         .await
         .unwrap();
-    let recovered=phase(db,async |tx:&mut Transaction| {Ok(tx.fetch::<4>("SELECT generation,CAST((SELECT lifecycle_ms FROM nx_clock WHERE singleton=1) AS TEXT),(SELECT state FROM nx_outbox WHERE id=$1),(SELECT state FROM nx_job_runtime WHERE singleton=1) FROM nx_deployment WHERE singleton=1",&[capture.id()?.into()]).await?)}).await.unwrap();
+    let recovered=phase(db,async |tx:&mut Transaction| {Ok(tx.fetch::<6>("SELECT generation,CAST((SELECT lifecycle_ms FROM nx_clock WHERE singleton=1) AS TEXT),(SELECT state FROM nx_outbox WHERE id=$1),(SELECT state FROM nx_job_runtime WHERE singleton=1),(SELECT state FROM nx_outbox WHERE id=$2),CAST((SELECT first_eligible_ms FROM nx_outbox WHERE id=$1) AS TEXT) FROM nx_deployment WHERE singleton=1",&[capture.id()?.into(),pending.id()?.into()]).await?)}).await.unwrap();
     assert_ne!(recovered[0][0], "deployment");
     assert_eq!(recovered[0][1], initial.unix_millis().to_string());
     assert_eq!(recovered[0][2], "paused");
     assert_eq!(recovered[0][3], "paused");
+    assert_eq!(recovered[0][4], "paused");
+    assert_eq!(recovered[0][5], initial.unix_millis().to_string());
     let generation = &recovered[0][0];
     recovered_activation(db, generation, &effective).await;
     let snapshot=phase(db,async |tx:&mut Transaction| {Ok(tx.fetch::<4>("SELECT epoch,state,(SELECT state FROM nx_effect_grants WHERE deployment=$1 AND tenant='alpha' AND endpoint='events'),(SELECT state FROM nx_outbox WHERE id=$2) FROM nx_job_runtime WHERE singleton=1",&[generation.as_str().into(),capture.id()?.into()]).await?)}).await.unwrap();
@@ -682,6 +704,7 @@ async fn actual_clock_recovery_contract(db: &Database) {
             .await?;
         assert_eq!(source.capture_digest()?, capture.capture_digest()?);
         assert_eq!(source.receiver_key()?, capture.receiver_key()?);
+        assert_eq!(tx.fetch::<2>("SELECT CAST(first_eligible_ms AS TEXT),CAST(round AS TEXT) FROM nx_outbox WHERE id=$1",&[capture.id()?.into()]).await?,[[initial.unix_millis().to_string(),String::from("0")]]);
         let mut calls = 16;
         let claim = OutboxContext {
             tx,
