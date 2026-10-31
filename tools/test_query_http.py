@@ -240,6 +240,9 @@ def main():
         first = create(alice, 'First <script>alert("x")</script>', "عربي Rust alpha beta", 10, 2)
         second = create(alice, "Second عربي", "Rust alpha beta", 10, 3)
         third = create(alice, "Third عربي", "Rust alpha beta", 20, 5)
+        # Host record identities are random, so the stable ID tie is numeric ID
+        # order rather than creation order.
+        tie_order = sorted((first, second), key=lambda path: int(path.rsplit("/", 1)[1]))
         filtered = create(alice, "Filtered private", "عربي Rust alpha beta", 30, 7, included=False)
         unrelated = create(alice, "Unrelated private", "unrelated", 40, 11)
         private = create(bob, "Other account private decoy", "عربي Rust alpha beta", 10, 1000)
@@ -248,14 +251,14 @@ def main():
         assert b'First &lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;' in page and b"<script>" not in page
         assert "Terms: rust عربي" in page.decode()
         links = [link for link in document.links if link.startswith("/documents/")]
-        assert links == [first, second], "immutable rank ordering must use stable record-ID ties"
+        assert links == tie_order, "immutable rank ordering must use stable record-ID ties"
         assert third not in links and filtered not in links and unrelated not in links and private not in links
         next_page = next(link for link in document.links if "cursor=" in link)
         _, page, document = read(alice, next_page, "search-second")
         assert [link for link in document.links if link.startswith("/documents/")] == [third]
         assert not any("cursor=" in link for link in document.links)
         _, _, canonical = read(alice, query_path(search_path, terms="Ｒｕｓｔ عربي RUST"), "canonical-first")
-        assert [link for link in canonical.links if link.startswith("/documents/")] == [first, second]
+        assert [link for link in canonical.links if link.startswith("/documents/")] == tie_order
         _, _, equivalent = read(alice, query_path(next_page, terms="Ｒｕｓｔ عربي RUST"), "canonical-cursor")
         assert [link for link in equivalent.links if link.startswith("/documents/")] == [third]
         for label, changes in (("changed-terms", {"terms": "Rust"}), ("changed-range", {"maximum": 99}),
@@ -285,9 +288,12 @@ def main():
         for label, changes, expected in (
             ("empty-search", {"terms": ""}, 404),
             ("punctuation-search", {"terms": "!!!"}, 400),
+            ("eight-tokens", {"terms": "one two three four five six seven eight"}, 200),
             ("too-many-tokens", {"terms": "one two three four five six seven eight nine"}, 400),
-            ("long-token", {"terms": "a" * 65}, 400),
+            ("sixty-four-scalars", {"terms": "ش" * 64}, 200),
+            ("long-token", {"terms": "ش" * 65}, 400),
             ("noncanonical-range", {"minimum": "01"}, 404),
+            ("out-of-domain-range", {"minimum": "-1"}, 404),
             ("invalid-boolean", {"included": "TRUE"}, 404),
             ("reversed-range", {"minimum": 21, "maximum": 20}, 422),
             ("malicious-search", {"terms": '<script onload="bad">&'}, 200),
@@ -298,6 +304,7 @@ def main():
             _, body, _ = read(alice, query_path(search_path, **changes), label, expected)
             assert b"<script" not in body
         read(alice, search_path + "&terms=duplicate", "duplicate-parameter", 404)
+        read(alice, search_path + "&undeclared=1", "undeclared-parameter", 404)
         read(alice, query_path(search_path, terms="x" * 1025), "query-url-limit", 404)
         read(alice, "/documents/01", "noncanonical-record-path", 404)
         create(alice, "Overflow one", "overflow", 60, 9223372036854775807)

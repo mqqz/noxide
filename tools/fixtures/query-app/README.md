@@ -26,6 +26,6 @@ restarts the same fixture and rejects the previous contract's cursor without
 resetting data. `result.json` records successful checkpoints; HTML, logs and
 `get-checkpoints.json` remain available on failure.
 
-The harness checks HTTP form behavior without client scripts. Browser-engine and broader
-team-document/membership/expiry acceptance are separate gates. The lockfile is
+The harness checks HTTP form behavior without client scripts. Browser-engine and
+broader team-document/membership/expiry acceptance are separate gates. The lockfile is
 copied from the reviewed blob fixture with only its root package name changed.
