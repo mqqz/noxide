@@ -205,7 +205,18 @@ impl Case {
         assert!(self.path.is_dir());
     }
     pub(in crate::application) async fn form(&self) -> (String, String) {
-        let page = self.app.view(&self.cookie, 1, None).await.unwrap();
+        let route = self
+            .app
+            .manifest
+            .routes
+            .iter()
+            .find(|route| route.forms.contains(&1))
+            .unwrap();
+        let page = self
+            .app
+            .view(&self.cookie, route.id, route.resource.map(|_| 1))
+            .await
+            .unwrap();
         let html = String::from_utf8(page.body).unwrap();
         (
             fixture::hidden(&html, "_submission"),
@@ -457,6 +468,35 @@ async fn denied(database: Option<Database>, expiry: bool) {
     );
     case.close().await;
 }
+async fn approved_maintenance(database: Option<Database>) {
+    let mut m = declarations(true);
+    for op in &mut m.operations {
+        if matches!(op.id, 4 | 5) {
+            op.maintenance = true;
+        }
+    }
+    let case = Case::new_manifest(database, m).await;
+    let job = case.create("ready").await;
+    let claim = case.claim(0).await.unwrap();
+    case.change_record(&job, true).await;
+    assert!(matches!(
+        case.app.invoke_job(&claim).await.unwrap(),
+        JobRunOutcome::Completed {
+            recovered: false,
+            ..
+        }
+    ));
+    assert_eq!(
+        case.stored(&job).await,
+        ("succeeded".into(), "finished".into(), 1)
+    );
+    case.close().await;
+}
+#[tokio::test]
+async fn sqlite_service_explicit_maintenance_can_update_expired_row() {
+    approved_maintenance(None).await;
+}
+
 async fn revoked(database: Option<Database>) {
     let case = Case::new(database, false).await;
     let job = case.create("ready").await;
@@ -663,12 +703,279 @@ async fn authoritative_limits(database: Option<Database>) {
     case.close().await;
 }
 
+fn derived_declarations() -> Manifest {
+    let mut m = declarations(false);
+    let mut folder = m.resources[0].clone();
+    folder.id = 2;
+    folder.name = "folders".into();
+    folder.fields[0].name = "label".into();
+    folder.fields[0].label = "Label".into();
+    m.resources.push(folder);
+    m.resources[0].fields.push(TextField {
+        immutable: true,
+        kind: FieldKind::Reference {
+            resource: "folders".into(),
+        },
+        optional: false,
+        initial: None,
+        name: "parent".into(),
+        label: "Folder".into(),
+        max_bytes: 64,
+    });
+    let mut service_read = m.operations.iter().find(|op| op.id == 4).unwrap().clone();
+    service_read.id = 6;
+    service_read.resource = 2;
+    let mut owner_read = m.operations.iter().find(|op| op.id == 2).unwrap().clone();
+    owner_read.id = 8;
+    owner_read.resource = 2;
+    m.operations.extend([service_read, owner_read]);
+    m.operations
+        .iter_mut()
+        .find(|op| op.id == 3)
+        .unwrap()
+        .bind
+        .insert("parent".into(), 8);
+    m.actions[0].targets.push(ActionTarget {
+        name: "folder".into(),
+        resource: 2,
+        source: TargetSource::Page { reads: vec![8] },
+        revision: Revision::Identity,
+        projection: None,
+        inspect: None,
+    });
+    m.actions[0].steps[0].assign.push(Assignment {
+        field: "parent".into(),
+        change: Change::Set(Value::Target("folder".into())),
+    });
+    m.routes[0].forms.clear();
+    m.routes.push(Route {
+        params: vec![],
+        access: Access::Authenticated,
+        id: 3,
+        path: "/folders/{folder}".into(),
+        resource: Some(2),
+        operations: vec![8],
+        forms: vec![1],
+    });
+    m.actions[1].targets[0]
+        .projection
+        .as_mut()
+        .unwrap()
+        .fields
+        .push("parent".into());
+    m.actions[1].targets.push(ActionTarget {
+        name: "parent".into(),
+        resource: 2,
+        source: TargetSource::Reference {
+            target: "record".into(),
+            field: "parent".into(),
+            eligible: 6,
+        },
+        revision: Revision::Identity,
+        projection: Some(Inspection {
+            operation: 6,
+            fields: vec![],
+        }),
+        inspect: None,
+    });
+    let jobs = m.jobs.as_mut().unwrap();
+    jobs.workers[0].actions[0].targets.insert(
+        "parent".into(),
+        WorkerTarget {
+            resource: 2,
+            eligible: 6,
+        },
+    );
+    jobs.schedules[0]
+        .targets
+        .insert("parent".into(), ScheduledTarget::Target("folder".into()));
+    m
+}
+async fn derived_targets(database: Option<Database>, failure: Option<&str>) {
+    let case = Case::new_manifest(database, derived_declarations()).await;
+    let owner = case.app.account_identity(&case.cookie).await.unwrap();
+    let mut tx = case
+        .db
+        .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    let storage = tx.storage_resource(&case.app.manifest, 2).await.unwrap();
+    for id in 1..=2i64 {
+        let sequence = tx.allocate_creation().await.unwrap();
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,$3,'team',$4,$5,1,$6)", &[storage.into(), id.into(), owner.as_str().into(), serde_json::to_string(&Fields::from([("label".into(), "Folder".into())])).unwrap().into(), format!("folder_{id}").into(), sequence.into()]).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    let job = case.create("ready").await;
+    assert_eq!(job.targets().len(), 2);
+    assert_eq!(job.targets()["parent"].id, 1);
+    if let Some(failure) = failure {
+        let mut tx = case
+            .db
+            .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
+            .await
+            .unwrap();
+        if failure == "relation" {
+            let mut forged = serde_json::to_value(&job).unwrap();
+            forged["targets"]["parent"]["id"] = 2.into();
+            forged["targets"]["parent"]["incarnation"] = "folder_2".into();
+            let forged: CapturedJob = serde_json::from_value(forged).unwrap();
+            tx.execute(
+                "UPDATE nx_jobs SET payload=$1,payload_digest=$2 WHERE id=$3",
+                &[
+                    serde_json::to_string(&forged).unwrap().into(),
+                    forged.invocation_digest().unwrap().into(),
+                    job.id().unwrap().into(),
+                ],
+            )
+            .await
+            .unwrap();
+        } else {
+            tx.execute(
+                "UPDATE nx_records SET tenant='other' WHERE resource=$1 AND id=1",
+                &[storage.into()],
+            )
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+    }
+    let claim = case.claim(0).await.unwrap();
+    let result = case.app.invoke_job(&claim).await.unwrap();
+    if failure.is_some() {
+        assert!(matches!(result, JobRunOutcome::Unavailable));
+        assert_eq!(
+            case.stored(&job).await,
+            ("rejected".into(), "ready".into(), 0)
+        );
+    } else {
+        assert!(matches!(result, JobRunOutcome::Completed { .. }));
+        assert_eq!(
+            case.stored(&job).await,
+            ("succeeded".into(), "finished".into(), 1)
+        );
+    }
+    case.close().await;
+}
+#[tokio::test]
+async fn sqlite_service_created_and_derived_targets() {
+    derived_targets(None, None).await;
+}
+#[tokio::test]
+async fn sqlite_service_derived_parent_read_is_independent() {
+    derived_targets(None, Some("authority")).await;
+}
+#[tokio::test]
+async fn sqlite_service_forged_derived_relation_is_unavailable() {
+    derived_targets(None, Some("relation")).await;
+}
+
+async fn exact_revision(database: Option<Database>) {
+    let mut m = declarations(false);
+    m.actions[1].targets[0].revision = Revision::Exact;
+    let case = Case::new_manifest(database, m).await;
+    let job = case.create("ready").await;
+    assert_eq!(job.targets()["record"].revision, 1);
+    let mut forged = serde_json::to_value(&job).unwrap();
+    forged["targets"]["record"]["revision"] = 0.into();
+    let forged: CapturedJob = serde_json::from_value(forged).unwrap();
+    let mut tx = case
+        .db
+        .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    tx.execute(
+        "UPDATE nx_jobs SET payload=$1,payload_digest=$2 WHERE id=$3",
+        &[
+            serde_json::to_string(&forged).unwrap().into(),
+            forged.invocation_digest().unwrap().into(),
+            job.id().unwrap().into(),
+        ],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let claim = case.claim(0).await.unwrap();
+    assert!(
+        matches!(
+            case.app.invoke_job(&claim).await.unwrap(),
+            JobRunOutcome::Unavailable
+        ),
+        "Exact never accepts the Identity-only zero revision"
+    );
+    assert_eq!(
+        case.stored(&job).await,
+        ("rejected".into(), "ready".into(), 0)
+    );
+    case.close().await;
+}
+
+async fn malformed_receipt(database: Option<Database>) {
+    let case = Case::new(database, false).await;
+    let job = case.create("ready").await;
+    let claim = case.claim(0).await.unwrap();
+    assert!(matches!(
+        case.app.invoke_job(&claim).await.unwrap(),
+        JobRunOutcome::Completed { .. }
+    ));
+    let mut tx = case
+        .db
+        .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    tx.execute(
+        "UPDATE nx_receipts SET outcome=$1 WHERE nonce=$2",
+        &[
+            r#"{"version":3,"outcomes":[],"source":null,"destination":null,"handover":null}"#
+                .into(),
+            job.id().unwrap().into(),
+        ],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        case.app.invoke_job(&claim).await.is_err(),
+        "incomplete semantic receipt is never abort evidence"
+    );
+    assert_eq!(
+        case.stored(&job).await,
+        ("succeeded".into(), "finished".into(), 1)
+    );
+    case.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_service_exact_rejects_zero_revision() {
+    exact_revision(None).await;
+}
+#[tokio::test]
+async fn sqlite_service_malformed_receipt_never_reexecutes() {
+    malformed_receipt(None).await;
+}
+
 async fn maximum_effects(database: Option<Database>) {
     let mut m = declarations(false);
     let mut followup = m.actions[1].clone();
     followup.id = 3;
     followup.name = "Observe completion".into();
-    followup.steps[0].guards.clear();
+    followup.inputs.push(Input {
+        name: "original".into(),
+        label: "Original state".into(),
+        kind: FieldKind::Text,
+        optional: false,
+        max_bytes: 4096,
+    });
+    followup.steps[0].guards = vec![Guard {
+        condition: GuardCondition::Compare {
+            left: Value::Input("original".into()),
+            comparison: Comparison::Equal,
+            right: Value::Literal(Literal::Text("ready".into())),
+        },
+        rejection: GuardRejection {
+            input: Some("original".into()),
+            message: "Original state differs".into(),
+        },
+    }];
     m.actions[1].steps = vec![m.actions[1].steps[0].clone(); 4];
     m.actions.push(followup);
     let jobs = m.jobs.as_mut().unwrap();
@@ -682,7 +989,14 @@ async fn maximum_effects(database: Option<Database>) {
             worker: "repair".into(),
             action: 3,
             targets: BTreeMap::from([("record".into(), ScheduledTarget::Target("record".into()))]),
-            inputs: BTreeMap::new(),
+            inputs: BTreeMap::from([(
+                "original".into(),
+                Value::SnapshotField {
+                    target: "record".into(),
+                    field: "body".into(),
+                    reviewed: false,
+                },
+            )]),
             due_at: Value::TransactionTime,
         });
     }
@@ -710,6 +1024,23 @@ async fn maximum_effects(database: Option<Database>) {
             .unwrap()[0][0],
         "3"
     );
+    let captures = tx
+        .fetch::<1>(
+            "SELECT payload FROM nx_jobs WHERE action=3 ORDER BY ordinal",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(captures.len(), 2);
+    for [payload] in captures {
+        let followup: CapturedJob = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            followup.input()["original"],
+            "ready",
+            "schedule expressions use initial snapshots, not final mutated row data"
+        );
+        assert_eq!(followup.targets()["record"].revision, 0);
+    }
     let stored = repository::load(&mut tx, &case.app.manifest, 1, job.targets()["record"].id)
         .await
         .unwrap()
@@ -803,6 +1134,12 @@ async fn postgres_service_action_integration() {
         "retry",
         "limits",
         "maximum",
+        "exact",
+        "malformed",
+        "maintenance",
+        "derived",
+        "derived_authority",
+        "derived_relation",
     ] {
         let name = format!(
             "nx_p10_action_{case}_{}",
@@ -831,6 +1168,12 @@ async fn postgres_service_action_integration() {
             "retry" => known_retry(db).await,
             "limits" => authoritative_limits(db).await,
             "maximum" => maximum_effects(db).await,
+            "exact" => exact_revision(db).await,
+            "malformed" => malformed_receipt(db).await,
+            "maintenance" => approved_maintenance(db).await,
+            "derived" => derived_targets(db, None).await,
+            "derived_authority" => derived_targets(db, Some("authority")).await,
+            "derived_relation" => derived_targets(db, Some("relation")).await,
             _ => unreachable!(),
         }
     }
