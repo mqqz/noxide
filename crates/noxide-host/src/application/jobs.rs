@@ -97,40 +97,36 @@ impl Application {
         claim: &Claim,
         budget: &mut ExecutionBudget,
     ) -> Result<JobRunOutcome> {
-        // This transaction needs no fresh clock, target, policy or credential.
-        // Recover a confirmed prior commit before any temporal admission guard.
-        let mut probe = self.database.begin(budget.deadline.into_std()).await?;
-        self.admission(&mut probe, false).await?;
-        let (capture, receipt) = QueueContext {
-            tx: &mut probe,
-            calls: &mut budget.database_calls,
-        }
-        .recover_receipt(claim, |job, payload| {
-            self.job_receipt(job, payload).map(|_| ())
-        })
-        .await?;
-        if let Some(payload) = receipt {
-            let outcomes = self.job_receipt(&capture, &payload)?.outcomes;
-            probe.commit().await?;
-            return Ok(JobRunOutcome::Completed {
-                outcomes,
-                recovered: true,
-            });
-        }
-        probe.rollback().await?;
+        let mut fixed_capture = None;
         for attempt_index in 0..3 {
             let mut tx = self.database.begin(budget.deadline.into_std()).await?;
             self.admission(&mut tx, false).await?;
-            budget.spend(1)?;
-            let time = self.temporal_after_admission(&mut tx).await?;
-            let execution = QueueContext {
+            let mut admitted_time = None;
+            let (capture, execution) = QueueContext {
                 tx: &mut tx,
                 calls: &mut budget.database_calls,
             }
-            .lock_execution(claim, time.timestamp(), |payload| {
-                self.job_receipt(&capture, payload).map(|_| ())
-            })
+            .lock_execution_with_time(
+                claim,
+                async |tx: &mut Transaction, calls: &mut u32| {
+                    *calls = calls
+                        .checked_sub(1)
+                        .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
+                    let time = self.temporal_after_admission(tx).await?;
+                    admitted_time = Some(time);
+                    Ok(time.timestamp())
+                },
+                |job, payload| self.job_receipt(job, payload).map(|_| ()),
+            )
             .await?;
+            if let Some(original) = &fixed_capture {
+                ensure!(
+                    original == &capture,
+                    "captured invocation changed during retry"
+                );
+            } else {
+                fixed_capture = Some(capture.clone());
+            }
             let verified = match execution {
                 Execution::Ready(verified) => verified,
                 Execution::Recovered(payload) => {
@@ -150,6 +146,8 @@ impl Application {
                     return Ok(JobRunOutcome::Dead);
                 }
             };
+            let time = admitted_time
+                .ok_or_else(|| anyhow::anyhow!("missing admitted lifecycle snapshot"))?;
             ensure!(
                 verified.captured() == &capture,
                 "captured invocation changed during retry"
@@ -515,6 +513,9 @@ impl Application {
         // Only queue bookkeeping follows; no resource row can change while these
         // two fixed effects are sealed. Deduplicate data loads, never authorization.
         let mut final_rows = BTreeMap::new();
+        // These are authoritative row-lock proofs within this transaction, not
+        // configuration metadata. No resource writes occur between fixed effects.
+        let mut locked_grants = BTreeMap::new();
         for schedule in schedules {
             let destination = manifest::action(&self.manifest, schedule.action)?;
             let (due, raw) = {
@@ -541,12 +542,19 @@ impl Application {
             };
             let input = manifest::canonical_input(&self.manifest, destination, &raw)?;
             manifest::validate_input(&self.manifest, destination, &input)?;
-            let locked = QueueContext {
-                tx: &mut effects.tx,
-                calls: &mut effects.calls,
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                locked_grants.entry(schedule.worker.as_str())
+            {
+                entry.insert(
+                    QueueContext {
+                        tx: &mut effects.tx,
+                        calls: &mut effects.calls,
+                    }
+                    .schedule_grant(&scope, &schedule.worker, &self.contract)
+                    .await?,
+                );
             }
-            .schedule_grant(&scope, &schedule.worker, &self.contract)
-            .await?;
+            let locked = &locked_grants[schedule.worker.as_str()];
             let mut candidates = BTreeMap::new();
             for (alias, source) in &schedule.targets {
                 let (resource, id, incarnation) = match source {
@@ -586,7 +594,7 @@ impl Application {
                     &mut effects.calls,
                 )
                 .await?;
-            let principal = auth::Principal::from_locked_job_grant(&locked);
+            let principal = auth::Principal::from_locked_job_grant(locked);
             let mut authority = self.authority_context(Some(time))?;
             let targets = self
                 .seal_job_target_rows(
@@ -597,7 +605,7 @@ impl Application {
                         authority: &mut authority,
                         budget: repository::ReadBudget::Action(&mut effects.calls),
                     },
-                    &locked,
+                    locked,
                     destination.id,
                     &rows,
                 )

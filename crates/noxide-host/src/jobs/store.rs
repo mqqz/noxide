@@ -280,36 +280,6 @@ impl QueueContext<'_> {
         ensure!(changed == 1, "job finalization superseded");
         Ok(())
     }
-    /// Receipt recovery deliberately requires no fresh lifecycle sample or current
-    /// target authority. Retained runtime/grant rows provide lock serialization,
-    /// while the original capture and core decoder bind committed evidence.
-    pub(crate) async fn recover_receipt(
-        &mut self,
-        claim: &Claim,
-        validate: impl Fn(&CapturedJob, &str) -> Result<()>,
-    ) -> Result<(CapturedJob, Option<String>)> {
-        self.charge()?;
-        self.lock_runtime(&claim.scope).await?;
-        let preview = self.row(claim, false).await?;
-        self.lock_grant(&claim.scope, &preview.job.worker).await?;
-        let row = self.row(claim, true).await?;
-        let receipt = self
-            .receipt(&row, &|payload| validate(&row.job, payload))
-            .await?;
-        if receipt.is_some() {
-            if row.state == "running" {
-                self.transition(claim, "succeeded", "", row.first_eligible)
-                    .await?;
-            } else {
-                ensure!(
-                    row.state == "succeeded",
-                    "receipt with inconsistent job state"
-                );
-            }
-        }
-        Ok((row.job, receipt))
-    }
-
     /// Current operator intersection for a fixed admitted transactional schedule.
     pub(crate) async fn schedule_grant(
         &mut self,
@@ -459,12 +429,12 @@ impl QueueContext<'_> {
     /// Locks authoritative runtime/grant plus claimed row in this execution
     /// transaction. Restores/revocations take conflicting locks. No current
     /// authorization is inferred from a captured grant or record identity.
-    pub(crate) async fn lock_execution(
+    pub(crate) async fn lock_execution_with_time(
         &mut self,
         claim: &Claim,
-        now: Timestamp,
-        validate_receipt: impl Fn(&str) -> Result<()>,
-    ) -> Result<Execution> {
+        sample_time: impl AsyncFnOnce(&mut Transaction, &mut u32) -> Result<Timestamp>,
+        validate_receipt: impl Fn(&CapturedJob, &str) -> Result<()>,
+    ) -> Result<(CapturedJob, Execution)> {
         self.charge()?;
         self.checkpoint()?;
         let deadline = RequestScope::current_work_deadline()
@@ -480,17 +450,25 @@ impl QueueContext<'_> {
         let preview = self.row(claim, false).await?;
         let (grant, grant_state) = self.lock_grant(&claim.scope, &preview.job.worker).await?;
         let row = self.row(claim, true).await?;
-        if let Some(outcome) = self.receipt(&row, &validate_receipt).await? {
+        let capture = row.job.clone();
+        if let Some(outcome) = self
+            .receipt(&row, &|payload| validate_receipt(&row.job, payload))
+            .await?
+        {
             if row.state == "running" {
-                self.transition(claim, "succeeded", "", now).await?;
+                self.transition(claim, "succeeded", "", row.first_eligible)
+                    .await?;
             } else {
                 ensure!(
                     row.state == "succeeded",
                     "receipt with inconsistent job state"
                 );
             }
-            return Ok(Execution::Recovered(outcome));
+            return Ok((capture, Execution::Recovered(outcome)));
         }
+        // This host callback consumes the existing lifecycle snapshot and charges
+        // its logical call. Receipt recovery never invokes a fresh time guard.
+        let now = sample_time(&mut *self.tx, &mut *self.calls).await?;
         ensure!(
             row.state == "running" && now < row.lease_until,
             "job claim expired or settled"
@@ -503,22 +481,42 @@ impl QueueContext<'_> {
         {
             self.transition(claim, "paused", "authority_changed", now)
                 .await?;
-            return Ok(Execution::Paused);
+            return Ok((capture, Execution::Paused));
         }
         let window = row
             .first_eligible
             .checked_add(Duration::from_millis(JOB_RETRY_WINDOW_MILLIS)?)?;
         if now >= window || claim.exhausted {
             self.transition(claim, "dead", "retry_window", now).await?;
-            return Ok(Execution::Dead);
+            return Ok((capture, Execution::Dead));
         }
         ensure!(row.attempts > 0, "job has no claimed attempt");
-        Ok(Execution::Ready(VerifiedJob {
-            claim: claim.clone(),
-            job: row.job,
-            grant,
-        }))
+        Ok((
+            capture,
+            Execution::Ready(VerifiedJob {
+                claim: claim.clone(),
+                job: row.job,
+                grant,
+            }),
+        ))
     }
+    #[cfg(test)]
+    pub(crate) async fn lock_execution(
+        &mut self,
+        claim: &Claim,
+        now: Timestamp,
+        validate_receipt: impl Fn(&str) -> Result<()>,
+    ) -> Result<Execution> {
+        // A supplied fixture timestamp performs no lifecycle database read.
+        self.lock_execution_with_time(
+            claim,
+            async |_, _| Ok(now),
+            |_, payload| validate_receipt(payload),
+        )
+        .await
+        .map(|(_, execution)| execution)
+    }
+
     /// Existing executor must first persist a complete semantic receipt. This
     /// completion write participates in that exact same mutation transaction.
     pub(crate) async fn succeed(

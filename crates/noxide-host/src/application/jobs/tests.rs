@@ -707,8 +707,8 @@ async fn exhausted_abort_budget(database: Option<Database>) {
     )
     .await;
     assert!(
-        result.is_err(),
-        "three full target attempts leave no call for a fenced backoff under the original16"
+        matches!(result.unwrap(), JobRunOutcome::Retrying(_)),
+        "three acknowledged aborts must use durable backoff within the original16"
     );
     assert_eq!(roots.len(), 1);
     case.app
@@ -718,8 +718,8 @@ async fn exhausted_abort_budget(database: Option<Database>) {
         .unwrap();
     assert_eq!(
         case.stored(&job).await,
-        ("running".into(), "ready".into(), 0),
-        "unrecorded finalization must retain the claim for authoritative recovery"
+        ("pending".into(), "ready".into(), 0),
+        "acknowledged aborts cannot commit effects or skip declared backoff"
     );
     case.close().await;
 }
@@ -728,7 +728,7 @@ async fn sqlite_service_acknowledged_trap_uses_retry_backoff() {
     acknowledged_trap_backoff(None).await;
 }
 #[tokio::test]
-async fn sqlite_service_exhausted_retry_budget_retains_running() {
+async fn sqlite_service_three_acknowledged_aborts_use_backoff() {
     exhausted_abort_budget(None).await;
 }
 
