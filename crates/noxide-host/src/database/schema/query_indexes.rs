@@ -142,8 +142,9 @@ impl Transaction {
         }
         ensure!(
             actual.usable && ddl_key(&actual.sql, storage) == ddl_key(&expected, storage),
-            "invalid derived index {}; run noxide schema indexes CONFIG",
-            requirement.name(storage)
+            "invalid derived index {} for queries {:?}; run noxide schema indexes CONFIG",
+            requirement.name(storage),
+            requirement.queries,
         );
         Ok(())
     }
@@ -165,7 +166,7 @@ impl Transaction {
                 continue;
             }
             let actual = existing.get(&name).with_context(|| {
-                format!("missing derived index {name}; run noxide schema indexes CONFIG")
+                format!("missing derived index {name} for queries {:?}; run noxide schema indexes CONFIG", requirement.queries)
             })?;
             self.verify_query_definition(&requirement, storage, actual)?;
         }

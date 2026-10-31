@@ -1,6 +1,7 @@
 use super::*;
 mod membership;
 mod query_indexes;
+mod search_indexes;
 
 impl Database {
     /// Reconcile operation-derived indexes under the operator maintenance lock.
@@ -9,6 +10,7 @@ impl Database {
         let mut tx = self.begin_schema().await?;
         tx.check_storage().await?;
         tx.bind_schema_catalog(target).await?;
+        tx.initialize_search_states(target).await?;
         tx.reconcile_query_indexes(target).await?;
         tx.reconcile_membership_indexes(&target.resources).await?;
         tx.commit().await
@@ -156,6 +158,7 @@ impl Transaction {
     pub(crate) async fn bind_schema(&mut self, manifest: &noxide_protocol::Manifest) -> Result<()> {
         self.bind_schema_catalog(manifest).await?;
         self.validate_query_indexes(manifest).await?;
+        self.validate_search_states(manifest).await?;
         self.preflight_membership(&manifest.resources).await?;
         self.validate_membership_indexes(&manifest.resources).await
     }
@@ -354,6 +357,8 @@ impl Transaction {
         {
             self.preflight_membership(&target.resources).await?;
             self.validate_membership_indexes(&target.resources).await?;
+            self.validate_query_indexes(target).await?;
+            self.validate_search_states(target).await?;
             return Ok(());
         }
         ensure!(
@@ -405,8 +410,17 @@ impl Transaction {
                     .await?;
             }
         }
+        let mut rebuild_search = std::collections::BTreeSet::new();
         for op in &migration.operations {
             match op {
+                MigrationOp::AddSearchIndex { resource }
+                | MigrationOp::RebuildSearchIndex { resource } => {
+                    rebuild_search.insert(resource.clone());
+                }
+                MigrationOp::RemoveSearchIndex { resource } => {
+                    let storage = self.storage_key(resource).await?;
+                    self.remove_search_index(storage).await?;
+                }
                 MigrationOp::AddResource { resource } => {
                     let id = self.next_storage_id().await?;
                     self.execute(
@@ -516,6 +530,11 @@ impl Transaction {
             }
         }
         self.validate_stored_resources(&target.resources).await?;
+        for resource in rebuild_search {
+            let declaration = schema::resource(&target.resources, &resource)?;
+            self.rebuild_search_index(declaration).await?;
+        }
+        self.initialize_search_states(target).await?;
         self.validate_references(&target.resources).await?;
         self.reference_indexes(&target.resources).await?;
         self.reconcile_query_indexes(target).await?;
