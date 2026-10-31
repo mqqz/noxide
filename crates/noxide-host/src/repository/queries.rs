@@ -430,10 +430,10 @@ impl Effects {
                 return Ok(false);
             }
         }
-        if let Some(scope) = &plan.scope {
-            if fields.get(scope).and_then(|v| v.parse::<u64>().ok()) != self.request.target {
-                return Ok(false);
-            }
+        if let Some(scope) = &plan.scope
+            && fields.get(scope).and_then(|v| v.parse::<u64>().ok()) != self.request.target
+        {
+            return Ok(false);
         }
         for condition in &plan.selection {
             let expected = match &condition.equals {
@@ -714,11 +714,11 @@ impl Effects {
                     (1001usize.saturating_sub(examined)).min(256)
                 };
                 let streams = source.policy.any.len();
-                let streams = if terms.is_some()
+                let streams = if let Some((tokens, _)) = &terms
                     && plan.scope.is_none()
                     && !matches!(plan.order, ListOrder::Field { .. })
                 {
-                    terms.as_ref().expect("search terms").0.len()
+                    tokens.len()
                 } else {
                     streams
                 };
