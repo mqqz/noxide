@@ -84,6 +84,23 @@ pub async fn prepare(project: &Path, development: bool, approval: Option<&str>) 
             "{}",
             serde_json::to_string_pretty(&serde_json::from_slice::<serde_json::Value>(&bytes)?)?
         );
+        let mut disclosed_actions = Vec::new();
+        for action in &manifest.actions {
+            let disclosures = noxide_host::manifest::action_disclosures(&manifest, action.id)?;
+            if !disclosures.is_empty() {
+                disclosed_actions.push(serde_json::json!({
+                    "action": action.id,
+                    "name": &action.name,
+                    "disclosures": disclosures,
+                }));
+            }
+        }
+        if !disclosed_actions.is_empty() {
+            println!(
+                "Action data disclosures:\n{}",
+                serde_json::to_string_pretty(&disclosed_actions)?
+            );
+        }
         println!("Contract: {digest}");
         if development {
             println!(
