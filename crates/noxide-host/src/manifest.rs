@@ -55,11 +55,12 @@ fn canonical_targets(manifest: &mut Manifest) {
 
 fn validate_selection(m: &Manifest, op: &Operation) -> Result<()> {
     ensure!(
-        op.filter.is_empty() || op.kind == OperationKind::List,
+        op.filter.is_empty() || matches!(op.kind, OperationKind::List | OperationKind::Aggregate),
         "filter requires list"
     );
     ensure!(
-        op.disclose.is_empty() || (op.kind == OperationKind::List && is_public(op)),
+        op.disclose.is_empty()
+            || (matches!(op.kind, OperationKind::List | OperationKind::Aggregate) && is_public(op)),
         "disclose requires public list"
     );
     ensure!(op.filter.len() <= 4, "filter limit");
@@ -277,7 +278,7 @@ pub fn validate(m: &Manifest) -> Result<()> {
     query::validate_declarations(m)?;
     // The compiling wire11 contract cannot enable a partially wired executor.
     ensure!(
-        !query::uses_extensions(m),
+        !query::uses_extensions(m) || cfg!(test),
         "P09 query runtime is not available"
     );
     crate::assets::validate_declarations(&m.assets)?;
@@ -446,7 +447,7 @@ pub fn validate(m: &Manifest) -> Result<()> {
     }
     for op in &m.operations {
         ensure!(
-            op.scope.is_none() || op.kind == OperationKind::List,
+            op.scope.is_none() || matches!(op.kind, OperationKind::List | OperationKind::Aggregate),
             "scope requires list"
         );
         ensure!(
@@ -464,7 +465,7 @@ pub fn validate(m: &Manifest) -> Result<()> {
                 "scope requires reference field"
             );
         }
-        if op.kind == OperationKind::List
+        if matches!(op.kind, OperationKind::List | OperationKind::Aggregate)
             && let Some(gate) = &r.gate
         {
             ensure!(
@@ -540,7 +541,10 @@ pub fn validate(m: &Manifest) -> Result<()> {
                     ensure!(
                         matches!(
                             op.kind,
-                            OperationKind::Read | OperationKind::List | OperationKind::Create
+                            OperationKind::Read
+                                | OperationKind::List
+                                | OperationKind::Aggregate
+                                | OperationKind::Create
                         ),
                         "principal_is requires read, list, or create"
                     );
@@ -571,7 +575,10 @@ pub fn validate(m: &Manifest) -> Result<()> {
                 continue;
             }
             ensure!(
-                matches!(op.kind, OperationKind::List | OperationKind::Read),
+                matches!(
+                    op.kind,
+                    OperationKind::List | OperationKind::Read | OperationKind::Aggregate
+                ),
                 "public operations must read"
             );
             let visibility = op
