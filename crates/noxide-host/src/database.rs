@@ -469,7 +469,11 @@ impl Database {
         .await?;
         tx.execute("UPDATE nx_job_grants SET state='revoked',version=CASE WHEN version<9223372036854775807 THEN version+1 ELSE version END WHERE deployment=(SELECT deployment FROM nx_job_runtime WHERE singleton=1) AND state='active'", &[]).await?;
         tx.execute("UPDATE nx_jobs SET state='paused',reason='clock_recovery',lease_until_ms=0 WHERE state IN ('pending','running')", &[]).await?;
-        tx.execute("UPDATE nx_job_recurring SET state='paused' WHERE state='active'", &[]).await?;
+        tx.execute(
+            "UPDATE nx_job_recurring SET state='paused' WHERE state='active'",
+            &[],
+        )
+        .await?;
         let now = crate::security::now()?;
         let generation = crate::security::random_id()?;
         tx.execute(
