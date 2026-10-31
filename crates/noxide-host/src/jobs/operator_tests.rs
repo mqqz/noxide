@@ -46,6 +46,7 @@ async fn activate(
     contract: &str,
     declaration: &JobContract,
     effective: &EffectiveJobDeployment,
+    phase: &str,
 ) {
     let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
     let mut lease = crate::database::MaintenanceLease::new(
@@ -53,7 +54,10 @@ async fn activate(
         Instant::now() + Duration::from_secs(5),
         crate::lifecycle_clock::Freshness::default(),
     );
-    lease.begin(database).await.unwrap();
+    lease
+        .begin(database)
+        .await
+        .unwrap_or_else(|error| panic!("P10 operator activation phase={phase} begin: {error:#}"));
     lease
         .tx()
         .activate_jobs("generation", contract, Some(effective), Some(declaration))
@@ -65,7 +69,7 @@ async fn activate(
 async fn operator_lifecycle(database: Database) {
     setup(&database).await;
     let (declaration, effective) = approved();
-    activate(&database, "approval", &declaration, &effective).await;
+    activate(&database, "approval", &declaration, &effective, "initial").await;
     let mut tx = database
         .begin(Instant::now() + Duration::from_secs(5))
         .await
@@ -79,7 +83,14 @@ async fn operator_lifecycle(database: Database) {
         .await
         .unwrap();
     tx.commit().await.unwrap();
-    activate(&database, "approval", &declaration, &effective).await;
+    activate(
+        &database,
+        "approval",
+        &declaration,
+        &effective,
+        "restart_after_revoke",
+    )
+    .await;
     let mut tx = database
         .begin(Instant::now() + Duration::from_secs(5))
         .await
@@ -105,7 +116,14 @@ async fn operator_lifecycle(database: Database) {
     assert_ne!(fork[0], original);
     assert_eq!(fork[1], "paused");
     tx.commit().await.unwrap();
-    activate(&database, "approval", &declaration, &effective).await;
+    activate(
+        &database,
+        "approval",
+        &declaration,
+        &effective,
+        "restart_after_fork",
+    )
+    .await;
     let mut tx = database
         .begin(Instant::now() + Duration::from_secs(5))
         .await
@@ -136,7 +154,14 @@ async fn operator_lifecycle(database: Database) {
         [String::from("2"), String::from("active")]
     );
     tx.commit().await.unwrap();
-    activate(&database, "new_approval", &declaration, &effective).await;
+    activate(
+        &database,
+        "new_approval",
+        &declaration,
+        &effective,
+        "contract_change",
+    )
+    .await;
     let mut tx = database
         .begin(Instant::now() + Duration::from_secs(5))
         .await
