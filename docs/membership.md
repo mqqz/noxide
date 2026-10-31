@@ -2,9 +2,10 @@
 
 Status: P07 integration candidate, not accepted or ready to activate. Canonical
 wire/admission, policy/SQL helpers, runtime read/mutation hooks and SDK lowering
-are present on the final P04 source checkpoint. Schema enforcement, full action
-and read-path regression coverage, provider measurements and the combined review
-remain integration gates. See the
+are present on the final P04 source checkpoint. Native schema enforcement,
+provider action/lifecycle proofs, SDK equivalence and a script-free HTTP proof app
+are implemented. Acceptance requires the full-suite/read-path gates and combined independent
+review. See the
 [capability contracts](architecture/capability-contracts.md) and
 [security contract](architecture/runtime.md#security-contract).
 
@@ -89,6 +90,20 @@ not rerun original temporal guards. Current delivery authorization uses a fresh
 read attempt. Public parent gates constrain public grants only; independent
 private read grants retain their authority.
 
+A public child read checks the gated parent's current visibility and expiry. An
+independent Owner or Member child read keeps its own grant when the parent expires;
+a follow to that parent must still deny because the parent itself is expired.
+An Owner OR membership policy remains owner-readable after membership revocation
+or expiry. A child List grant never substitutes for a parent Read grant.
+
+Postcommit delivery uses the unspent portion of the existing total 16-call action
+pool plus its already-deducted navigation reserve (four calls, or six for a gated
+destination). Transferring those calls zeros the source. It does not add a new
+allowance. Fresh delivery catalog, clock and membership work charges this same
+pool; exhaustion after commit returns committed success/handover without claiming
+a rollback. The existing fixed schema/admission envelope remains separately
+bounded, and the original absolute deadline is retained.
+
 P04 snapshots retain the initial approved read/projection values for that one
 invocation. An earlier step cannot erase data already captured under that grant.
 The declared flow may use those initial values after membership revocation or a
@@ -123,15 +138,27 @@ bootstrap: workspace create, then membership create with `Created(0)`, `Principa
 and a literal admin role. Membership-management actions require the workspace
 admin policy; ordinary membership ownership cannot grant or change roles.
 
-The SDK equivalence test checks literal lowering, field-key mapping, identity
-and reference matching, metadata-only schema registration, native tuple and
-explicit/default horizon declarations. The earlier disabled checkpoint passed
-four real SQLite/PostgreSQL leaf tests. The first integrated primitive round
-passes seven tests with both real providers, including production SQL/row parity,
-actual expiry/horizons, account scope, historical duplicates, owned-nonmember
-denial, mutation freshness and read-only clock state. Those focused results do
-not establish all runtime paths. Full bootstrap and sequential snapshot tests,
-anonymous picker, all-read-path expiry/freshness, schema/index activation,
-adversarial 100k-row measurements and independent combined P04/P07 review remain
-required. No deployment, audited-security or anonymity claim follows from local
-checks.
+The SDK equivalence and compile-diagnostic gates check literal lowering, field
+keys, identity/reference matching, metadata-only schema registration, unique tuple
+and horizon declarations. Required same-tenant account action inputs lower to the
+same explicit host input/operation metadata; missing or unsupported scopes fail
+macro expansion. The submitted recipient is preserved.
+
+The [team documents example](../examples/team-documents/README.md) bootstraps a
+workspace and administrator membership in one real action, then uses active
+membership to grant document access and an explicit administrator policy for
+member management. Its actual SDK Wasm component passes the script-free HTTP
+walkthrough against SQLite and disposable PostgreSQL. Provider action tests cover
+native duplicate rollback and receipt recovery, cross-tenant recipients,
+principal-owned membership denial, immediate expiry and stale lifecycle time.
+Sequential tests preserve initial approved snapshots while requiring fresh
+membership/expiry decisions for later mutations and CurrentField guards.
+
+The exact production batch64 SQL has been measured against 100,000 unrelated rows,
+100,000 wrong-role duplicates and 100,000 expired otherwise-matching duplicates,
+without planner overrides. SQLite scanstatus reports 67 examined rows; PostgreSQL
+EXPLAIN scan-node accounting reports 3. These provider metrics use different
+instrumentation and are not a speed comparison. The specialized lookup, native
+index activation and bounded shared budgets have dedicated provider regressions.
+Full integration and fresh combined independent review remain acceptance gates.
+No deployment, audited-security or anonymity claim follows from local checks.

@@ -620,6 +620,217 @@ async fn sqlite_expired_routes_targets_recovery_and_no_get_clock_writes() {
     temporal_routes_contract(None).await;
 }
 
+async fn anonymous_picker_contract(db: Option<Database>) {
+    let mut m = declarations();
+    let workspace = resource(&m, "workspaces");
+    let eligible = m
+        .operations
+        .iter()
+        .find(|op| {
+            op.resource == workspace
+                && op.kind == OperationKind::Read
+                && op.policy.any
+                    == vec![vec![Predicate::ExistsRelated(
+                        noxide_protocol::membership::ExistsRelated {
+                            resource: "memberships".into(),
+                            reference: "workspace".into(),
+                            target: noxide_protocol::membership::RelatedTarget::SelfRecord,
+                            account: "account".into(),
+                            conditions: std::collections::BTreeMap::from([
+                                (
+                                    "active".into(),
+                                    noxide_protocol::membership::MembershipLiteral::Boolean(true),
+                                ),
+                                (
+                                    "role".into(),
+                                    noxide_protocol::membership::MembershipLiteral::Choice(
+                                        "admin".into(),
+                                    ),
+                                ),
+                            ]),
+                        },
+                    )]]
+        })
+        .unwrap()
+        .clone();
+    let mut picker = eligible.clone();
+    picker.id = 910;
+    picker.kind = OperationKind::List;
+    picker.list = Some(ListSettings {
+        order: ListOrder::CreatedAsc,
+        page_size: 10,
+        preview: None,
+    });
+    m.resources.push(Resource {
+        id: 911,
+        name: "selected_links".into(),
+        gate: None,
+        expiry: None,
+        unique: vec![],
+        fields: vec![TextField {
+            name: "workspace".into(),
+            label: "Workspace".into(),
+            kind: FieldKind::Reference {
+                resource: "workspaces".into(),
+            },
+            optional: false,
+            initial: None,
+            max_bytes: 20,
+        }],
+    });
+    let mut create = eligible.clone();
+    create.id = 912;
+    create.resource = 911;
+    create.kind = OperationKind::Create;
+    create.policy = Policy {
+        any: vec![vec![Predicate::Public]],
+    };
+    create.bind = std::collections::BTreeMap::from([("workspace".into(), eligible.id)]);
+    let mut private = create.clone();
+    private.id = 913;
+    private.policy = Policy {
+        any: vec![vec![Predicate::Owner]],
+    };
+    m.operations.extend([picker, create, private]);
+    let target = ActionTarget {
+        name: "selected".into(),
+        resource: workspace,
+        source: TargetSource::Selected {
+            query: 910,
+            eligible: eligible.id,
+            label: vec!["name".into()],
+        },
+        revision: Revision::Identity,
+        projection: Some(Inspection {
+            operation: eligible.id,
+            fields: vec!["name".into()],
+        }),
+        inspect: None,
+    };
+    for (id, operation) in [(914, 912), (915, 913)] {
+        m.actions.push(Action {
+            id,
+            version: 1,
+            name: format!("Picker {id}"),
+            inputs: vec![],
+            targets: vec![target.clone()],
+            steps: vec![Step {
+                operation,
+                target: Target::None,
+                guards: vec![],
+                assign: vec![Assignment {
+                    field: "workspace".into(),
+                    change: Change::Set(Value::Target("selected".into())),
+                }],
+            }],
+        });
+        let root = route(&m, "workspaces");
+        m.web_bindings.push(WebBinding {
+            id,
+            version: 1,
+            action: id,
+            layout: vec![],
+            redirect: Redirect {
+                route: root,
+                source: RedirectSource::Target("selected".into()),
+            },
+        });
+    }
+    let member_route = route(&m, "workspaces");
+    m.routes
+        .iter_mut()
+        .find(|r| r.id == member_route)
+        .unwrap()
+        .forms = vec![914, 915];
+    m.routes
+        .iter_mut()
+        .find(|r| r.id == member_route)
+        .unwrap()
+        .operations = vec![eligible.id];
+    manifest::validate(&m).unwrap();
+    let case = Case::indexed(db, m).await;
+    let bootstrap = case.form(&case.alice, "Create workspace", 0).await;
+    assert_eq!(
+        case.submit(
+            &case.alice,
+            "Create workspace",
+            &bootstrap,
+            Fields::from([("name".into(), "Picker secret".into())])
+        )
+        .await
+        .unwrap()
+        .status,
+        303
+    );
+    let member = case.records("workspaces").await[0].0;
+    // The guest invokes the authenticated administrator workspace Read before
+    // form completion, warming the exact self-record declaration/key used by
+    // both picker queries.
+    let page = case
+        .app
+        .view_page(Some(&case.alice), member_route, Some(member), None)
+        .await
+        .unwrap();
+    assert_eq!(page.status, 200);
+    let html = String::from_utf8(page.body).unwrap();
+    let public = html
+        .split_once("action=\"/actions/914\"")
+        .unwrap()
+        .1
+        .split_once("</form>")
+        .unwrap()
+        .0;
+    let private = html
+        .split_once("action=\"/actions/915\"")
+        .unwrap()
+        .1
+        .split_once("</form>")
+        .unwrap()
+        .0;
+    assert_eq!(
+        public.matches("<option ").count(),
+        1,
+        "anonymous picker must contain only its empty placeholder"
+    );
+    assert!(
+        !public.contains("Picker secret"),
+        "anonymous picker must not inherit the authenticated membership witness"
+    );
+    assert_eq!(private.matches("<option ").count(), 2);
+    assert!(
+        private.contains("Picker secret"),
+        "authenticated picker must regain its independent grant after the swap"
+    );
+    let handle = private
+        .split("<option value=\"")
+        .nth(2)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert!(
+        matches!(
+            case.app
+                .submit(
+                    page.anonymous_cookie.as_ref().unwrap(),
+                    914,
+                    &crate::test_support::hidden(public, "_submission"),
+                    &crate::test_support::hidden(public, "_csrf"),
+                    Fields::from([("_target_selected".into(), handle.into())])
+                )
+                .await,
+            Err(RequestError::InvalidRequest)
+        ),
+        "private selection proof cannot be replayed into the anonymous action"
+    );
+    assert_eq!(case.counts().await, (2, 1));
+    case.close().await;
+}
+#[tokio::test]
+async fn sqlite_anonymous_picker_cannot_reuse_authenticated_page_membership() {
+    anonymous_picker_contract(None).await;
+}
+
 #[tokio::test]
 async fn sqlite_workspace_bootstrap_membership_and_native_uniqueness() {
     bootstrap_contract(None).await;
@@ -638,7 +849,7 @@ async fn postgres_workspace_bootstrap_and_sequential_boundaries() {
     use sqlx::Connection;
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-    for index in 0..8 {
+    for index in 0..9 {
         let name = format!("nx_p07_actions_{}_{}", std::process::id(), index);
         sqlx::query(&format!("CREATE DATABASE {name}"))
             .execute(&mut admin)
@@ -651,6 +862,8 @@ async fn postgres_workspace_bootstrap_and_sequential_boundaries() {
             bootstrap_contract(db).await;
         } else if index == 7 {
             temporal_routes_contract(db).await;
+        } else if index == 8 {
+            anonymous_picker_contract(db).await;
         } else {
             let n = index - 1;
             sequential_contract(
@@ -669,4 +882,48 @@ async fn postgres_workspace_bootstrap_and_sequential_boundaries() {
             .await
             .unwrap();
     }
+}
+
+/// Artifact gate, deliberately separate from the WAT decision guest used above.
+#[tokio::test]
+#[ignore = "requires built P07 SDK bundle/CLI and NOXIDE_TEST_POSTGRES"]
+async fn postgres_actual_sdk_nojs_http_workspace() {
+    use sqlx::Connection;
+    let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let bundle = std::env::var("NOXIDE_TEST_TEAM_DOCUMENTS_BUNDLE").unwrap();
+    let cli = std::env::var("NOXIDE_TEST_HOST_CLI").unwrap();
+    let output = std::env::var("NOXIDE_TEST_NOJS_OUTPUT").unwrap();
+    let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+    let name = format!("nx_p07_http_{}", std::process::id());
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    eprintln!("P07 NoJS disposable PostgreSQL fixture: {name}");
+    let mut parsed = url::Url::parse(&url).unwrap();
+    parsed.set_path(&format!("/{name}"));
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/test_team_documents.py");
+    let status = std::process::Command::new("python3")
+        .arg(script)
+        .args([
+            "--bundle",
+            &bundle,
+            "--host-cli",
+            &cli,
+            "--output",
+            &output,
+            "--postgres",
+            parsed.as_str(),
+        ])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "retained failed fixture {name}; inspect {output}"
+    );
+    sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
 }
