@@ -1,7 +1,9 @@
 mod commit;
+pub(crate) mod lifecycle;
 mod maintenance;
 mod schema;
 use anyhow::{Context, Result, ensure};
+pub(crate) use commit::CommitFailure;
 use commit::CommitState;
 pub(crate) use maintenance::{MaintenanceLease, MaintenanceUncertain};
 use sqlx::{
@@ -20,8 +22,16 @@ use std::{
 };
 
 #[derive(Clone)]
-pub enum Database {
-    Sqlite(SqliteConnectOptions),
+pub struct Database {
+    options: DatabaseOptions,
+}
+#[derive(Clone)]
+enum DatabaseOptions {
+    Sqlite {
+        options: SqliteConnectOptions,
+        path: std::path::PathBuf,
+        busy: Duration,
+    },
     Postgres(PgConnectOptions),
 }
 
@@ -50,6 +60,7 @@ pub(crate) struct Transaction {
     cancelled: Arc<AtomicBool>,
     deadline: tokio::time::Instant,
     maintenance: Option<maintenance::Control>,
+    ordinary: Option<lifecycle::Ordinary>,
 }
 
 #[derive(Clone)]
@@ -88,16 +99,36 @@ macro_rules! bound_query {
 
 impl Database {
     pub fn sqlite(path: impl AsRef<Path>) -> Self {
-        Self::Sqlite(
-            SqliteConnectOptions::new()
-                .filename(path)
-                .create_if_missing(true)
-                .journal_mode(SqliteJournalMode::Wal)
-                .synchronous(SqliteSynchronous::Full)
-                .foreign_keys(true)
-                .busy_timeout(Duration::from_millis(250))
-                .pragma("trusted_schema", "OFF"),
-        )
+        let path = path.as_ref().to_path_buf();
+        let busy = Duration::from_millis(250);
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Full)
+            .foreign_keys(true)
+            .busy_timeout(busy)
+            .pragma("trusted_schema", "OFF");
+        Self {
+            options: DatabaseOptions::Sqlite {
+                options,
+                path,
+                busy,
+            },
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn is_sqlite(&self) -> bool {
+        matches!(self.options, DatabaseOptions::Sqlite { .. })
+    }
+    #[cfg(test)]
+    pub(crate) fn with_sqlite_busy_timeout_for_test(mut self, timeout: Duration) -> Self {
+        let DatabaseOptions::Sqlite { options, busy, .. } = &mut self.options else {
+            panic!("SQLite fixture required")
+        };
+        *busy = timeout;
+        *options = options.clone().busy_timeout(timeout);
+        self
     }
     /// PostgreSQL is reached through a local socket or loopback. Remote database
     /// transport requires a separately configured trusted deployment extension.
@@ -112,12 +143,20 @@ impl Database {
                     .is_ok_and(|a| a.is_loopback()),
             "database must be local"
         );
-        Ok(Self::Postgres(options))
+        Ok(Self {
+            options: DatabaseOptions::Postgres(options),
+        })
     }
     pub(crate) async fn begin(&self, deadline: Instant) -> Result<Transaction> {
+        if let Some(result) = lifecycle::begin(self, deadline, false).await {
+            return result;
+        }
         tokio::time::timeout_at(deadline.into(), self.connect(deadline, false, false, None)).await?
     }
     pub(crate) async fn begin_read(&self, deadline: Instant) -> Result<Transaction> {
+        if let Some(result) = lifecycle::begin(self, deadline, true).await {
+            return result;
+        }
         tokio::time::timeout_at(deadline.into(), self.connect(deadline, false, true, None)).await?
     }
     /// Clock-only private connection. SQLite must never queue a busy worker
@@ -145,8 +184,8 @@ impl Database {
     ) -> Result<Transaction> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut control = None;
-        let backend = match self {
-            Self::Sqlite(options) => {
+        let backend = match &self.options {
+            DatabaseOptions::Sqlite { options, .. } => {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -219,7 +258,7 @@ impl Database {
                 }
                 Backend::Sqlite(cx)
             }
-            Self::Postgres(options) => {
+            DatabaseOptions::Postgres(options) => {
                 let scope = if maintenance.is_some() {
                     format!("nx-clock-{}", crate::security::random_id()?)
                 } else {
@@ -301,6 +340,7 @@ impl Database {
             cancelled,
             deadline: deadline.into(),
             maintenance: control,
+            ordinary: None,
         })
     }
 
@@ -683,12 +723,9 @@ impl Transaction {
     }
     async fn execute_internal(&mut self, sql: &str, params: &[Param]) -> Result<u64> {
         self.maintenance_timeout().await?;
-        let deadline = if sql == "ROLLBACK" {
-            tokio::time::Instant::now() + Duration::from_millis(500)
-        } else {
-            self.deadline
-        };
-        tokio::time::timeout_at(deadline, async {
+        self.ordinary_timeout().await?;
+        self.ordinary_in_flight(true);
+        let result = tokio::time::timeout_at(self.deadline, async {
             Ok(match &mut self.backend {
                 Backend::Closed => unreachable!("closed maintenance transaction"),
                 Backend::Sqlite(cx) => bound_query!(sql, params).execute(cx).await?.rows_affected(),
@@ -697,7 +734,11 @@ impl Transaction {
                 }
             })
         })
-        .await?
+        .await?;
+        if result.is_ok() {
+            self.ordinary_in_flight(false);
+        }
+        result
     }
     // Trusted queries cast selected columns to TEXT, keeping backend conversion
     // rules out of the semantic repository and receipt contracts.
@@ -707,6 +748,8 @@ impl Transaction {
         params: &[Param],
     ) -> Result<Vec<[String; N]>> {
         self.maintenance_timeout().await?;
+        self.ordinary_timeout().await?;
+        self.ordinary_in_flight(true);
         macro_rules! rows {
             ($cx:expr) => {{
                 let rows = bound_query!(sql, params).fetch_all($cx).await?;
@@ -730,36 +773,38 @@ impl Transaction {
                 output
             }};
         }
-        tokio::time::timeout_at(self.deadline, async {
+        let result = tokio::time::timeout_at(self.deadline, async {
             Ok(match &mut self.backend {
                 Backend::Closed => unreachable!("closed maintenance transaction"),
                 Backend::Sqlite(cx) => rows!(cx),
                 Backend::Postgres(cx) => rows!(cx),
             })
         })
-        .await?
+        .await?;
+        if result.is_ok() {
+            self.ordinary_in_flight(false);
+        }
+        result
     }
     async fn release_gate(&mut self) -> Result<()> {
-        if self.maintenance.is_some() {
-            // COMMIT ends transaction-local settings. This private connection's
-            // session setting must still use the remaining original work time.
-            self.maintenance_timeout().await?;
-            if let Backend::Postgres(connection) = &mut self.backend {
-                tokio::time::timeout_at(
-                    self.deadline,
-                    sqlx::query("SELECT pg_advisory_unlock_all()").execute(connection),
-                )
-                .await??;
-            }
-        } else if let Backend::Postgres(connection) = &mut self.backend {
-            // Ordinary request cleanup retains its existing independent bound.
-            tokio::time::timeout(
-                Duration::from_millis(500),
+        self.maintenance_timeout().await?;
+        self.ordinary_timeout().await?;
+        self.ordinary_in_flight(true);
+        let result = if let Backend::Postgres(connection) = &mut self.backend {
+            tokio::time::timeout_at(
+                self.deadline,
                 sqlx::query("SELECT pg_advisory_unlock_all()").execute(connection),
             )
-            .await??;
+            .await?
+            .map(|_| ())
+            .map_err(Into::into)
+        } else {
+            Ok(())
+        };
+        if result.is_ok() {
+            self.ordinary_in_flight(false);
         }
-        Ok(())
+        result
     }
 
     pub(crate) async fn commit(&mut self) -> Result<()> {
@@ -770,9 +815,11 @@ impl Transaction {
         // Set before polling the provider future: cancellation must conservatively
         // retain this state even if it interrupts transmission or acknowledgement.
         self.commit_state = CommitState::Sent;
+        self.ordinary_commit_pending(true);
         if let Err(error) = self.execute_internal("COMMIT", &[]).await {
             if commit::refused(&self.backend, &error) {
                 self.commit_state = CommitState::Refused;
+                self.ordinary_commit_pending(false);
                 return Err(error);
             }
             return Err(commit::CommitFailure::uncertain(error));
@@ -790,11 +837,18 @@ impl Transaction {
             .await
             .map_err(commit::CommitFailure::uncertain)?;
         self.commit_state = CommitState::Acknowledged;
+        self.ordinary_commit_pending(false);
+        if self.ordinary.is_some() {
+            // There is no await between observing COMMIT acknowledgement and
+            // returning prepared success. Cleanup owns the gate independently.
+            lifecycle::drop_transaction(self);
+            return Ok(());
+        }
         self.release_gate()
             .await
-            .map_err(commit::CommitFailure::cleanup)?;
-        Ok(())
+            .map_err(commit::CommitFailure::cleanup)
     }
+
     pub(crate) fn commit_acknowledged(&self) -> bool {
         self.commit_state == CommitState::Acknowledged
     }
@@ -802,20 +856,24 @@ impl Transaction {
         self.commit_state.may_have_committed()
     }
     pub(crate) async fn rollback(&mut self) -> Result<()> {
-        let cleanup = tokio::time::timeout(Duration::from_millis(500), async {
-            if self.active {
-                if let Backend::Sqlite(cx) = &mut self.backend {
-                    cx.lock_handle().await?.remove_progress_handler();
+        let cleanup = if self.ordinary.is_some() {
+            lifecycle::finish_transaction(self).await
+        } else {
+            tokio::time::timeout_at(self.deadline, async {
+                if self.active {
+                    if let Backend::Sqlite(cx) = &mut self.backend {
+                        cx.lock_handle().await?.remove_progress_handler();
+                    }
+                    self.execute_internal("ROLLBACK", &[]).await?;
+                    self.active = false;
                 }
-                self.execute_internal("ROLLBACK", &[]).await?;
-                self.active = false;
-            }
-            self.release_gate().await?;
-            Ok::<(), anyhow::Error>(())
-        })
-        .await
-        .map_err(anyhow::Error::from)
-        .and_then(|result| result);
+                self.release_gate().await?;
+                Ok::<(), anyhow::Error>(())
+            })
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|result| result)
+        };
         // Preserve the semantic frontier on BOTH successful and failed cleanup.
         // The physical stop result is not evidence that COMMIT did not happen.
         match self.commit_state {
@@ -836,6 +894,7 @@ impl Transaction {
 
 impl Drop for Transaction {
     fn drop(&mut self) {
+        lifecycle::drop_transaction(self);
         // Connections are never returned to a pool with unresolved state.
         // SQLite's worker closes its connection; PostgreSQL disconnect rolls back.
         self.cancelled.store(true, Ordering::Relaxed);

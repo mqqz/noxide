@@ -16,113 +16,133 @@ impl Application {
         id: u64,
         cookie: Option<&str>,
     ) -> Result<Rendered, RequestError> {
-        let _request = self
-            .admission_limits
-            .requests()
-            .request()
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        let _database = self
-            .admission_limits
-            .database()
-            .acquire()
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        let deadline = Instant::now() + std::time::Duration::from_secs(2);
-        let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
-        timeout_at(deadline, async {
-            let mut tx = self
-                .database
-                .begin_read(deadline.into_std())
-                .await
-                .map_err(|_| RequestError::Busy)?;
-            self.admission(&mut tx, false)
-                .await
-                .map_err(RequestError::database)?;
-            let now = security::observe_clock_read(
-                &mut tx,
-                security::now().map_err(|_| RequestError::Rejected)?,
-                &self.clock,
-            )
-            .await
-            .map_err(RequestError::database)?;
-            let route = self
-                .capability_route(resource)
-                .map_err(|_| RequestError::InvalidRequest)?;
-            let time = if crate::authority::uses_time(&self.manifest) {
-                budget.spend(1).map_err(RequestError::database)?;
-                Some(self.temporal_after_admission(&mut tx).await?)
-            } else {
-                None
-            };
-            let record = repository::load(&mut tx, &self.manifest, resource, id)
-                .await
-                .map_err(RequestError::database)?;
-            let Some(record) = record.filter(|r| r.cap_version.is_some()) else {
-                return render::unavailable(&self.presentation, &self.manifest)
-                    .map_err(|_| RequestError::Rejected);
-            };
-            if !crate::expiry::available(
-                manifest::resource(&self.manifest, resource).map_err(RequestError::database)?,
-                &record.record.fields,
-                time,
-            )
-            .map_err(RequestError::database)?
-            {
-                return render::unavailable(&self.presentation, &self.manifest)
-                    .map_err(|_| RequestError::Rejected);
-            }
-            let (anonymous, new_cookie) =
-                match cookie.and_then(|c| self.keys.anonymous(c, now).ok()) {
-                    Some(token) => (token, None),
-                    None => {
-                        let (token, cookie) = self
-                            .keys
-                            .issue(TokenKind::Anonymous, "", now, security::ANONYMOUS_TTL)
+        let entry_scope = self.request_scope(std::time::Duration::from_secs(2));
+        entry_scope
+            .run(async {
+                let _request = self
+                    .admission_limits
+                    .requests()
+                    .request()
+                    .await
+                    .map_err(|_| RequestError::deadline())?;
+                let _database = self
+                    .admission_limits
+                    .database()
+                    .acquire()
+                    .await
+                    .map_err(|_| RequestError::deadline())?;
+                let owner = self.owned_request(
+                    _request,
+                    std::sync::Arc::new(_database),
+                    None,
+                    std::time::Duration::from_secs(2),
+                );
+                let deadline = owner.work_deadline();
+                owner
+                    .run(async {
+                        let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
+                        timeout_at(deadline, async {
+                            let mut tx = self
+                                .database
+                                .begin_read(deadline.into_std())
+                                .await
+                                .map_err(|_| RequestError::deadline())?;
+                            self.admission(&mut tx, false)
+                                .await
+                                .map_err(RequestError::database)?;
+                            let now = security::observe_clock_read(
+                                &mut tx,
+                                security::now().map_err(|_| RequestError::Rejected)?,
+                                &self.clock,
+                            )
+                            .await
+                            .map_err(RequestError::database)?;
+                            let route = self
+                                .capability_route(resource)
+                                .map_err(|_| RequestError::InvalidRequest)?;
+                            let time = if crate::authority::uses_time(&self.manifest) {
+                                budget.spend(1).map_err(RequestError::database)?;
+                                Some(self.temporal_after_admission(&mut tx).await?)
+                            } else {
+                                None
+                            };
+                            let record = repository::load(&mut tx, &self.manifest, resource, id)
+                                .await
+                                .map_err(RequestError::database)?;
+                            let Some(record) = record.filter(|r| r.cap_version.is_some()) else {
+                                return render::unavailable(&self.presentation, &self.manifest)
+                                    .map_err(|_| RequestError::Rejected);
+                            };
+                            if !crate::expiry::available(
+                                manifest::resource(&self.manifest, resource)
+                                    .map_err(RequestError::database)?,
+                                &record.record.fields,
+                                time,
+                            )
+                            .map_err(RequestError::database)?
+                            {
+                                return render::unavailable(&self.presentation, &self.manifest)
+                                    .map_err(|_| RequestError::Rejected);
+                            }
+                            let (anonymous, new_cookie) =
+                                match cookie.and_then(|c| self.keys.anonymous(c, now).ok()) {
+                                    Some(token) => (token, None),
+                                    None => {
+                                        let (token, cookie) = self
+                                            .keys
+                                            .issue(
+                                                TokenKind::Anonymous,
+                                                "",
+                                                now,
+                                                security::ANONYMOUS_TTL,
+                                            )
+                                            .map_err(|_| RequestError::Rejected)?;
+                                        (token, Some(cookie))
+                                    }
+                                };
+                            let target = RecordTarget {
+                                resource,
+                                id,
+                                route: Some(route),
+                                incarnation: record.incarnation,
+                                revision: record.revision,
+                            };
+                            let (_, submission) = self
+                                .keys
+                                .issue(
+                                    TokenKind::AnonymousSubmission {
+                                        contract: self.submission_contract(),
+                                        action: 0,
+                                        version: 1,
+                                        targets: BTreeMap::from([("target".into(), target)]),
+                                    },
+                                    &anonymous.nonce,
+                                    now,
+                                    security::ANONYMOUS_TTL,
+                                )
+                                .map_err(|_| RequestError::Rejected)?;
+                            let mut page = render::capability_rotation(
+                                &self.presentation,
+                                &FormCredentials {
+                                    selections: Default::default(),
+                                    selected: Default::default(),
+                                    csrf: self.keys.csrf(&anonymous.nonce),
+                                    submission,
+                                    values: Fields::new(),
+                                },
+                                resource,
+                                id,
+                            )
                             .map_err(|_| RequestError::Rejected)?;
-                        (token, Some(cookie))
-                    }
-                };
-            let target = RecordTarget {
-                resource,
-                id,
-                route: Some(route),
-                incarnation: record.incarnation,
-                revision: record.revision,
-            };
-            let (_, submission) = self
-                .keys
-                .issue(
-                    TokenKind::AnonymousSubmission {
-                        contract: self.submission_contract(),
-                        action: 0,
-                        version: 1,
-                        targets: BTreeMap::from([("target".into(), target)]),
-                    },
-                    &anonymous.nonce,
-                    now,
-                    security::ANONYMOUS_TTL,
-                )
-                .map_err(|_| RequestError::Rejected)?;
-            let mut page = render::capability_rotation(
-                &self.presentation,
-                &FormCredentials {
-                    selections: Default::default(),
-                    selected: Default::default(),
-                    csrf: self.keys.csrf(&anonymous.nonce),
-                    submission,
-                    values: Fields::new(),
-                },
-                resource,
-                id,
-            )
-            .map_err(|_| RequestError::Rejected)?;
-            page.anonymous_cookie = new_cookie;
-            tx.commit().await.map_err(|_| RequestError::Busy)?;
-            Ok(page)
-        })
-        .await
-        .map_err(|_| RequestError::Busy)?
+                            page.anonymous_cookie = new_cookie;
+                            Self::finish_commit(&mut tx, page).await
+                        })
+                        .await
+                        .map_err(|_| RequestError::deadline())?
+                    })
+                    .await
+            })
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -135,57 +155,79 @@ impl Application {
         submission: &str,
         secret: &str,
     ) -> Result<Rendered, RequestError> {
-        let _request = self
-            .admission_limits
-            .requests()
-            .request()
+        let entry_scope = self.request_scope(self.runtime.limits().wall_time);
+        entry_scope
+            .run(async {
+                let _request = self
+                    .admission_limits
+                    .requests()
+                    .request()
+                    .await
+                    .map_err(|_| RequestError::deadline())?;
+                let _anonymous_write = self.anonymous_write(true).await?;
+                let _database = self
+                    .admission_limits
+                    .database()
+                    .acquire()
+                    .await
+                    .map_err(|_| RequestError::deadline())?;
+                let owner = self.owned_request(
+                    _request,
+                    std::sync::Arc::new(_database),
+                    _anonymous_write,
+                    self.runtime.limits().wall_time,
+                );
+                let deadline = owner.work_deadline();
+                owner
+                    .run(async {
+                        let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
+                        for _ in 0..3 {
+                            let prepared = timeout_at(
+                                deadline,
+                                self.prepare_rotation(
+                                    resource,
+                                    id,
+                                    cookie,
+                                    csrf,
+                                    submission,
+                                    secret,
+                                    deadline,
+                                    &mut budget,
+                                ),
+                            )
+                            .await;
+                            let (mut tx, page) = match prepared {
+                                Err(_) => return Err(RequestError::Busy),
+                                Ok(Err(error))
+                                    if retryable(&error) && Instant::now() < deadline =>
+                                {
+                                    continue;
+                                }
+                                Ok(Err(error)) => {
+                                    return Err(error
+                                        .downcast::<RequestError>()
+                                        .unwrap_or_else(RequestError::database));
+                                }
+                                Ok(Ok(value)) => value,
+                            };
+                            match timeout_at(deadline, tx.commit()).await {
+                                Ok(Ok(())) => return Ok(page),
+                                _ if tx.commit_acknowledged() => return Ok(page),
+                                Ok(Err(error))
+                                    if !tx.commit_may_have_succeeded() && retryable(&error) =>
+                                {
+                                    if tx.rollback().await.is_err() {
+                                        return Err(RequestError::OutcomeUnknown);
+                                    }
+                                }
+                                _ => return Err(RequestError::OutcomeUnknown),
+                            }
+                        }
+                        Err(RequestError::Busy)
+                    })
+                    .await
+            })
             .await
-            .map_err(|_| RequestError::Busy)?;
-        let _anonymous_write = self.anonymous_write(true).await?;
-        let _database = self
-            .admission_limits
-            .database()
-            .acquire()
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        let deadline = Instant::now() + self.runtime.limits().wall_time;
-        let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
-        for _ in 0..3 {
-            let prepared = timeout_at(
-                deadline,
-                self.prepare_rotation(
-                    resource,
-                    id,
-                    cookie,
-                    csrf,
-                    submission,
-                    secret,
-                    deadline,
-                    &mut budget,
-                ),
-            )
-            .await;
-            let (mut tx, page) = match prepared {
-                Err(_) => return Err(RequestError::Busy),
-                Ok(Err(error)) if retryable(&error) && Instant::now() < deadline => continue,
-                Ok(Err(error)) => {
-                    return Err(error
-                        .downcast::<RequestError>()
-                        .unwrap_or(RequestError::Rejected));
-                }
-                Ok(Ok(value)) => value,
-            };
-            match timeout_at(deadline, tx.commit()).await {
-                Ok(Ok(())) => return Ok(page),
-                Ok(Err(error)) if retryable(&error) => {
-                    if tx.rollback().await.is_err() {
-                        return Err(RequestError::OutcomeUnknown);
-                    }
-                }
-                _ => return Err(RequestError::OutcomeUnknown),
-            }
-        }
-        Err(RequestError::Busy)
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -1,5 +1,5 @@
-//! Clock-only cancellation and stop acknowledgement. Ordinary transactions do
-//! not allocate control connections or use these provider settings.
+//! Host-owned PostgreSQL cancellation and stop acknowledgement. Clock and ordinary
+//! lifecycles share identity checks; their capacity/deadline owners remain distinct.
 use super::*;
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -66,6 +66,9 @@ impl Control {
             started,
         })
     }
+    pub(super) async fn close(self) -> Result<()> {
+        self.connection.close().await.map_err(Into::into)
+    }
     async fn configure(&mut self, deadline: Instant) -> Result<()> {
         let timeout = remaining_ms(deadline)?;
         sqlx::query(&format!("SET statement_timeout = '{timeout}ms'"))
@@ -73,7 +76,7 @@ impl Control {
             .await?;
         Ok(())
     }
-    async fn cancel(&mut self, deadline: Instant) -> Result<()> {
+    pub(super) async fn cancel(&mut self, deadline: Instant) -> Result<()> {
         self.configure(deadline).await?;
         // Only a host-created work connection is eligible. Its socket remains
         // owned until this check/cancel completes. Guest input supplies no ID.
@@ -82,7 +85,7 @@ impl Control {
             .fetch_all(&mut self.connection).await?;
         Ok(())
     }
-    async fn stopped(&mut self, deadline: Instant) -> Result<()> {
+    pub(super) async fn stopped(&mut self, deadline: Instant) -> Result<()> {
         for _ in 0..16 {
             self.configure(deadline).await?;
             let present: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid=$1 AND application_name=$2 AND CAST(backend_start AS TEXT)=$3 AND datname=pg_catalog.current_database() AND usename=current_user)")

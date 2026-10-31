@@ -542,7 +542,7 @@ async fn filtered_lists(db: Database) {
         .await
         .unwrap();
     tx.bind_schema(&base).await.unwrap();
-    if matches!(&db, Database::Postgres(_)) {
+    if !db.is_sqlite() {
         // This disposable planner fixture runs ANALYZE explicitly below.
         // Background vacuum must not contend with its repeated index swaps.
         tx.execute(
@@ -739,15 +739,15 @@ async fn filtered_lists(db: Database) {
                             predicates.join(" AND "),
                             values.len()
                         );
-                        let plan = match &db {
-                            Database::Sqlite(_) => {
+                        let plan = match db.is_sqlite() {
+                            true => {
                                 let mut literal = sql.clone();
                                 for (i, value) in values.iter().enumerate().rev() {
                                     literal = literal.replace(&format!("${}", i + 1), value);
                                 }
                                 tx.explain(&literal).await.unwrap().join("\n")
                             }
-                            Database::Postgres(_) => {
+                            false => {
                                 tx.execute("SET LOCAL plan_cache_mode=force_generic_plan", &[])
                                     .await
                                     .unwrap();
@@ -1473,11 +1473,9 @@ async fn previews_case(db: Database) {
         .await
         .unwrap();
     tx.bind_schema(&renamed).await.unwrap();
-    let catalog = match db {
-        Database::Sqlite(_) => {
-            "SELECT name FROM sqlite_schema WHERE type='index' AND name GLOB 'nx_q_*'"
-        }
-        Database::Postgres(_) => {
+    let catalog = match db.is_sqlite() {
+        true => "SELECT name FROM sqlite_schema WHERE type='index' AND name GLOB 'nx_q_*'",
+        false => {
             "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND left(indexname,5)='nx_q_'"
         }
     };

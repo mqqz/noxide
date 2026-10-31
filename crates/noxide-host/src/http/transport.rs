@@ -236,6 +236,7 @@ pub async fn serve(
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
     let checkpoint = app.start_clock_service()?;
+    let ordinary = app.request_lifecycle();
     let router = router(app, origin);
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let circuits: CircuitCounts = Arc::new(Mutex::new(HashMap::new()));
@@ -252,7 +253,8 @@ pub async fn serve(
                 let circuits = circuits.clone();
                 connections.spawn(async move {
                     let _permit=permit;
-                    let _=tokio::time::timeout(Duration::from_secs(60), async move {
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+                    let _=tokio::time::timeout_at(deadline, async move {
                         let (stream, peer): (Box<dyn Transport>, Peer) = if tor {
                             let Ok((stream, peer)) = read_proxy(stream).await else { return };
                             (Box::new(stream), peer)
@@ -264,7 +266,7 @@ pub async fn serve(
                                 Some(guard)
                             }
                         };
-                        let service=hyper_util::service::TowerToHyperService::new(router.layer(axum::Extension(peer)));
+                        let service=hyper_util::service::TowerToHyperService::new(router.layer(axum::Extension(peer)).layer(axum::Extension(super::TransportDeadline(deadline))));
                         let mut http=hyper::server::conn::http1::Builder::new();
                         http.auto_date_header(false).timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(HEADER_READ_TIMEOUT).max_headers(64).max_buf_size(32*1024);
                         let _=http.serve_connection(hyper_util::rt::TokioIo::new(stream),service).await;
@@ -279,7 +281,10 @@ pub async fn serve(
     .await;
     connections.abort_all();
     while connections.join_next().await.is_some() {}
-    checkpoint.shutdown().await?;
+    let ordinary_stopped = ordinary.shutdown().await;
+    let clock_stopped = checkpoint.shutdown().await;
+    ordinary_stopped?;
+    clock_stopped?;
     Ok(())
 }
 
