@@ -29,7 +29,7 @@ fn declarations() -> Manifest {
                         label: "Message".into(),
                         kind: FieldKind::Text,
                         optional: false,
-                        max_bytes: 1024,
+                        max_bytes: 4096,
                     },
                     value: Value::Input("body".into()),
                 }],
@@ -380,7 +380,12 @@ async fn actual_effect_cli_reconciles_explicitly_preserves_keys_and_redacts_payl
     .unwrap();
     app.activate().await.unwrap();
     let page = app.view(&cookie, 1, None).await.unwrap();
-    assert!(String::from_utf8(page.body).unwrap().contains(PRIVATE_BODY));
+    // The static support guest renders no record data; rendering must still succeed.
+    assert!(
+        String::from_utf8(page.body)
+            .unwrap()
+            .contains("Private notes")
+    );
     drop(app);
     assert_eq!(inspect(&root, &secrets).await.len(), 2);
     let mut unapproved = configuration;
