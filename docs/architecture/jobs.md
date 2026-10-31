@@ -1,196 +1,169 @@
 # Durable jobs
 
-This documents the P10 integration branch. The protocol, audited storage14,
-operator approval, existing action executor adapter, recurring selector and
-worker are wired together. P10 remains unaccepted until its final integrated
-runtime, operator, provider and independent review gates pass. The accepted
-capability-expansion branch currently ends at P09.
+The P10 integration runs declared background actions through the existing action
+executor. It includes operator approval, durable queues, recurring selection and
+worker shutdown. P10 remains unaccepted until its integrated tests and independent
+review gates finish. The [implementation ledger](implementation-ledger.md#p10-integration-checkpoint-unaccepted)
+records evidence, remaining gates and earlier preparation history.
 
-## Authority and identity
+## Authority and capture
 
-`jobs::JobContract` declares workers, transactional schedules and operator recurring
-schedules. Each `WorkerAction` names a fixed action and exact target aliases with
-resource and eligible Read operations. A `Schedule` names its originating action,
-ordinal 0 or 1, fixed worker/action, typed scalar `Value` sources, target sources
-and due-time expression. Maps reject duplicate keys. Independent host admission
-checks the call graph is acyclic, aliases/resources agree, workers have no web
-bindings, and service actions update/delete only. Existing computation admission
-must check expression domains and explicit disclosures; leaf admission requires
-callbacks to that existing implementation.
+`JobContract` declares workers, transactional schedules and fixed-interval recurring
+schedules. Each worker action names a fixed action and exact target aliases, with a
+resource and eligible Read operation for each alias. Host admission checks target
+relationships, scalar expression domains and disclosures. It rejects cycles in the
+schedule-call graph. Worker actions have no web binding and can update or delete;
+service creation requiring a user owner is outside this increment.
 
-Central integration adds `TargetSource::Service { eligible }`, the distinct
-`Principal::Service`, `Predicate::Service { worker }`, and approved operation
-maintenance metadata. A worker may also use an existing one-hop Reference target.
-Every alias retains its independent eligible Read; enqueue verifies any derived
-relationship and execution checks it again. Service identities inherit no user,
-owner, account, role, browser session or edit-capability authority. Current policy
-and tenant checks remain in the existing executor. Maintenance access to expired
-rows is an explicit operation approval, never a flag supplied by a job.
+Service identity is distinct from a user account. A service receives its approved
+worker name, tenant and action subset without browser credentials, ownership,
+roles or edit secrets. A service target or derived one-hop Reference target still
+requires its own current eligible Read. The normal action policies run at execution.
+Expired-row maintenance requires approved operation metadata. Guests cannot grant
+that authority with a job payload or bypass host authentication, budgets or safe
+rendering. Jobs grant no filesystem, network, process or host-secret access.
 
-An operator installs a `Grant` containing `JobScope { deployment, tenant }`, the
-approved `Worker` intersection, positive version, contract and runtime epoch.
-Deployment is the persisted `nx_deployment.generation`, not a display name. A grant
-row is retained on revocation so committed receipts remain recoverable. Updates,
-revocation and epoch rotation conflict with execution's authoritative row locks.
-A captured grant alone grants nothing.
+The operator configuration intersects the declaration without changing its target
+rules. The stored grant binds the persisted `nx_deployment.generation`, tenant,
+worker/action subset, positive version, approved contract and runtime epoch. Runtime
+and grant rows are locked during execution; cached configuration cannot authorize a
+commit. Revocation retains the grant row and earlier receipts.
 
-`CapturedJob::capture` accepts the admitted Schedule, verified originating
-invocation identity, current Grant, action version, evaluated due time, fixed
-attempt time, canonical Fields and sealed targets. The common adapter must verify
-that the schedule belongs to its current source action and resolve Created and
-existing targets inside that originating transaction. Evaluate scalar expressions
-once from its snapshots and transaction time. Never persist picker tokens,
-submission tokens, cookies, passwords, edit secrets or guest-asserted identities.
-Each `SealedTarget` has resource, positive ID, incarnation and revision.
+Transactional scheduling shares the source action's mutation and receipt transaction.
+The host evaluates admitted scalar sources once, canonicalizes inputs and resolves
+Created or existing targets there. Capture stores immutable resource IDs,
+incarnations and revision rules. Picker tokens, cookies, submission tokens,
+passwords and edit secrets never become job arguments.
 
-Job IDs derive from deployment, originating invocation and effect ordinal. Input,
-contract, epoch, grant version, action/version and all target seals enter the
-stable invocation digest. The changing claim fence is excluded. The receipt nonce
-is the job ID; subject is the domain-separated deployment/tenant/worker identity;
-`nx_receipts.input` is the invocation digest, matching the existing executor.
-Changing a capture under an existing origin/ordinal fails closed.
+The job ID derives from deployment generation, originating invocation and effect
+ordinal. Contract, epoch, grant version, destination action/version, canonical input
+and all target seals enter the invocation digest. Claim fences never change this
+identity. A repeated origin/ordinal with different capture fails closed. The receipt
+nonce is the job ID, its subject binds deployment/tenant/worker, and its input field
+contains the invocation digest.
 
-## Queue API and transactions
+## Claims, receipts and execution
 
-`QueueContext<'a>` borrows `tx: &'a mut Transaction` and `calls: &'a mut u32` from
-existing request/execution ownership. It creates no transaction, timer, request
-root or executor and never commits a caller transaction. One bounded public queue
-command charges one existing logical database call; every internal statement
-charges the existing root's actual statement meter and deadline. CPU work checks
-the current RequestScope or the transaction's existing operator checkpoint.
+The queue progresses through Pending, Running and Succeeded. A known retry returns
+to Pending; terminal results include Rejected and Dead. Authority changes pause
+unresolved work for operator reconciliation.
 
-The methods are:
+`QueueContext` borrows a transaction and its remaining logical database-call budget.
+It creates no request root, deadline or executor and never commits its caller's
+transaction. Enqueue is idempotent for an identical capture and serializes quota
+admission with insertion. Pending, Running and Paused rows count against app and
+tenant limits, including retained earlier generations.
 
-- `enqueue(&CapturedJob, Timestamp, tenant_limit: u16) -> Result<bool>`;
-- `claim(deployment: &str, Timestamp) -> Result<Option<Claim>>`;
-- `lock_execution(&Claim, Timestamp, receipt_decoder) -> Result<Execution>`;
-- `succeed(&VerifiedJob, receipt_decoder) -> Result<()>`;
-- `fail(&Claim, Timestamp, Failure, receipt_decoder) -> Result<FailureResult>`;
-- `begin_recurrence(&JobScope, &RecurringSchedule, Timestamp)` returns an optional
-  `RecurrenceBatch`; `emit_recurrence` appends one bounded occurrence; and
-  `finish_recurrence(batch, Option<&str>)` stores the internal continuation.
+A worker claims one eligible job in a short transaction and commits before entering
+the action executor. Tenant rotation makes claims fair within the app. PostgreSQL
+claims skip execution-locked rows rather than wait while holding the queue lock.
+Running rows continue to consume concurrency capacity after lease expiry; an expired
+lease permits fenced recovery and never proves that an older transaction stopped.
+The lease lasts 30 seconds, and the admitted action deadline must be shorter.
 
-`receipt_decoder` has type `impl Fn(&str) -> anyhow::Result<()>`. Production must
-supply the existing semantic receipt decoder, including version/outcome validation.
-A malformed, incomplete or mismatched receipt is unavailable; it is never proof
-of an abort. `Execution` is Ready(VerifiedJob), Recovered(String), Paused or Dead.
-`Failure` is Transient, Rejected (fixed authorization/unavailable code), or
-BusinessRejected(ValidatedActionRejection). A rejection is terminal. FailureResult
-also returns BusinessRejected with that same validated structure; other variants
-are Retrying(Timestamp), Rejected, Dead, Paused or a validated Recovered(String).
+The production adapter uses `lock_execution_with_time` in its execution transaction.
+It locks runtime, current grant and claimed job rows, then checks the bound semantic
+receipt. A complete receipt is validated with the existing core decoder before
+fresh lifecycle time is sampled. This ordering permits receipt recovery even when
+new temporal execution is unavailable. Malformed, incomplete or mismatched receipts
+fail closed.
 
-The shared core leaf `application/action/rejection.rs` preserves Rejected
-(field_errors, message) and GuardRejected (optional input, message). Its factory
-validates the existing web limits and declared input names. Guard results must
-match a declared guard/adjustment rejection. The private wrapper is the only
-serializable persistence input: `new(&Action, ActionRejection)` validates a core
-result; `from_stored(&Action, &str)` strictly decodes and repeats that validation
-before operator display. `as_rejection()`/`into_rejection()` retain the structured
-result, `action()` binds action ID/version, and `stored_json()` supplies bounded
-terminal metadata to the fenced queue transition. This metadata has a separately
-enforced 24 KiB serialized ceiling, preserving existing text bounds even under
-maximum JSON escaping; job input payloads retain their 16 KiB ceiling. No input
-values, record targets, step indices, diagnostic error chains or logs are added.
+Without a recoverable receipt, the same locked transaction samples fresh durable
+lifecycle time, verifies lease/fence and current authority, and produces the private
+`VerifiedJob` proof. The adapter constructs a service invocation from that proof and
+runs the common action core. Mutations, every semantic outcome, the complete receipt
+and queue success commit together. Headless receipts cannot carry browser navigation
+or anonymous handover state.
 
-Enqueue shares the action mutation/receipt transaction. Its queue lock serializes
-quota admission and insertion. App and per-tenant pending ceilings are 1,000 or a
-lower operator tenant limit; Pending, Running and Paused count. Historical terminal
-rows do not enter the bounded active scan (at most 1,001 candidates). Payloads are
-at most 16 KiB; due dates are at most 30 days ahead. Duplicate enqueue succeeds
-without consuming another quota slot, including when the queue is full.
+Only a confirmed abort permits transient retry handling. The core distinguishes an
+acknowledged rollback from an ambiguous provider error. After a known abort, a fresh
+short transaction locks the same authority/job rows and checks the receipt before
+recording backoff or rejection. An uncertain COMMIT or cleanup leaves the job Running
+for authoritative recovery. The worker never marks failure from a raw error.
 
-Claims commit in a short host-owned work transaction before execution. PostgreSQL
-claims skip execution-locked job rows so an action that enqueues cannot deadlock
-with a claim retaining the queue lock. A separate
-queue lock preserves tenant rotation without serializing all action transactions.
-All Running rows consume the two/app concurrency ceiling, including expired
-leases. An expired Running row can itself be recovered under a new monotonic
-fence; expiry does not release an old execution's capacity or prove termination.
-Leases last 30 seconds. The existing action work deadline must be shorter.
+At most five attempts fit within 24 hours of due/first eligibility. Future scheduling
+does not consume that window before the job becomes eligible. Retry delays are one
+minute, five minutes, thirty minutes and two hours, with deterministic additive
+jitter of zero to ten percent. The exact 24-hour boundary is terminal. Business and
+current-authority rejection do not automatically retry.
 
-Execution locks runtime, authoritative grant and claimed job rows, then probes the
-bound receipt before any reexecution. PostgreSQL runtime/grant locks are shared;
-SQLite's existing write transaction provides serialization. Restores/revocations
-take conflicting locks. Acquiring the job lock serializes with a previous execution
-transaction; the old fence cannot later commit. Only this admission creates
-VerifiedJob. Its immutable accessors expose deployment, tenant, worker,
-grant_version, action `(u32,u32)`, canonical input, sealed targets, receipt nonce,
-receipt subject, invocation digest, runtime epoch, fence and lease timestamp.
+## Work limits and lifecycle
 
-C's adapter constructs the service principal only from VerifiedJob, then invokes
-the existing action executor. It persists the complete semantic receipt and calls
-`succeed` before committing mutations, receipt and completion together. Headless
-result validation precedes commit. A failure after an uncertain commit goes to a
-fresh fenced transaction's receipt probe before retry or terminal marking. The
-queue never classifies an uncertain COMMIT from its error alone.
+The default pending ceiling is 1,000/app and 1,000/tenant; the operator may lower both,
+with the tenant ceiling no greater than the app ceiling. Worker concurrency is at
+most two/app and may be lowered. Locked runtime state enforces these ceilings.
+Captures are limited to 16 KiB and scheduling to 30 days ahead. Validated rejection
+metadata has a separate 24 KiB serialized ceiling.
 
-Attempts are at most five within 24 hours from due/first eligibility, not enqueue.
-Retry delays are 1 minute, 5 minutes, 30 minutes and 2 hours with deterministic
-additive jitter between zero and 10 percent. Retry beyond the remaining window is
-Dead. Business/authorization rejection is terminal. Contract, grant or epoch
-changes pause work. Central activation/restore must atomically pause old pending
-work, rotate the authoritative runtime epoch when required, and preserve old
-receipts/grants. Operator reconciliation cancels or explicitly reenqueues with a
-linked new identity; it must not silently resume old captured jobs.
+A production worker carries one request root, original deadline, actual statement
+meter and remaining logical calls across claim and invocation. Durable time and the
+claim consume that same 16-call allowance. Execution preserves the existing fuel,
+host-call and memory limits; actual provider statements remain capped at 256 or the
+operator's lower request ceiling. Internal retries cannot replenish these budgets.
+
+Worker/request and database permits are separate from interactive requests and the
+reserved clock maintenance lane. An app-bound worker slot cannot be inherited by
+another app. Claim cleanup and later database admission share the original deadline;
+at most two held slots bound waiting. Wasm uses the existing shared admission limit.
+
+The service starts at most two loops, polling once per second and coalescing missed
+polls. Shutdown stops new work, joins those loops and closes the dedicated job
+request registry. That registry waits for physical provider stop using original
+admitted deadlines. Unconfirmed cleanup retains capacity and fails closed. Once
+closed, the registry stays closed: restarting this service requires a new activated
+`Application` instance.
 
 ## Recurring selection
 
-Fixed intervals are between 60 seconds and 30 days. Recurring schedules are a
-separate approved operator capability, with a ceiling of 20 occurrences per tick.
-They do not extend the action's two-schedule limit. Query selection uses the
-existing service-authorized indexed query adapter and fixed literal filters.
+Recurring schedules use fixed intervals between 60 seconds and 30 days. Missed ticks
+coalesce. A schedule may be target-free or select exactly one approved target through
+the existing indexed query adapter. Fanout is capped at 20 occurrences per batch and
+also consumes the existing queue and request budgets.
 
-Persist a lifecycle cutoff, a creation-sequence cutoff and the internal query
-frontier. A resumed scan retains both cutoffs across missed ticks. Query SQL must
-apply `created_seq <= batch.cutoff_seq()` and any approved maintenance expiry
-condition at `batch.cutoff()`. This is a host-owned bound operator runtime
-parameter; guests cannot provide it. Current authorization still applies to every
-candidate, and temporal eligibility never widens ordinary guest query authority.
-The internal frontier must be canonical and at most 4 KiB; browser cursors or other
-expiring credentials cannot be persisted as it.
+The selection subset is deliberately narrow: creation ascending/descending order,
+fixed Boolean/Choice literal filters, and exactly one policy conjunction containing
+the matching Service predicate and SameTenant. Scoped/via/preview lists, search,
+ranges and aggregate queries are excluded. Every candidate passes the List policy
+and an independent current eligible Read before the common adapter seals its target.
 
-`RecurrenceBatch` exposes cutoff(), cutoff_seq(), cursor(), remaining() and scope().
-The selector must stop before exhausting the existing logical/actual budgets and
-persist an advanced continuation. Twenty is a ceiling, not a new budget: smaller
-batches resume next interval. Emission consumes fanout work even for a duplicate.
-Cursor progress and emitted jobs commit atomically. Completed scans coalesce missed
-intervals instead of replaying every historical tick.
+A scan persists a lifecycle cutoff, creation-sequence cutoff and canonical internal
+frontier of at most 4 KiB. The creation cutoff enters the native indexed frontier
+before its bounded LIMIT. Current attempt time governs authorization and expiry
+visibility. Expiry repair additionally requires maintenance-approved List, Read and mutation
+operations and an expiry no later than the fixed scan cutoff.
 
-Ordinary occurrence keys include the fixed scan cutoff and target incarnation.
-Expiry repair keys instead include schedule, scope, target identity/incarnation,
-expiry value and contract, deduplicating that expiry across later repair scans.
-`nx_job_occurrences` records this relationship atomically with enqueue.
+Partial scans retain their cutoffs across later ticks. The selector reserves work
+for each possible enqueue and cursor finalization before reading another candidate.
+It may return fewer than 20 rows, or zero with an incomplete frontier. Cursor progress
+and emitted jobs commit together. A completed scan clears its continuation and
+coalesces the next interval.
 
-## Central integration packet
+When a resumed scan cannot afford a candidate and returns an unchanged frontier,
+`defer_recurrence` advances only its version and next work time by one second. It
+preserves cursor and cutoffs, allowing another due tenant to run without claiming
+row progress or completing the occurrence. The deferral uses the already reserved
+finalization call and statement. An initial budget stop persists the selector's
+canonical start frontier with no row position.
 
-The fixed table/index packet is `crates/noxide-host/src/jobs/schema.sql`. C owns
-storage14 registration, provider-native byte/JSON/SQLite integer-affinity checks,
-fixed-layout audits, activation and migrations. Leaf SQL is not schema activation.
-The queue uses separate runtime and queue rows, retained grant rows, active jobs,
-tenant rotation, persisted recurring cursors and occurrence deduplication. No
-operator database reset, migration, deletion or restore was performed.
+Ordinary occurrence keys include the scan cutoff and target incarnation. Expiry
+repair deduplicates by schedule, scope, target identity/incarnation, expiry value and
+contract across later repair scans. Grant version changes do not reset these keys.
 
-C also owns wire12/root exports, optional Manifest.jobs omission when absent,
-canonical hashing of every authority field, SDK explicit declarations, maintenance
-policy/selection integration, action effect evaluation and the service adapter.
-The runtime remains unavailable until those paths and operator approval are real.
-Measure the worst permitted two enqueues plus four mutations, recovery and service
-completion under the original logical16/actual256 root; no allowance was raised.
+## Storage and acceptance
 
-Source fixtures cover SQLite and retained disposable PostgreSQL queue transitions,
-duplicate capture, tenant rotation, concurrency ceiling, stale fence, bounded
-retry, lost commit acknowledgement, malformed/mismatched receipts, revocation,
-resumed cutoff/cursor and expiry repair deduplication. These fixtures use a narrow
-fixture receipt decoder only; executor/normal-policy integration needs C's real
-adapter tests. All compilation and provider tests remain unrun in this preparation
-packet. Rustfmt parsed/formatted the owned Rust leaves successfully.
+Wire 12 and storage 14 register the integrated contract. The authoritative fixed DDL
+and audits live in `database/jobs_layout.rs`; the earlier leaf SQL packet is obsolete.
+Startup audits provider-native types, nullability, keys, foreign namespaces, byte/JSON
+bounds and required B-tree indexes. Incompatible operator storage fails with an
+explicit migration/new-store message; the host does not silently reset it.
 
-## First isolated integration execution
+Startup installs runtime/grant state in the same maintenance transaction as its
+first durable lifecycle tick. Contract changes pause old captures. Explicit
+reconciliation checks current approval, canonical input and fresh target eligibility
+before creating a protected link to a new job identity. The [operations guide](jobs-operations.md)
+covers commands, clock recovery and restore fencing.
 
-C joined accepted P09 atc581b7d, then compiled all workspace targets successfully
-after one test-only explicit String conversion. Four core rejection tests, four
-queue tests (including SQLite and disposable PostgreSQL) and two protocol tests
-pass under `target/capability-evidence/p10-first-compile`. SQLite fixture state is
-now retained as well as PostgreSQL. This is leaf proof using the narrow fixture
-receipt decoder. Service invocation/schema/operator/selection integration remains
-unavailable and unaccepted; unused integration-hook warnings are not suppressed.
+Focused native tests and retained failed fixtures are recorded in the ledger. They
+do not establish full P10 acceptance, a security audit or deployment readiness.
+Remaining integrated/current-SHA, independent review and proof-app gates still apply.
+P11 outbox delivery and its transport/revocation acceptance remain future work.
