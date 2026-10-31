@@ -116,15 +116,16 @@ impl Transaction {
         for binding in &effective.grants {
             self.maintenance_checkpoint()?;
             let rows=self.fetch::<4>("SELECT CAST(version AS TEXT),contract,epoch,declaration FROM nx_effect_grants WHERE deployment=$1 AND tenant=$2 AND endpoint=$3",&[generation.into(),binding.tenant.as_str().into(),binding.endpoint.name.as_str().into()]).await?;
-            if let Some([_, c, e, payload]) = rows.first() {
-                if c == contract && e == epoch {
-                    let stored: EffectiveEffectGrant = serde_json::from_str(payload)?;
-                    ensure!(
-                        &stored == binding,
-                        "same effect approval has different binding"
-                    );
-                    continue;
-                }
+            if let Some([_, c, e, payload]) = rows.first()
+                && c == contract
+                && e == epoch
+            {
+                let stored: EffectiveEffectGrant = serde_json::from_str(payload)?;
+                ensure!(
+                    &stored == binding,
+                    "same effect approval has different binding"
+                );
+                continue;
             }
             let version = match rows.first() {
                 Some([v, ..]) => integer(v)?

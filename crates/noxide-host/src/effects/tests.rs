@@ -346,9 +346,8 @@ async fn quota_contract(db: &Database, app_full: bool) {
     assert_eq!(state(db, &dead.id().unwrap()).await, "dead");
     if !app_full {
         let rows = phase(db, async |tx: &mut Transaction| {
-            Ok(tx
-                .fetch::<1>("SELECT id FROM nx_outbox WHERE state='pending'", &[])
-                .await?)
+            tx.fetch::<1>("SELECT id FROM nx_outbox WHERE state='pending'", &[])
+                .await
         })
         .await
         .unwrap();
@@ -648,7 +647,7 @@ async fn actual_clock_recovery_contract(db: &Database) {
     db.recover_clock(&crate::HostKeys::generate().unwrap())
         .await
         .unwrap();
-    let recovered=phase(db,async |tx:&mut Transaction| {Ok(tx.fetch::<6>("SELECT generation,CAST((SELECT lifecycle_ms FROM nx_clock WHERE singleton=1) AS TEXT),(SELECT state FROM nx_outbox WHERE id=$1),(SELECT state FROM nx_job_runtime WHERE singleton=1),(SELECT state FROM nx_outbox WHERE id=$2),CAST((SELECT first_eligible_ms FROM nx_outbox WHERE id=$1) AS TEXT) FROM nx_deployment WHERE singleton=1",&[capture.id()?.into(),pending.id()?.into()]).await?)}).await.unwrap();
+    let recovered=phase(db,async |tx:&mut Transaction| {tx.fetch::<6>("SELECT generation,CAST((SELECT lifecycle_ms FROM nx_clock WHERE singleton=1) AS TEXT),(SELECT state FROM nx_outbox WHERE id=$1),(SELECT state FROM nx_job_runtime WHERE singleton=1),(SELECT state FROM nx_outbox WHERE id=$2),CAST((SELECT first_eligible_ms FROM nx_outbox WHERE id=$1) AS TEXT) FROM nx_deployment WHERE singleton=1",&[capture.id()?.into(),pending.id()?.into()]).await}).await.unwrap();
     assert_ne!(recovered[0][0], "deployment");
     assert_eq!(recovered[0][1], initial.unix_millis().to_string());
     assert_eq!(recovered[0][2], "paused");
@@ -657,7 +656,7 @@ async fn actual_clock_recovery_contract(db: &Database) {
     assert_eq!(recovered[0][5], initial.unix_millis().to_string());
     let generation = &recovered[0][0];
     recovered_activation(db, generation, &effective).await;
-    let snapshot=phase(db,async |tx:&mut Transaction| {Ok(tx.fetch::<4>("SELECT epoch,state,(SELECT state FROM nx_effect_grants WHERE deployment=$1 AND tenant='alpha' AND endpoint='events'),(SELECT state FROM nx_outbox WHERE id=$2) FROM nx_job_runtime WHERE singleton=1",&[generation.as_str().into(),capture.id()?.into()]).await?)}).await.unwrap();
+    let snapshot=phase(db,async |tx:&mut Transaction| {tx.fetch::<4>("SELECT epoch,state,(SELECT state FROM nx_effect_grants WHERE deployment=$1 AND tenant='alpha' AND endpoint='events'),(SELECT state FROM nx_outbox WHERE id=$2) FROM nx_job_runtime WHERE singleton=1",&[generation.as_str().into(),capture.id()?.into()]).await}).await.unwrap();
     assert_eq!(
         &snapshot[0][1..],
         &[

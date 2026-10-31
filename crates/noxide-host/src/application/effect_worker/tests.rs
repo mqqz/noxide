@@ -250,7 +250,7 @@ async fn shutdown_contract(database: Option<Database>) {
     );
     assert_eq!(
         physical.upgrade().unwrap().active_claims(),
-        [request.key.clone()]
+        std::slice::from_ref(&request.key)
     );
     // Trusted local inspection remains available during an admitted send.
     assert!(
