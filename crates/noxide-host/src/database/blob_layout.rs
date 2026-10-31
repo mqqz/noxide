@@ -9,6 +9,8 @@ pub(super) const TABLES: &[Table] = &[
         &[
             ("singleton", "BIGINT"),
             ("identity", "TEXT"),
+            ("pair_id", "TEXT"),
+            ("pair_state", "TEXT"),
             ("serial", "BIGINT"),
             ("reserved_bytes", "BIGINT"),
             ("used_bytes", "BIGINT"),
@@ -69,7 +71,7 @@ pub(super) const TABLES: &[Table] = &[
     ),
 ];
 pub(super) const TABLE_SQL: &[&str] = &[
-    "CREATE TABLE nx_blob_store (singleton BIGINT PRIMARY KEY CHECK(singleton=1), identity TEXT NOT NULL, serial BIGINT NOT NULL CHECK(serial>0), reserved_bytes BIGINT NOT NULL CHECK(reserved_bytes>=0), used_bytes BIGINT NOT NULL CHECK(used_bytes>=0), objects BIGINT NOT NULL CHECK(objects>=0), anonymous_reserved_bytes BIGINT NOT NULL CHECK(anonymous_reserved_bytes>=0), anonymous_used_bytes BIGINT NOT NULL CHECK(anonymous_used_bytes>=0))",
+    "CREATE TABLE nx_blob_store (singleton BIGINT PRIMARY KEY CHECK(singleton=1), identity TEXT NOT NULL, pair_id TEXT NOT NULL, pair_state TEXT NOT NULL CHECK(pair_state IN ('pending','paired')), serial BIGINT NOT NULL CHECK(serial>0), reserved_bytes BIGINT NOT NULL CHECK(reserved_bytes>=0), used_bytes BIGINT NOT NULL CHECK(used_bytes>=0), objects BIGINT NOT NULL CHECK(objects>=0), anonymous_reserved_bytes BIGINT NOT NULL CHECK(anonymous_reserved_bytes>=0), anonymous_used_bytes BIGINT NOT NULL CHECK(anonymous_used_bytes>=0))",
     "CREATE TABLE nx_blob_subjects (subject TEXT PRIMARY KEY NOT NULL, anonymous BIGINT NOT NULL CHECK(anonymous IN (0,1)), reserved_bytes BIGINT NOT NULL CHECK(reserved_bytes>=0), used_bytes BIGINT NOT NULL CHECK(used_bytes>=0), objects BIGINT NOT NULL CHECK(objects>=0))",
     "CREATE TABLE nx_blobs (slot TEXT PRIMARY KEY NOT NULL, blob_ref TEXT NOT NULL, upload_handle TEXT NOT NULL, object_key TEXT NOT NULL, subject TEXT NOT NULL, context TEXT NOT NULL, input TEXT NOT NULL, anonymous BIGINT NOT NULL CHECK(anonymous IN (0,1)), state TEXT NOT NULL CHECK(state IN ('uploading','staged','attached','unreferenced','deleting','deleted')), generation BIGINT NOT NULL CHECK(generation>0), reserved_bytes BIGINT NOT NULL CHECK(reserved_bytes>=0), actual_bytes BIGINT NOT NULL CHECK(actual_bytes>=0), sha256 TEXT NOT NULL, filename TEXT NOT NULL, created_ms BIGINT NOT NULL CHECK(created_ms>=0), expires_ms BIGINT NOT NULL CHECK(expires_ms>=created_ms), owner_resource BIGINT NOT NULL, owner_id BIGINT NOT NULL, owner_incarnation TEXT NOT NULL, owner_field TEXT NOT NULL, claimed_ms BIGINT NOT NULL CHECK(claimed_ms>=0), owner_process TEXT NOT NULL)",
     "CREATE TABLE nx_blob_orphans (object_key TEXT PRIMARY KEY NOT NULL, generation BIGINT NOT NULL CHECK(generation>0), state TEXT NOT NULL CHECK(state IN ('observed','deleting')), first_seen_ms BIGINT NOT NULL CHECK(first_seen_ms>=0), claimed_ms BIGINT NOT NULL CHECK(claimed_ms>=0), charged_bytes BIGINT NOT NULL CHECK(charged_bytes>=0), charged_objects BIGINT NOT NULL CHECK(charged_objects>0), owner_process TEXT NOT NULL)",

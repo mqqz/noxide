@@ -99,6 +99,16 @@ async fn contract(db: Database) {
     tx.rollback().await.unwrap();
     db.initialize().await.unwrap();
 
+    for state in ["pending", "paired", "unreviewed"] {
+        let mut tx = begin().await.unwrap();
+        let result = tx.execute("INSERT INTO nx_blob_store(singleton,identity,pair_id,pair_state,serial,reserved_bytes,used_bytes,objects,anonymous_reserved_bytes,anonymous_used_bytes) VALUES(1,$1,$2,$3,1,0,0,0,0,0)", &["a".repeat(64).into(),"b".repeat(64).into(),state.into()]).await;
+        assert_eq!(result.is_ok(), state != "unreviewed");
+        tx.rollback().await.unwrap();
+    }
+    let mut tx = begin().await.unwrap();
+    assert!(tx.execute("INSERT INTO nx_blob_store(singleton,identity,pair_state,serial,reserved_bytes,used_bytes,objects,anonymous_reserved_bytes,anonymous_used_bytes) VALUES(1,$1,'pending',1,0,0,0,0,0)", &["a".repeat(64).into()]).await.is_err());
+    tx.rollback().await.unwrap();
+
     // Native constraints, independently of metadata loader/canonicalization.
     let mut tx = begin().await.unwrap();
     insert(&mut tx, "a", None, true).await.unwrap();

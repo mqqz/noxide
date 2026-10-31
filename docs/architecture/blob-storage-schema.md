@@ -8,7 +8,8 @@ Use a separately configured empty development database, or implement and review
 an explicit migration. Preserve the old database and any corresponding object
 snapshot. Never point a new empty database at a previously paired object store.
 
-Four framework tables contain store counters/identity, per-subject counters,
+Four framework tables contain store counters/identity and durable pending/paired
+state, per-subject counters,
 immutable blob lifecycle/association metadata, and fenced orphan observations.
 No bytes or filesystem paths enter these tables. Text primary keys explicitly
 reject NULL on both providers. Ten named indexes cover bounded stage/expiry/claim/
@@ -52,3 +53,20 @@ Logs are under target/capability-evidence/p08. Independent review, full integrat
 suites, store-pairing recovery, quota races, real streaming/GC and consistent
 backup/restore remain open. No operator database mutation or external delivery
 was performed.
+
+Pairing delta: nx_blob_store also requires a canonical opaque pair_id and
+pair_state (pending/paired), without defaults. A fresh bind durably commits its
+pending row before writing/syncing the private filesystem pairing marker, then
+acknowledges paired in the database before readiness. Mismatch or missing metadata
+never silently adopts a previously paired store, even if it is empty. A pending
+bind with populated object directories fails closed. A matching pair does not
+prove snapshot-time consistency: completely unknown objects are quarantined and
+accounted, not automatically deleted after a grace period. Normal crash cleanup
+requires the authoritative preexisting Uploading/reservation or deletion claim.
+The complete state machine and operator reconciliation remain B/P13 gates.
+
+The pairing-column delta was compiled and reran the same two native layout tests
+on fresh SQLite/PostgreSQL fixtures: exit0, two passed/zero ignored,
+`schema-pair-providers.log`. Added native cases accept pending/paired, reject
+an unknown state and a missing pair ID; metadata/FS commit ordering remains an
+independent runtime gate. Source formatting and diff checks pass.
