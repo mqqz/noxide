@@ -74,6 +74,27 @@ impl Registry {
             stopped: false,
         })
     }
+    #[cfg(test)]
+    pub(crate) async fn wait_idle_for_test(&self) -> Result<()> {
+        loop {
+            let changed = self.changed.notified();
+            let deadline = {
+                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if state.active == 0 {
+                    ensure!(!state.quarantined, Unavailable::Unconfirmed);
+                    return Ok(());
+                }
+                *state
+                    .deadlines
+                    .keys()
+                    .next_back()
+                    .context("active provider missing original deadline")?
+            };
+            tokio::time::timeout_at(deadline, changed)
+                .await
+                .map_err(|_| Unavailable::Unconfirmed)?;
+        }
+    }
     pub(crate) async fn shutdown(&self) -> Result<()> {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
         loop {
