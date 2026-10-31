@@ -240,17 +240,20 @@ impl Database {
                         // Disable schema trust before that first schema read.
                         sqlx::query("PRAGMA trusted_schema = OFF")
                             .execute(&mut cx)
-                            .await?;
+                            .await
+                            .context("maintenance SQLite schema trust setup")?;
                         sqlx::query("PRAGMA synchronous = FULL")
                             .execute(&mut cx)
-                            .await?;
+                            .await
+                            .context("maintenance SQLite synchronous setup")?;
                     }
                     let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
                         .fetch_one(&mut cx)
                         .await?;
                     let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
                         .fetch_one(&mut cx)
-                        .await?;
+                        .await
+                        .context("SQLite journal verification")?;
                     ensure!(
                         synchronous == 2 && mode == "wal",
                         "unsafe SQLite durability"
@@ -266,7 +269,8 @@ impl Database {
                         "BEGIN IMMEDIATE"
                     })
                     .execute(&mut cx)
-                    .await?;
+                    .await
+                    .context("SQLite transaction start")?;
                     Ok(())
                 }
                 .await;
