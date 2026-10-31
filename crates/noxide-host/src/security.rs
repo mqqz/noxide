@@ -40,13 +40,22 @@ pub(crate) enum TokenKind {
     Login,
     Session,
     Anonymous,
+    Selection {
+        contract: String,
+        action: u32,
+        binding: u32,
+        name: String,
+        query: u32,
+        eligible: u32,
+        targets: std::collections::BTreeMap<String, RecordTarget>,
+    },
     AnonymousSubmission {
         contract: String,
         /// Web binding ID; zero is reserved for host edit-key rotation.
         action: u32,
         /// Web binding version, independent of the canonical action version.
         version: u32,
-        target: Option<RecordTarget>,
+        targets: std::collections::BTreeMap<String, RecordTarget>,
     },
     Submission {
         contract: String,
@@ -54,7 +63,7 @@ pub(crate) enum TokenKind {
         action: u32,
         /// Web binding version, independent of the canonical action version.
         version: u32,
-        target: Option<RecordTarget>,
+        targets: std::collections::BTreeMap<String, RecordTarget>,
     },
 }
 
@@ -275,12 +284,27 @@ impl HostKeys {
         Ok((token, encoded))
     }
     pub(crate) fn verify(&self, encoded: &str, now: i64) -> Result<Token> {
-        self.verify_domain(encoded, now, false)
+        self.verify_domain(encoded, now, false, false)
     }
     pub(crate) fn verify_cursor(&self, encoded: &str, now: i64) -> Result<Token> {
-        self.verify_domain(encoded, now, true)
+        self.verify_domain(encoded, now, true, false)
     }
-    fn verify_domain(&self, encoded: &str, now: i64, cursor: bool) -> Result<Token> {
+    /// Only selection proof verification defers expiry until after receipt lookup.
+    pub(crate) fn verify_selection(&self, encoded: &str, now: i64) -> Result<Token> {
+        let token = self.verify_domain(encoded, now, false, true)?;
+        ensure!(
+            matches!(token.kind, TokenKind::Selection { .. }),
+            "not a selection proof"
+        );
+        Ok(token)
+    }
+    fn verify_domain(
+        &self,
+        encoded: &str,
+        now: i64,
+        cursor: bool,
+        selection: bool,
+    ) -> Result<Token> {
         ensure!(encoded.len() <= 2048, "token limit");
         let envelope = URL_SAFE_NO_PAD.decode(encoded)?;
         ensure!(envelope.len() >= 41 && envelope[0] == 2, "invalid token");
@@ -311,7 +335,8 @@ impl HostKeys {
                 && token.issued >= 0
                 && token.issued < token.expires
                 && token.issued <= now
-                && now < token.expires
+                && (now < token.expires
+                    || selection && matches!(token.kind, TokenKind::Selection { .. }))
                 && token.expires - token.issued <= 86400,
             "expired token or authority"
         );
@@ -413,13 +438,16 @@ mod tests {
                 contract: "approved-contract".into(),
                 action: 5,
                 version: 3,
-                target: Some(RecordTarget {
-                    resource: 1,
-                    id: 42,
-                    incarnation: "record-incarnation".into(),
-                    revision: 2,
-                    route: Some(1),
-                }),
+                targets: std::collections::BTreeMap::from([(
+                    "target".into(),
+                    RecordTarget {
+                        resource: 1,
+                        id: 42,
+                        incarnation: "record-incarnation".into(),
+                        revision: 2,
+                        route: Some(1),
+                    },
+                )]),
             },
         ] {
             let (token, encoded) = keys

@@ -30,9 +30,8 @@ impl Application {
             .await?;
         let a = manifest::web_action(&self.manifest, action)
             .map_err(|_| RequestError::InvalidRequest)?;
-        let input = manifest::canonical_input(&self.manifest, &a, &input)
-            .map_err(|_| RequestError::InvalidRequest)?;
-        manifest::validate_input(&self.manifest, &a, &input)
+        let canonical = self
+            .canonical_action_input(a.core.id, &input)
             .map_err(|_| RequestError::InvalidRequest)?;
         let deadline = Instant::now() + self.runtime.limits().wall_time;
         let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
@@ -44,7 +43,7 @@ impl Application {
                     action,
                     submission,
                     csrf,
-                    &input,
+                    &canonical,
                     capability,
                     &mut budget,
                 ),
@@ -128,30 +127,41 @@ impl Application {
             let (token, session, principal) = self
                 .submission_identity(&mut tx, core, cookie, submission, csrf, now)
                 .await?;
-            let target = self.submission_target(&token, core, binding)?;
+            let (_, selections) = self.action_input(a.core, input)?;
+            let grants = self.web_target_grants(
+                &token,
+                core,
+                binding,
+                &selections,
+                &session,
+                &principal,
+                now,
+            )?;
+            let targets: BTreeMap<_, _> = grants
+                .iter()
+                .map(|(name, grant)| (name.clone(), grant.identity().clone()))
+                .collect();
             let receipt = self
                 .load_receipt(&mut tx, &token.nonce, &session.nonce)
                 .await?;
             if let Some([digest, outcome]) = receipt.as_ref() {
-                let canonical = manifest::canonical_input(&self.manifest, &a, input).ok();
+                let canonical = self.canonical_action_input(a.core.id, input).ok();
                 let expected = canonical
                     .as_ref()
                     .map(|input| {
-                        input_digest(core, input).and_then(|digest| {
-                            self.web_invocation_identity(
-                                binding,
-                                &token,
-                                &session,
-                                &principal,
-                                &digest,
-                                target.as_ref(),
-                            )
-                        })
+                        self.web_invocation_identity(
+                            binding,
+                            &token,
+                            &session,
+                            &principal,
+                            input.digest(),
+                            &targets,
+                        )
                     })
                     .transpose()?;
 
                 let response = if expected.as_ref() == Some(digest) {
-                    self.prepare_response(&mut tx, &a, target.as_ref(), outcome, &principal)
+                    self.prepare_response(&mut tx, &a, &targets, outcome, &principal)
                         .await
                         .or_else(|_| self.committed_recovery(&a, submission, csrf, input))?
                 } else {
@@ -165,11 +175,44 @@ impl Application {
                 }
                 return Ok(response);
             }
-            if let Some(target) = target {
-                let Some(stored) = self
-                    .authorized_target(&mut tx, core, &target, &principal, capability)
-                    .await?
-                else {
+            let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
+            match self
+                .resolve_action_targets(
+                    &mut tx,
+                    core,
+                    &grants,
+                    &principal,
+                    capability,
+                    now,
+                    &mut budget,
+                )
+                .await
+            {
+                Ok(_) => self.authorize_create(core, &principal)?,
+                Err(error) if error.is::<action::ReviewConflict>() && unknown => {}
+                Err(error) if error.is::<action::ReviewConflict>() => {
+                    if a.targets.len() == 1
+                        && matches!(a.targets[0].source, TargetSource::Page { .. })
+                    {
+                        let target = targets[&a.targets[0].name].clone();
+                        let stored =
+                            repository::load(&mut tx, &self.manifest, target.resource, target.id)
+                                .await?
+                                .ok_or(repository::ReferenceUnavailable)?;
+                        return self
+                            .settle(
+                                &a,
+                                action::Settled::Conflict { target, stored },
+                                submission,
+                                csrf,
+                                input,
+                                Some((&session, now)),
+                            )
+                            .map(navigation::Prepared::ready);
+                    }
+                    return Ok(navigation::Prepared::ready(render::target_conflict()));
+                }
+                Err(error) if error.is::<repository::ReferenceUnavailable>() => {
                     return self
                         .settle(
                             &a,
@@ -180,23 +223,12 @@ impl Application {
                             None,
                         )
                         .map(navigation::Prepared::ready);
-                };
-                if a.revision == Revision::Exact && stored.revision != target.revision && !unknown {
-                    return self
-                        .settle(
-                            &a,
-                            action::Settled::Conflict { target, stored },
-                            submission,
-                            csrf,
-                            input,
-                            Some((&session, now)),
-                        )
-                        .map(navigation::Prepared::ready);
                 }
-            } else {
-                self.authorize_create(core, &principal)?;
+                Err(error) => return Err(error),
             }
             let credentials = FormCredentials {
+                selections: Default::default(),
+                selected: Default::default(),
                 csrf: csrf.into(),
                 submission: submission.into(),
                 values: Fields::new(),
@@ -223,17 +255,19 @@ impl Application {
         action: u32,
         submission: &str,
         csrf: &str,
-        input: &Fields,
+        canonical: &CanonicalActionInput,
         capability: Option<&str>,
         budget: &mut ExecutionBudget,
     ) -> Result<(Option<Transaction>, navigation::Prepared)> {
         let a = manifest::web_action(&self.manifest, action)?;
+        let input = canonical.web_fields();
+        let input = &input;
         let binding = manifest::web_binding(&self.manifest, action)?;
         let mut tx = self.database.begin(budget.deadline.into_std()).await?;
         self.admission(&mut tx, false).await?;
         let (context, session, now) = self
             .admit_web_invocation(
-                &mut tx, binding.id, cookie, submission, csrf, input, capability,
+                &mut tx, binding.id, cookie, submission, csrf, canonical, capability,
             )
             .await?;
         let attempt = self.attempt_action(tx, context, budget).await;
@@ -259,7 +293,7 @@ impl Application {
             .prepare_response(
                 &mut tx,
                 &a,
-                receipt.target.as_ref(),
+                &receipt.targets,
                 &receipt.payload,
                 &receipt.principal,
             )
@@ -287,6 +321,7 @@ impl Application {
         use action::Settled;
         let (errors, message) = match outcome {
             Settled::Unavailable => return render::unavailable(&self.presentation, &self.manifest),
+            Settled::TargetConflict => return Ok(render::target_conflict()),
             Settled::Conflict { target, stored } => {
                 let (session, now) =
                     refresh.ok_or_else(|| anyhow::anyhow!("missing web refresh identity"))?;
@@ -306,6 +341,8 @@ impl Application {
             &self.manifest,
             a.id,
             &FormCredentials {
+                selections: Default::default(),
+                selected: Default::default(),
                 csrf: csrf.into(),
                 submission: submission.into(),
                 values: Fields::new(),
@@ -365,12 +402,21 @@ mod parent_redirect_budget_tests {
         ]);
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
         let mut budget = ExecutionBudget::new(app.runtime.limits(), deadline);
+        let canonical = app.canonical_action_input(m.actions[0].id, &input).unwrap();
         // Complete capture, mutation and response preparation on every attempt.
         // Rollbacks deterministically reproduce two known-aborted transactions
         // without relying on database lock timing or a provider-specific error.
         for attempt in 0..3 {
             let (tx, prepared) = app
-                .prepare(&cookie, 1, &submission, &csrf, &input, None, &mut budget)
+                .prepare(
+                    &cookie,
+                    1,
+                    &submission,
+                    &csrf,
+                    &canonical,
+                    None,
+                    &mut budget,
+                )
                 .await
                 .unwrap();
             let mut tx = tx.unwrap();

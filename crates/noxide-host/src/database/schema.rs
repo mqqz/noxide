@@ -279,14 +279,16 @@ impl Transaction {
                     self.execute(&format!("CREATE INDEX nx_a_{storage:x}_{}_{suffix} ON nx_records(resource, ({expression}), {columns}created_seq) WHERE resource={storage}", field.name), &[]).await?;
                 }
             }
-            if let Some(field) = crate::manifest::reference_field(resource) {
+            for field in crate::manifest::reference_fields(resource) {
                 let storage = self.storage_key(&resource.name).await?;
                 let expression = self.field_expression(&field.name)?;
                 self.execute(&format!("CREATE INDEX nx_r_{storage:x}_{} ON nx_records(resource, ({expression}), created_seq) WHERE resource={storage}", field.name), &[]).await?;
-                for column in ["owner", "tenant"]
-                    .into_iter()
-                    .filter(|_| resource.gate.is_some())
-                {
+                for column in ["owner", "tenant"].into_iter().filter(|_| {
+                    resource
+                        .gate
+                        .as_ref()
+                        .is_some_and(|gate| gate.field == field.name)
+                }) {
                     self.execute(&format!("CREATE INDEX nx_r_{storage:x}_{}_{column} ON nx_records(resource, ({expression}), {column}, created_seq) WHERE resource={storage}", field.name),&[]).await?;
                 }
             }
@@ -296,7 +298,7 @@ impl Transaction {
 
     async fn validate_references(&mut self, resources: &[noxide_protocol::Resource]) -> Result<()> {
         for child in resources {
-            if let Some(field) = crate::manifest::reference_field(child) {
+            for field in crate::manifest::reference_fields(child) {
                 let noxide_protocol::FieldKind::Reference {
                     resource: parent, ..
                 } = &field.kind
@@ -428,12 +430,14 @@ impl Transaction {
                     .await?;
                 }
             }
-            if let Some(field) = crate::manifest::reference_field(resource) {
+            for field in crate::manifest::reference_fields(resource) {
                 let storage = self.storage_key(&resource.name).await?;
-                for column in ["owner", "tenant"]
-                    .into_iter()
-                    .filter(|_| resource.gate.is_some())
-                {
+                for column in ["owner", "tenant"].into_iter().filter(|_| {
+                    resource
+                        .gate
+                        .as_ref()
+                        .is_some_and(|gate| gate.field == field.name)
+                }) {
                     self.execute(
                         &format!("DROP INDEX nx_r_{storage:x}_{}_{column}", field.name),
                         &[],

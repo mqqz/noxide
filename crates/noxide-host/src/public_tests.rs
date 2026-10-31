@@ -66,7 +66,7 @@ fn declarations() -> Manifest {
         ),
     ] {
         m.operations.push(Operation {
-            bind: None,
+            bind: Default::default(),
             scope: None,
             via: None,
             filter: Vec::new(),
@@ -193,7 +193,7 @@ fn manifest_private_operations_forbid_public_metadata() {
 fn manifest_action_inspection_cannot_use_public_read() {
     let mut m = declarations();
     m.operations.push(Operation {
-        bind: None,
+        bind: Default::default(),
         scope: None,
         via: None,
         filter: Vec::new(),
@@ -210,8 +210,9 @@ fn manifest_action_inspection_cannot_use_public_read() {
     });
     let mut action = fixture::manifest().actions.remove(0);
     action.steps[0].operation = 8;
-    action.steps[0].target = Target::Signed;
-    action.inspect = Some(Inspection {
+    action.steps[0].target = Target::Named("target".into());
+    action.targets = vec![fixture::page_target(1, vec![2], Revision::Exact)];
+    action.targets[0].inspect = Some(Inspection {
         operation: 2,
         fields: vec!["body".into()],
     });
@@ -294,10 +295,11 @@ fn effects(
             kind: RequestKind::Route(route),
             target,
             input: Fields::new(),
-            inspection: None,
+            inspection: Default::default(),
             available_forms: vec![],
         },
-        grant: None,
+        grants: Default::default(),
+        target_rows: Default::default(),
         capability_grant: None,
 
         calls: 64,
@@ -883,7 +885,7 @@ async fn sqlite_initial_create_commit_is_host_owned() {
             tx.commit().await.unwrap();
             let mut updates = m.clone();
             updates.operations.push(Operation {
-                bind: None,
+                bind: Default::default(),
                 scope: None,
                 via: None,
                 filter: Vec::new(),
@@ -906,7 +908,7 @@ async fn sqlite_initial_create_commit_is_host_owned() {
                     2,
                     "Moderate",
                     4,
-                    Target::Signed,
+                    Target::Named("target".into()),
                     &updates.resources[0],
                     &["published"],
                     2,
@@ -927,13 +929,16 @@ async fn sqlite_initial_create_commit_is_host_owned() {
             let mut e = effects(tx, &updates, moderator, 2, Some(record.id));
             e.request.kind = RequestKind::Action(2);
             e.request.input.insert("published".into(), "false".into());
-            e.grant = Some(crate::security::RecordTarget {
-                resource: 1,
-                id: record.id,
-                route: Some(2),
-                incarnation: stored.incarnation.clone(),
-                revision: stored.revision,
-            });
+            e.grants.insert(
+                "target".into(),
+                crate::security::RecordTarget {
+                    resource: 1,
+                    id: record.id,
+                    route: Some(2),
+                    incarnation: stored.incarnation.clone(),
+                    revision: stored.revision,
+                },
+            );
 
             e.execute_transaction(crate::application::ActionCore::of(&updates.actions[1]).unwrap())
                 .await

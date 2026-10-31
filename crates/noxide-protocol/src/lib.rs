@@ -5,7 +5,7 @@ pub mod time;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 pub const MAX_IR_BYTES: usize = 65_536;
 pub const MAX_NODES: usize = 1_024;
 pub const MAX_DEPTH: usize = 32;
@@ -243,7 +243,12 @@ pub enum OperationKind {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
-    pub bind: Option<Bind>,
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "reference_bindings"
+    )]
+    pub bind: BTreeMap<String, u32>,
     pub scope: Option<String>,
     pub via: Option<Via>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -260,6 +265,33 @@ pub struct Operation {
     pub visibility: Option<Visibility>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<Vec<String>>,
+}
+
+fn reference_bindings<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<String, u32>, D::Error> {
+    struct Bindings;
+    impl<'de> serde::de::Visitor<'de> for Bindings {
+        type Value = BTreeMap<String, u32>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("at most four distinct reference eligibility fields")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut access: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut fields = BTreeMap::new();
+            while let Some((field, operation)) = access.next_entry::<String, u32>()? {
+                if fields.len() == 4 || fields.insert(field, operation).is_some() {
+                    return Err(serde::de::Error::custom(
+                        "duplicate or excessive reference eligibility field",
+                    ));
+                }
+            }
+            Ok(fields)
+        }
+    }
+    deserializer.deserialize_map(Bindings)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -353,7 +385,7 @@ impl Redirect {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum RedirectSource {
-    Signed,
+    Target(String),
     Step(u8),
     Reference { step: u8, field: String },
 }
@@ -364,12 +396,38 @@ pub struct Action {
     pub id: u32,
     pub version: u32,
     pub name: String,
-    /// Eligible non-follow target reads. Each grant still checks current policy.
-    pub target_reads: Vec<u32>,
-    pub inspect: Option<Inspection>,
+    pub targets: Vec<ActionTarget>,
     pub inputs: Vec<Input>,
-    pub revision: Revision,
     pub steps: Vec<Step>,
+}
+
+/// Existing targets have explicit provenance, review and independent read grants.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ActionTarget {
+    pub name: String,
+    pub resource: u32,
+    pub source: TargetSource,
+    pub revision: Revision,
+    pub projection: Option<Inspection>,
+    pub inspect: Option<Inspection>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum TargetSource {
+    Page {
+        reads: Vec<u32>,
+    },
+    Selected {
+        query: u32,
+        eligible: u32,
+        label: Vec<String>,
+    },
+    Reference {
+        target: String,
+        field: String,
+        eligible: u32,
+    },
 }
 
 /// Browser presentation refers to a canonical action; it grants no authority.
@@ -421,7 +479,7 @@ pub struct Step {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Target {
     None,
-    Signed,
+    Named(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -450,7 +508,7 @@ pub enum Change {
 pub enum Value {
     Input(String),
     Constant(String),
-    SignedTarget,
+    Target(String),
     Created(u8),
 }
 
@@ -513,7 +571,7 @@ pub struct RequestView {
     pub target: Option<u64>,
     pub input: Fields,
     /// Original target values permitted by the action's explicit read projection.
-    pub inspection: Option<Fields>,
+    pub inspection: BTreeMap<String, Fields>,
     pub available_forms: Vec<u32>,
 }
 
@@ -671,10 +729,10 @@ mod tests {
         );
         required::<Action>(
             serde_json::json!({
-                "target_reads": [], "id": 1, "version": 1, "name": "Create", "inputs": [], "revision": "exact",
-                "steps": [{"operation": 1, "target": "none", "assign": []}], "inspect": null
+                "targets": [], "id": 1, "version": 1, "name": "Create", "inputs": [],
+                "steps": [{"operation": 1, "target": "none", "assign": []}]
             }),
-            &["target_reads", "inputs", "revision", "steps"],
+            &["targets", "inputs", "steps"],
         );
         required::<WebBinding>(
             serde_json::json!({ "id": 11, "version": 1, "action": 1, "layout": [], "redirect": {"route": 1, "source": {"step": 0}} }),
@@ -683,7 +741,7 @@ mod tests {
         required::<RequestView>(
             serde_json::json!({
                 "version": VERSION, "kind": {"route": 1}, "target": null, "input": {},
-                "inspection": null, "available_forms": []
+                "inspection": {}, "available_forms": []
             }),
             &["available_forms"],
         );
@@ -697,15 +755,41 @@ pub struct Gate {
     pub visible: Visibility,
     pub create_when: Visibility,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Bind {
-    pub field: String,
-    pub eligible: u32,
-}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Via {
     pub source: u32,
     pub field: String,
+}
+
+#[cfg(test)]
+mod reference_binding_tests {
+    use super::*;
+    #[test]
+    fn eligibility_fields_are_canonical_maps_and_duplicate_wire_keys_are_rejected() {
+        let operation = r#"{"bind":{"right":2,"left":1},"scope":null,"via":null,"id":3,"resource":4,"kind":"create","policy":{"any":[["owner"]]}}"#;
+        let parsed: Operation = serde_json::from_str(operation).unwrap();
+        let reordered: Operation = serde_json::from_str(
+            &operation.replace("\"right\":2,\"left\":1", "\"left\":1,\"right\":2"),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&parsed).unwrap(),
+            serde_json::to_vec(&reordered).unwrap()
+        );
+        assert!(
+            serde_json::from_str::<Operation>(
+                &operation.replace("\"right\":2,\"left\":1", "\"left\":2,\"left\":1")
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<Operation>(&operation.replace(
+                "\"right\":2,\"left\":1",
+                "\"a\":1,\"b\":1,\"c\":1,\"d\":1,\"e\":1"
+            ))
+            .is_err()
+        );
+    }
 }

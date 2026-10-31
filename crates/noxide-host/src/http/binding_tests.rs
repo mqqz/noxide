@@ -71,7 +71,8 @@ async fn application(
         let mut unrelated = m.actions[0].clone();
         unrelated.id = 91;
         unrelated.steps[0].operation = 4;
-        unrelated.steps[0].target = Target::Signed;
+        unrelated.steps[0].target = Target::Named("target".into());
+        unrelated.targets = vec![fixture::page_target(1, vec![2], Revision::Exact)];
         m.actions.push(unrelated);
     }
     let app = Arc::new(

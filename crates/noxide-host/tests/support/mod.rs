@@ -25,7 +25,7 @@ pub fn manifest() -> Manifest {
         }],
         operations: vec![
             Operation {
-                bind: None,
+                bind: Default::default(),
                 scope: None,
                 via: None,
                 filter: Vec::new(),
@@ -39,7 +39,7 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
-                bind: None,
+                bind: Default::default(),
                 scope: None,
                 via: None,
                 filter: Vec::new(),
@@ -53,7 +53,7 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
-                bind: None,
+                bind: Default::default(),
                 scope: None,
                 via: None,
                 filter: Vec::new(),
@@ -98,11 +98,10 @@ pub fn manifest() -> Manifest {
             },
         }],
         actions: vec![Action {
-            target_reads: vec![2],
+            targets: vec![],
             id: 1,
             version: 1,
             name: "Save note".into(),
-            revision: Revision::Exact,
             inputs: vec![Input {
                 name: "body".into(),
                 label: "Note".into(),
@@ -118,7 +117,6 @@ pub fn manifest() -> Manifest {
                     change: Change::Set(Value::Input("body".into())),
                 }],
             }],
-            inspect: None,
         }],
     }
 }
@@ -229,10 +227,12 @@ pub fn action(
         id,
         version: 1,
         name: name.into(),
-        target_reads: vec![2],
-        inspect: None,
+        targets: if target == Target::None {
+            vec![]
+        } else {
+            vec![page_target(resource.id, vec![2], Revision::Exact)]
+        },
         inputs: vec![],
-        revision: Revision::Exact,
         steps: vec![Step {
             operation,
             target: target.clone(),
@@ -249,7 +249,7 @@ pub fn action(
             source: if target == Target::None {
                 RedirectSource::Step(0)
             } else {
-                RedirectSource::Signed
+                RedirectSource::Target("target".into())
             },
         },
     }
@@ -272,44 +272,22 @@ impl std::ops::DerefMut for FixtureAction {
 }
 #[allow(dead_code)]
 pub fn register_action(m: &mut Manifest, mut action: FixtureAction) {
-    action.core.target_reads = m
-        .routes
-        .iter()
-        .filter(|route| route.forms.contains(&action.core.id))
-        .flat_map(|route| &route.operations)
-        .copied()
-        .filter(|id| {
-            m.operations
+    for target in &mut action.core.targets {
+        if let TargetSource::Page { reads } = &mut target.source {
+            *reads = m
+                .operations
                 .iter()
-                .any(|op| op.id == *id && op.kind == OperationKind::Read && op.via.is_none())
-        })
-        .collect();
-    if action.core.target_reads.is_empty() {
-        let signed = action
-            .core
-            .steps
-            .iter()
-            .find(|step| step.target == Target::Signed)
-            .and_then(|step| m.operations.iter().find(|op| op.id == step.operation))
-            .map(|op| op.resource);
-        action.core.target_reads = m
-            .operations
-            .iter()
-            .filter(|op| {
-                op.kind == OperationKind::Read
-                    && op.via.is_none()
-                    && match signed {
-                        Some(resource) => op.resource == resource,
-                        None => m.routes.iter().any(|route| {
-                            route.id == action.redirect.route && route.resource == Some(op.resource)
-                        }),
-                    }
-            })
-            .map(|op| op.id)
-            .collect();
+                .filter(|op| {
+                    op.kind == OperationKind::Read
+                        && op.via.is_none()
+                        && op.resource == target.resource
+                })
+                .map(|op| op.id)
+                .collect();
+            reads.sort_unstable();
+            reads.dedup();
+        }
     }
-    action.core.target_reads.sort_unstable();
-    action.core.target_reads.dedup();
     m.web_bindings.push(WebBinding {
         id: action.core.id,
         version: action.core.version,
@@ -318,4 +296,16 @@ pub fn register_action(m: &mut Manifest, mut action: FixtureAction) {
         redirect: action.redirect,
     });
     m.actions.push(action.core);
+}
+
+#[allow(dead_code)]
+pub fn page_target(resource: u32, reads: Vec<u32>, revision: Revision) -> ActionTarget {
+    ActionTarget {
+        name: "target".into(),
+        resource,
+        source: TargetSource::Page { reads },
+        revision,
+        projection: None,
+        inspect: None,
+    }
 }

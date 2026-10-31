@@ -590,7 +590,7 @@ async fn ordinary_actions_cannot_write_moderator_fields_or_reuse_credential() {
                 tenant_scoped: false,
             }]],
         };
-        m.actions[0].inspect = None;
+        m.actions[0].targets[0].inspect = None;
         m.actions[1].inputs = vec![Input {
             name: "tag".into(),
             label: "Tag".into(),
@@ -604,7 +604,7 @@ async fn ordinary_actions_cannot_write_moderator_fields_or_reuse_credential() {
         }];
         m.web_bindings[1].redirect = Redirect {
             route: 2,
-            source: RedirectSource::Signed,
+            source: RedirectSource::Target("target".into()),
         };
         let keys = HostKeys::generate().unwrap();
         let secret = keys

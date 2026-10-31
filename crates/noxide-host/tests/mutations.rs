@@ -377,7 +377,7 @@ async fn snapshots(db: &Database, keys: &[u8], alice: &str, inspect: &mut Inspec
         for projection in [false, true] {
             let mut m = declarations();
             if !projection {
-                m.actions[0].inspect = None;
+                m.actions[0].targets[0].inspect = None;
             }
             let app = application_with(db, keys, mode, m).await;
             for action in [2, 3] {
@@ -400,8 +400,15 @@ async fn snapshots(db: &Database, keys: &[u8], alice: &str, inspect: &mut Inspec
                 assert_eq!(seen.input, input);
                 assert_eq!(
                     seen.inspection,
-                    (projection && action == 2)
-                        .then(|| Fields::from([("body".into(), stored["body"].clone())])),
+                    if projection && action == 2 {
+                        [(
+                            "target".into(),
+                            Fields::from([("body".into(), stored["body"].clone())]),
+                        )]
+                        .into()
+                    } else {
+                        Default::default()
+                    },
                     "{mode}: only the original body projection may enter the guest"
                 );
                 assert_eq!(inspect.state().await, before);
@@ -517,7 +524,7 @@ fn rejects_ambiguous_or_expanded_record_action_contracts() {
 
     for fields in [vec!["owner"], vec!["body", "body"], Vec::new()] {
         let mut m = declarations();
-        m.actions[0].inspect.as_mut().unwrap().fields =
+        m.actions[0].targets[0].inspect.as_mut().unwrap().fields =
             fields.into_iter().map(str::to_owned).collect();
         assert!(
             manifest::validate(&m).is_err(),
@@ -525,7 +532,11 @@ fn rejects_ambiguous_or_expanded_record_action_contracts() {
         );
     }
     let mut non_read = declarations();
-    non_read.actions[0].inspect.as_mut().unwrap().operation = 5;
+    non_read.actions[0].targets[0]
+        .inspect
+        .as_mut()
+        .unwrap()
+        .operation = 5;
     assert!(manifest::validate(&non_read).is_err());
 
     let mut wrong_resource = declarations();
@@ -537,7 +548,7 @@ fn rejects_ambiguous_or_expanded_record_action_contracts() {
     other_read.id = 9;
     other_read.resource = 9;
     wrong_resource.operations.push(other_read);
-    wrong_resource.actions[0]
+    wrong_resource.actions[0].targets[0]
         .inspect
         .as_mut()
         .unwrap()

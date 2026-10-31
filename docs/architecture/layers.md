@@ -43,6 +43,13 @@ approved canonical action and declares eligible target reads. It has no route or
 redirect dependency. A separate optional navigation plan comes from verified web
 binding admission. Service admission remains unavailable until P10.
 
+`application/action/targets.rs` owns typed selection-handle verification, opaque
+canonical input certificates, per-alias target authorization and NoJS picker
+completion. The picker invokes the existing bounded query path under a declared
+binding grant. Its compute projection stays host-only; independently declared
+inspection is the only target data delivered to guest validation. Physical row
+caching never shares eligibility or mutation authority between aliases.
+
 `application/submission.rs` is the web form binding. It uses common invocation
 admission and owns browser proof verification, input handling, response mapping,
 the commit loop and recovery. Its preparation function maps settled outcomes to forms

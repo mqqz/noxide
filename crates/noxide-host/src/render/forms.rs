@@ -34,6 +34,32 @@ pub(super) fn form(
     ] {
         hidden(out, name, value)?;
     }
+    for target in action
+        .targets
+        .iter()
+        .filter(|target| matches!(target.source, TargetSource::Selected { .. }))
+    {
+        let name = format!("_target_{}", target.name);
+        if let Some(value) = credentials.selected.get(&target.name) {
+            hidden(out, &name, value)?;
+            continue;
+        }
+        out.push("<label>")?;
+        out.text(&target.name.replace('_', " "))?;
+        out.push("<select name=\"")?;
+        out.text(&name)?;
+        out.push("\" required><option value=\"\">Choose a record</option>")?;
+        if let Some(options) = credentials.selections.get(&target.name) {
+            for (handle, label) in options {
+                out.push("<option value=\"")?;
+                out.text(handle)?;
+                out.push("\">")?;
+                out.text(label)?;
+                out.push("</option>")?;
+            }
+        }
+        out.push("</select></label>")?;
+    }
     if crate::manifest::is_capability(crate::manifest::operation(m, action.steps[0].operation)?) {
         out.push(&format!("<label>Edit secret<input type=\"password\" name=\"{}\" autocomplete=\"off\" maxlength=\"128\" required></label>", presentation.capability_field))?;
     }

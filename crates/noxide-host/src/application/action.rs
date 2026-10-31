@@ -1,4 +1,5 @@
 //! Core action execution and transactional replay semantics.
+mod targets;
 use super::{Application, EditReceipt, RequestError, navigation};
 use crate::{
     auth,
@@ -9,9 +10,10 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use noxide_protocol::{
-    Action, Fields, Input, Inspection, OperationKind, RedirectSource, RequestKind, RequestView,
-    ResponseIntent, Revision, Step, VERSION,
+    Action, ActionTarget, Fields, Input, OperationKind, RedirectSource, RequestKind, RequestView,
+    ResponseIntent, Revision, Step, TargetSource, VERSION,
 };
+pub(super) use targets::ReviewConflict;
 use tokio::time::Instant;
 
 /// Execution view of an approved action.
@@ -20,10 +22,8 @@ pub(crate) struct ActionCore<'a> {
     pub id: u32,
     pub version: u32,
     pub inputs: &'a [Input],
-    pub revision: &'a Revision,
     pub steps: &'a [Step],
-    pub inspect: Option<&'a Inspection>,
-    pub target_reads: &'a [u32],
+    pub targets: &'a [ActionTarget],
 }
 impl<'a> ActionCore<'a> {
     pub fn of(action: &'a Action) -> Result<Self> {
@@ -31,10 +31,8 @@ impl<'a> ActionCore<'a> {
             id: action.id,
             version: action.version,
             inputs: &action.inputs,
-            revision: &action.revision,
             steps: &action.steps,
-            inspect: action.inspect.as_ref(),
-            target_reads: &action.target_reads,
+            targets: &action.targets,
         })
     }
 
@@ -43,11 +41,39 @@ impl<'a> ActionCore<'a> {
     }
 }
 
+/// A host-canonicalized request bound to the approved execution contract.
+pub(super) struct CanonicalActionInput {
+    action: u32,
+    version: u32,
+    contract: String,
+    fields: Fields,
+    selections: std::collections::BTreeMap<String, String>,
+    digest: String,
+}
+impl CanonicalActionInput {
+    pub(super) fn digest(&self) -> &str {
+        &self.digest
+    }
+    pub(super) fn web_fields(&self) -> Fields {
+        let mut fields = self.fields.clone();
+        for (name, handle) in &self.selections {
+            fields.insert(format!("_target_{name}"), handle.clone());
+        }
+        fields
+    }
+}
+
 /// Sealed target proof constructed only by verified host admission.
 /// Current read/edit authority is checked after committed-receipt recovery.
-struct TargetGrant {
+pub(super) struct TargetGrant {
     target: RecordTarget,
-    capability: Option<String>,
+    expires: Option<i64>,
+}
+
+impl TargetGrant {
+    pub(super) fn identity(&self) -> &RecordTarget {
+        &self.target
+    }
 }
 
 /// Transaction-scoped execution identity; guests and adapters cannot supply a principal.
@@ -55,7 +81,9 @@ pub(super) struct InvocationContext<'a> {
     action: ActionCore<'a>,
     input: Fields,
     principal: auth::Principal,
-    target: Option<TargetGrant>,
+    targets: std::collections::BTreeMap<String, TargetGrant>,
+    capability: Option<String>,
+    observed: i64,
     identity: String,
     nonce: String,
     subject: String,
@@ -98,7 +126,7 @@ pub(super) enum Attempt {
 }
 pub(super) struct Committed {
     pub payload: String,
-    pub target: Option<RecordTarget>,
+    pub targets: std::collections::BTreeMap<String, RecordTarget>,
     pub principal: auth::Principal,
 }
 pub(super) enum Settled {
@@ -107,6 +135,7 @@ pub(super) enum Settled {
         target: RecordTarget,
         stored: StoredRecord,
     },
+    TargetConflict,
     Rejected {
         field_errors: Fields,
         message: String,
@@ -130,14 +159,19 @@ impl Application {
             action: a,
             input,
             principal,
-            target: grant,
+            targets: grants,
+            capability,
+            observed,
             identity,
             nonce,
             subject,
             expires,
             navigation,
         } = context;
-        let target = grant.as_ref().map(|grant| grant.target.clone());
+        let sealed: std::collections::BTreeMap<_, _> = grants
+            .iter()
+            .map(|(name, grant)| (name.clone(), grant.target.clone()))
+            .collect();
         let input_hash = identity.as_str();
         let claimed = tx.execute("INSERT INTO nx_receipts(nonce,subject,contract,action,input,outcome,expires) VALUES($1,$2,$3,$4,$5,'',$6) ON CONFLICT(nonce) DO NOTHING", &[
             nonce.as_str().into(), subject.as_str().into(), self.contract.as_str().into(), Param::Number(a.id.into()), input_hash.into(), Param::Number(expires),
@@ -152,39 +186,51 @@ impl Application {
                 tx,
                 receipt: Committed {
                     payload: outcome,
-                    target,
+                    targets: sealed,
                     principal,
                 },
             });
         }
-        let record = if let Some(target) = &target {
-            let Some(stored) = self
-                .authorized_target(
-                    &mut tx,
-                    a,
-                    target,
-                    &principal,
-                    grant.as_ref().and_then(|grant| grant.capability.as_deref()),
-                )
-                .await?
-            else {
+        if self.authorize_create(a, &principal).is_err() {
+            tx.rollback().await?;
+            return Ok(Attempt::Settled(Settled::Unavailable));
+        }
+        let (records, capability_grant) = match self
+            .resolve_action_targets(
+                &mut tx,
+                a,
+                &grants,
+                &principal,
+                capability.as_deref(),
+                observed,
+                budget,
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                if error.is::<targets::ReviewConflict>()
+                    && a.targets.len() == 1
+                    && matches!(a.targets[0].source, TargetSource::Page { .. })
+                {
+                    let target = grants[&a.targets[0].name].target.clone();
+                    budget.spend(2)?;
+                    let stored =
+                        repository::load(&mut tx, &self.manifest, target.resource, target.id)
+                            .await?
+                            .ok_or(repository::ReferenceUnavailable)?;
+                    tx.rollback().await?;
+                    return Ok(Attempt::Settled(Settled::Conflict { target, stored }));
+                }
                 tx.rollback().await?;
-                return Ok(Attempt::Settled(Settled::Unavailable));
-            };
-            if *a.revision == Revision::Exact && stored.revision != target.revision {
-                tx.rollback().await?;
-                return Ok(Attempt::Settled(Settled::Conflict {
-                    target: target.clone(),
-                    stored,
-                }));
+                if error.is::<targets::ReviewConflict>() {
+                    return Ok(Attempt::Settled(Settled::TargetConflict));
+                }
+                if error.is::<repository::ReferenceUnavailable>() {
+                    return Ok(Attempt::Settled(Settled::Unavailable));
+                }
+                return Err(error);
             }
-            Some(stored)
-        } else {
-            if self.authorize_create(a, &principal).is_err() {
-                tx.rollback().await?;
-                return Ok(Attempt::Settled(Settled::Unavailable));
-            }
-            None
         };
         let gated_destination = navigation
             .and_then(|plan| plan.destination_resource)
@@ -194,25 +240,36 @@ impl Application {
         if navigation.is_some() {
             budget.parent_redirect_attempt(gated_destination)?;
         }
-        let signed_target = target.clone();
-        let original = record.clone();
+        let original = records.clone();
         let response_principal = principal.clone();
-        let inspection = a.inspect.map(|inspect| {
-            let stored = record
-                .as_ref()
-                .expect("validated inspection requires a target");
-            inspect
-                .fields
-                .iter()
-                .map(|name| (name.clone(), stored.record.fields[name].clone()))
-                .collect()
-        });
+        let inspection = a
+            .targets
+            .iter()
+            .filter_map(|target| target.inspect.as_ref().map(|inspect| (target, inspect)))
+            .map(|(target, inspect)| {
+                let proof = &sealed[&target.name];
+                let stored = &records[&(proof.resource, proof.id)];
+                (
+                    target.name.clone(),
+                    inspect
+                        .fields
+                        .iter()
+                        .map(|field| (field.clone(), stored.record.fields[field].clone()))
+                        .collect(),
+                )
+            })
+            .collect();
         let request = RequestView {
             params: Default::default(),
             available_forms: Vec::new(),
             version: VERSION,
             kind: RequestKind::Action(a.id),
-            target: target.as_ref().map(|t| t.id),
+            target: a
+                .targets
+                .iter()
+                .find(|target| matches!(target.source, TargetSource::Page { .. }))
+                .and_then(|target| sealed.get(&target.name))
+                .map(|target| target.id),
             input: input.clone(),
             inspection,
         };
@@ -230,15 +287,9 @@ impl Application {
             manifest: self.manifest.clone(),
             principal,
             request: request.clone(),
-            capability_grant: if manifest::is_capability(manifest::operation(
-                &self.manifest,
-                a.first_operation(),
-            )?) {
-                target.clone()
-            } else {
-                None
-            },
-            grant: target,
+            capability_grant,
+            grants: sealed.clone(),
+            target_rows: records,
             calls: budget.database_calls,
             cursor: None,
             more: None,
@@ -310,14 +361,8 @@ impl Application {
         };
         budget.database_calls = effects.calls;
         let destination = if let Some(plan) = navigation {
-            self.capture_destination(
-                &mut effects.tx,
-                plan,
-                signed_target.as_ref(),
-                original.as_ref(),
-                &outcomes,
-            )
-            .await?
+            self.capture_destination(&mut effects.tx, plan, &sealed, &original, &outcomes)
+                .await?
         } else {
             None
         };
@@ -340,7 +385,7 @@ impl Application {
             })
             .transpose()?;
         let receipt = serde_json::to_string(&navigation::SemanticReceipt {
-            version: 2,
+            version: 3,
             outcomes,
             source: navigation.map(|plan| plan.source.clone()),
             destination,
@@ -350,7 +395,7 @@ impl Application {
             tx: effects.tx,
             receipt: Committed {
                 payload: receipt,
-                target: None,
+                targets: sealed,
                 principal: response_principal,
             },
             nonce,
@@ -367,38 +412,40 @@ impl Application {
         cookie: &str,
         submission: &str,
         csrf: &str,
-        input: &Fields,
+        canonical: &CanonicalActionInput,
         capability: Option<&str>,
     ) -> Result<(InvocationContext<'a>, Token, i64)> {
         let binding = manifest::web_binding(&self.manifest, binding)?;
         let action = manifest::action(&self.manifest, binding.action)?;
         let core = ActionCore::of(action)?;
-        let input = manifest::canonical_input(&self.manifest, action, input)
-            .map_err(|_| RequestError::InvalidRequest)?;
-        manifest::validate_input(&self.manifest, action, &input)
-            .map_err(|_| RequestError::InvalidRequest)?;
-        let input_hash = input_digest(core, &input)?;
+        ensure!(
+            canonical.action == action.id
+                && canonical.version == action.version
+                && canonical.contract == self.contract,
+            RequestError::InvalidRequest
+        );
+        let input = canonical.fields.clone();
+        let selections = &canonical.selections;
+        let input_hash = canonical.digest();
         let now = self.observe_clock_write(tx, security::now()?).await?;
         let (token, session, principal) = self
             .submission_identity(tx, core, cookie, submission, csrf, now)
             .await?;
-        let target = self.submission_target(&token, core, binding)?;
-        let identity = self.web_invocation_identity(
-            binding,
-            &token,
-            &session,
-            &principal,
-            &input_hash,
-            target.as_ref(),
-        )?;
+        let targets =
+            self.web_target_grants(&token, core, binding, selections, &session, &principal, now)?;
+        let sealed: std::collections::BTreeMap<_, _> = targets
+            .iter()
+            .map(|(name, grant)| (name.clone(), grant.target.clone()))
+            .collect();
+        let identity = self
+            .web_invocation_identity(binding, &token, &session, &principal, input_hash, &sealed)?;
         let context = InvocationContext {
             action: core,
             input,
             principal,
-            target: target.map(|target| TargetGrant {
-                target,
-                capability: capability.map(str::to_owned),
-            }),
+            targets,
+            capability: capability.map(str::to_owned),
+            observed: now,
             identity,
             nonce: token.nonce,
             subject: session.nonce.clone(),
@@ -415,7 +462,7 @@ impl Application {
         session: &Token,
         principal: &auth::Principal,
         input_hash: &str,
-        target: Option<&RecordTarget>,
+        targets: &std::collections::BTreeMap<String, RecordTarget>,
     ) -> Result<String> {
         use base64::Engine;
         use sha2::Digest;
@@ -426,6 +473,12 @@ impl Application {
         let action = manifest::action(&self.manifest, binding.action)?;
         // Existing receipt columns persist this digest. It binds every execution
         // identity field; changing an adapter or binding cannot reuse its claim.
+        let mut targets = targets.clone();
+        for (name, target) in &mut targets {
+            if manifest::action_target(&action.targets, name)?.revision == Revision::Identity {
+                target.revision = 0;
+            }
+        }
         let canonical = serde_json::to_vec(&(
             VERSION,
             "web",
@@ -437,7 +490,7 @@ impl Application {
             binding.id,
             binding.version,
             input_hash,
-            target,
+            targets,
             &token.nonce,
         ))?;
         Ok(
@@ -493,29 +546,12 @@ impl Application {
     }
 }
 
-pub(super) fn input_digest(action: ActionCore<'_>, input: &Fields) -> Result<String> {
+fn input_digest(action: ActionCore<'_>, input: &Fields) -> Result<String> {
     use base64::Engine;
     use sha2::Digest;
-    ensure!(
-        input.len() == action.inputs.len(),
-        "unexpected digest input"
-    );
-    let input: Fields = action
-        .inputs
-        .iter()
-        .map(|schema| {
-            let value = input
-                .get(&schema.name)
-                .ok_or_else(|| anyhow::anyhow!("missing digest input"))?;
-            Ok((
-                schema.name.clone(),
-                schema.canonical(value).map_err(anyhow::Error::msg)?,
-            ))
-        })
-        .collect::<Result<_>>()?;
     Ok(
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(
-            serde_json::to_vec(&(VERSION, action.version, &action.inputs, input))?,
+            serde_json::to_vec(&(VERSION, action.version, action.inputs, input))?,
         )),
     )
 }
@@ -532,6 +568,13 @@ pub(super) struct ExecutionBudget {
     pub(super) wasm: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl ExecutionBudget {
+    pub(super) fn spend(&mut self, calls: u32) -> Result<()> {
+        self.database_calls = self
+            .database_calls
+            .checked_sub(calls)
+            .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
+        Ok(())
+    }
     pub(super) fn parent_redirect_attempt(&mut self, gated: bool) -> Result<()> {
         // Navigation runs once after the successful commit, outside all retries.
         // Its quota covers begin/commit, the target lookup and its optional gate.
@@ -609,7 +652,7 @@ mod tests {
         assert_eq!(core.id, action.id);
         assert_eq!(core.steps, action.steps);
         assert_eq!(core.inputs, action.inputs);
-        assert_eq!(core.target_reads, action.target_reads);
+        assert_eq!(core.targets, action.targets);
         // No production service constructor exists: a headless declaration alone
         // cannot enter the web adapter or create a service invocation context.
         assert!(manifest::web_action(&manifest, action.id).is_err());
@@ -702,7 +745,14 @@ mod tests {
         let digest = input_digest(ActionCore::of(&manifest.actions[0]).unwrap(), &input).unwrap();
         let binding = &manifest.web_bindings[0];
         let identity = app
-            .web_invocation_identity(binding, &token, &session, &principal, &digest, None)
+            .web_invocation_identity(
+                binding,
+                &token,
+                &session,
+                &principal,
+                &digest,
+                &Default::default(),
+            )
             .unwrap();
         assert_eq!(
             app.load_receipt(&mut tx, &token.nonce, &session.nonce)
@@ -715,8 +765,15 @@ mod tests {
         substituted.version += 1;
         assert_ne!(
             identity,
-            app.web_invocation_identity(&substituted, &token, &session, &principal, &digest, None)
-                .unwrap()
+            app.web_invocation_identity(
+                &substituted,
+                &token,
+                &session,
+                &principal,
+                &digest,
+                &Default::default()
+            )
+            .unwrap()
         );
         assert_ne!(
             identity,
@@ -726,7 +783,7 @@ mod tests {
                 &session,
                 &principal,
                 &digest,
-                None
+                &Default::default()
             )
             .unwrap()
         );
@@ -745,7 +802,7 @@ mod tests {
                 &alternate,
                 &session,
                 security::now().unwrap(),
-                None,
+                Default::default(),
                 Fields::new(),
             )
             .unwrap();
@@ -792,7 +849,9 @@ mod tests {
         let mut independent = manifest.operations[1].clone();
         independent.id = 9;
         manifest.operations.push(independent);
-        manifest.actions[0].target_reads = vec![9];
+        manifest.actions[0].targets = vec![fixture::page_target(1, vec![9], Revision::Exact)];
+        manifest.routes[0].forms.clear();
+        manifest.routes[1].forms = vec![1];
         let app = Application::new(
             &fixture::component(None),
             &serde_json::to_vec(&manifest).unwrap(),
@@ -829,7 +888,7 @@ mod tests {
             .unwrap()
         );
         let mut core = manifest.actions[0].clone();
-        core.target_reads = vec![2];
+        core.targets[0].source = TargetSource::Page { reads: vec![2] };
         assert!(
             app.target_allowed(ActionCore::of(&core).unwrap(), Some(2), &principal, &stored)
                 .unwrap()
@@ -866,12 +925,12 @@ mod tests {
             2,
             "Edit",
             4,
-            Target::Signed,
+            Target::Named("target".into()),
             &manifest.resources[0],
             &["body"],
             2,
         );
-        edit.inspect = Some(Inspection {
+        edit.targets[0].inspect = Some(Inspection {
             operation: 2,
             fields: vec!["body".into()],
         });
@@ -933,32 +992,44 @@ mod tests {
             revision: stored.revision,
             route: Some(2),
         };
-        let core = ActionCore::of(&manifest.actions[1]).unwrap();
+        let grants = std::collections::BTreeMap::from([(
+            "target".into(),
+            TargetGrant {
+                target,
+                expires: None,
+            },
+        )]);
+        let mut budget = ExecutionBudget::new(
+            app.runtime.limits(),
+            Instant::now() + std::time::Duration::from_secs(3),
+        );
         assert!(
-            app.authorized_target(
+            app.resolve_action_targets(
                 &mut tx,
-                core,
-                &target,
+                ActionCore::of(&manifest.actions[1]).unwrap(),
+                &grants,
                 &auth::Principal::Anonymous,
-                Some(secret)
+                Some(secret),
+                security::now().unwrap(),
+                &mut budget
             )
             .await
-            .unwrap()
-            .is_none()
+            .is_err()
         );
         let mut mutation_only = manifest.actions[1].clone();
-        mutation_only.inspect = None;
+        mutation_only.targets[0].inspect = None;
         assert!(
-            app.authorized_target(
+            app.resolve_action_targets(
                 &mut tx,
                 ActionCore::of(&mutation_only).unwrap(),
-                &target,
+                &grants,
                 &auth::Principal::Anonymous,
-                Some(secret)
+                Some(secret),
+                security::now().unwrap(),
+                &mut budget
             )
             .await
-            .unwrap()
-            .is_some()
+            .is_ok()
         );
         tx.rollback().await.unwrap();
     }
@@ -972,7 +1043,13 @@ mod tests {
                 1 => forged.web_bindings[0].version = 0,
                 2 => forged.web_bindings.push(forged.web_bindings[0].clone()),
                 3 => forged.web_bindings[0].redirect.route = u32::MAX,
-                4 => forged.actions[0].target_reads = vec![3], // mutation cannot supply reads
+                4 => {
+                    forged.actions[0].targets = vec![crate::test_support::page_target(
+                        1,
+                        vec![3],
+                        Revision::Exact,
+                    )]
+                } // mutation cannot supply reads
                 _ => unreachable!(),
             }
             assert!(

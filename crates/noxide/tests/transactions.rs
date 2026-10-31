@@ -3,6 +3,7 @@ use noxide::prelude::*;
 use noxide::{
     ActionType, IntoActionResponse, RequestKind, RequestView, ResponseIntent, WebActionType,
 };
+use noxide::{QueryType, ResourceType};
 
 #[derive(Resource)]
 #[resource(key = "products")]
@@ -64,9 +65,9 @@ fn transaction_lowering_keeps_shared_input_and_created_step_identity() {
     assert_eq!(action.inputs.len(), 2);
     assert_eq!(action.inputs[0].name, "quantity");
     assert_eq!(action.inputs[1].max_bytes, 2000);
-    assert_eq!(action.revision, Revision::Identity);
+    assert_eq!(action.targets[0].revision, Revision::Identity);
     assert_eq!(action.steps.len(), 3);
-    assert_eq!(action.steps[0].target, Target::Signed);
+    assert_eq!(action.steps[0].target, Target::Named("target".into()));
     assert_eq!(action.steps[1].target, Target::None);
     assert!(
         matches!(&action.steps[0].assign[0].change, Change::Decrease { by, rejection } if by == "quantity" && rejection.input == "quantity" && rejection.message == "Not enough stock")
@@ -90,9 +91,9 @@ fn transaction_lowering_keeps_shared_input_and_created_step_identity() {
 #[test]
 fn single_action_uses_the_transaction_protocol_and_defaults_to_exact() {
     let action = SetStock::definition();
-    assert_eq!(action.revision, Revision::Exact);
+    assert_eq!(action.targets[0].revision, Revision::Exact);
     assert_eq!(action.steps.len(), 1);
-    assert_eq!(action.steps[0].target, Target::Signed);
+    assert_eq!(action.steps[0].target, Target::Named("target".into()));
     assert_eq!(
         action.steps[0].assign[0].change,
         Change::Set(Value::Input("stock".into()))
@@ -112,7 +113,7 @@ fn action_decisions_require_no_storage_callback() {
             ("body".into(), "First note".into()),
         ]
         .into(),
-        inspection: None,
+        inspection: Default::default(),
         available_forms: vec![],
     };
     let submission = Submission::<PlaceOrder>::new(&request);
@@ -140,10 +141,8 @@ impl ActionType for Headless {
             id: 7,
             version: 1,
             name: "Initialize stock".into(),
-            target_reads: vec![],
-            inspect: None,
+            targets: vec![],
             inputs: vec![],
-            revision: Revision::Exact,
             steps: vec![Step {
                 operation: 8,
                 target: Target::None,
@@ -163,7 +162,7 @@ impl ActionType for Headless {
             policy: Policy {
                 any: vec![vec![Predicate::Owner]],
             },
-            bind: None,
+            bind: Default::default(),
             scope: None,
             via: None,
             filter: vec![],
@@ -194,7 +193,7 @@ fn explicit_headless_sdk_needs_no_web_trait_or_redirect() {
         kind: RequestKind::Action(7),
         target: None,
         input: Default::default(),
-        inspection: None,
+        inspection: Default::default(),
         params: Default::default(),
         available_forms: vec![],
     };
@@ -210,7 +209,9 @@ fn explicit_headless_sdk_needs_no_web_trait_or_redirect() {
 fn explicit_sdk_keeps_two_bindings_on_one_canonical_action() {
     let mut action = SetStock::definition();
     let read = <ReadProduct as noxide::QueryType>::operation();
-    action.target_reads = vec![read.id];
+    action.targets[0].source = noxide::__private::TargetSource::Page {
+        reads: vec![read.id],
+    };
     let mut other_read = read.clone();
     other_read.id = u32::MAX;
     let mut first = SetStock::web_binding();
@@ -253,4 +254,67 @@ fn explicit_sdk_keeps_two_bindings_on_one_canonical_action() {
     assert_eq!(manifest.web_bindings, vec![first, second]);
     assert_eq!(manifest.web_bindings[0].action, manifest.actions[0].id);
     assert_eq!(manifest.web_bindings[1].action, manifest.actions[0].id);
+}
+
+#[derive(Resource)]
+#[resource(key = "paired_orders")]
+pub struct PairedOrder {
+    #[id]
+    pub id: Id<Self>,
+    #[field()]
+    pub left: Id<Product>,
+    #[field()]
+    pub right: Id<Product>,
+}
+#[query(list(Product), allow = owner, page_size = 20)]
+struct ProductChoices;
+fn pair_targets() -> noxide::TargetDeclarations {
+    noxide::TargetDeclarations::new()
+        .selected::<ProductChoices, ReadProduct>("left", Revision::Identity, &["stock"], &["stock"])
+        .selected::<ProductChoices, ReadProduct>("right", Revision::Exact, &["stock"], &["stock"])
+}
+#[action(
+    inputs(), targets = pair_targets,
+    transaction(order = create(PairedOrder, set(left = left, right = right), eligible(left = ReadProduct, right = ReadProduct))),
+    allow = owner, redirect = show_order(order),
+)]
+struct PairOrder;
+#[test]
+fn named_target_helpers_lower_to_explicit_field_keyed_contract() {
+    let action = PairOrder::definition();
+    let expected: Vec<_> = [("left", Revision::Identity), ("right", Revision::Exact)]
+        .into_iter()
+        .map(|(name, revision)| noxide::__private::ActionTarget {
+            name: name.into(),
+            resource: Product::definition().id,
+            source: noxide::__private::TargetSource::Selected {
+                query: ProductChoices::operation().id,
+                eligible: ReadProduct::operation().id,
+                label: vec!["stock".into()],
+            },
+            revision,
+            projection: Some(noxide::__private::Inspection {
+                operation: ReadProduct::operation().id,
+                fields: vec!["stock".into()],
+            }),
+            inspect: None,
+        })
+        .collect();
+    assert_eq!(action.targets, expected);
+    let create = &PairOrder::operations()[0];
+    assert_eq!(
+        create.bind,
+        std::collections::BTreeMap::from([
+            ("left".into(), ReadProduct::operation().id),
+            ("right".into(), ReadProduct::operation().id)
+        ])
+    );
+    assert_eq!(
+        action.steps[0].assign[0].change,
+        Change::Set(Value::Target("left".into()))
+    );
+    assert_eq!(
+        action.steps[0].assign[1].change,
+        Change::Set(Value::Target("right".into()))
+    );
 }

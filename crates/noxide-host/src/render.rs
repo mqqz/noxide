@@ -6,10 +6,13 @@ use std::collections::BTreeMap;
 
 pub const CSP: &str = "default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
+#[derive(Clone)]
 pub struct FormCredentials {
     pub csrf: String,
     pub submission: String,
     pub values: Fields,
+    pub selections: BTreeMap<String, Vec<(String, String)>>,
+    pub selected: BTreeMap<String, String>,
 }
 
 pub struct RenderContext<'a> {
@@ -342,6 +345,19 @@ pub(crate) fn recovery(
     reason: Recovery<'_>,
 ) -> Result<Rendered> {
     let a = crate::manifest::web_action(m, action)?;
+    let mut scalar = input.clone();
+    let mut credentials = credentials.clone();
+    for target in a
+        .targets
+        .iter()
+        .filter(|target| matches!(target.source, TargetSource::Selected { .. }))
+    {
+        if let Some(value) = scalar.remove(&format!("_target_{}", target.name)) {
+            credentials.selected.insert(target.name.clone(), value);
+        }
+    }
+    let input = &scalar;
+    let credentials = &credentials;
     let empty = Fields::new();
     let (title, explanation, status, readonly, button, errors) = match &reason {
         Recovery::Committed => (
@@ -530,6 +546,8 @@ mod tests {
             &manifest,
             &crate::manifest::web_action(&manifest, 1).unwrap(),
             &FormCredentials {
+                selections: Default::default(),
+                selected: Default::default(),
                 csrf: "csrf".into(),
                 submission: "token".into(),
                 values: Fields::new(),
@@ -570,6 +588,8 @@ mod tests {
                     &manifest,
                     &action,
                     &FormCredentials {
+                        selections: Default::default(),
+                        selected: Default::default(),
                         csrf: "csrf".into(),
                         submission: "token".into(),
                         values: Fields::new()
@@ -979,4 +999,8 @@ pub(crate) fn form_already_used(
     )?;
     response.status = 409;
     Ok(response)
+}
+
+pub(crate) fn target_conflict() -> Rendered {
+    Rendered { status: 409, body: b"<!doctype html><html lang=\"en\"><title>Selection changed</title><main><h1>A selection changed</h1><p>Reload the original form and review your selections.</p><a href=\"/\">Return to the application</a></main></html>".to_vec(), location: None, anonymous_cookie: None }
 }

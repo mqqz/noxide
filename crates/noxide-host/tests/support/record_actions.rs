@@ -3,25 +3,25 @@ use noxide_protocol::{Manifest, VERSION};
 pub fn declarations() -> Manifest {
     serde_json::from_value(serde_json::json!({
         "version": VERSION,
-        "resources": [{"id":1,"name":"notes","fields":[
-            {"kind":"text","optional":false,"initial":null,"name":"body","label":"Note","max_bytes":4096},
-            {"kind":"text","optional":false,"initial":null,"name":"tag","label":"Tag","max_bytes":128}]}],
+        "resources": [
+            {"id":1,"name":"notes","fields":[{"kind":"text","optional":false,"initial":null,"name":"body","label":"Note","max_bytes":4096},{"kind":"text","optional":false,"initial":null,"name":"tag","label":"Tag","max_bytes":128}]}
+        ],
         "operations": [
             {"id":2,"resource":1,"kind":"read","policy":{"any":[["owner"]]}},
             {"id":4,"resource":1,"kind":"update","policy":{"any":[["owner",{"role":{"name":"writer","tenant_scoped":false}}]]}},
             {"id":5,"resource":1,"kind":"delete","policy":{"any":[["owner",{"role":{"name":"writer","tenant_scoped":false}}]]}}
         ],
-        "routes":[
+        "routes": [
             {"id":1,"path":"/","resource":null,"operations":[],"forms":[]},
             {"id":2,"path":"/notes/{note}","resource":1,"operations":[2],"forms":[2,3]}
         ],
-        "actions":[
-            {"id":2,"version":1,"name":"Save changes","revision":"exact","inputs":[{"name":"body","label":"Note","kind":"text","optional":false,"max_bytes":4096}],"steps":[{"operation":4,"target":"signed","assign":[{"field":"body","change":{"set":{"input":"body"}}}]}],"inspect":{"operation":2,"fields":["body"]},"target_reads":[2]},
-            {"id":3,"version":1,"name":"Delete note","revision":"exact","inputs":[],"steps":[{"operation":5,"target":"signed","assign":[]}],"target_reads":[2]}
+        "actions": [
+            {"id":2,"version":1,"name":"Save changes","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[2]}},"revision":"exact","projection":null,"inspect":{"operation":2,"fields":["body"]}}],"inputs":[{"name":"body","label":"Note","kind":"text","optional":false,"max_bytes":4096}],"steps":[{"operation":4,"target":{"named":"target"},"assign":[{"field":"body","change":{"set":{"input":"body"}}}]}]},
+            {"id":3,"version":1,"name":"Delete note","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[2]}},"revision":"exact","projection":null,"inspect":null}],"inputs":[],"steps":[{"operation":5,"target":{"named":"target"},"assign":[]}]}
         ],
-"web_bindings":[
-            {"id":2,"version":1,"action":2,"layout":[],"redirect":{"route":2,"source":"signed"}},
-            {"id":3,"version":1,"action":3,"layout":[],"redirect":{"route":1,"source":"signed"}}
+        "web_bindings": [
+            {"id":2,"version":1,"action":2,"layout":[],"redirect":{"route":2,"source":{"target":"target"}}},
+            {"id":3,"version":1,"action":3,"layout":[],"redirect":{"route":1,"source":{"target":"target"}}}
         ]
     })).unwrap()
 }

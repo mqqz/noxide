@@ -10,51 +10,43 @@ fn declarations() -> Manifest {
     let mut m: Manifest = serde_json::from_value(serde_json::json!({
         "version": VERSION,
         "resources": [
-            {"id":1,"name":"products","fields":[
-                {"kind":{"integer":{"min":0,"max":10}},"optional":false,"initial":null,"name":"stock","label":"Stock","max_bytes":20},
-                {"kind":"boolean","optional":false,"initial":null,"name":"open","label":"Open","max_bytes":5},
-                {"kind":{"integer":{"min":i64::MIN,"max":i64::MAX}},"optional":false,"initial":null,"name":"counter","label":"Counter","max_bytes":20}]},
-            {"id":2,"name":"orders","fields":[
-                {"kind":{"integer":{"min":1,"max":10}},"optional":false,"initial":null,"name":"quantity","label":"Quantity","max_bytes":20},
-                {"kind":{"reference":{"resource":"products"}},"optional":false,"initial":null,"name":"product","label":"Product","max_bytes":19}],
-                "gate":{"field":"product","visible":{"field":"open","equals":"true"},"create_when":{"field":"open","equals":"true"}}},
-            {"id":3,"name":"order_notes","fields":[
-                {"kind":"text","optional":false,"initial":null,"name":"body","label":"Note","max_bytes":200},
-                {"kind":{"reference":{"resource":"orders"}},"optional":false,"initial":null,"name":"order","label":"Order","max_bytes":19}]}
+            {"id":1,"name":"products","fields":[{"kind":{"integer":{"min":0,"max":10}},"optional":false,"initial":null,"name":"stock","label":"Stock","max_bytes":20},{"kind":"boolean","optional":false,"initial":null,"name":"open","label":"Open","max_bytes":5},{"kind":{"integer":{"min":i64::MIN,"max":i64::MAX}},"optional":false,"initial":null,"name":"counter","label":"Counter","max_bytes":20}]},
+            {"id":2,"name":"orders","fields":[{"kind":{"integer":{"min":1,"max":10}},"optional":false,"initial":null,"name":"quantity","label":"Quantity","max_bytes":20},{"kind":{"reference":{"resource":"products"}},"optional":false,"initial":null,"name":"product","label":"Product","max_bytes":19}],"gate":{"field":"product","visible":{"field":"open","equals":"true"},"create_when":{"field":"open","equals":"true"}}},
+            {"id":3,"name":"order_notes","fields":[{"kind":"text","optional":false,"initial":null,"name":"body","label":"Note","max_bytes":200},{"kind":{"reference":{"resource":"orders"}},"optional":false,"initial":null,"name":"order","label":"Order","max_bytes":19}]}
         ],
-        "operations":[
+        "operations": [
             {"id":1,"resource":1,"kind":"read","policy":{"any":[["owner"]]}},
             {"id":2,"resource":1,"kind":"update","policy":{"any":[["owner",{"role":{"name":"stock","tenant_scoped":false}}]]}},
-            {"id":3,"resource":2,"kind":"create","policy":{"any":[["owner"]]},"bind":{"field":"product","eligible":1}},
+            {"bind":{"product":1},"id":3,"resource":2,"kind":"create","policy":{"any":[["owner"]]}},
             {"id":4,"resource":2,"kind":"read","policy":{"any":[["owner"]]}},
-            {"id":5,"resource":3,"kind":"create","policy":{"any":[["owner",{"role":{"name":"notes","tenant_scoped":false}}]]},"bind":{"field":"order","eligible":4}},
+            {"bind":{"order":4},"id":5,"resource":3,"kind":"create","policy":{"any":[["owner",{"role":{"name":"notes","tenant_scoped":false}}]]}},
             {"id":6,"resource":3,"kind":"read","policy":{"any":[["owner"]]}}
         ],
-        "routes":[
+        "routes": [
             {"id":1,"path":"/","resource":null,"operations":[],"forms":[]},
             {"id":2,"path":"/products/{product}","resource":1,"operations":[1],"forms":[1,2,3,4,5,6,7,8]},
             {"id":3,"path":"/orders/{order}","resource":2,"operations":[4],"forms":[]},
             {"id":4,"path":"/order_notes/{note}","resource":3,"operations":[6],"forms":[]}
         ],
         "actions": [
-            {"id":1,"version":1,"name":"Place order","revision":"identity","inspect":null,"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20},{"name":"body","label":"Note","kind":"text","optional":false,"max_bytes":200}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"stock","change":{"decrease":{"by":"quantity","rejection":{"input":"quantity","message":"Not enough stock"}}}}]},{"operation":3,"target":"none","assign":[{"field":"quantity","change":{"set":{"input":"quantity"}}},{"field":"product","change":{"set":"signed_target"}}]},{"operation":5,"target":"none","assign":[{"field":"body","change":{"set":{"input":"body"}}},{"field":"order","change":{"set":{"created":1}}}]}],"target_reads":[1]},
-            {"id":2,"version":1,"name":"Edit stock","revision":"exact","inspect":{"operation":1,"fields":["stock"]},"inputs":[{"name":"stock","label":"Stock","kind":{"integer":{"min":0,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"stock","change":{"set":{"input":"stock"}}}]}],"target_reads":[1]},
-            {"id":3,"version":1,"name":"Two signed steps","revision":"identity","inspect":null,"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"stock","change":{"increase":{"by":"quantity","rejection":{"input":"quantity","message":"Stock limit"}}}}]},{"operation":2,"target":"signed","assign":[{"field":"stock","change":{"decrease":{"by":"quantity","rejection":{"input":"quantity","message":"Not enough stock"}}}}]}],"target_reads":[1]},
-            {"id":4,"version":1,"name":"Open then order","revision":"exact","inspect":null,"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"open","change":{"set":{"constant":"true"}}}]},{"operation":3,"target":"none","assign":[{"field":"quantity","change":{"set":{"input":"quantity"}}},{"field":"product","change":{"set":"signed_target"}}]}],"target_reads":[1]},
-            {"id":5,"version":1,"name":"Close then order","revision":"exact","inspect":null,"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"open","change":{"set":{"constant":"false"}}}]},{"operation":3,"target":"none","assign":[{"field":"quantity","change":{"set":{"input":"quantity"}}},{"field":"product","change":{"set":"signed_target"}}]}],"target_reads":[1]},
-            {"id":6,"version":1,"name":"Increase counter","revision":"identity","inspect":null,"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"counter","change":{"increase":{"by":"quantity","rejection":{"input":"quantity","message":"Counter upper bound"}}}}]}],"target_reads":[1]},
-            {"id":7,"version":1,"name":"Decrease counter","revision":"identity","inspect":null,"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"counter","change":{"decrease":{"by":"quantity","rejection":{"input":"quantity","message":"Counter lower bound"}}}}]}],"target_reads":[1]},
-            {"id":8,"version":1,"name":"Increase stock","revision":"identity","inspect":null,"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":"signed","assign":[{"field":"stock","change":{"increase":{"by":"quantity","rejection":{"input":"quantity","message":"Stock upper bound"}}}}]}],"target_reads":[1]}
+            {"id":1,"version":1,"name":"Place order","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[1]}},"revision":"identity","projection":null,"inspect":null}],"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20},{"name":"body","label":"Note","kind":"text","optional":false,"max_bytes":200}],"steps":[{"operation":2,"target":{"named":"target"},"assign":[{"field":"stock","change":{"decrease":{"by":"quantity","rejection":{"input":"quantity","message":"Not enough stock"}}}}]},{"operation":3,"target":"none","assign":[{"field":"quantity","change":{"set":{"input":"quantity"}}},{"field":"product","change":{"set":{"target":"target"}}}]},{"operation":5,"target":"none","assign":[{"field":"body","change":{"set":{"input":"body"}}},{"field":"order","change":{"set":{"created":1}}}]}]},
+            {"id":2,"version":1,"name":"Edit stock","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[1]}},"revision":"exact","projection":null,"inspect":{"operation":1,"fields":["stock"]}}],"inputs":[{"name":"stock","label":"Stock","kind":{"integer":{"min":0,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":{"named":"target"},"assign":[{"field":"stock","change":{"set":{"input":"stock"}}}]}]},
+            {"id":3,"version":1,"name":"Two signed steps","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[1]}},"revision":"identity","projection":null,"inspect":null}],"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":{"named":"target"},"assign":[{"field":"stock","change":{"increase":{"by":"quantity","rejection":{"input":"quantity","message":"Stock limit"}}}}]},{"operation":2,"target":{"named":"target"},"assign":[{"field":"stock","change":{"decrease":{"by":"quantity","rejection":{"input":"quantity","message":"Not enough stock"}}}}]}]},
+            {"id":4,"version":1,"name":"Open then order","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[1]}},"revision":"exact","projection":null,"inspect":null}],"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":{"named":"target"},"assign":[{"field":"open","change":{"set":{"constant":"true"}}}]},{"operation":3,"target":"none","assign":[{"field":"quantity","change":{"set":{"input":"quantity"}}},{"field":"product","change":{"set":{"target":"target"}}}]}]},
+            {"id":5,"version":1,"name":"Close then order","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[1]}},"revision":"exact","projection":null,"inspect":null}],"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":{"named":"target"},"assign":[{"field":"open","change":{"set":{"constant":"false"}}}]},{"operation":3,"target":"none","assign":[{"field":"quantity","change":{"set":{"input":"quantity"}}},{"field":"product","change":{"set":{"target":"target"}}}]}]},
+            {"id":6,"version":1,"name":"Increase counter","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[1]}},"revision":"identity","projection":null,"inspect":null}],"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":{"named":"target"},"assign":[{"field":"counter","change":{"increase":{"by":"quantity","rejection":{"input":"quantity","message":"Counter upper bound"}}}}]}]},
+            {"id":7,"version":1,"name":"Decrease counter","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[1]}},"revision":"identity","projection":null,"inspect":null}],"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":{"named":"target"},"assign":[{"field":"counter","change":{"decrease":{"by":"quantity","rejection":{"input":"quantity","message":"Counter lower bound"}}}}]}]},
+            {"id":8,"version":1,"name":"Increase stock","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[1]}},"revision":"identity","projection":null,"inspect":null}],"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"operation":2,"target":{"named":"target"},"assign":[{"field":"stock","change":{"increase":{"by":"quantity","rejection":{"input":"quantity","message":"Stock upper bound"}}}}]}]}
         ],
-"web_bindings":[
+        "web_bindings": [
             {"id":1,"version":1,"action":1,"layout":[],"redirect":{"route":3,"source":{"step":1}}},
-            {"id":2,"version":1,"action":2,"layout":[],"redirect":{"route":2,"source":"signed"}},
-            {"id":3,"version":1,"action":3,"layout":[],"redirect":{"route":2,"source":"signed"}},
+            {"id":2,"version":1,"action":2,"layout":[],"redirect":{"route":2,"source":{"target":"target"}}},
+            {"id":3,"version":1,"action":3,"layout":[],"redirect":{"route":2,"source":{"target":"target"}}},
             {"id":4,"version":1,"action":4,"layout":[],"redirect":{"route":3,"source":{"step":1}}},
             {"id":5,"version":1,"action":5,"layout":[],"redirect":{"route":3,"source":{"step":1}}},
-            {"id":6,"version":1,"action":6,"layout":[],"redirect":{"route":2,"source":"signed"}},
-            {"id":7,"version":1,"action":7,"layout":[],"redirect":{"route":2,"source":"signed"}},
-            {"id":8,"version":1,"action":8,"layout":[],"redirect":{"route":2,"source":"signed"}}
+            {"id":6,"version":1,"action":6,"layout":[],"redirect":{"route":2,"source":{"target":"target"}}},
+            {"id":7,"version":1,"action":7,"layout":[],"redirect":{"route":2,"source":{"target":"target"}}},
+            {"id":8,"version":1,"action":8,"layout":[],"redirect":{"route":2,"source":{"target":"target"}}}
         ]
     })).unwrap();
     for (id, count) in [(9, 2), (10, 3)] {
@@ -799,9 +791,10 @@ async fn contract_changes_invalidate_tokens(mut case: Case) {
                 };
                 rejection.message = "Inventory unavailable".into();
             }
-            5 => changed.actions[0].revision = Revision::Exact,
+            5 => changed.actions[0].targets[0].revision = Revision::Exact,
             6 => {
-                changed.actions[0].inspect = Some(Inspection {
+                changed.actions[0].targets[0].revision = Revision::Exact;
+                changed.actions[0].targets[0].inspect = Some(Inspection {
                     operation: 1,
                     fields: vec!["stock".into()],
                 })
@@ -809,7 +802,7 @@ async fn contract_changes_invalidate_tokens(mut case: Case) {
             7 => {
                 changed.web_bindings[0].redirect = Redirect {
                     route: 2,
-                    source: RedirectSource::Signed,
+                    source: RedirectSource::Target("target".into()),
                 }
             }
             _ => unreachable!(),

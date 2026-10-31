@@ -67,11 +67,20 @@ impl ApplicationDefinition {
     pub fn manifest(mut self) -> Manifest {
         // Existing single-action declarations infer eligible reads from their
         // declared page bindings. The emitted execution contract is explicit.
-        let infer_reads: BTreeSet<u32> = self
+        let infer_reads: BTreeSet<(u32, String)> = self
             .actions
             .values()
-            .filter(|action| action.target_reads.is_empty())
-            .map(|action| action.id)
+            .flat_map(|action| {
+                action
+                    .targets
+                    .iter()
+                    .filter_map(move |target| match &target.source {
+                        noxide_protocol::TargetSource::Page { reads } if reads.is_empty() => {
+                            Some((action.id, target.name.clone()))
+                        }
+                        _ => None,
+                    })
+            })
             .collect();
         for route in self.routes.values() {
             for id in &route.forms {
@@ -80,20 +89,28 @@ impl ApplicationDefinition {
                     .actions
                     .get_mut(&binding.action)
                     .expect("unknown action");
-                if !infer_reads.contains(&action.id) {
-                    continue;
-                }
-                for id in &route.operations {
-                    let operation = &self.operations[id];
-                    if operation.kind == noxide_protocol::OperationKind::Read
-                        && operation.via.is_none()
-                    {
-                        action.target_reads.push(*id);
+                for target in &mut action.targets {
+                    if !infer_reads.contains(&(action.id, target.name.clone())) {
+                        continue;
+                    }
+                    if let noxide_protocol::TargetSource::Page { reads } = &mut target.source {
+                        for id in &route.operations {
+                            let operation = &self.operations[id];
+                            if operation.kind == noxide_protocol::OperationKind::Read
+                                && operation.via.is_none()
+                                && operation.resource == target.resource
+                            {
+                                reads.push(*id);
+                            }
+                        }
+                        reads.sort_unstable();
+                        reads.dedup();
                     }
                 }
-                action.target_reads.sort_unstable();
-                action.target_reads.dedup();
             }
+        }
+        for action in self.actions.values_mut() {
+            action.targets.sort_by(|a, b| a.name.cmp(&b.name));
         }
         Manifest {
             version: VERSION,

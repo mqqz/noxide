@@ -5,8 +5,9 @@ use std::collections::BTreeSet;
 
 pub fn parse(bytes: &[u8]) -> Result<Manifest> {
     ensure!(bytes.len() <= MAX_MANIFEST_BYTES, "manifest limit");
-    let manifest: Manifest = serde_json::from_slice(bytes)?;
+    let mut manifest: Manifest = serde_json::from_slice(bytes)?;
     validate(&manifest)?;
+    canonical_targets(&mut manifest);
     Ok(manifest)
 }
 
@@ -18,10 +19,19 @@ pub fn digest(manifest: &Manifest) -> Result<[u8; 32]> {
     canonical.routes.sort_by_key(|route| route.id);
     canonical.actions.sort_by_key(|action| action.id);
     canonical.web_bindings.sort_by_key(|binding| binding.id);
-    for action in &mut canonical.actions {
-        action.target_reads.sort_unstable();
-    }
+    canonical_targets(&mut canonical);
     Ok(Sha256::digest(serde_json::to_vec(&canonical)?).into())
+}
+
+fn canonical_targets(manifest: &mut Manifest) {
+    for action in &mut manifest.actions {
+        action.targets.sort_by(|a, b| a.name.cmp(&b.name));
+        for target in &mut action.targets {
+            if let TargetSource::Page { reads } = &mut target.source {
+                reads.sort_unstable();
+            }
+        }
+    }
 }
 
 fn validate_selection(m: &Manifest, op: &Operation) -> Result<()> {
@@ -230,8 +240,8 @@ pub fn validate(m: &Manifest) -> Result<()> {
                 .iter()
                 .filter(|f| matches!(f.kind, FieldKind::Reference { .. }))
                 .count()
-                <= 1,
-            "one reference per resource"
+                <= 4,
+            "reference field limit"
         );
         ensure!(
             r.fields
@@ -304,10 +314,10 @@ pub fn validate(m: &Manifest) -> Result<()> {
     }
     for r in &m.resources {
         if let Some(gate) = &r.gate {
-            let field =
-                reference_field(r).ok_or_else(|| anyhow::anyhow!("gate requires reference"))?;
+            let field = reference_field(r, &gate.field)
+                .ok_or_else(|| anyhow::anyhow!("gate requires reference"))?;
             ensure!(gate.field == field.name, "gate must name reference");
-            let target = reference_resource(m, r.id)?.expect("reference target");
+            let target = reference_resource(m, r.id, &gate.field)?.expect("reference target");
             ensure!(target.gate.is_none(), "gate target cannot have a gate");
             for predicate in [&gate.visible, &gate.create_when] {
                 let field = target
@@ -341,7 +351,7 @@ pub fn validate(m: &Manifest) -> Result<()> {
         let r = resource(m, op.resource)?;
         if let Some(scope) = &op.scope {
             ensure!(
-                reference_field(r).is_some_and(|f| &f.name == scope),
+                reference_field(r, scope).is_some(),
                 "scope requires reference field"
             );
         }
@@ -362,8 +372,8 @@ pub fn validate(m: &Manifest) -> Result<()> {
             );
             let source_resource = resource(m, source.resource)?;
             ensure!(
-                reference_field(source_resource).is_some_and(|f| f.name == via.field)
-                    && reference_resource(m, source.resource)?
+                reference_field(source_resource, &via.field).is_some()
+                    && reference_resource(m, source.resource, &via.field)?
                         .is_some_and(|target| target.id == op.resource),
                 "invalid follow reference"
             );
@@ -375,24 +385,25 @@ pub fn validate(m: &Manifest) -> Result<()> {
                 "follow source projection hides reference"
             );
         }
-        if let Some(bind) = &op.bind {
+        ensure!(
+            op.bind.is_empty() || op.kind == OperationKind::Create,
+            "binding eligibility requires create"
+        );
+        if op.kind == OperationKind::Create {
             ensure!(
-                op.kind == OperationKind::Create
-                    && reference_field(r).is_some_and(|field| field.name == bind.field),
-                "bind requires reference create"
+                op.bind.len() == reference_fields(r).count(),
+                "every reference requires eligibility"
             );
-            let eligible = operation(m, bind.eligible)?;
+        }
+        for (field, id) in &op.bind {
+            let target = reference_resource(m, op.resource, field)?
+                .ok_or_else(|| anyhow::anyhow!("binding requires reference field"))?;
+            let eligible = operation(m, *id)?;
             ensure!(
                 eligible.kind == OperationKind::Read
                     && eligible.via.is_none()
-                    && reference_resource(m, op.resource)?
-                        .is_some_and(|target| target.id == eligible.resource),
+                    && eligible.resource == target.id,
                 "invalid binding eligibility"
-            );
-        } else {
-            ensure!(
-                op.kind != OperationKind::Create || reference_field(r).is_none(),
-                "reference create requires bind"
             );
         }
         validate_selection(m, op)?;
@@ -589,7 +600,8 @@ pub fn validate(m: &Manifest) -> Result<()> {
                 );
             } else if op.kind == OperationKind::List {
                 let target = if op.scope.is_some() {
-                    reference_resource(m, op.resource)?.map(|p| p.id)
+                    reference_resource(m, op.resource, op.scope.as_deref().expect("scoped list"))?
+                        .map(|p| p.id)
                 } else {
                     None
                 };
@@ -616,28 +628,31 @@ pub fn validate(m: &Manifest) -> Result<()> {
         }
         for id in &r.forms {
             let a = web_action(m, *id)?;
+            for step in &a.steps {
+                let op = operation(m, step.operation)?;
+                for assignment in &step.assign {
+                    if let Change::Set(Value::Target(name)) = &assignment.change
+                        && matches!(
+                            action_target(&a.targets, name)?.source,
+                            TargetSource::Page { .. }
+                        )
+                    {
+                        let eligible = op.bind.get(&assignment.field).ok_or_else(|| {
+                            anyhow::anyhow!("reference create requires field eligibility")
+                        })?;
+                        ensure!(
+                            r.operations.contains(eligible),
+                            "page reference eligibility must be on form route"
+                        );
+                    }
+                }
+            }
+
             if let Some(target) = signed_resource(m, &a)? {
                 ensure!(
                     r.resource == Some(target),
                     "mutation form requires its signed target route"
                 );
-            }
-            for step in &a.steps {
-                let op = operation(m, step.operation)?;
-                if step
-                    .assign
-                    .iter()
-                    .any(|assignment| matches!(assignment.change, Change::Set(Value::SignedTarget)))
-                {
-                    let bind = op
-                        .bind
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("reference create requires bind"))?;
-                    ensure!(
-                        r.operations.contains(&bind.eligible),
-                        "binding eligibility must be on form route"
-                    );
-                }
             }
         }
     }
@@ -657,43 +672,57 @@ pub fn validate(m: &Manifest) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn signed_resource(m: &Manifest, action: &Action) -> Result<Option<u32>> {
-    signed_resource_parts(m, &action.steps, action.inspect.as_ref())
+pub(crate) fn signed_resource(_m: &Manifest, action: &Action) -> Result<Option<u32>> {
+    page_resource(&action.targets)
 }
-
-pub(crate) fn signed_resource_parts(
-    m: &Manifest,
-    steps: &[Step],
-    inspect: Option<&Inspection>,
-) -> Result<Option<u32>> {
-    let mut signed = None;
-    let mut include = |resource| -> Result<()> {
+pub(crate) fn page_resource(targets: &[ActionTarget]) -> Result<Option<u32>> {
+    let mut resource = None;
+    for target in targets
+        .iter()
+        .filter(|target| matches!(target.source, TargetSource::Page { .. }))
+    {
         ensure!(
-            signed.is_none_or(|previous| previous == resource),
-            "inconsistent signed target resource"
+            resource.is_none_or(|resource| resource == target.resource),
+            "page target resource mismatch"
         );
-        signed = Some(resource);
-        Ok(())
-    };
-    for step in steps {
-        let op = operation(m, step.operation)?;
-        if step.target == Target::Signed {
-            include(op.resource)?;
-        }
-        for assignment in &step.assign {
-            if assignment.change == Change::Set(Value::SignedTarget) {
-                let target = reference_resource(m, op.resource)?
-                    .ok_or_else(|| anyhow::anyhow!("signed target requires reference"))?;
-                include(target.id)?;
-            }
-        }
+        resource = Some(target.resource);
     }
-    if let Some(inspect) = inspect {
-        include(operation(m, inspect.operation)?.resource)?;
-    }
-    Ok(signed)
+    Ok(resource)
 }
-
+pub(crate) fn action_target<'a>(
+    targets: &'a [ActionTarget],
+    name: &str,
+) -> Result<&'a ActionTarget> {
+    targets
+        .iter()
+        .find(|target| target.name == name)
+        .ok_or_else(|| anyhow::anyhow!("unknown named target"))
+}
+fn target_projection(
+    m: &Manifest,
+    target: &ActionTarget,
+    projection: &Inspection,
+    guest: bool,
+) -> Result<()> {
+    let read = operation(m, projection.operation)?;
+    ensure!(
+        read.kind == OperationKind::Read && read.via.is_none() && read.resource == target.resource,
+        "invalid target projection operation"
+    );
+    ensure!(
+        !guest || !is_public(read),
+        "inspection cannot use a public operation"
+    );
+    ensure!(!guest || !projection.fields.is_empty(), "empty inspection");
+    projected_fields(resource(m, read.resource)?, &projection.fields)?;
+    ensure!(
+        read.fields
+            .as_ref()
+            .is_none_or(|fields| projection.fields.iter().all(|field| fields.contains(field))),
+        "target projection exceeds approved read"
+    );
+    Ok(())
+}
 fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
     ensure!(
         a.version > 0
@@ -703,12 +732,126 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
         "invalid action"
     );
     ensure!((1..=4).contains(&a.steps.len()), "transaction step limit");
+    ensure!(a.targets.len() <= 4, "existing target limit");
     ensure!(a.inputs.len() <= 32, "action input count limit");
-    let signed = signed_resource(m, a)?;
+    let mut target_names = BTreeSet::new();
+    ensure!(
+        a.targets
+            .iter()
+            .all(|target| target_names.insert(&target.name)),
+        "duplicate target name"
+    );
+    page_resource(&a.targets)?;
+    for target in &a.targets {
+        ensure!(identifier(&target.name), "invalid target name");
+        resource(m, target.resource)?;
+        let eligible = match &target.source {
+            TargetSource::Page { reads } => {
+                unique(reads.iter().copied())?;
+                ensure!(reads.len() <= 8, "target read limit");
+                for id in reads {
+                    let read = operation(m, *id)?;
+                    ensure!(
+                        read.kind == OperationKind::Read
+                            && read.via.is_none()
+                            && read.resource == target.resource,
+                        "invalid page target read"
+                    );
+                }
+                let edit = a.steps.iter().any(|step| {
+                    matches!(&step.target, Target::Named(name) if name == &target.name)
+                        && operation(m, step.operation).is_ok_and(is_capability)
+                });
+                ensure!(
+                    !reads.is_empty() || edit,
+                    "page target requires eligible reads"
+                );
+                None
+            }
+            TargetSource::Selected {
+                query,
+                eligible,
+                label,
+            } => {
+                projected_fields(resource(m, target.resource)?, label)?;
+                ensure!(
+                    target.projection.as_ref().is_some_and(|projection| label
+                        .iter()
+                        .all(|field| projection.fields.contains(field))),
+                    "picker labels exceed approved target projection"
+                );
+                let query = operation(m, *query)?;
+                ensure!(
+                    query.kind == OperationKind::List
+                        && query.via.is_none()
+                        && query.scope.is_none()
+                        && query.resource == target.resource
+                        && query
+                            .filter
+                            .iter()
+                            .all(|filter| matches!(filter.equals, Operand::Literal(_))),
+                    "invalid selection query"
+                );
+                Some(*eligible)
+            }
+            TargetSource::Reference {
+                target: source,
+                field,
+                eligible,
+            } => {
+                let source = action_target(&a.targets, source)?;
+                ensure!(
+                    !matches!(source.source, TargetSource::Reference { .. }),
+                    "derived target depth limit"
+                );
+                ensure!(
+                    reference_resource(m, source.resource, field)?
+                        .is_some_and(|resource| resource.id == target.resource),
+                    "derived target reference mismatch"
+                );
+                ensure!(
+                    source
+                        .projection
+                        .as_ref()
+                        .is_some_and(|projection| projection.fields.contains(field)),
+                    "derived target requires an approved source projection"
+                );
+                Some(*eligible)
+            }
+        };
+        if let Some(eligible) = eligible {
+            let read = operation(m, eligible)?;
+            ensure!(
+                read.kind == OperationKind::Read
+                    && read.via.is_none()
+                    && read.resource == target.resource,
+                "invalid target eligibility"
+            );
+            ensure!(
+                target
+                    .projection
+                    .as_ref()
+                    .is_some_and(|projection| projection.operation == eligible),
+                "selected and derived targets require explicit eligible-read projections"
+            );
+        }
+        if let Some(projection) = &target.projection {
+            target_projection(m, target, projection, false)?;
+        }
+        if let Some(inspect) = &target.inspect {
+            target_projection(m, target, inspect, true)?;
+            ensure!(
+                target.revision == Revision::Exact,
+                "inspection requires exact review"
+            );
+        }
+    }
     let mut names = BTreeSet::new();
     for input in &a.inputs {
         ensure!(
-            identifier(&input.name) && names.insert(input.name.as_str()),
+            identifier(&input.name)
+                && !input.name.starts_with("_target_")
+                && names.insert(input.name.as_str()),
             "invalid or duplicate input"
         );
         validate_input_schema(input)?;
@@ -723,7 +866,7 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
     );
     let mut used = BTreeSet::new();
     let mut creates = 0;
-    let mut exact = false;
+    let mut exact = BTreeSet::new();
     for (index, step) in a.steps.iter().enumerate() {
         let op = operation(m, step.operation)?;
         let resource = resource(m, op.resource)?;
@@ -740,20 +883,23 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
                 ensure!(step.target == Target::None, "create has no target");
                 ensure!(!step.assign.is_empty(), "create requires writable fields");
             }
-            OperationKind::Update => {
+            OperationKind::Update | OperationKind::Delete => {
+                let Target::Named(name) = &step.target else {
+                    anyhow::bail!("mutation requires named target")
+                };
                 ensure!(
-                    step.target == Target::Signed,
-                    "update requires signed target"
+                    action_target(&a.targets, name)?.resource == op.resource,
+                    "mutation target resource mismatch"
                 );
-                ensure!(!step.assign.is_empty(), "update requires writable fields");
-            }
-            OperationKind::Delete => {
-                ensure!(a.steps.len() == 1, "delete must be the only step");
-                ensure!(
-                    step.target == Target::Signed && step.assign.is_empty(),
-                    "delete requires signed target and no assignments"
-                );
-                exact = true;
+                if op.kind == OperationKind::Delete {
+                    ensure!(
+                        a.steps.len() == 1 && step.assign.is_empty(),
+                        "delete must be the only step without assignments"
+                    );
+                    exact.insert(name.as_str());
+                } else {
+                    ensure!(!step.assign.is_empty(), "update requires writable fields");
+                }
             }
             _ => anyhow::bail!("action must declare a mutation"),
         }
@@ -788,7 +934,9 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
             );
             match &assignment.change {
                 Change::Set(value) => {
-                    exact |= op.kind == OperationKind::Update;
+                    if let Target::Named(name) = &step.target {
+                        exact.insert(name.as_str());
+                    }
                     match value {
                         Value::Input(name) => {
                             let input = a
@@ -809,17 +957,12 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
                             );
                             validate_value(field, value)?;
                         }
-                        Value::SignedTarget => {
+                        Value::Target(name) => {
+                            let target = action_target(&a.targets, name)?;
                             ensure!(
-                                reference_field(resource)
-                                    .is_some_and(|reference| reference.name == field.name),
-                                "signed target requires reference field"
-                            );
-                            ensure!(
-                                reference_resource(m, resource.id)?.map(|target| target.id)
-                                    == signed
-                                    && signed.is_some(),
-                                "wrong signed reference type"
+                                reference_resource(m, resource.id, &field.name)?
+                                    .is_some_and(|resource| resource.id == target.resource),
+                                "wrong named reference type"
                             );
                         }
                         Value::Created(created) => {
@@ -834,10 +977,8 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
                                 "created reference requires create step"
                             );
                             ensure!(
-                                reference_field(resource)
-                                    .is_some_and(|reference| reference.name == field.name)
-                                    && reference_resource(m, resource.id)?
-                                        .is_some_and(|target| target.id == source.resource),
+                                reference_resource(m, resource.id, &field.name)?
+                                    .is_some_and(|resource| resource.id == source.resource),
                                 "wrong created reference type"
                             );
                         }
@@ -845,15 +986,15 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
                 }
                 Change::Decrease { by, rejection } | Change::Increase { by, rejection } => {
                     ensure!(
-                        op.kind == OperationKind::Update && step.target == Target::Signed,
-                        "adjustments require signed update steps"
+                        op.kind == OperationKind::Update && matches!(step.target, Target::Named(_)),
+                        "adjustments require named update steps"
                     );
                     let FieldKind::Integer {
                         min: Some(min),
                         max: Some(max),
                     } = field.kind
                     else {
-                        anyhow::bail!("adjustment requires bounded integer field");
+                        anyhow::bail!("adjustment requires bounded integer field")
                     };
                     let input = a
                         .inputs
@@ -865,7 +1006,7 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
                         max: Some(amount_max),
                     } = input.kind
                     else {
-                        anyhow::bail!("adjustment requires bounded integer input");
+                        anyhow::bail!("adjustment requires bounded integer input")
                     };
                     ensure!(
                         !input.optional
@@ -891,57 +1032,29 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
             }
         }
         if op.kind == OperationKind::Create {
-            let writable = resource
-                .fields
-                .iter()
-                .filter(|field| field.initial.is_none())
-                .count();
             ensure!(
-                step.assign.len() == writable,
+                step.assign.len()
+                    == resource
+                        .fields
+                        .iter()
+                        .filter(|field| field.initial.is_none())
+                        .count(),
                 "creation requires every writable field"
             );
         }
     }
-    ensure!(
-        !exact || a.revision == Revision::Exact,
-        "identity revision is weaker than required exact revision"
-    );
+    for name in exact {
+        ensure!(
+            action_target(&a.targets, name)?.revision == Revision::Exact,
+            "identity revision is weaker than required exact revision"
+        );
+    }
     ensure!(used == names, "unused action input");
-    if let Some(inspect) = &a.inspect {
-        let read = operation(m, inspect.operation)?;
-        ensure!(!is_public(read), "inspection cannot use a public operation");
-        ensure!(
-            read.kind == OperationKind::Read && read.via.is_none() && Some(read.resource) == signed,
-            "invalid inspection operation"
-        );
-        ensure!(!inspect.fields.is_empty(), "empty inspection");
-        projected_fields(resource(m, read.resource)?, &inspect.fields)?;
-    }
-    unique(a.target_reads.iter().copied())?;
-    ensure!(a.target_reads.len() <= 8, "target read limit");
-    for id in &a.target_reads {
-        let read = operation(m, *id)?;
-        ensure!(
-            read.kind == OperationKind::Read
-                && read.via.is_none()
-                && signed.is_none_or(|resource| resource == read.resource),
-            "invalid target read operation"
-        );
-    }
-    ensure!(
-        signed.is_none()
-            || !a.target_reads.is_empty()
-            || a.steps
-                .iter()
-                .all(|step| operation(m, step.operation).is_ok_and(is_capability)),
-        "target requires eligible reads"
-    );
     Ok(())
 }
 
 fn validate_web_binding(m: &Manifest, a: &WebAction<'_>) -> Result<()> {
     ensure!(a.version > 0, "invalid web binding version");
-    let signed = signed_resource(m, a)?;
     validate_layout(m, a)?;
     let destination = route(m, a.redirect.route())?;
     ensure!(
@@ -950,10 +1063,9 @@ fn validate_web_binding(m: &Manifest, a: &WebAction<'_>) -> Result<()> {
     );
     if a.steps.len() == 1
         && operation(m, a.steps[0].operation)?.kind == OperationKind::Delete
-        && matches!(
-            a.redirect.source,
-            RedirectSource::Signed | RedirectSource::Step(0)
-        )
+        && (matches!(a.redirect.source, RedirectSource::Step(0))
+            || matches!((&a.redirect.source, &a.steps[0].target),
+                (RedirectSource::Target(destination), Target::Named(deleted)) if destination == deleted))
     {
         ensure!(
             destination.resource.is_none(),
@@ -962,9 +1074,7 @@ fn validate_web_binding(m: &Manifest, a: &WebAction<'_>) -> Result<()> {
         return Ok(());
     }
     let destination_resource = match &a.redirect.source {
-        RedirectSource::Signed => {
-            signed.ok_or_else(|| anyhow::anyhow!("redirect requires signed target"))?
-        }
+        RedirectSource::Target(name) => action_target(&a.targets, name)?.resource,
         RedirectSource::Step(index) | RedirectSource::Reference { step: index, .. } => {
             let step = a
                 .steps
@@ -973,8 +1083,7 @@ fn validate_web_binding(m: &Manifest, a: &WebAction<'_>) -> Result<()> {
             let op = operation(m, step.operation)?;
             if let RedirectSource::Reference { field, .. } = &a.redirect.source {
                 ensure!(
-                    reference_field(resource(m, op.resource)?)
-                        .is_some_and(|reference| reference.name == *field),
+                    reference_field(resource(m, op.resource)?, field).is_some(),
                     "redirect requires reference field"
                 );
                 ensure!(
@@ -989,7 +1098,7 @@ fn validate_web_binding(m: &Manifest, a: &WebAction<'_>) -> Result<()> {
                         == 1,
                     "parent destination requires one unambiguous resource read"
                 );
-                reference_resource(m, op.resource)?
+                reference_resource(m, op.resource, field)?
                     .expect("validated reference")
                     .id
             } else if op.kind == OperationKind::Delete {
@@ -1083,22 +1192,29 @@ fn input_fits(input: &Input, field: &TextField) -> bool {
     }
 }
 
-pub(crate) fn reference_field(resource: &Resource) -> Option<&TextField> {
+pub(crate) fn reference_fields(resource: &Resource) -> impl Iterator<Item = &TextField> {
     resource
         .fields
         .iter()
-        .find(|f| matches!(f.kind, FieldKind::Reference { .. }))
+        .filter(|field| matches!(field.kind, FieldKind::Reference { .. }))
 }
-pub(crate) fn reference_resource(m: &Manifest, child: u32) -> Result<Option<&Resource>> {
-    match reference_field(resource(m, child)?) {
+pub(crate) fn reference_field<'a>(resource: &'a Resource, name: &str) -> Option<&'a TextField> {
+    reference_fields(resource).find(|field| field.name == name)
+}
+pub(crate) fn reference_resource<'a>(
+    m: &'a Manifest,
+    child: u32,
+    name: &str,
+) -> Result<Option<&'a Resource>> {
+    match reference_field(resource(m, child)?, name) {
         Some(TextField {
-            kind: FieldKind::Reference { resource: key, .. },
+            kind: FieldKind::Reference { resource: key },
             ..
         }) => Ok(Some(
             m.resources
                 .iter()
-                .find(|r| &r.name == key)
-                .ok_or_else(|| anyhow::anyhow!("unknown parent"))?,
+                .find(|resource| &resource.name == key)
+                .ok_or_else(|| anyhow::anyhow!("unknown reference resource"))?,
         )),
         _ => Ok(None),
     }
@@ -1891,20 +2007,14 @@ mod transaction_tests {
         order_create.id = 4;
         order_create.resource = 2;
         order_create.kind = OperationKind::Create;
-        order_create.bind = Some(Bind {
-            field: "product".into(),
-            eligible: 2,
-        });
+        order_create.bind = ::std::collections::BTreeMap::from([("product".into(), 2)]);
         let mut order_read = m.operations[1].clone();
         order_read.id = 5;
         order_read.resource = 2;
         let mut note_create = order_create.clone();
         note_create.id = 6;
         note_create.resource = 3;
-        note_create.bind = Some(Bind {
-            field: "order".into(),
-            eligible: 5,
-        });
+        note_create.bind = ::std::collections::BTreeMap::from([("order".into(), 5)]);
         let mut note_read = order_read.clone();
         note_read.id = 7;
         note_read.resource = 3;
@@ -1924,6 +2034,11 @@ mod transaction_tests {
         note_route.resource = Some(3);
         note_route.operations = vec![7];
         m.routes.extend([order_route, note_route]);
+        m.actions[0].targets = vec![crate::test_support::page_target(
+            1,
+            vec![2],
+            Revision::Identity,
+        )];
         let a = &mut m.actions[0];
         a.inputs = vec![
             Input {
@@ -1944,7 +2059,7 @@ mod transaction_tests {
                 max_bytes: 200,
             },
         ];
-        a.revision = Revision::Identity;
+        a.targets[0].revision = Revision::Identity;
         m.web_bindings[0].redirect = Redirect {
             route: 3,
             source: RedirectSource::Step(1),
@@ -1952,7 +2067,7 @@ mod transaction_tests {
         a.steps = vec![
             Step {
                 operation: 3,
-                target: Target::Signed,
+                target: Target::Named("target".into()),
                 assign: vec![Assignment {
                     field: "stock".into(),
                     change: Change::Decrease {
@@ -1969,7 +2084,7 @@ mod transaction_tests {
                 target: Target::None,
                 assign: vec![
                     set("quantity", Value::Input("quantity".into())),
-                    set("product", Value::SignedTarget),
+                    set("product", Value::Target("target".into())),
                 ],
             },
             Step {
@@ -2008,13 +2123,18 @@ mod transaction_tests {
                 .contains("initial value")
         );
         initialized.operations[2].kind = OperationKind::Update;
-        initialized.actions[0].steps[0].target = Target::Signed;
+        initialized.actions[0].steps[0].target = Target::Named("target".into());
+        initialized.actions[0].targets = vec![crate::test_support::page_target(
+            1,
+            vec![2],
+            Revision::Exact,
+        )];
         initialized.actions[0].steps[0]
             .assign
             .push(set("published", Value::Constant("true".into())));
         initialized.routes[0].forms.clear();
         initialized.routes[1].forms = vec![1];
-        initialized.web_bindings[0].redirect.source = RedirectSource::Signed;
+        initialized.web_bindings[0].redirect.source = RedirectSource::Target("target".into());
         validate(&initialized).unwrap();
 
         let mut account = crate::test_support::manifest();
@@ -2038,10 +2158,15 @@ mod transaction_tests {
             .push(set("recipient", Value::Input("recipient".into())));
         validate(&account).unwrap();
         account.operations[2].kind = OperationKind::Update;
-        account.actions[0].steps[0].target = Target::Signed;
+        account.actions[0].steps[0].target = Target::Named("target".into());
+        account.actions[0].targets = vec![crate::test_support::page_target(
+            1,
+            vec![2],
+            Revision::Exact,
+        )];
         account.routes[0].forms.clear();
         account.routes[1].forms = vec![1];
-        account.web_bindings[0].redirect.source = RedirectSource::Signed;
+        account.web_bindings[0].redirect.source = RedirectSource::Target("target".into());
         assert!(
             validate(&account)
                 .unwrap_err()
@@ -2070,14 +2195,14 @@ mod transaction_tests {
         let mut bad = m.clone();
         bad.operations[2].kind = OperationKind::Delete;
         bad.actions[0].steps[0].assign.clear();
-        bad.actions[0].revision = Revision::Exact;
+        bad.actions[0].targets[0].revision = Revision::Exact;
         assert!(
             validate(&bad)
                 .unwrap_err()
                 .to_string()
                 .contains("only step")
         );
-        for (index, target) in [(0, Target::None), (1, Target::Signed)] {
+        for (index, target) in [(0, Target::None), (1, Target::Named("target".into()))] {
             let mut bad = m.clone();
             bad.actions[0].steps[index].target = target;
             assert!(validate(&bad).is_err());
@@ -2094,7 +2219,7 @@ mod transaction_tests {
             Value::Created(2),
             Value::Created(3),
             Value::Created(0),
-            Value::SignedTarget,
+            Value::Target("target".into()),
             Value::Constant("1".into()),
             Value::Input("body".into()),
         ] {
@@ -2109,7 +2234,7 @@ mod transaction_tests {
         bad.routes[1].operations.clear();
         assert!(validate(&bad).is_err());
         let mut bad = m.clone();
-        bad.operations[3].bind.as_mut().unwrap().eligible = 5;
+        bad.operations[3].bind.insert("product".into(), 5);
         assert!(validate(&bad).is_err());
     }
 
@@ -2154,8 +2279,8 @@ mod transaction_tests {
         assert!(validate(&bad).is_err());
         let mut bad = m.clone();
         bad.operations[3].kind = OperationKind::Update;
-        bad.operations[3].bind = None;
-        bad.actions[0].steps[1].target = Target::Signed;
+        bad.operations[3].bind.clear();
+        bad.actions[0].steps[1].target = Target::Named("target".into());
         assert!(validate(&bad).is_err());
     }
 
@@ -2211,7 +2336,7 @@ mod transaction_tests {
             validate(&bad)
                 .unwrap_err()
                 .to_string()
-                .contains("signed update")
+                .contains("named update")
         );
         for kind in [
             FieldKind::Text,
@@ -2264,7 +2389,7 @@ mod transaction_tests {
                 .to_string()
                 .contains("exact revision")
         );
-        bad.actions[0].revision = Revision::Exact;
+        bad.actions[0].targets[0].revision = Revision::Exact;
         validate(&bad).unwrap();
         for predicate in [Predicate::Public, Predicate::Capability] {
             let mut bad = m.clone();
@@ -2429,10 +2554,11 @@ mod transaction_tests {
         }
         changed(bad);
         let mut bad = m.clone();
-        bad.actions[0].revision = Revision::Exact;
+        bad.actions[0].targets[0].revision = Revision::Exact;
         changed(bad);
         let mut bad = m.clone();
-        bad.actions[0].inspect = Some(Inspection {
+        bad.actions[0].targets[0].revision = Revision::Exact;
+        bad.actions[0].targets[0].inspect = Some(Inspection {
             operation: 2,
             fields: vec!["stock".into()],
         });
@@ -2440,7 +2566,7 @@ mod transaction_tests {
         let mut bad = m.clone();
         bad.web_bindings[0].redirect = Redirect {
             route: 2,
-            source: RedirectSource::Signed,
+            source: RedirectSource::Target("target".into()),
         };
         changed(bad);
     }

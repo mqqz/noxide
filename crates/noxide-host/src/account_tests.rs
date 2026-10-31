@@ -75,10 +75,11 @@ fn effects(tx: Transaction, m: &Manifest, id: &str, action: bool, recipient: &st
             } else {
                 Fields::new()
             },
-            inspection: None,
+            inspection: Default::default(),
             available_forms: vec![],
         },
-        grant: None,
+        grants: Default::default(),
+        target_rows: Default::default(),
         capability_grant: None,
 
         calls: 64,

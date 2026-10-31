@@ -199,9 +199,10 @@ async fn stored_bounds(db: &Database) {
             kind: RequestKind::Route(1),
             target: None,
             input: Fields::new(),
-            inspection: None,
+            inspection: Default::default(),
         },
-        grant: None,
+        grants: Default::default(),
+        target_rows: Default::default(),
         capability_grant: None,
 
         calls: 50,

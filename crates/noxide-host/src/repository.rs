@@ -65,7 +65,8 @@ fn adjust(
 pub(crate) const MAX_LIST_DATABASE_CALLS: usize = 4096;
 
 pub(crate) struct Effects {
-    pub provenance: std::collections::BTreeMap<(u32, u32, u64), u64>,
+    pub provenance:
+        std::collections::BTreeMap<(u32, u32, u64), std::collections::BTreeMap<String, u64>>,
     pub follow_sources: Vec<(u32, u64)>,
     pub invoked: std::collections::BTreeSet<u32>,
     pub list_bytes: usize,
@@ -78,7 +79,8 @@ pub(crate) struct Effects {
     pub plans: std::collections::BTreeMap<u32, Arc<crate::query_plan::ListPlan>>,
     pub principal: Principal,
     pub request: RequestView,
-    pub grant: Option<RecordTarget>,
+    pub grants: std::collections::BTreeMap<String, RecordTarget>,
+    pub target_rows: std::collections::BTreeMap<(u32, u64), StoredRecord>,
     pub capability_grant: Option<RecordTarget>,
     pub calls: u32,
     pub cursor: Option<u64>,
@@ -178,26 +180,8 @@ pub(crate) async fn read_resource(
     let Some(stored) = load(tx, m, op.resource, target).await? else {
         return Ok(None);
     };
-    if !read_allowed(m, principal, op, &stored)? {
+    if !authorize_stored_read(tx, m, principal, op, &stored).await? {
         return Ok(None);
-    }
-    if manifest::is_public(op)
-        && manifest::resource(m, op.resource)?.gate.is_some()
-        && let Some(parent) = manifest::reference_resource(m, op.resource)?
-    {
-        let source_resource = manifest::resource(m, op.resource)?;
-        let field = manifest::reference_field(source_resource).expect("reference");
-        let id = stored
-            .record
-            .fields
-            .get(&field.name)
-            .ok_or_else(|| anyhow::anyhow!("missing parent"))?
-            .parse()?;
-        let parent = load(tx, m, parent.id, id).await?;
-        if !parent.is_some_and(|p| manifest::gate_permits(source_resource, &p.record.fields, false))
-        {
-            return Ok(None);
-        }
     }
     let mut record = stored.record;
     if manifest::is_public(op) {
@@ -208,6 +192,54 @@ pub(crate) async fn read_resource(
         record.fields.retain(|name, _| projection.contains(name));
     }
     Ok(Some(record))
+}
+pub(crate) async fn authorize_stored_read(
+    tx: &mut Transaction,
+    m: &Manifest,
+    principal: &Principal,
+    op: &Operation,
+    stored: &StoredRecord,
+) -> Result<bool> {
+    ensure!(
+        matches!(op.kind, OperationKind::Read | OperationKind::List),
+        "invalid row read authority"
+    );
+    let mut read = op.clone();
+    read.kind = OperationKind::Read;
+    if !read_allowed(m, principal, &read, stored)? {
+        return Ok(false);
+    }
+    if manifest::is_public(op)
+        && manifest::resource(m, op.resource)?.gate.is_some()
+        && let Some(parent) = manifest::reference_resource(
+            m,
+            op.resource,
+            &manifest::resource(m, op.resource)?
+                .gate
+                .as_ref()
+                .expect("gate")
+                .field,
+        )?
+    {
+        let source_resource = manifest::resource(m, op.resource)?;
+        let field = manifest::reference_field(
+            source_resource,
+            &source_resource.gate.as_ref().expect("gate").field,
+        )
+        .expect("reference");
+        let id = stored
+            .record
+            .fields
+            .get(&field.name)
+            .ok_or_else(|| anyhow::anyhow!("missing parent"))?
+            .parse()?;
+        let parent = load(tx, m, parent.id, id).await?;
+        if !parent.is_some_and(|p| manifest::gate_permits(source_resource, &p.record.fields, false))
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 pub(crate) fn read_allowed(
     m: &Manifest,
@@ -282,7 +314,7 @@ pub(crate) async fn authorize_page_resource(
     // Read operations are independent grants, as on GET. Public-only authority
     // still requires the parent gate; an authorized private read does not.
     if !private_read && let Some(gate) = &manifest::resource(m, resource)?.gate {
-        let target = manifest::reference_resource(m, resource)?.expect("gate target");
+        let target = manifest::reference_resource(m, resource, &gate.field)?.expect("gate target");
         let id = stored.record.fields[&gate.field].parse()?;
         let target = load(tx, m, target.id, id).await?;
         if target.is_none_or(|target| {
@@ -313,10 +345,10 @@ impl Effects {
             ensure!(self.calls > 0, "database call budget");
             self.calls -= 1;
             let op = manifest::operation(&self.manifest, step.operation)?.clone();
-            let stored = match step.target {
+            let stored = match &step.target {
                 Target::None => None,
-                Target::Signed => {
-                    let grant = self.grant.as_ref().ok_or(ReferenceUnavailable)?;
+                Target::Named(name) => {
+                    let grant = self.grants.get(name).ok_or(ReferenceUnavailable)?;
                     ensure!(grant.resource == op.resource, ReferenceUnavailable);
                     let stored = load(&mut self.tx, &self.manifest, op.resource, grant.id)
                         .await?
@@ -340,9 +372,9 @@ impl Effects {
                             .ok_or_else(|| anyhow::anyhow!("missing transaction input"))?
                             .clone(),
                         Value::Constant(value) => value.clone(),
-                        Value::SignedTarget => self
-                            .grant
-                            .as_ref()
+                        Value::Target(name) => self
+                            .grants
+                            .get(name)
                             .ok_or(ReferenceUnavailable)?
                             .id
                             .to_string(),
@@ -416,6 +448,7 @@ impl Effects {
                 }
                 _ => anyhow::bail!("transaction requires mutation"),
             };
+            self.target_rows.remove(&(outcome.resource, outcome.id));
             outcomes.push(outcome);
             #[cfg(test)]
             crate::failure_tests::after_effect(&mut self.tx).await?;
@@ -444,9 +477,13 @@ impl Effects {
         } else {
             let stored = stored.ok_or(ReferenceUnavailable)?;
             if manifest::is_capability(op) {
-                let grant = self.grant.as_ref().ok_or(ReferenceUnavailable)?;
                 ensure!(
-                    self.capability_grant.as_ref() == Some(grant) && stored.cap_version.is_some(),
+                    self.capability_grant
+                        .as_ref()
+                        .is_some_and(|grant| grant.resource == stored.record.resource
+                            && grant.id == stored.record.id
+                            && grant.incarnation == stored.incarnation)
+                        && stored.cap_version.is_some(),
                     ReferenceUnavailable
                 );
             } else {
@@ -476,23 +513,32 @@ impl Effects {
     ) -> Result<MutationOutcome> {
         let m = self.manifest.clone();
         let resource = manifest::resource(&m, op.resource)?;
-        if let Some(parent) = manifest::reference_resource(&m, op.resource)? {
-            let reference = manifest::reference_field(resource).expect("admitted reference");
+        for reference in manifest::reference_fields(resource) {
+            let parent = manifest::reference_resource(&m, op.resource, &reference.name)?
+                .expect("admitted reference");
             let id: u64 = fields
                 .get(&reference.name)
                 .ok_or(ReferenceUnavailable)?
                 .parse()?;
-            let stored = load(&mut self.tx, &m, parent.id, id)
-                .await?
-                .ok_or(ReferenceUnavailable)?;
+            let stored = if let Some(stored) = self.target_rows.get(&(parent.id, id)) {
+                stored.clone()
+            } else {
+                ensure!(self.calls >= 2, "database call budget");
+                self.calls -= 2;
+                let stored = load(&mut self.tx, &m, parent.id, id)
+                    .await?
+                    .ok_or(ReferenceUnavailable)?;
+                self.target_rows.insert((parent.id, id), stored.clone());
+                stored
+            };
             let assignment = step
                 .assign
                 .iter()
                 .find(|a| a.field == reference.name)
                 .ok_or_else(|| anyhow::anyhow!("missing reference assignment"))?;
             let expected_incarnation = match &assignment.change {
-                Change::Set(Value::SignedTarget) => {
-                    let grant = self.grant.as_ref().ok_or(ReferenceUnavailable)?;
+                Change::Set(Value::Target(name)) => {
+                    let grant = self.grants.get(name).ok_or(ReferenceUnavailable)?;
                     ensure!(
                         grant.resource == parent.id && grant.id == id,
                         ReferenceUnavailable
@@ -517,16 +563,19 @@ impl Effects {
                 &stored.incarnation == expected_incarnation,
                 ReferenceUnavailable
             );
-            let bind = op
-                .bind
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("missing binding eligibility"))?;
-            let eligible = manifest::operation(&m, bind.eligible)?;
+            let eligible = manifest::operation(
+                &m,
+                *op.bind
+                    .get(&reference.name)
+                    .ok_or_else(|| anyhow::anyhow!("missing binding eligibility"))?,
+            )?;
             ensure!(
-                read_resource(&mut self.tx, &m, &self.principal, eligible, id)
-                    .await?
-                    .is_some()
-                    && manifest::gate_permits(resource, &stored.record.fields, true),
+                authorize_stored_read(&mut self.tx, &m, &self.principal, eligible, &stored).await?
+                    && (resource
+                        .gate
+                        .as_ref()
+                        .is_none_or(|gate| gate.field != reference.name)
+                        || manifest::gate_permits(resource, &stored.record.fields, true)),
                 ReferenceUnavailable
             );
         }
@@ -628,14 +677,15 @@ impl Effects {
         stored: &StoredRecord,
     ) -> Result<MutationOutcome> {
         for child in &self.manifest.resources {
-            if manifest::reference_resource(&self.manifest, child.id)?
-                .is_some_and(|p| p.id == op.resource)
-            {
-                let field = manifest::reference_field(child).expect("admitted reference");
-                let storage = self.tx.storage_resource(&self.manifest, child.id).await?;
-                let expression = self.tx.field_expression(&field.name)?;
-                let rows = self.tx.fetch::<1>(&format!("SELECT CAST(id AS TEXT) FROM nx_records WHERE resource={storage} AND {expression}=$1 LIMIT 1"), &[stored.record.id.to_string().into()]).await?;
-                ensure!(rows.is_empty(), "parent has children");
+            for field in manifest::reference_fields(child) {
+                if manifest::reference_resource(&self.manifest, child.id, &field.name)?
+                    .is_some_and(|parent| parent.id == op.resource)
+                {
+                    let storage = self.tx.storage_resource(&self.manifest, child.id).await?;
+                    let expression = self.tx.field_expression(&field.name)?;
+                    let rows = self.tx.fetch::<1>(&format!("SELECT CAST(id AS TEXT) FROM nx_records WHERE resource={storage} AND {expression}=$1 LIMIT 1"), &[stored.record.id.to_string().into()]).await?;
+                    ensure!(rows.is_empty(), "parent has children");
+                }
             }
         }
         let storage_resource = self
@@ -661,7 +711,7 @@ impl Effects {
         self.list_calls = MAX_LIST_DATABASE_CALLS;
         self.see_all.clear();
     }
-    fn charge_list_calls(&mut self, count: usize) -> Result<()> {
+    pub(crate) fn charge_list_calls(&mut self, count: usize) -> Result<()> {
         ensure!(self.list_calls >= count, "list database call budget");
         self.list_calls -= count;
         Ok(())
@@ -978,6 +1028,7 @@ impl Effects {
             .map(|(resource, id)| {
                 self.provenance
                     .get(&(via.source, *resource, *id))
+                    .and_then(|fields| fields.get(&via.field))
                     .copied()
                     .ok_or_else(|| anyhow::anyhow!("follow source was not returned"))
             })
@@ -1031,9 +1082,10 @@ impl Effects {
                     .gate
                     .clone()
             {
-                let target_resource = manifest::reference_resource(&self.manifest, op.resource)?
-                    .expect("gate target")
-                    .id;
+                let target_resource =
+                    manifest::reference_resource(&self.manifest, op.resource, &gate.field)?
+                        .expect("gate target")
+                        .id;
                 self.charge_list_calls(2)?;
                 let storage = self
                     .tx
@@ -1085,31 +1137,75 @@ impl Effects {
         );
         Ok(bytes)
     }
+    pub(crate) async fn picker_records(&mut self, binding: u32, name: &str) -> Result<Vec<Record>> {
+        let RequestKind::Route(route) = self.request.kind else {
+            anyhow::bail!("picker outside web route")
+        };
+        ensure!(
+            manifest::route(&self.manifest, route)?
+                .forms
+                .contains(&binding),
+            "picker outside binding grant"
+        );
+        let action = manifest::web_action(&self.manifest, binding)?;
+        let declaration = manifest::action_target(&action.targets, name)?;
+        let TargetSource::Selected { query, .. } = declaration.source else {
+            anyhow::bail!("not a picker target")
+        };
+        let op = manifest::operation(&self.manifest, query)?.clone();
+        let previous = (self.cursor, self.more, self.result_limit, self.truncated);
+        // Route pagination is scoped to its own query; it cannot select a
+        // different window of the host-owned picker query.
+        self.cursor = None;
+        let result = self.invoke_internal(query, 0, true).await;
+        (self.cursor, self.more, self.result_limit, self.truncated) = previous;
+        let bytes = result?;
+        if manifest::is_preview(&op) {
+            Ok(serde_json::from_slice::<PreviewResult>(&bytes)?.items)
+        } else {
+            Ok(serde_json::from_slice(&bytes)?)
+        }
+    }
     pub(crate) async fn invoke(&mut self, operation: u32, target: u64) -> Result<Vec<u8>> {
+        self.invoke_internal(operation, target, false).await
+    }
+    async fn invoke_internal(
+        &mut self,
+        operation: u32,
+        target: u64,
+        picker: bool,
+    ) -> Result<Vec<u8>> {
         ensure!(self.calls > 0, "database call budget");
         self.calls -= 1;
         let op = manifest::operation(&self.manifest, operation)?.clone();
         ensure!(op.via.is_none(), "follow cannot be invoked by ID");
-        match &self.request.kind {
-            RequestKind::Route(id) => {
-                let route = manifest::route(&self.manifest, *id)?;
-                ensure!(
-                    route.operations.contains(&operation)
-                        && target
-                            == if op.kind == OperationKind::List {
-                                0
-                            } else {
-                                self.request.target.unwrap_or(0)
-                            },
-                    "operation outside request grant"
-                );
-                ensure!(
-                    matches!(op.kind, OperationKind::List | OperationKind::Read),
-                    "read route mutation"
-                );
-                ensure!(self.invoked.insert(operation), "operation already invoked");
+        if picker {
+            ensure!(
+                op.kind == OperationKind::List && op.scope.is_none() && target == 0,
+                "invalid picker query grant"
+            );
+        } else {
+            match &self.request.kind {
+                RequestKind::Route(id) => {
+                    let route = manifest::route(&self.manifest, *id)?;
+                    ensure!(
+                        route.operations.contains(&operation)
+                            && target
+                                == if op.kind == OperationKind::List {
+                                    0
+                                } else {
+                                    self.request.target.unwrap_or(0)
+                                },
+                        "operation outside request grant"
+                    );
+                    ensure!(
+                        matches!(op.kind, OperationKind::List | OperationKind::Read),
+                        "read route mutation"
+                    );
+                    ensure!(self.invoked.insert(operation), "operation already invoked");
+                }
+                RequestKind::Action(_) => anyhow::bail!("storage import during action"),
             }
-            RequestKind::Action(_) => anyhow::bail!("storage import during action"),
         }
         if op.kind == OperationKind::List {
             self.charge_list_calls(1)?;
@@ -1138,17 +1234,23 @@ impl Effects {
                 let source_resource = manifest::resource(&self.manifest, op.resource)?.clone();
                 if manifest::is_public(&op)
                     && source_resource.gate.is_some()
-                    && let Some(parent) =
-                        manifest::reference_resource(&self.manifest, op.resource)?.map(|p| p.id)
+                    && let Some(parent) = manifest::reference_resource(
+                        &self.manifest,
+                        op.resource,
+                        &source_resource.gate.as_ref().expect("gate").field,
+                    )?
+                    .map(|p| p.id)
                 {
                     self.charge_list_calls(2)?;
                     let id = self
                         .request
                         .target
                         .ok_or_else(|| anyhow::anyhow!("missing parent target"))?;
-                    let field =
-                        manifest::reference_field(manifest::resource(&self.manifest, op.resource)?)
-                            .expect("parent");
+                    let field = manifest::reference_field(
+                        &source_resource,
+                        &source_resource.gate.as_ref().expect("gate").field,
+                    )
+                    .expect("parent");
                     ensure!(
                         plan.scope.as_deref() == Some(field.name.as_str()),
                         "invalid list parent"
@@ -1243,16 +1345,21 @@ impl Effects {
             } else {
                 serde_json::from_slice(&value)?
             };
-            if let Some(field) =
-                manifest::reference_field(manifest::resource(&self.manifest, op.resource)?)
-            {
-                for record in records {
-                    // Projections may omit the reference; such operations cannot be follow sources.
-                    if let Some(target) = record.fields.get(&field.name) {
-                        self.provenance
-                            .insert((op.id, op.resource, record.id), target.parse()?);
-                        ensure!(self.provenance.len() <= 56, "follow provenance budget");
-                    }
+            for record in records {
+                let references =
+                    manifest::reference_fields(manifest::resource(&self.manifest, op.resource)?)
+                        .filter_map(|field| {
+                            record
+                                .fields
+                                .get(&field.name)
+                                .map(|value| (field.name.clone(), value))
+                        })
+                        .map(|(field, value)| Ok((field, value.parse::<u64>()?)))
+                        .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+                if !references.is_empty() {
+                    self.provenance
+                        .insert((op.id, op.resource, record.id), references);
+                    ensure!(self.provenance.len() <= 56, "follow provenance budget");
                 }
             }
         }

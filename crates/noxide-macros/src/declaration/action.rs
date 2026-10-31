@@ -146,12 +146,9 @@ pub(crate) fn expand_action(
     }
     let bind = if let Some((field, query)) = &declaration.bind {
         let hash = stable_id(&field.to_string());
-        quote!(Some(::noxide::__private::Bind {
-            field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into(),
-            eligible: <#query as ::noxide::QueryType>::operation().id,
-        }))
+        quote!(::std::collections::BTreeMap::from([(<#resource as ::noxide::FieldSpec<#hash>>::KEY.into(), <#query as ::noxide::QueryType>::operation().id)]))
     } else {
-        quote!(None)
+        quote!(::std::collections::BTreeMap::new())
     };
     let policy = policy_tokens(&declaration.policy, &declaration.resource);
     let version = declaration.version;
@@ -223,11 +220,11 @@ pub(crate) fn expand_action(
     let target = if declaration.kind == "create" {
         quote!(::noxide::__private::Target::None)
     } else {
-        quote!(::noxide::__private::Target::Signed)
+        quote!(::noxide::__private::Target::Named("target".into()))
     };
     let reference_assignment = if let Some((field, _)) = &declaration.bind {
         let hash = stable_id(&field.to_string());
-        quote!(let assign = { let mut assign = assign; assign.push(::noxide::__private::Assignment { field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into(), change: ::noxide::__private::Change::Set(::noxide::__private::Value::SignedTarget) }); assign };)
+        quote!(let assign = { let mut assign = assign; assign.push(::noxide::__private::Assignment { field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into(), change: ::noxide::__private::Change::Set(::noxide::__private::Value::Target("target".into())) }); assign };)
     } else {
         Tokens::new()
     };
@@ -275,12 +272,9 @@ pub(crate) fn expand_action(
                 }).collect();
                 let assign = vec![#(::noxide::__private::Assignment { field: #keys.into(), change: ::noxide::__private::Change::Set(::noxide::__private::Value::Input(#keys.into())) }),*];
                 #reference_assignment
-                ::noxide::__private::Action {
-                    id: ::noxide::stable_id(concat!("action:", module_path!(), "::", stringify!(#name))),
-                    version: #version, name: #label.into(),
-                    steps: vec![::noxide::__private::Step { operation: <Self as ::noxide::ActionType>::operations()[0].id, target: #target, assign }], target_reads: vec![],
-                    inputs, revision: ::noxide::__private::Revision::Exact, inspect: #inspection,
-                }
+                let steps = vec![::noxide::__private::Step { operation: <Self as ::noxide::ActionType>::operations()[0].id, target: #target, assign }];
+                let targets = ::noxide::page_targets(&<Self as ::noxide::ActionType>::operations(), &steps, ::noxide::__private::Revision::Exact, #inspection);
+                ::noxide::__private::Action { id: ::noxide::stable_id(concat!("action:", module_path!(), "::", stringify!(#name))), version: #version, name: #label.into(), steps, inputs, targets }
             }
             fn inspection() -> Option<::noxide::__private::Operation> { #inspection_operation }
         }
@@ -307,7 +301,7 @@ impl syn::parse::Parse for ActionDeclaration {
         let first: syn::Ident = fork.parse()?;
         if matches!(
             first.to_string().as_str(),
-            "inputs" | "transaction" | "revision"
+            "inputs" | "transaction" | "revision" | "targets"
         ) {
             Ok(Self::Transaction(Box::new(input.parse()?)))
         } else {
@@ -336,7 +330,8 @@ struct TransactionStep {
     kind: syn::Ident,
     resource: syn::Type,
     assignments: Vec<(syn::Ident, DeclaredChange)>,
-    eligible: Option<syn::Type>,
+    eligible: Vec<(Option<syn::Ident>, syn::Type)>,
+    target: Option<syn::Ident>,
 }
 enum DeclaredChange {
     Set(syn::Expr),
@@ -351,6 +346,7 @@ pub(crate) struct TransactionDeclaration {
     inputs: Vec<InputDeclaration>,
     steps: Vec<TransactionStep>,
     identity: bool,
+    targets: Option<syn::Path>,
     policy: Vec<Vec<PolicyAtom>>,
     redirect: syn::Path,
     redirect_source: syn::Ident,
@@ -365,6 +361,7 @@ impl syn::parse::Parse for TransactionDeclaration {
         let mut inputs = Vec::new();
         let mut steps = Vec::new();
         let mut identity = false;
+        let mut targets = None;
         let mut rules = None;
         let mut redirect = None;
         let mut redirect_reference = None;
@@ -400,6 +397,10 @@ impl syn::parse::Parse for TransactionDeclaration {
                             content.parse::<Token![,]>()?;
                         }
                     }
+                }
+                "targets" => {
+                    input.parse::<Token![=]>()?;
+                    targets = Some(input.parse()?);
                 }
                 "revision" => {
                     input.parse::<Token![=]>()?;
@@ -479,18 +480,14 @@ impl syn::parse::Parse for TransactionDeclaration {
                         let args;
                         parenthesized!(args in content);
                         let resource = args.parse()?;
+                        let mut selected_target = None;
                         if kind != "create" {
                             args.parse::<Token![,]>()?;
                             let target: syn::Ident = args.parse()?;
-                            if target != "target" {
-                                return Err(syn::Error::new(
-                                    target.span(),
-                                    "updates and deletes require target",
-                                ));
-                            }
+                            selected_target = Some(target);
                         }
                         let mut assignments = Vec::new();
-                        let mut eligible = None;
+                        let mut eligible = Vec::new();
                         while !args.is_empty() {
                             args.parse::<Token![,]>()?;
                             if args.is_empty() {
@@ -498,14 +495,21 @@ impl syn::parse::Parse for TransactionDeclaration {
                             }
                             let change: syn::Ident = args.parse()?;
                             if change == "eligible" {
-                                args.parse::<Token![=]>()?;
-                                if eligible.is_some() {
-                                    return Err(syn::Error::new(
-                                        change.span(),
-                                        "duplicate eligibility",
-                                    ));
+                                if args.peek(syn::token::Paren) {
+                                    let content;
+                                    parenthesized!(content in args);
+                                    while !content.is_empty() {
+                                        let field = content.parse()?;
+                                        content.parse::<Token![=]>()?;
+                                        eligible.push((Some(field), content.parse()?));
+                                        if !content.is_empty() {
+                                            content.parse::<Token![,]>()?;
+                                        }
+                                    }
+                                } else {
+                                    args.parse::<Token![=]>()?;
+                                    eligible.push((None, args.parse()?));
                                 }
-                                eligible = Some(args.parse()?);
                                 continue;
                             }
                             let values;
@@ -569,6 +573,7 @@ impl syn::parse::Parse for TransactionDeclaration {
                             resource,
                             assignments,
                             eligible,
+                            target: selected_target,
                         });
                         if !content.is_empty() {
                             content.parse::<Token![,]>()?;
@@ -593,6 +598,15 @@ impl syn::parse::Parse for TransactionDeclaration {
         if steps.is_empty() {
             return Err(input.error("actions require transaction"));
         }
+        if targets.is_none()
+            && steps.iter().any(|step| {
+                step.target
+                    .as_ref()
+                    .is_some_and(|target| target != "target")
+            })
+        {
+            return Err(input.error("updates and deletes require target or explicit targets"));
+        }
         if inspect.is_some() != !inspection_fields.is_empty() {
             return Err(input.error("inspection requires inspect and inspect_fields"));
         }
@@ -600,6 +614,7 @@ impl syn::parse::Parse for TransactionDeclaration {
             inputs,
             steps,
             identity,
+            targets,
             policy: rules.ok_or_else(|| input.error("explicit allow required"))?,
             redirect,
             redirect_source,
@@ -703,7 +718,8 @@ fn expand_transaction(
         let target = if step.kind == "create" {
             quote!(::noxide::__private::Target::None)
         } else {
-            quote!(::noxide::__private::Target::Signed)
+            let name = step.target.as_ref().expect("mutation target").to_string();
+            quote!(::noxide::__private::Target::Named(#name.into()))
         };
         let kind = match step.kind.to_string().as_str() {
             "create" => quote!(::noxide::__private::OperationKind::Create),
@@ -724,11 +740,13 @@ fn expand_transaction(
                             let ident = path.path.get_ident().unwrap();
                             let key = ident.to_string();
                             if key == "target" {
-                                quote!(::noxide::__private::Value::SignedTarget)
+                                quote!(::noxide::__private::Value::Target("target".into()))
                             } else if declared.contains(&key) {
                                 quote!(::noxide::__private::Value::Input(#key.into()))
                             } else if let Some(previous) = created.get(&key) {
                                 quote!(::noxide::__private::Value::Created(#previous))
+                            } else if declaration.targets.is_some() {
+                                quote!(::noxide::__private::Value::Target(#key.into()))
                             } else {
                                 return Err(syn::Error::new(
                                     ident.span(),
@@ -781,11 +799,24 @@ fn expand_transaction(
             };
             assignments.push(quote!(::noxide::__private::Assignment { field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into(), change: #value }));
         }
-        let bind = if let Some(eligible) = &step.eligible {
-            quote!(Some(::noxide::__private::Bind { field: <#resource as ::noxide::ResourceType>::definition().fields.into_iter().find(|f| matches!(f.kind, ::noxide::__private::FieldKind::Reference { .. })).expect("eligibility requires reference").name, eligible: <#eligible as ::noxide::QueryType>::operation().id }))
-        } else {
-            quote!(None)
-        };
+        let mut eligibility_fields = BTreeSet::new();
+        let bindings: Vec<_> = step.eligible.iter().map(|(field, eligible)| {
+            let key = if let Some(field) = field { let hash = stable_id(&field.to_string()); quote!(<#resource as ::noxide::FieldSpec<#hash>>::KEY.into()) }
+            else { quote!({ let fields: Vec<_> = <#resource as ::noxide::ResourceType>::definition().fields.into_iter().filter(|field| matches!(field.kind, ::noxide::__private::FieldKind::Reference { .. })).collect(); assert_eq!(fields.len(), 1, "multiple references require field-keyed eligibility"); fields[0].name.clone() }) };
+            (field, key, eligible)
+        }).collect();
+        for (field, _, _) in &bindings {
+            if !eligibility_fields.insert(field.as_ref().map(ToString::to_string)) {
+                return Err(syn::Error::new(
+                    resource.span(),
+                    "duplicate field eligibility",
+                ));
+            }
+        }
+        let bindings = bindings.iter().map(
+            |(_, key, eligible)| quote!((#key, <#eligible as ::noxide::QueryType>::operation().id)),
+        );
+        let bind = quote!(::std::collections::BTreeMap::from([#(#bindings),*]));
         let policy = policy_tokens(&declaration.policy, resource);
         operations.push(quote!(::noxide::__private::Operation { bind: #bind, scope: None, via: None, filter: Vec::new(), disclose: Vec::new(), list: None, id: #operation_id, resource: <#resource as ::noxide::ResourceType>::definition().id, kind: #kind, policy: #policy, visibility: None, fields: None }));
         steps.push(quote!(::noxide::__private::Step { operation: #operation_id, target: #target, assign: vec![#(#assignments),*] }));
@@ -805,18 +836,35 @@ fn expand_transaction(
     let eligibility_operations = declaration
         .steps
         .iter()
-        .filter_map(|step| step.eligible.as_ref())
+        .flat_map(|step| step.eligible.iter().map(|(_, query)| query))
         .map(|query| quote!(<#query as ::noxide::QueryType>::operation()));
+    let custom_resources = declaration
+        .targets
+        .as_ref()
+        .map(|path| quote!(#path().resources))
+        .unwrap_or_else(|| quote!(::std::vec::Vec::new()));
+    let custom_operations = declaration
+        .targets
+        .as_ref()
+        .map(|path| quote!(#path().operations))
+        .unwrap_or_else(|| quote!(::std::vec::Vec::new()));
+
     let redirect = &declaration.redirect;
     let source_key = declaration.redirect_source.to_string();
-    let source = if source_key == "target" {
+    let source = if source_key == "target"
+        || declaration.targets.is_some()
+            && !declaration.steps.iter().any(|step| {
+                step.name
+                    .as_ref()
+                    .is_some_and(|name| name == &declaration.redirect_source)
+            }) {
         if declaration.redirect_reference.is_some() {
             return Err(syn::Error::new(
                 declaration.redirect_source.span(),
                 "reference navigation requires a step",
             ));
         }
-        quote!(::noxide::__private::RedirectSource::Signed)
+        quote!(::noxide::__private::RedirectSource::Target(#source_key.into()))
     } else {
         let index = declaration
             .steps
@@ -868,6 +916,11 @@ fn expand_transaction(
     } else {
         (quote!(()), quote!(None))
     };
+    let target_definitions = if let Some(path) = &declaration.targets {
+        quote!(#path().targets)
+    } else {
+        quote!(::noxide::page_targets(&<Self as ::noxide::ActionType>::operations(), &steps, #revision, #inspection))
+    };
     Ok(quote! {
         #item
         #original
@@ -881,10 +934,10 @@ fn expand_transaction(
             type Original = #original_type;
 
 
-            fn resources() -> Vec<::noxide::__private::Resource> { vec![#(<#resources as ::noxide::ResourceType>::definition()),*] }
-            fn operations() -> Vec<::noxide::__private::Operation> { vec![#(#operations,)* #(#eligibility_operations),*] }
+            fn resources() -> Vec<::noxide::__private::Resource> { let mut resources = vec![#(<#resources as ::noxide::ResourceType>::definition()),*]; resources.extend(#custom_resources); resources }
+            fn operations() -> Vec<::noxide::__private::Operation> { let mut operations = vec![#(#operations,)* #(#eligibility_operations),*]; operations.extend(#custom_operations); operations }
             fn inspection() -> Option<::noxide::__private::Operation> { #inspection_operation }
-            fn definition() -> ::noxide::__private::Action { ::noxide::__private::Action { id: ::noxide::stable_id(concat!("action:", module_path!(), "::", stringify!(#name))), version: #version, name: #label.into(), target_reads: vec![], inspect: #inspection, inputs: vec![#(#schemas),*], revision: #revision, steps: vec![#(#steps),*] } }
+            fn definition() -> ::noxide::__private::Action { let steps = vec![#(#steps),*]; let targets = #target_definitions; ::noxide::__private::Action { id: ::noxide::stable_id(concat!("action:", module_path!(), "::", stringify!(#name))), version: #version, name: #label.into(), targets, inputs: vec![#(#schemas),*], steps } }
         }
         impl ::noxide::WebActionType for #name {
             type Controls = #controls_name;

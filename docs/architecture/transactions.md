@@ -46,7 +46,7 @@ The host separates three parts of an action:
   response mapping, conflict and rejection forms, recovery and handover delivery.
 - The response expresses success, validation errors and an optional destination.
 
-Protocol 5 separates canonical `Action` execution declarations from
+Protocol 6 retains the split between canonical `Action` execution declarations and
 `WebBinding` presentation. Routes carry binding IDs; bindings reference action IDs.
 Several bindings can present the same action. A canonical action can have no web
 binding, route or redirect; a headless-only manifest may have zero routes.
@@ -63,8 +63,8 @@ context and target-grant fields prevent an adapter from supplying a principal or
 turning a raw record ID into authority. Service admission has no constructor until
 P10 implements authoritative persisted grant/job/fence checks.
 
-The action explicitly declares eligible `target_reads`. A web target grant also
-requires a matching read operation on its issuing route; current policy is checked
+Each Page target explicitly declares eligible reads. Its web grant also
+requires a matching read operation on the issuing route; current policy is checked
 inside the execution transaction. SDK registration lowers the existing page
 bindings into that explicit read list without inventing policies. Edit credentials
 retain mutation authority only: guest inspection still requires its declared
@@ -86,9 +86,11 @@ headless execution has no navigation source and requires bounded non-rendering
 result preparation before the same write/check/commit sequence. There is no
 production headless execution adapter yet.
 
-Semantic receipt version 2 makes the navigation source optional. Storage remains
-version 10; this change neither deletes databases nor adds a migration. Rebuild
-protocol-5 development contracts and explicitly reapprove/reactivate deployments;
+Semantic receipt version 3 represents named navigation sources and target maps.
+Framework storage remains version 11 from clock service integration; reference
+indexes retain their existing format and this change adds no storage migration.
+Protocol 5 contracts and semantic receipt 2 are deliberately incompatible. Rebuild
+protocol-6 development contracts and explicitly reapprove/reactivate deployments;
 old signed forms and previous-contract receipts are invalidated by the contract
 and deployment-generation seal. There is no compatibility executor. Operators
 must resolve outstanding submissions under their original deployment before
@@ -102,10 +104,8 @@ pub struct Action {
     pub id: u32,
     pub version: u32,
     pub name: String,
-    pub target_reads: Vec<u32>,       // eligible reads; web intersects issuing route
-    pub inspect: Option<Inspection>,  // reads the signed target, unchanged
+    pub targets: Vec<ActionTarget>,  // at most four named target declarations
     pub inputs: Vec<Input>,           // action-level schema, unique names
-    pub revision: Revision,           // Exact | Identity, see Revision rules
     pub steps: Vec<Step>,             // 1..=4 steps, at most 2 creates
 }
 pub struct WebBinding {
@@ -117,14 +117,14 @@ pub struct WebBinding {
 }
 pub struct Input { pub name: String, pub label: String, pub kind: FieldKind, pub optional: bool, pub max_bytes: u32 }
 pub struct Step { pub operation: u32, pub target: Target, pub assign: Vec<Assignment> }
-pub enum Target { None, Signed }      // None for create, Signed for update/delete
+pub enum Target { None, Named(String) } // None for create; approved alias otherwise
 pub struct Assignment { pub field: String, pub change: Change }
 pub enum Change {
     Set(Value),
     Decrease { by: String, rejection: GuardRejection },
     Increase { by: String, rejection: GuardRejection },
 }
-pub enum Value { Input(String), Constant(String), SignedTarget, Created(u8) }
+pub enum Value { Input(String), Constant(String), Target(String), Created(u8) }
 pub struct GuardRejection { pub input: String, pub message: String }
 pub enum Revision { Exact, Identity }
 ```
@@ -165,27 +165,26 @@ Admission in `manifest.rs` rejects the manifest unless all of these hold:
 
 - There are 1–4 steps and at most 2 creates. A delete is the only step.
 - Each step's operation is a create, update or delete on the step's resource,
-  with `Target::None` for create and `Target::Signed` otherwise. Every `Signed`
-  use addresses the declared target resource; web bindings require matching issuing routes.
+  with `Target::None` for create and `Target::Named` otherwise. Every named
+  use addresses its declared target resource; web bindings require matching issuing routes.
 - Each field is assigned at most once per step. A create assigns every writable
   stored field, including its reference. An update assigns a nonempty subset of
   ordinary fields. No step assigns owner, tenant, ID, incarnation, revision,
   account fields on update, or a reference field on update. Fields with initial
   values cannot be assigned on create; authorized updates may change them.
 - `Value::Input` names a declared input whose domain fits (see Inputs).
-  `Value::Constant` is valid for the field's schema. `Value::SignedTarget` and
+  `Value::Constant` is valid for the field's schema. `Value::Target(name)` and
   `Value::Created(n)` assign only reference fields of the matching target
   resource. `Created(n)` requires `n` to be an earlier create step.
-- `Decrease`/`Increase` appear only in update steps targeting `Signed`; create
+- `Decrease`/`Increase` appear only in update steps targeting a named alias; create
   assignments use `Set`. They assign an integer field declaring both `min` and
   `max`. Their `by` input satisfies the Inputs rule. The rejection's `input` is
   declared.
 - `revision` is no weaker than the implied requirement (see Revision rules).
 - An action with more than one step contains no public or capability operation.
   This keeps one anonymous ownership handover per action in this increment.
-- `inspect` reads the signed target resource, as today.
-- Reference eligibility moves from `Action.bind` to the referencing operation or
-  resource declaration. Each `SignedTarget`/`Created` reference assignment keeps
+- Each target declares its own revision, compute projection and optional guest inspection.
+- Reference eligibility lives on the referencing create operation as a field-keyed map. Each `Target`/`Created` reference assignment keeps
   the existing source create policy, gate and target existence checks.
 
 Admission checks structure only. It does not estimate database cost.
@@ -195,8 +194,8 @@ Admission checks structure only. It does not estimate database cost.
 Identity means the same record ID and incarnation as the signed token. Exact also
 means the revision recorded in the token.
 
-The implied requirement is `Exact` if any step updates the signed target with
-`Set`, or deletes it. Otherwise it is `Identity`. Applications declare `revision`;
+For each alias, the implied requirement is `Exact` if any step updates it with
+`Set`, or deletes it. Otherwise it is `Identity`. Applications declare each target's `revision`;
 SDK lowering defaults to `Exact`. Admission rejects a declared `Identity` when
 `Exact` is implied, so declarations can only strengthen.
 
@@ -207,7 +206,9 @@ price. The order and stock example below uses `Identity` only because it stores 
 price and the stock count is guarded.
 
 The pre-execution check in `attempt_action()` applies the action's declared
-requirement. A stale `Exact` target produces the existing 409 conflict form. Reference
+requirement independently per alias, deduplicating physical identity without
+sharing authority. A stale `Exact` page target produces the existing 409 conflict
+form; multiple/selected targets receive a safe reload prompt. Reference
 eligibility no longer compares revisions; identity plus current eligibility,
 gate and create policy inside the transaction is the binding requirement.
 
@@ -303,7 +304,12 @@ and redirect bindings are all part of approval and submission-contract identity.
 struct PlaceOrder;
 ```
 
-`eligible = Query` on a create lowers reference eligibility onto its operation.
+`eligible = Query` is available for exactly one reference field. Multiple fields
+use `eligible(field = ReadQuery, other = OtherReadQuery)`. Explicit SDK
+`TargetDeclarations` provides `page`, `selected`, `reference` and `inspect` methods;
+`targets = declarations_fn` in a transaction macro lowers to the same protocol.
+See [references](references.md#named-targets-and-the-nojs-picker) for handle and
+projection authority.
 `redirect = page(target)` names the signed target; `page(order)` names a step,
 and `reference(order.product, page)` names a reference on a step.
 

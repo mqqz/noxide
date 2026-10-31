@@ -36,6 +36,7 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
     let mut references = 0;
     let mut gate = quote!(None);
     let mut gate_field = 0u32;
+    let mut has_gate = false;
     let name = &input.ident;
     for field in &fields.named {
         let rust_name = field.ident.as_ref().expect("named field");
@@ -69,10 +70,10 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
             .map(|(_, ty)| ty);
         if parent.is_some() {
             references += 1;
-            if references > 1 {
+            if references > 4 {
                 return Err(syn::Error::new(
                     ty.span(),
-                    "at most one reference field per resource",
+                    "at most four reference fields per resource",
                 ));
             }
         }
@@ -227,6 +228,13 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
             }
             match (visible, create_when) {
                 (Some((vf, vv)), Some((wf, wv))) => {
+                    if has_gate {
+                        return Err(syn::Error::new(
+                            ty.span(),
+                            "at most one gated reference field per resource",
+                        ));
+                    }
+                    has_gate = true;
                     gate_field = stable_id(&rust_name.to_string());
                     let vh = stable_id(&vf.to_string());
                     let wh = stable_id(&wf.to_string());

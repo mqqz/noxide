@@ -54,6 +54,8 @@ impl Application {
             &self.manifest,
             action.id,
             &FormCredentials {
+                selections: Default::default(),
+                selected: Default::default(),
                 csrf: csrf.into(),
                 submission: submission.into(),
                 values: Fields::new(),
@@ -67,17 +69,18 @@ impl Application {
         &self,
         tx: &mut Transaction,
         action: action::NavigationPlan<'_>,
-        signed: Option<&RecordTarget>,
-        original: Option<&StoredRecord>,
+        signed: &BTreeMap<String, RecordTarget>,
+        original: &BTreeMap<(u32, u64), StoredRecord>,
         outcomes: &[MutationOutcome],
     ) -> Result<Option<ReferenceDestination>> {
         if action.destination_resource.is_none() {
             return Ok(None);
         }
         let (resource, id, incarnation) = match action.source {
-            RedirectSource::Signed => {
-                let signed =
-                    signed.ok_or_else(|| anyhow::anyhow!("missing signed navigation source"))?;
+            RedirectSource::Target(name) => {
+                let signed = signed
+                    .get(name)
+                    .ok_or_else(|| anyhow::anyhow!("missing named navigation source"))?;
                 (signed.resource, signed.id, signed.incarnation.clone())
             }
             RedirectSource::Step(index) => {
@@ -91,7 +94,7 @@ impl Application {
                     .get(usize::from(*step))
                     .ok_or_else(|| anyhow::anyhow!("missing reference outcome"))?;
                 let source = if outcome.kind == MutationKind::Deleted {
-                    original.cloned()
+                    original.get(&(outcome.resource, outcome.id)).cloned()
                 } else {
                     repository::load(tx, &self.manifest, outcome.resource, outcome.id).await?
                 }
@@ -100,7 +103,7 @@ impl Application {
                     source.incarnation == outcome.incarnation,
                     "navigation source changed"
                 );
-                let parent = manifest::reference_resource(&self.manifest, outcome.resource)?
+                let parent = manifest::reference_resource(&self.manifest, outcome.resource, field)?
                     .ok_or_else(|| anyhow::anyhow!("missing reference schema"))?;
                 let id = source
                     .record
@@ -130,13 +133,13 @@ impl Application {
         &self,
         tx: &mut Transaction,
         action: &manifest::WebAction<'_>,
-        target: Option<&RecordTarget>,
+        targets: &BTreeMap<String, RecordTarget>,
         payload: &str,
         principal: &auth::Principal,
     ) -> Result<Prepared> {
         let receipt: SemanticReceipt = serde_json::from_str(payload)?;
         ensure!(
-            receipt.version == 2
+            receipt.version == 3
                 && receipt.outcomes.len() == action.steps.len()
                 && receipt.source.as_ref() == Some(&action.redirect.source),
             "receipt contract differs"
@@ -158,9 +161,10 @@ impl Application {
                     && outcome.incarnation.len() <= 64,
                 "invalid mutation identity"
             );
-            if step.target == Target::Signed
-                && let Some(target) = target
-            {
+            if let Target::Named(name) = &step.target {
+                let target = targets
+                    .get(name)
+                    .ok_or_else(|| anyhow::anyhow!("missing receipt target"))?;
                 ensure!(
                     outcome.resource == target.resource
                         && outcome.id == target.id
@@ -312,9 +316,9 @@ mod tests {
         // Current ordinary and reference receipts round-trip.
         // Keys and identifiers are test data.
         for raw in [
-            r#"{"version":2,"outcomes":[{"kind":"created","resource":7,"id":9,"incarnation":"test"}],"source":{"step":0},"destination":null,"handover":{"resource":7,"id":9,"incarnation":"test","cap_version":2,"key_id":3}}"#,
-            r#"{"version":2,"outcomes":[{"kind":"created","resource":7,"id":9,"incarnation":"test"}],"source":{"reference":{"step":0,"field":"thread"}},"destination":{"route":5,"resource":6,"id":8,"incarnation":"test-incarnation"},"handover":null}"#,
-            r#"{"version":2,"outcomes":[{"kind":"deleted","resource":7,"id":9,"incarnation":"test"}],"source":"signed","destination":null,"handover":null}"#,
+            r#"{"version":3,"outcomes":[{"kind":"created","resource":7,"id":9,"incarnation":"test"}],"source":{"step":0},"destination":null,"handover":{"resource":7,"id":9,"incarnation":"test","cap_version":2,"key_id":3}}"#,
+            r#"{"version":3,"outcomes":[{"kind":"created","resource":7,"id":9,"incarnation":"test"}],"source":{"reference":{"step":0,"field":"thread"}},"destination":{"route":5,"resource":6,"id":8,"incarnation":"test-incarnation"},"handover":null}"#,
+            r#"{"version":3,"outcomes":[{"kind":"deleted","resource":7,"id":9,"incarnation":"test"}],"source":{"target":"target"},"destination":null,"handover":null}"#,
         ] {
             let receipt: SemanticReceipt = serde_json::from_str(raw).unwrap();
             assert_eq!(
@@ -334,12 +338,12 @@ mod tests {
         }
         assert!(
             serde_json::from_str::<SemanticReceipt>(
-                r#"{"version":2,"outcome":{},"destination":null,"extra":true}"#
+                r#"{"version":3,"outcome":{},"destination":null,"extra":true}"#
             )
             .is_err()
         );
         for raw in [
-            r#"{"route":4,"source":"signed"}"#,
+            r#"{"route":4,"source":{"target":"target"}}"#,
             r#"{"route":5,"source":{"reference":{"step":0,"field":"thread"}}}"#,
         ] {
             let redirect: Redirect = serde_json::from_str(raw).unwrap();
@@ -474,12 +478,12 @@ mod tests {
         db.initialize().await.unwrap();
         let mut m = parent_tests::declarations();
         m.operations.iter_mut().find(|op| op.id == 4).unwrap().id = 6;
-        m.actions[0].target_reads = vec![6];
+        m.actions[0].targets[0].source = TargetSource::Page { reads: vec![6] };
         m.routes[2].operations = vec![6, 1];
-        m.operations[2].bind.as_mut().unwrap().eligible = 6;
+        m.operations[2].bind.insert("thread".into(), 6);
         for (id, kind) in [(4, OperationKind::Update), (5, OperationKind::Delete)] {
             m.operations.push(Operation {
-                bind: None,
+                bind: Default::default(),
                 scope: None,
                 via: None,
                 filter: Vec::new(),
@@ -498,7 +502,7 @@ mod tests {
                 id - 2,
                 "Change reply",
                 id,
-                Target::Signed,
+                Target::Named("target".into()),
                 &m.resources[0],
                 if id == 4 { &["body"] } else { &[] },
                 3,
@@ -546,7 +550,13 @@ mod tests {
             };
             let action = manifest::web_action(&m, action_id).unwrap();
             let credentials = app
-                .credentials(&action, &session, now, Some(target), Fields::new())
+                .credentials(
+                    &action,
+                    &session,
+                    now,
+                    Application::page_grants(action.core, &target),
+                    Fields::new(),
+                )
                 .unwrap();
             let input = if action_id == 2 {
                 Fields::from([("body".into(), "updated".into())])
@@ -611,8 +621,17 @@ mod tests {
         ]);
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut budget = super::super::action::ExecutionBudget::new(app.runtime.limits(), deadline);
+        let canonical = app.canonical_action_input(m.actions[0].id, &input).unwrap();
         let (tx, prepared) = app
-            .prepare(&cookie, 1, &submission, &csrf, &input, None, &mut budget)
+            .prepare(
+                &cookie,
+                1,
+                &submission,
+                &csrf,
+                &canonical,
+                None,
+                &mut budget,
+            )
             .await
             .unwrap();
         let fallback = prepared.fallback.body.clone();
@@ -675,7 +694,7 @@ mod tests {
             .prepare_response(
                 &mut tx,
                 &manifest::web_action(&m, m.web_bindings[0].id).unwrap(),
-                None,
+                &Default::default(),
                 &payload,
                 &auth::Principal::Anonymous,
             )

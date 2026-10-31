@@ -89,7 +89,7 @@ fn host_rejects_parameterized_mutation_redirects() {
         m.actions[0].steps[0].target = if kind == OperationKind::Create {
             Target::None
         } else {
-            Target::Signed
+            Target::Named("target".into())
         };
         m.resources.push(Resource {
             gate: None,
@@ -130,6 +130,11 @@ fn host_rejects_parameterized_mutation_redirects() {
             params: vec![],
         });
         if kind == OperationKind::Update {
+            m.actions[0].targets = vec![crate::test_support::page_target(
+                1,
+                vec![2],
+                Revision::Exact,
+            )];
             m.routes[0].forms.clear();
             m.routes[1].forms.push(1);
         }
@@ -155,7 +160,12 @@ fn host_rejects_parameterized_mutation_redirects() {
     m.routes[0].forms.clear();
     m.routes[1].forms.push(1);
     m.operations[2].kind = OperationKind::Delete;
-    m.actions[0].steps[0].target = Target::Signed;
+    m.actions[0].targets = vec![crate::test_support::page_target(
+        1,
+        vec![2],
+        Revision::Exact,
+    )];
+    m.actions[0].steps[0].target = Target::Named("target".into());
     m.actions[0].inputs.clear();
     m.actions[0].steps[0].assign.clear();
     m.routes.push(Route {
@@ -197,11 +207,11 @@ fn host_rejects_parameterized_mutation_redirects() {
         m.actions[0].steps[0].target = if kind == OperationKind::Create {
             Target::None
         } else {
-            Target::Signed
+            Target::Named("target".into())
         };
         if kind != OperationKind::Create {
-            m.actions[0].target_reads = vec![2];
-            m.operations[2].bind = None;
+            m.actions[0].targets[0] = crate::test_support::page_target(1, vec![2], Revision::Exact);
+            m.operations[2].bind.clear();
             m.actions[0].steps[0].assign.retain(|a| a.field != "thread");
             m.operations[2].policy = Policy {
                 any: vec![vec![Predicate::Owner]],

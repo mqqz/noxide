@@ -1,7 +1,7 @@
 # Typed references
 
-A resource may have one required, immutable `Id<T>` reference. The host binds it
-from a signed page target or an earlier create step. A reference declares
+A resource may have up to four required, immutable `Id<T>` references. The host
+binds each field from an approved named target or an earlier create step. A reference declares
 integrity, not read authority.
 The [runtime security contract](runtime.md#security-contract) applies throughout.
 
@@ -24,23 +24,26 @@ retain their own policies even when the thread is hidden.
 References are required, have no initial value, and cannot be form controls,
 submitted inputs, update fields, selection filters or disclosures. A referencing
 create operation declares binding eligibility; the action assigns its reference
-with `SignedTarget` or `Created(n)`. The latter names an earlier create step of the
+with `Target(name)` or `Created(n)`. The latter names an earlier create step of the
 matching resource. Admission rejects forward references and references to other
 resources. Updates to newly created records remain deferred.
 
 The explicit single-operation SDK syntax `bind(field = target, eligible = Query)`
-lowers to operation eligibility and a `Set(SignedTarget)` assignment. A multi-step
+lowers to operation eligibility and a `Set(Target("target"))` assignment. A multi-step
 create uses `create(Order, set(product = target, quantity = quantity),
 eligible = ReadProduct)`, or assigns a named earlier create instead of `target`.
-Eligibility must be a non-follow read of the referenced resource. Signed binding
-uses the page's signed target and an explicitly declared action target read
-intersected with the issuing route's reads. An edit credential supplies mutation
-authority and cannot authorize inspection.
+With multiple references, write `eligible(product = ReadProduct, contact = ReadContact)`;
+every declared reference needs its own eligible non-follow Read operation. The
+wire operation stores a field-keyed map, with duplicate fields rejected before
+canonical sorting. The single-reference shorthand lowers to that same map.
+Page targets use explicitly declared eligible reads intersected with the issuing
+route's reads. An edit credential supplies mutation authority and cannot authorize
+inspection.
 
 Binding checks identity and incarnation, current eligibility, source create policy
 and both gate predicates inside the transaction. It does not compare the reference
-target's revision. The action's declared `Exact` or `Identity` requirement applies
-separately to its signed target before execution. Losing eligibility later does
+target's revision. Each named target's declared `Exact` or `Identity` requirement applies
+separately before execution. Losing eligibility later does
 not affect the source. Receipt recovery precedes new execution checks and never
 reruns eligibility or creation gates.
 
@@ -54,6 +57,49 @@ resource, and changing a reference target.
 Each reference has a schema-managed `nx_r_<storage:x>_<field>` index over resource,
 reference value and creation sequence. Gated references also have owner and tenant
 variants. Query index reconciliation continues to own only `nx_q_*` indexes.
+
+## Named targets and the NoJS picker
+
+An action declares at most four existing targets. A target comes from its signed
+page, an opaque user-selected handle, or one immutable reference from a page or
+selected target. Reference-derived sources cannot themselves be derived. Source
+names are resolved as a graph; declaration order has no meaning. Named target
+maps and field eligibility maps are canonicalized, while mutation step order
+remains semantic.
+
+Selected and derived targets name one eligible Read and an explicit host compute
+projection. A derived source projection must contain its reference field. Guest
+inspection is separate, uses an explicit private Read and projection, and requires
+Exact review. Compute-only fields and handle bytes do not enter guest inputs.
+Aliases of one physical record share loading and revision checks; each alias still
+passes its own eligibility, projection and mutation policies. Conflicting Exact
+seals produce a conflict only after every alias is authorized.
+
+The host renders a native HTML select from an authorized bounded List result,
+filtered by the selected target's eligible Read. Its label fields must be an
+explicit subset of the compute projection. Results share the route's database,
+byte and deadline budgets; the picker exposes at most twenty candidates per
+query. The current picker uses the query's first bounded page. Applications can
+use a narrower declared query when that page is insufficient.
+
+Each encrypted handle binds deployment, contract, user/tenant or anonymous
+session, binding, action, target name, selection and eligible operations, record
+incarnation and a ten-minute expiry. Raw IDs confer no authority. Submit verifies
+that scope before receipt lookup, then rechecks current eligible Read, projection,
+incarnation, reference and revision inside the existing write transaction. Query
+filters choose candidates when issuing the handle; the explicit eligible Read is
+the execution authority. Public picker queries do not revoke independently
+approved private target reads.
+
+Receipt identity includes decoded target identities rather than randomized token
+bytes. Identity targets ignore review revision in that identity; Exact targets
+retain it. Equivalent or expired handles can recover a committed receipt, with no
+fresh write or current target-authority requirement. Expired handles cannot begin
+a new execution. Role changes are excluded from receipt identity.
+
+The [catalog-links example](../../examples/catalog-links/src/lib.rs) selects a
+contact, derives its project through an immutable reference, and creates a ticket
+with both references using the existing executor.
 
 ## Gates and scope
 
@@ -104,7 +150,6 @@ precedes navigation.
 ## Deferred until an application needs them
 
 - Reference selection from URL parameters and folding scope into filters.
-- User-selected references, a second signed target and multiple references per resource.
 - Cross-thread gated lists and gates on private operations.
 - Mutable references and deletion behavior other than rejection.
 - Multi-hop follows.

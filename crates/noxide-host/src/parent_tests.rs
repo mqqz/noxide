@@ -61,7 +61,7 @@ pub(crate) fn declarations() -> Manifest {
         }
     }
     m.operations.push(Operation {
-        bind: None,
+        bind: Default::default(),
         scope: None,
         via: None,
         filter: Vec::new(),
@@ -92,15 +92,12 @@ pub(crate) fn declarations() -> Manifest {
         forms: vec![1],
         access: Access::PublicOptional,
     });
-    m.actions[0].target_reads = vec![4];
+    m.actions[0].targets = vec![fixture::page_target(2, vec![4], Revision::Exact)];
     m.actions[0].steps[0].assign.push(Assignment {
         field: "thread".into(),
-        change: Change::Set(Value::SignedTarget),
+        change: Change::Set(Value::Target("target".into())),
     });
-    m.operations[2].bind = Some(Bind {
-        field: "thread".into(),
-        eligible: 4,
-    });
+    m.operations[2].bind = ::std::collections::BTreeMap::from([("thread".into(), 4)]);
     m.operations
         .iter_mut()
         .find(|op| op.kind == OperationKind::List)
@@ -161,10 +158,11 @@ async fn effects(db: &Database, m: &Manifest, route: u32, target: u64) -> Effect
             kind: RequestKind::Route(route),
             target: Some(target),
             input: Fields::new(),
-            inspection: None,
+            inspection: Default::default(),
             available_forms: vec![],
         },
-        grant: None,
+        grants: Default::default(),
+        target_rows: Default::default(),
         capability_grant: None,
 
         calls: 64,
@@ -228,7 +226,7 @@ async fn mutation_case(db: Database) {
     db.initialize().await.unwrap();
     let mut m = declarations();
     m.operations.push(Operation {
-        bind: None,
+        bind: Default::default(),
         scope: None,
         via: None,
         filter: Vec::new(),
@@ -251,7 +249,7 @@ async fn mutation_case(db: Database) {
             2,
             "Edit reply",
             5,
-            Target::Signed,
+            Target::Named("target".into()),
             &m.resources[0],
             &["body"],
             2,
@@ -278,13 +276,16 @@ async fn mutation_case(db: Database) {
         .await
         .unwrap()
         .unwrap();
-    e.grant = Some(crate::security::RecordTarget {
-        resource: 1,
-        id: 12,
-        route: Some(2),
-        incarnation: stored.incarnation.clone(),
-        revision: stored.revision,
-    });
+    e.grants.insert(
+        "target".into(),
+        crate::security::RecordTarget {
+            resource: 1,
+            id: 12,
+            route: Some(2),
+            incarnation: stored.incarnation.clone(),
+            revision: stored.revision,
+        },
+    );
 
     e.request.kind = RequestKind::Action(2);
     e.principal = Principal::User(crate::auth::User {
@@ -396,7 +397,7 @@ async fn concurrent_case(db: Database) {
                 ("body".into(), "racing reply".into()),
                 ("published".into(), "true".into()),
             ]);
-            e.grant = Some(grant);
+            e.grants.insert("target".into(), grant);
             assert!(
                 e.execute_transaction(
                     crate::application::ActionCore::of(&child_manifest.actions[0]).unwrap()
@@ -599,7 +600,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         tenant_scoped: false,
     };
     m.operations.push(Operation {
-        bind: None,
+        bind: Default::default(),
         scope: None,
         via: None,
         filter: Vec::new(),
@@ -619,8 +620,8 @@ async fn integrity_case(db: Database, _sqlite: bool) {
             2,
             "Delete thread",
             5,
-            Target::Signed,
-            &m.resources[0],
+            Target::Named("target".into()),
+            &m.resources[1],
             &[],
             1,
         );
@@ -634,13 +635,16 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         .await
         .unwrap()
         .unwrap();
-    e.grant = Some(crate::security::RecordTarget {
-        resource: 2,
-        id: 10,
-        route: Some(3),
-        incarnation: stored.incarnation.clone(),
-        revision: stored.revision,
-    });
+    e.grants.insert(
+        "target".into(),
+        crate::security::RecordTarget {
+            resource: 2,
+            id: 10,
+            route: Some(3),
+            incarnation: stored.incarnation.clone(),
+            revision: stored.revision,
+        },
+    );
 
     e.request.kind = RequestKind::Action(2);
     e.principal = Principal::User(crate::auth::User {
@@ -669,6 +673,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
     // Match the new parent route so the destination manifest itself is valid.
     target.operations[3].resource = 3;
     target.routes[2].resource = Some(3);
+    target.actions[0].targets[0].resource = 3;
     target.routes[2].forms.retain(|id| *id == 1);
     target.actions.retain(|a| a.id == 1);
     target.web_bindings.retain(|binding| binding.action == 1);
@@ -720,8 +725,8 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         }
     }
     for operation in &mut renamed.operations {
-        if let Some(bind) = &mut operation.bind {
-            bind.field = "parent_thread".into();
+        if let Some(eligible) = operation.bind.remove("thread") {
+            operation.bind.insert("parent_thread".into(), eligible);
         }
     }
     let migration = crate::schema::Migration {
@@ -904,8 +909,8 @@ async fn index_scope_case(db: Database, sqlite: bool) {
         }
     }
     for operation in &mut renamed.operations {
-        if let Some(bind) = &mut operation.bind {
-            bind.field = "parent_thread".into();
+        if let Some(eligible) = operation.bind.remove("thread") {
+            operation.bind.insert("parent_thread".into(), eligible);
         }
     }
     let migration = crate::schema::Migration {
@@ -1799,14 +1804,19 @@ fn forged_reference_and_follow_declarations_are_rejected_independently() {
             "forged declaration admitted: {bad:?}"
         );
     };
-    reject(&|m| m.operations[2].bind = None);
-    reject(&|m| m.operations[2].bind.as_mut().unwrap().field = "body".into());
-    reject(&|m| m.operations[2].bind.as_mut().unwrap().eligible = 2);
+    reject(&|m| m.operations[2].bind.clear());
+    reject(&|m| {
+        m.operations[2].bind.clear();
+        m.operations[2].bind.insert("body".into(), 4);
+    });
+    reject(&|m| {
+        m.operations[2].bind.insert("thread".into(), 2);
+    });
     reject(&|m| {
         let mut read = m.operations[3].clone();
         read.id = 7;
         m.operations.push(read);
-        m.operations[2].bind.as_mut().unwrap().eligible = 7;
+        m.operations[2].bind.insert("thread".into(), 7);
     });
     reject(&|m| {
         let mut field = m.resources[0].fields[2].clone();
@@ -1999,13 +2009,16 @@ async fn follow_case(db: Database) {
         ("body".into(), "order".into()),
         ("published".into(), "true".into()),
     ]);
-    e.grant = Some(crate::security::RecordTarget {
-        resource: 2,
-        id: 10,
-        incarnation: "parent".into(),
-        revision: 1,
-        route: Some(3),
-    });
+    e.grants.insert(
+        "target".into(),
+        crate::security::RecordTarget {
+            resource: 2,
+            id: 10,
+            incarnation: "parent".into(),
+            revision: 1,
+            route: Some(3),
+        },
+    );
     assert!(
         e.execute_transaction(crate::application::ActionCore::of(&m.actions[0]).unwrap())
             .await

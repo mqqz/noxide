@@ -39,7 +39,7 @@ fn declarations() -> Manifest {
     }
     for (id, kind) in [(4, OperationKind::Update), (5, OperationKind::Delete)] {
         m.operations.push(Operation {
-            bind: None,
+            bind: Default::default(),
             scope: None,
             via: None,
             filter: Vec::new(),
@@ -62,7 +62,7 @@ fn declarations() -> Manifest {
             2,
             "Edit",
             4,
-            Target::Signed,
+            Target::Named("target".into()),
             &m.resources[0],
             &["body", "private"],
             2,
@@ -70,7 +70,15 @@ fn declarations() -> Manifest {
         fixture::register_action(&mut m, action);
     }
     {
-        let action = fixture::action(3, "Delete", 5, Target::Signed, &m.resources[0], &[], 1);
+        let action = fixture::action(
+            3,
+            "Delete",
+            5,
+            Target::Named("target".into()),
+            &m.resources[0],
+            &[],
+            1,
+        );
         fixture::register_action(&mut m, action);
     }
     for r in &mut m.routes {
@@ -855,7 +863,7 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
         let mut m = declarations();
         if inspect {
             m.operations.push(Operation {
-                bind: None,
+                bind: Default::default(),
                 scope: None,
                 via: None,
                 filter: Vec::new(),
@@ -870,7 +878,7 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
                 visibility: None,
                 fields: None,
             });
-            m.actions[1].inspect = Some(Inspection {
+            m.actions[1].targets[0].inspect = Some(Inspection {
                 operation: 6,
                 fields: vec!["private".into()],
             });
@@ -962,7 +970,7 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
                 ("body".into(), "forged".into()),
                 ("private".into(), "".into()),
             ]),
-            inspection: None,
+            inspection: Default::default(),
             available_forms: vec![],
         };
         let mut effects = crate::repository::Effects {
@@ -979,7 +987,8 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
             manifest: Arc::new(m),
             principal: crate::auth::Principal::Anonymous,
             request,
-            grant: Some(grant),
+            grants: std::collections::BTreeMap::from([("target".into(), grant)]),
+            target_rows: Default::default(),
             capability_grant: None,
 
             calls: 16,
@@ -1027,6 +1036,11 @@ async fn persistent_resource_secret_contract(db: Database) {
         op.resource = 901;
     }
     rebound.routes[1].resource = Some(901);
+    for action in &mut rebound.actions {
+        for target in &mut action.targets {
+            target.resource = 901;
+        }
+    }
     let keys: HostKeys =
         serde_json::from_value(serde_json::to_value(&*original.keys).unwrap()).unwrap();
     let changed = Application::new(
@@ -1082,6 +1096,11 @@ async fn persistent_resource_secret_contract(db: Database) {
         op.resource = 1901;
     }
     renamed.routes[1].resource = Some(1901);
+    for action in &mut renamed.actions {
+        for target in &mut action.targets {
+            target.resource = 1901;
+        }
+    }
     db.schema_apply(
         &renamed,
         &crate::schema::Migration {

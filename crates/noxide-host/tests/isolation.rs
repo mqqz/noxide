@@ -9,7 +9,7 @@ fn request() -> RequestView {
         kind: RequestKind::Route(1),
         target: None,
         input: Default::default(),
-        inspection: None,
+        inspection: Default::default(),
     }
 }
 
@@ -79,7 +79,7 @@ async fn action_input_and_inspection_fit_the_request_envelope() {
     for field in ["body", "tag"] {
         request.input.insert(field.into(), "\\".repeat(4096));
     }
-    request.inspection = Some(request.input.clone());
+    request.inspection = [("target".into(), request.input.clone())].into();
     assert!(serde_json::to_vec(&request).unwrap().len() > noxide_protocol::MAX_INPUT_BYTES);
     app.render_only(request.clone()).await.unwrap();
 

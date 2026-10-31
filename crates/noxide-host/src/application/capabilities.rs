@@ -80,7 +80,7 @@ impl Application {
                         contract: self.submission_contract(),
                         action: 0,
                         version: 1,
-                        target: Some(target),
+                        targets: BTreeMap::from([("target".into(), target)]),
                     },
                     &anonymous.nonce,
                     now,
@@ -90,6 +90,8 @@ impl Application {
             let mut page = render::capability_rotation(
                 &self.presentation,
                 &FormCredentials {
+                    selections: Default::default(),
+                    selected: Default::default(),
                     csrf: self.keys.csrf(&anonymous.nonce),
                     submission,
                     values: Fields::new(),
@@ -188,11 +190,13 @@ impl Application {
             contract,
             action: 0,
             version: 1,
-            target: Some(target),
+            targets,
         } = &token.kind
         else {
             anyhow::bail!(RequestError::InvalidRequest);
         };
+        ensure!(targets.len() == 1, RequestError::InvalidRequest);
+        let target = targets.get("target").ok_or(RequestError::InvalidRequest)?;
         ensure!(
             contract == &self.submission_contract()
                 && token.subject == anonymous.nonce

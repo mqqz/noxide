@@ -89,7 +89,7 @@ fn public_query_decodes_only_projected_fields() {
         kind: noxide::RequestKind::Route(index::id()),
         target: None,
         input: Fields::new(),
-        inspection: None,
+        inspection: Default::default(),
         available_forms: vec![],
     };
     let _ = index::dispatch(&request);
