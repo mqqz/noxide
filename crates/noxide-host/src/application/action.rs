@@ -1,6 +1,8 @@
 //! Core action execution and transactional replay semantics.
 #[cfg(test)]
 mod computation_tests;
+#[cfg(test)]
+mod membership_tests;
 mod targets;
 use super::{Application, EditReceipt, RequestError, navigation};
 use crate::{

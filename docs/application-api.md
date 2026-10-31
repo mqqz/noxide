@@ -359,8 +359,10 @@ struct PlaceOrder;
 This is the flow in [shop](../examples/shop/src/lib.rs): one quantity control feeds
 the guarded stock decrease and stored order quantity. A named earlier create can
 supply an immutable reference to another create. Inputs support existing scalar
-kinds, including typed account inputs on creates with host account-binding checks;
-reference inputs are forbidden. Text bounds are UTF-8 byte limits. Constants are
+kinds, including `inputs(recipient: AccountId = same_tenant)` on creates with
+host account-binding checks. Account inputs must be required and explicitly name
+the supported scope; the host validates the selected active recipient without
+replacing it with the principal. Reference inputs are forbidden. Text bounds are UTF-8 byte limits. Constants are
 literal values, not expressions. There are no branches, loops or selected targets.
 
 Transactions contain one to four steps, at most two creates, and no delete combined

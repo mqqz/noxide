@@ -35,7 +35,7 @@ fn route(m: &Manifest, name: &str) -> u32 {
         .unwrap()
         .id
 }
-fn component(m: &Manifest) -> Vec<u8> {
+fn component(m: &Manifest, read_routes: bool) -> Vec<u8> {
     fn emit(bytes: &[u8]) -> String {
         bytes
             .chunks(8)
@@ -78,7 +78,7 @@ fn component(m: &Manifest) -> Vec<u8> {
                 condition.push_str("i32.and\n");
             }
         }
-        let page = emit(
+        let mut page = emit(
             &serde_json::to_vec(&ResponseIntent::Page(Document::new(
                 "Computation fixture",
                 route
@@ -89,34 +89,76 @@ fn component(m: &Manifest) -> Vec<u8> {
             )))
             .unwrap(),
         );
+        if read_routes
+            && let Some(read) = route
+                .operations
+                .iter()
+                .filter_map(|id| m.operations.iter().find(|op| op.id == *id))
+                .find(|op| op.kind == OperationKind::Read && Some(op.resource) == route.resource)
+        {
+            let target_offset = format!(
+                "{{\"version\":{VERSION},\"kind\":{{\"route\":{}}},\"target\":",
+                route.id
+            )
+            .len();
+            let not_found = emit(
+                &serde_json::to_vec(&ResponseIntent::NotFound(Document::new(
+                    "Not found",
+                    vec![],
+                )))
+                .unwrap(),
+            );
+            page = format!(
+                r#"i64.const 0 local.set $target i32.const {target_offset} local.set $pos
+                block $end_digits loop $digits
+                  local.get $pos call $request i32.wrap_i64 i32.const 255 i32.and local.tee $digit i32.const 48 i32.lt_u br_if $end_digits
+                  local.get $digit i32.const 57 i32.gt_u br_if $end_digits
+                  local.get $target i64.const 10 i64.mul local.get $digit i32.const 48 i32.sub i64.extend_i32_u i64.add local.set $target
+                  local.get $pos i32.const 1 i32.add local.set $pos br $digits
+                end end
+                i32.const {operation} local.get $target call $invoke i32.const 4 i32.eq
+                if {not_found} else {page} end"#,
+                operation = read.id
+            );
+        }
         branches = format!("{condition} if {page} else {branches} end");
     }
     let kind = format!("{{\"version\":{VERSION},\"kind\":{{").len() + 1;
     let execute = emit(&serde_json::to_vec(&ResponseIntent::Execute).unwrap());
     wat::parse_str(format!(r#"(component
-      (import "noxide:application/host@0.1.0" (instance $h (export "emit" (func (param "word" u64) (param "length" u32))) (export "request-chunk" (func (param "offset" u32) (result u64)))))
+      (import "noxide:application/host@0.1.0" (instance $h (export "emit" (func (param "word" u64) (param "length" u32))) (export "request-chunk" (func (param "offset" u32) (result u64))) (export "invoke" (func (param "operation" u32) (param "target" u64) (result u32)))))
       (alias export $h "emit" (func $emit)) (core func $emit (canon lower (func $emit)))
       (alias export $h "request-chunk" (func $request)) (core func $request (canon lower (func $request)))
-      (core module $m (import "h" "emit" (func $emit (param i64 i32))) (import "h" "request" (func $request (param i32) (result i64)))
-        (func (export "handle") i32.const {kind} call $request i32.wrap_i64 i32.const 255 i32.and i32.const 97 i32.eq if {execute} else {branches} end))
-      (core instance $i (instantiate $m (with "h" (instance (export "emit" (func $emit)) (export "request" (func $request))))))
+      (alias export $h "invoke" (func $invoke)) (core func $invoke (canon lower (func $invoke)))
+      (core module $m (import "h" "invoke" (func $invoke (param i32 i64) (result i32))) (import "h" "emit" (func $emit (param i64 i32))) (import "h" "request" (func $request (param i32) (result i64)))
+        (func (export "handle") (local $target i64) (local $pos i32) (local $digit i32) i32.const {kind} call $request i32.wrap_i64 i32.const 255 i32.and i32.const 97 i32.eq if {execute} else {branches} end))
+      (core instance $i (instantiate $m (with "h" (instance (export "emit" (func $emit)) (export "request" (func $request)) (export "invoke" (func $invoke))))))
       (func (export "handle") (canon lift (core func $i "handle"))))"#)).unwrap()
 }
-struct Case {
+pub(super) struct Case {
     _temp: tempfile::TempDir,
-    db: Database,
-    app: Arc<Application>,
-    alice: String,
-    bob: String,
-    eve: String,
-    accounts: std::collections::BTreeMap<String, String>,
-    clock: Option<crate::application::clock::ClockService>,
+    pub(super) db: Database,
+    pub(super) app: Arc<Application>,
+    pub(super) alice: String,
+    pub(super) bob: String,
+    pub(super) eve: String,
+    pub(super) accounts: std::collections::BTreeMap<String, String>,
+    pub(super) clock: Option<crate::application::clock::ClockService>,
 }
 impl Case {
-    async fn new(db: Option<Database>, m: Manifest) -> Self {
+    pub(super) async fn new(db: Option<Database>, m: Manifest) -> Self {
+        Self::new_internal(db, m, false).await
+    }
+    pub(super) async fn indexed(db: Option<Database>, m: Manifest) -> Self {
+        Self::new_internal(db, m, true).await
+    }
+    async fn new_internal(db: Option<Database>, m: Manifest, indexes: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let db = db.unwrap_or_else(|| Database::sqlite(temp.path().join("computations.db")));
         db.initialize().await.unwrap();
+        if indexes {
+            db.reconcile_query_indexes(&m).await.unwrap();
+        }
         let mut accounts = std::collections::BTreeMap::new();
         for (name, tenant) in [("alice", "team"), ("bob", "team"), ("eve", "other")] {
             accounts.insert(
@@ -128,7 +170,7 @@ impl Case {
         }
         let app = Arc::new(
             Application::new(
-                &component(&m),
+                &component(&m, indexes),
                 &serde_json::to_vec(&m).unwrap(),
                 manifest::digest(&m).unwrap(),
                 db.clone(),
@@ -198,12 +240,12 @@ impl Case {
             clock,
         }
     }
-    async fn close(mut self) {
+    pub(super) async fn close(mut self) {
         if let Some(clock) = self.clock.take() {
             clock.shutdown().await.unwrap();
         }
     }
-    async fn form(&self, cookie: &str, name: &str, target: u64) -> (String, String) {
+    pub(super) async fn form(&self, cookie: &str, name: &str, target: u64) -> (String, String) {
         let binding = binding(&self.app.manifest, name);
         let route = self
             .app
@@ -227,7 +269,7 @@ impl Case {
             fixture::hidden(form, "_csrf"),
         )
     }
-    async fn submit(
+    pub(super) async fn submit(
         &self,
         cookie: &str,
         name: &str,
@@ -244,7 +286,7 @@ impl Case {
             )
             .await
     }
-    async fn records(&self, name: &str) -> Vec<(u64, Fields, i64)> {
+    pub(super) async fn records(&self, name: &str) -> Vec<(u64, Fields, i64)> {
         let mut tx = self
             .db
             .begin_read(std::time::Instant::now() + Duration::from_secs(3))
@@ -266,7 +308,7 @@ impl Case {
             })
             .collect()
     }
-    async fn counts(&self) -> (u64, u64) {
+    pub(super) async fn counts(&self) -> (u64, u64) {
         let mut tx = self
             .db
             .begin_read(std::time::Instant::now() + Duration::from_secs(3))
