@@ -233,7 +233,13 @@ async fn stored_bounds(db: &Database) {
         "records follow creation order independently of ID width"
     );
     assert!(records.iter().all(|r| r.fields == fields));
-    assert_eq!(effects.more, Some(3));
+    assert_eq!(
+        effects.more,
+        Some(noxide_protocol::query::CursorKey::Created {
+            sequence: 3,
+            record: 10
+        })
+    );
     effects.cursor = effects.more.take();
     effects.next_request();
     let records: Vec<Record> =

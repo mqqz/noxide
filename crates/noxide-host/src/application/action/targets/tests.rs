@@ -1378,8 +1378,14 @@ async fn picker_query_ignores_and_preserves_unrelated_route_pagination() {
         target_rows: Default::default(),
         capability_grant: None,
         calls: 16,
-        cursor: Some(9999),
-        more: Some(777),
+        cursor: Some(noxide_protocol::query::CursorKey::Created {
+            sequence: 9999,
+            record: 9999,
+        }),
+        more: Some(noxide_protocol::query::CursorKey::Created {
+            sequence: 777,
+            record: 777,
+        }),
     };
     assert_eq!(
         effects
@@ -1398,7 +1404,18 @@ async fn picker_query_ignores_and_preserves_unrelated_route_pagination() {
             effects.result_limit,
             effects.truncated
         ),
-        (Some(9999), Some(777), 321, true)
+        (
+            Some(noxide_protocol::query::CursorKey::Created {
+                sequence: 9999,
+                record: 9999
+            }),
+            Some(noxide_protocol::query::CursorKey::Created {
+                sequence: 777,
+                record: 777
+            }),
+            321,
+            true,
+        )
     );
     effects.tx.commit().await.unwrap();
 }

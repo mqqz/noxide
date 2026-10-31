@@ -291,7 +291,7 @@ async fn contract(db: Database, descending: bool) {
             if e.more.is_none() {
                 break;
             }
-            e.cursor = e.more;
+            e.cursor = e.more.take();
             e.next_request();
         }
         assert_eq!(seen.len(), expected);
@@ -321,15 +321,29 @@ async fn contract(db: Database, descending: bool) {
     assert!(page.is_empty());
     let first = e
         .more
+        .take()
         .expect("bounded residual scan must allow continuation");
-    e.cursor = Some(first);
+    e.cursor = Some(first.clone());
     e.next_request();
     let page: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
     assert!(page.is_empty());
+    let (next, prior) = match (e.more.as_ref().unwrap(), &first) {
+        (
+            noxide_protocol::query::CursorKey::Created {
+                sequence: a,
+                record: aid,
+            },
+            noxide_protocol::query::CursorKey::Created {
+                sequence: b,
+                record: bid,
+            },
+        ) => ((a, aid), (b, bid)),
+        _ => panic!("creation cursor required"),
+    };
     assert!(if descending {
-        e.more.unwrap() < first
+        next < prior
     } else {
-        e.more.unwrap() > first
+        next > prior
     });
     e.tx.commit().await.unwrap();
     let mut tx = db
@@ -813,7 +827,7 @@ async fn filtered_lists(db: Database) {
                         if e.more.is_none() {
                             break;
                         }
-                        e.cursor = e.more;
+                        e.cursor = e.more.take();
                         e.next_request();
                     }
                     let expected: Vec<_> = if descending {
@@ -870,7 +884,7 @@ async fn filtered_lists(db: Database) {
                 e.more.is_some(),
                 "residual bound must not report a false end"
             );
-            e.cursor = e.more;
+            e.cursor = e.more.take();
             e.next_request();
             let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
             assert!(rows.is_empty());
@@ -1289,7 +1303,10 @@ async fn previews_case(db: Database) {
                 .unwrap();
             let mut e = effects(tx, &m, &alice, false, "");
             e.calls = 16;
-            e.cursor = Some(150);
+            e.cursor = Some(noxide_protocol::query::CursorKey::Created {
+                sequence: 150,
+                record: 150,
+            });
             for id in order {
                 let bytes = e.invoke(id, 0).await.unwrap();
                 assert!(bytes.len() <= MAX_RESULT_BYTES);
@@ -1312,7 +1329,14 @@ async fn previews_case(db: Database) {
                 }
             }
             assert!(started.elapsed() < Duration::from_secs(2));
-            assert_eq!(e.more, Some(if descending { 140 } else { 160 }));
+            let boundary = if descending { 140 } else { 160 };
+            assert_eq!(
+                e.more,
+                Some(noxide_protocol::query::CursorKey::Created {
+                    sequence: boundary,
+                    record: boundary
+                })
+            );
             assert_eq!(e.see_all.len(), 1);
             assert_eq!(crate::routing::resolve(&m, &e.see_all[0]).unwrap(), "/");
             assert!(e.list_bytes <= MAX_LIST_RESULT_BYTES);
