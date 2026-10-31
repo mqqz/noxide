@@ -29,7 +29,7 @@ pub(super) const TABLES: &[super::blob_layout::Table] = &[
 
 const SQLITE: &[&str] = &[
     "CREATE TABLE nx_search_state (resource BIGINT PRIMARY KEY NOT NULL REFERENCES nx_resource_catalog(storage_id), tokenizer TEXT NOT NULL CHECK(length(CAST(tokenizer AS BLOB))>=1 AND length(CAST(tokenizer AS BLOB))<=256), declaration TEXT NOT NULL CHECK(length(CAST(declaration AS BLOB))>=2 AND length(CAST(declaration AS BLOB))<=4096 AND json_valid(declaration) AND json_type(declaration)='object'), version BIGINT NOT NULL CHECK(version=1), state TEXT NOT NULL CHECK(state IN ('building','ready')))",
-    "CREATE TABLE nx_search_postings (resource BIGINT NOT NULL REFERENCES nx_search_state(resource), record_id BIGINT NOT NULL CHECK(record_id>0), field BIGINT NOT NULL CHECK(field>=0 AND field<4), token TEXT COLLATE BINARY NOT NULL CHECK(length(CAST(token AS BLOB))>=1 AND length(CAST(token AS BLOB))<=256 AND length(token)<=64), incarnation TEXT NOT NULL CHECK(length(CAST(incarnation AS BLOB))>=1 AND length(CAST(incarnation AS BLOB))<=64), revision BIGINT NOT NULL CHECK(revision>=1), created_seq BIGINT NOT NULL CHECK(created_seq>0), PRIMARY KEY(resource,record_id,field,token), FOREIGN KEY(resource,record_id) REFERENCES nx_records(resource,id) ON DELETE CASCADE)",
+    "CREATE TABLE nx_search_postings (resource BIGINT NOT NULL REFERENCES nx_search_state(resource), record_id BIGINT NOT NULL CHECK(record_id>0), field BIGINT NOT NULL CHECK(field>=0 AND field<4), token TEXT COLLATE BINARY NOT NULL CHECK(length(CAST(token AS BLOB))>=1 AND length(CAST(token AS BLOB))<=256 AND length(token)<=64 AND instr(token,char(0))=0), incarnation TEXT NOT NULL CHECK(length(CAST(incarnation AS BLOB))>=1 AND length(CAST(incarnation AS BLOB))<=64), revision BIGINT NOT NULL CHECK(revision>=1), created_seq BIGINT NOT NULL CHECK(created_seq>0), PRIMARY KEY(resource,record_id,field,token), FOREIGN KEY(resource,record_id) REFERENCES nx_records(resource,id) ON DELETE CASCADE)",
 ];
 const POSTGRES: &[&str] = &[
     "CREATE TABLE nx_search_state (resource BIGINT PRIMARY KEY NOT NULL REFERENCES nx_resource_catalog(storage_id), tokenizer TEXT NOT NULL CHECK(octet_length(tokenizer)>=1 AND octet_length(tokenizer)<=256), declaration TEXT NOT NULL CHECK(octet_length(declaration)>=2 AND octet_length(declaration)<=4096 AND jsonb_typeof(declaration::jsonb)='object'), version BIGINT NOT NULL CHECK(version=1), state TEXT NOT NULL CHECK(state IN ('building','ready')))",
@@ -182,7 +182,6 @@ impl Transaction {
                             "foreign search metadata namespace"
                         );
                     }
-                    let definition = definition.replace(&format!("{namespace}."), "");
                     actual.push((table, kind, ddl_key(&definition), target));
                 }
                 actual.sort();
@@ -231,3 +230,6 @@ impl Transaction {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod review_tests;
