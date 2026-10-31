@@ -230,6 +230,12 @@ impl Application {
                     .iter()
                     .any(|schedule| schedule.source_action == a.id)
             })
+            || self.manifest.effects.as_ref().is_some_and(|effects| {
+                effects
+                    .emissions
+                    .iter()
+                    .any(|emission| emission.source_action == a.id)
+            })
         {
             budget.spend(1)?;
             Some(self.temporal_after_admission(&mut tx).await?)
@@ -436,6 +442,17 @@ impl Application {
         budget.database_calls = effects.calls;
         if let Err(error) = self
             .enqueue_action_jobs(&mut effects, a, &original, &outcomes, time, &nonce)
+            .await
+        {
+            budget.database_calls = effects.calls;
+            effects.tx.rollback().await?;
+            if error.is::<repository::ReferenceUnavailable>() {
+                return Ok(Attempt::Settled(Settled::Unavailable));
+            }
+            return Ok(Attempt::Aborted { error });
+        }
+        if let Err(error) = self
+            .enqueue_action_effects(&mut effects, a, &original, &outcomes, time, &nonce)
             .await
         {
             budget.database_calls = effects.calls;
@@ -871,6 +888,7 @@ mod tests {
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
                 jobs: None,
+                effects: None,
             },
         )
         .unwrap();
@@ -907,6 +925,7 @@ mod tests {
                     assets: crate::assets::AssetBundle::default(),
                     blobs: None,
                     jobs: None,
+                    effects: None,
                 },
             )
             .unwrap(),
@@ -1080,6 +1099,7 @@ mod tests {
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
                 jobs: None,
+                effects: None,
             },
         )
         .unwrap();
@@ -1175,6 +1195,7 @@ mod tests {
                     assets: crate::assets::AssetBundle::default(),
                     blobs: None,
                     jobs: None,
+                    effects: None,
                 },
             )
             .unwrap(),
