@@ -108,9 +108,9 @@ fn component_with_redirect(forged: bool) -> Vec<u8> {
     let page1 = emit(br#"{"page":{"title":"Create","nodes":[{"form":{"action":1}}]}}"#);
     let page2 =
         emit(br#"{"page":{"title":"Edit","nodes":[{"form":{"action":2}},{"form":{"action":3}}]}}"#);
-    let kind = br#"{"version":3,"kind":{"#.len() + 1;
-    let action = br#"{"version":3,"kind":{"action":"#.len();
-    let route = br#"{"version":3,"kind":{"route":"#.len();
+    let kind = format!(r#"{{"version":{VERSION},"kind":{{"#).len() + 1;
+    let action = format!(r#"{{"version":{VERSION},"kind":{{"action":"#).len();
+    let route = format!(r#"{{"version":{VERSION},"kind":{{"route":"#).len();
     let decision = if forged {
         emit(br#"{"created":{"resource":1,"id":1,"destination":{"route":999,"target":null}}}"#)
     } else {

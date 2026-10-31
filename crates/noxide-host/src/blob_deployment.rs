@@ -30,9 +30,8 @@ pub struct DeploymentApproval {
     pub digest: [u8; 32],
 }
 
-/// Requires an independently admitted manifest. During the wire10 checkpoint,
-/// manifests with blobs still fail that admission until runtime enforcement is
-/// complete. Operator paths are absent from this pure function's signature.
+/// Requires an independently admitted manifest. Operator paths are absent
+/// from this pure calculation; resource opening follows approval verification.
 pub fn approval(
     manifest: &Manifest,
     ceilings: Option<&BlobCeilings>,

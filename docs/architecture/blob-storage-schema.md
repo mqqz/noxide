@@ -1,7 +1,8 @@
-# Blob metadata storage preparation
+# Blob metadata storage
 
-This schema is P08 preparation, not enabled uploads or downloads. Blob declarations
-still fail host admission until their complete runtime is integrated and reviewed.
+The P08 runtime uses this provider-portable metadata layout for uploads,
+transactional attachment, pairing and fenced cleanup. See [blob storage](blobs.md)
+for the complete authority and transfer contract.
 The framework storage version is 12. Existing version-11 databases are refused
 without changing their data; the framework does not reset or migrate them silently.
 Use a separately configured empty development database, or implement and review
@@ -18,8 +19,8 @@ attached resource fields. Initialization checks primary keys and the actual inde
 definitions, including uniqueness, column order and partial predicates. Existing
 index names alone do not establish correctness. Activation must repeat the two
 bounded blob catalog checks before binding the store; ordinary reads do not scan
-catalogs. Counter/state consistency and pairing are enforced by the forthcoming
-metadata adapter, not established by an empty table layout.
+catalogs. The runtime metadata adapter enforces counter/state consistency and pairing;
+an empty table layout alone does not prove those runtime invariants.
 
 Generic application migrations refuse removing or renaming resources containing
 Blob fields, removing/renaming existing Blob fields, converting or changing their
@@ -27,7 +28,12 @@ kind, or initializing an existing record's attachment from a literal ID. They
 must first implement atomic association maintenance. Adding a new resource remains
 possible through the ordinary declared schema path. Record deletion uses the
 transactional detachment path, followed by deferred physical deletion; that
-runtime path is not enabled by this schema preparation.
+runtime path is implemented by the shared action executor and blob maintenance.
+
+## Historical preparation evidence
+
+The following records predate runtime integration; current runtime gates are
+recorded in the implementation ledger and linked blob contract.
 
 Coordinator owns the schema and storage-version allocation. Requested route is
 Sol/high; effective token/credit usage is unavailable. The isolated worktree is

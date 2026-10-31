@@ -1,214 +1,202 @@
 # Blob storage
 
-P08 is **disabled**, not an available application capability. Wire version 10
-includes opaque types and the requested policy; host admission rejects blob
-manifests. Durable store, multipart parsing, state and approval helpers have leaf
-tests. Native schema verification is separately reviewed. Metadata SQL, pairing
-and inspection interfaces compile, but their provider/commit/FS integration is
-unfinished. Explicit SDK declarations lower to this same contract; they grant no
-authority. Runtime upload/download dispatch, transactional attachment, GC and
-operator activation remain unfinished.
+Noxide stores uploads in one host's private immutable local store, including
+when metadata uses PostgreSQL. Applications receive opaque `UploadHandle` and
+`BlobRef` values. File bytes stay outside Wasm, ordinary JSON and Document IR.
+A blob declaration requires explicit deployment resources and approval; it grants
+no guest filesystem or network access.
 
-The feature contract is [F4 in the handover](handover-2026-10-31.md#f4-blob-storage-and-delivery).
-All application bytes are hostile. They will be downloaded as attachments with
-`application/octet-stream`, never interpreted as assets, HTML, SVG or inline
-previews. No uploaded bytes enter Wasm, ordinary JSON or Document IR buffers.
+The [security principles](../../README.md#security-principles) and
+[runtime security contract](runtime.md#security-contract) apply. Application code
+and uploaded content remain hostile. This implementation is not an audited
+security or transport-anonymity certification.
 
-## Implemented foundation
+## Declare and approve
 
-`noxide-protocol/src/blobs.rs` distinguishes a `BlobRef` from an `UploadHandle`.
-Each encodes a random host identity, with a distinct prefix and canonical lowercase
-hex encoding; parsing establishes no authority. Debug output redacts tokens.
-Host object keys are separate identities and never supplied by a guest as paths.
+A resource stores a `BlobRef` or `Option<BlobRef>`. An explicit action declares one
+`UploadHandle` input and assigns it to one compatible Blob field in a Create step.
+The SDK's `.file()` control and `download::<ReadQuery>(record, field, text)` helper
+lower to the same protocol shapes. See the complete
+[explicit SDK fixture](../../tools/fixtures/blob-app/src/lib.rs) and its
+[production HTTP harness](../../tools/test_blob_http.py).
 
-The hard ceilings are 10 MiB per file, 1 GiB per application, 65,536 physical
-objects, four live stages per subject, four concurrent uploads and eight
-concurrent downloads. Operator limits may lower these ceilings. The object count
-includes Uploading, Staged, Attached, Unreferenced and Deleting, including uncertain
-physical work. Empty files consume object quota. Bytes and object count are
-released only after acknowledged durable deletion. Reducing an operator quota
-stops new reservations while allowing existing overages to be cleaned gradually.
+One `Manifest.blobs: Option<BlobPolicy>` declares limits and upload bindings. Each
+binding names its web binding and upload input. At most 16 bindings are admitted;
+each action and web binding has at most one upload input, used exactly once.
+Blob literals, initial values, updates, scalar expressions and comparisons are
+rejected. Only host canonicalization supplies an unassigned optional Blob field's
+empty value. A submitted absent file requires both optional input and optional
+destination, with no previously reserved slot for that form nonce.
 
-`blob_store.rs` opens an absolute operator path by directory descriptors, refusing
-symlink components. The root and internal directories must have mode 0700 and
-belong to the effective host user. Files must be owned, regular and singly linked.
-Staging uses create-new, mode 0600, no-follow operations. Finalization seals the
-file to mode 0400, fsyncs its data, renames within one filesystem without replacing
-an existing object, and fsyncs both directories. Only then can it return the
-private durable-object token needed for a Staged candidate.
+The constructor's final argument is one `DeploymentResources` value:
 
-A persistent random store identity and a distinct pair identity must be bound to
-the database during activation. A nonblocking exclusive flock prevents simultaneous owners of the
-same store. Descriptors, uploads and scans retain this lease. Store access assumes
-a healthy operator-managed local filesystem and trusted host account. Another
-process with that same account's authority can tamper with private files; this is
-not a sandbox against the operator. Directory-relative I/O prevents guest paths
-and symlinks from redirecting an operation.
-
-Downloads can capture an immutable descriptor after checking expected length,
-ownership, file type, link count and mode. Missing or inconsistent objects fail.
-A descriptor already captured remains readable after unlink; a new open fails.
-Actual authorization is intentionally absent from the store and must precede
-opening through the shared current resource/field read authority.
-
-All data operations check a supplied monotonic deadline and cancellation flag
-between chunks of at most 64 KiB, and after finalization syscalls. Lifecycle
-timestamps come from the existing durable clock, never this I/O deadline.
-Native fsync/read/write calls cannot be forcibly interrupted by a Tokio timeout.
-`blob_io.rs` acquires a bounded worker permit before enqueueing, without a waiting
-admission queue, and keeps the permit inside the worker until actual exit.
-Timed-out or abandoned work quarantines its capacity until completion. A late
-successful syscall cannot publish a successful worker result after cancellation.
-No destructor performs filesystem cleanup. Failed/incomplete files remain
-unclaimable and must be reconciled under fenced metadata ownership.
-
-The pure `blob_state.rs` transitions preserve the sequence
-`Uploading -> Staged -> Attached -> Unreferenced -> Deleting -> Deleted`.
-Reservations count the full upload ceiling before receiving bytes. Staged
-publication converts the reservation to actual used bytes exactly once;
-attachment does not charge again. A handle is bound to subject, stable invocation
-slot, deployment/session/form context and the named UploadHandle input. Scalar
-and selected-review inputs belong to the serialized action receipt claim, not
-the immutable file slot. After an authoritatively aborted action the same form
-scope and original nonce may reuse that file while correcting other inputs.
-Committed or unknown invocations cannot be rebound to different canonical input.
-Expiry is exactly 15 minutes from the attempt's typed lifecycle timestamp.
-Attachment produces a conditional candidate rather than mutating the original,
-so transaction rollback leaves Staged reusable. Generation checks fence every
-transition. Failed-upload cleanup requires a matching stopped-worker proof;
-successful unpublished work must expire first. Startup process-fence recovery is
-not yet implemented and must not fabricate a completed-worker proof.
-
-Directory enumeration retains a scanner between batches and reads at most 64
-entries per batch. It rejects malformed names and nonregular entries rather than
-following or recursively deleting them. The root permits only its fixed private
-store names and refuses an unrelated existing directory. A bounded inspection
-plan distinguishes known reservation recovery from completely unknown objects;
-the latter always require operator reconciliation. Plans omit filenames, content
-and credentials, and are host/operator-only data, never deletion or read grants.
-Durable observations, automatic recovery execution and SQL GC claims remain to
-be integrated.
-
-`blob_transport.rs` normalizes bounded filenames to at most 80 safe ASCII bytes
-and constructs attachment-only header values. Its monotonic transfer accounting
-enforces exact remaining bytes, 64 KiB chunks, 15-second idle and 120-second total
-ceilings, clamped to the existing request deadline. Empty polls cannot renew idle
-time. The eventual transport must enforce timers even when the client stops
-polling; a budget object alone cannot wake or cancel a stalled HTTP connection.
-
-## Required integration
-
-The approved browser flow is one NoJS multipart POST to an existing web action.
-A GET issues a stateless form/deployment/session-or-anonymous-capability ticket
-without database writes. The host validates origin, CSRF, submission identity,
-ticket and bounded scalar prefix before reserving quota and reading the final
-one-file part. Reused stage and new file are mutually exclusive. Unknown parts,
-headers and ordering fail closed. One upload input attaches to exactly one create
-field; scalar one-input-to-many assignment does not apply. There is at most one
-upload input/binding per action and web binding, and at most 16 bindings per app.
-The existing eight-field resource limit is unchanged. Explicit File controls
-follow all submitted prefix controls in native DOM order.
-
-`Manifest.blobs` contains the requested ceilings, upload bindings and anonymous
-opt-in. Anonymous staging additionally requires explicit operator ceilings, at
-most 16 live stages/160 MiB per deployment and four/40 MiB per capability, within
-the shared application limits. These defaults are bounds, not capacity claims.
-The build manifest digest covers this requested authority. A blob deployment's
-single approval token additionally covers the canonical effective policy after
-operator intersection; declaration order does not change that token. Paths and
-secrets are excluded. Changed effective authority invalidates old submissions,
-tickets, receipts and queued work. `contract-hash` remains a build digest;
-`deployment-hash` is the read-only deployment approval calculation. Activation
-must verify the one approval before opening the configured store.
-
-Before accepting file bytes, a replay must resolve its stable slot and committed
-receipt. The first finalized object fixes its handle, identity and digest. Retry
-cannot replace those bytes, create a fresh stage, or substitute an equivalent new
-handle. Committed receipt recovery precedes stage expiry checks; new execution
-requires current authority and time. Streaming consumes the remaining overall
-HTTP deadline rather than starting a fresh action budget afterward.
-The existing 60-second connection ceiling clamps the 120-second transfer ceiling;
-the final action retains its stricter two-second phase cap. A single private
-request scope must retain the outer deadline and actual provider-statement meter
-through classification, staging, execution, navigation and cleanup. Metadata
-leaves currently expose an explicit caller counter for preparation only; runtime
-integration must delegate to the shared transaction-owned meter. No new upload
-allowance or independently reset budget is authorized.
-
-SQL must atomically lock/count quota, publish Staged with the correct generation,
-attach the owning resource/field and receipt together, and mark resource deletion
-Unreferenced in that same transaction. Unknown commit acknowledgements go through
-authoritative receipt recovery before cleanup. Fenced GC commits its claim before
-unlink, deletes outside the transaction, then conditionally finalizes metadata.
-Every normal file creation must follow a durably committed Uploading reservation.
-Unknown acknowledgement is recovered before file creation. Retained reservation
-and claimed-deletion metadata permits fenced normal crash recovery. A completely
-unknown object is evidence of an ambiguous restore or lost metadata, even after
-a grace interval: retain and quarantine/account it in bounded batches, block new
-uploads on mismatch/overage, and require explicit operator reconciliation. Never
-delete it merely because its store marker matches or it appears old.
-
-Downloads must use the canonical current read policy, active membership,
-projection, visibility, parent gate, expiry, grant scope and record incarnation.
-Initially only independent direct Read provenance is accepted. A BlobRef, edit
-capability, cursor, mutation grant or child-list grant cannot substitute for it;
-Follow requires separately proven source provenance and is not inferred.
-Capture the file descriptor in the short read transaction and release transaction
-and database permits before streaming. Require no-store, nosniff, restrictive
-CSP, a host-normalized attachment filename, no Range, 64 KiB transfer chunks,
-15-second idle and 120-second total limits, plus bounded stream concurrency.
-Revocation stops new streams; bytes already delivered cannot be recalled.
-
-## Backup and restore contract
-
-These are requirements for the unfinished operator integration, not a shipped
-backup command. One designated host manages this local object store even when
-metadata uses PostgreSQL. Multi-host shared object storage is outside this scope.
-
-An operator backup must fence uploads, finalization, attachment and GC, drain or
-quarantine native work, and pair a consistent metadata snapshot with its immutable
-objects and store identity. Preserve private modes and ownership. Copying only the
-database or only the objects is not a complete backup. Restore must verify the
-store identity, each referenced object's type, mode, link count, length and stored
-digest before serving. Missing objects cannot become successful downloads.
-Resume the existing lifecycle clock and reconcile incomplete rows and orphan
-files in bounded batches before clearing the maintenance fence. Do not reset
-quota counters or delete unknown-commit objects to obtain readiness.
-
-First bind commits a pending database pair before writing a synced private
-filesystem pair marker, then acknowledges the same pair in the database. No
-readiness or GC precedes both. A missing/new database refuses any already-paired
-store, including an empty one. A paired database refuses a missing/mismatched
-marker. A matching pending bind resumes only after authoritative database outcome
-recovery and a bounded empty-store proof under the held lease. No mismatch cleanup
-is automatic. Matching markers do not certify that database and filesystem
-snapshots were captured together; equal-time backup/restore validation remains
-required.
-
-## Leaf verification
-
-Run the committed standalone harness with new evidence output and a dedicated
-compiler lane:
-
-```sh
-python3 tools/test_blob_leaves.py \
-  --output /path/to/fresh/evidence \
-  --target /path/to/dedicated/cargo-target
+```rust
+DeploymentResources {
+    assets,
+    blobs: Some(BlobDeployment { directory, ceilings }),
+}
 ```
 
-It includes the actual leaf sources without registering them, verifies that the
-entire resolved dependency identity/version/checksum closure is a subset of the
-workspace lock, and runs tests offline with two compiler jobs and one test thread.
-The accepted frozen foundation had 35 passing tests: exact file/buffer limits, immutable
-round trips, no-follow/special-file/hardlink/mode negatives, create/rename
-collisions, finalization fault points, retained descriptors/leases, bounded scans,
-quota and object counts, corrupt metadata arithmetic, expiry, foreign handle
-binding, rollback reuse, association/GC generations, worker cancellation,
-stuck-worker capacity, panic, filename/header injection and monotonic idle,
-total and outer-deadline accounting.
-Later pure/parser/native leaf filters have their own exact logs and source
-checkpoints; do not add their counts to provider proof. This does not prove
-metadata transactions, pairing commit order, quotas, HTTP, NoJS browser behavior,
-packaged SDK lowering or an enabled P08 capability. Shared request accounting,
-unknown-COMMIT recovery and provider-capacity fixes are prerequisites. Those gates
-and independent review remain required.
+Applications without blob policy pass `blobs: None`. Unused blob configuration
+and policy without explicit operator ceilings/store configuration are rejected.
+There is no compatibility overload for the former asset-only argument.
+
+The CLI uses the existing `approved_contract` field and approval path. For a blob
+deployment, `noxide deployment-hash CONFIG.json` reports `manifest_digest`,
+requested/effective blob policy, and `deployment_digest`; the latter is the value
+approved for activation. It reads configuration and declarations without opening
+keys, a database, assets or the store. `contract-hash` remains the requested build
+contract digest. The one domain-separated deployment digest covers that manifest
+and the canonical effective policy, excluding paths and secrets. Verify approval
+before opening the store. Changing requested or effective authority invalidates
+old submissions and download tickets.
+
+A `blobs` configuration entry is explicit, for example:
+
+```json
+{
+  "directory": "objects",
+  "ceilings": {
+    "limits": {
+      "file_bytes": 10485760,
+      "app_bytes": 1073741824,
+      "objects": 65536,
+      "live_stages": 4,
+      "uploads": 4,
+      "downloads": 8
+    },
+    "anonymous": null
+  }
+}
+```
+
+Paths are relative to the configuration file. The directory must be a private
+local store with no symlink components. The framework does not adopt an unrelated
+operator directory.
+
+## Upload and replay
+
+An ordinary NoJS form submits one multipart POST to its existing action endpoint.
+The host renders security controls, selected targets and scalar fields before the
+sole final file control. The bounded parser rejects unknown/reordered parts,
+headers, duplicate controls and additional files. Origin, session or anonymous
+capability, CSRF, submission scope, upload ticket and scalar prefix are checked
+before any file bytes are consumed by the file decoder or written to storage.
+
+The prefix and upload-bound core attempt lock the existing paired metadata row
+before receipt probe/claim, then stage rows. This ordering serializes an in-flight
+no-file commit against a competing file reservation. No placeholder receipt or
+second executor is used. Upload/download transport runs outside those transactions.
+
+A slot binds deployment, original verified form nonce, principal/session or
+anonymous capability, web binding and named upload input. The account stage quota
+is shared across its sessions; the separate context still seals the originating
+session. The first finalized file fixes its handle and cannot be replaced.
+
+After a known rejection/rollback, corrected scalar or reviewed target input can
+reuse the same form nonce and file. Scalar identity belongs to the existing
+semantic receipt, not a permanent hash on the stage. Committed or unknown outcomes
+must recover that receipt first. Original canonical input is preserved; a changed
+input cannot become a second commit. A committed optional no-file submission also
+replays through its receipt without inventing a slot. An existing slot cannot be
+discarded by forging an empty URL-encoded upload input.
+
+Quota is reserved and durably acknowledged before file creation. The hard maxima
+are 10 MiB/file, 1 GiB/application, 65,536 live objects, four live stages/account or
+anonymous capability, four upload workers and eight download streams. Empty files
+consume object quota. Operator ceilings can only lower limits. Anonymous staging
+requires both explicit binding capability limits and deployment limits: at most
+four stages/40 MiB per capability and 16 stages/160 MiB per deployment, within the
+shared limits. No circuit identity is stored.
+
+Stages expire after 15 minutes of the existing durable lifecycle clock's UTC
+milliseconds. Credential seconds remain separate. Reservation, publication,
+attachment, reads and GC consume a fresh committed heartbeat and fixed attempt
+time; raw credential observations never advance blob lifecycle time. Blob-only
+applications also require freshness. Stale maintenance makes new temporal work
+unavailable; known receipt recovery still precedes stage expiry/freshness checks.
+
+Files use create-new/no-follow staging, mode 0600, then seal to 0400, data fsync,
+same-filesystem no-replace rename and directory fsync before becoming Staged.
+The state sequence is:
+
+```text
+Uploading -> Staged -> Attached -> Unreferenced -> Deleting -> Deleted
+```
+
+Publication converts reserved bytes to actual usage once. Attachment locks the
+stage, verifies a durable immutable descriptor, resolves canonical proposed-row
+policy and associates one stable storage resource/record incarnation/field in the
+same transaction as every resource outcome and receipt. Rollback leaves Staged
+reusable. A reservation lease covers cancellation before native dispatch.
+
+## Authorized downloads
+
+A link requires successful direct Read provenance for the exact operation,
+record/incarnation and projected Blob field. A Blob ID, list/cursor, edit,
+mutation or Follow grant cannot mint it. The endpoint verifies the sealed ticket,
+current session and current canonical read authority, visibility, gate,
+membership and expiry through the shared `ReadContext`.
+
+The host captures and integrity-checks an immutable no-follow descriptor inside
+the short read transaction, then releases the transaction/database admission
+before streaming. Missing or inconsistent bytes fail closed. The response uses
+`application/octet-stream`, attachment disposition with a normalized ASCII
+filename, `nosniff`, `no-store` and restrictive CSP. Ranges and inline previews are
+unsupported. Uploaded HTML/SVG never becomes application HTML or a packaged asset.
+
+Transfers use 64 KiB chunks, 15-second idle and 120-second total ceilings, clamped
+to the original 60-second HTTP outer deadline. A watchdog also expires a body that
+is never polled. Stream admission remains held until completion/timeout and the
+actual native worker's exit. Revocation stops newly authorized streams; an
+already captured stream can finish, and already-sent bytes cannot be recalled.
+
+The original private request root retains its actual 256-statement ceiling across
+classification, prefix, publication, action, navigation and cleanup. The action's
+logical 16-call and query's 4,096-call budgets are unchanged. Named metadata/action
+phases retain their existing caps; no transfer resets the outer deadline or meter.
+Kernel I/O can outlive cancellation: its bounded worker permit stays quarantined
+until physical exit, with no destructor filesystem cleanup or late publication.
+
+## Pairing, cleanup and recovery
+
+One designated process retains an exclusive store flock. The root has a strict
+layout; descriptors/scanners retain that lease. First activation commits a pending
+database pair, writes and fsyncs its filesystem marker, then acknowledges the
+same pair in the database before readiness. A new database refuses an already
+paired store; a paired database refuses missing/wrong markers. Matching pending
+state resumes only through authoritative recovery and the empty-store checks.
+Pair identity is not a certificate of snapshot-time consistency.
+
+Activation and serving maintenance reconcile bounded pages: 16 inventory/metadata
+items and at most four physical deletions per pass, within the ordinary root
+budgets. New uploads wait for initial inventory completion. Known incomplete
+reservations recover under stopped-worker or exclusive prior-process proof.
+Resource deletion detaches exactly its expected nonempty fields in the same
+resource/receipt transaction; extra, missing or mismatched associations roll back.
+
+GC commits a generation-fenced Deleting claim, releases its transaction, unlinks
+and fsyncs through bounded native work, then commits the matching quota release.
+Attachment cannot claim Deleting objects. Proof for either possible generation
+survives cancellation between claim commit and native dispatch. Uncertain commits
+are resolved through authoritative state/receipts before physical cleanup.
+Deleted metadata tombstones retain identity; pagination does not rescan an
+unbounded history in one request.
+
+Completely unknown files are retained, accounted in `nx_blob_orphans`, and block
+new uploads. Missing referenced objects and physical mismatches also fence new
+uploads. Neither age nor a matching pair marker authorizes deleting unknown
+bytes. This increment provides no automatic unknown-object adoption/deletion or
+backup command; operator reconciliation must preserve uncertain data.
+
+Storage version 12 deliberately refuses version-11 databases without resetting
+or silently migrating them. Use a new development database and new unpaired
+store, or a separately reviewed explicit migration. See
+[metadata storage](blob-storage-schema.md) for native schema and migration guards.
+
+A backup must fence/drain writes and GC and pair metadata, immutable objects and
+private store markers/identity, preserving permissions and verifying referenced
+length/digest before serving. Copying only one side is incomplete. The full
+consistent backup/restore operational exercise belongs to P13; cross-capability
+and full-program acceptance belongs to P14. Current runtime/provider evidence is
+recorded in the implementation ledger, separately from those later gates.

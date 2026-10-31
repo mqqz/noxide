@@ -211,13 +211,6 @@ pub use noxide_protocol::identifier;
 
 pub fn validate(m: &Manifest) -> Result<()> {
     ensure!(m.version == VERSION, "unsupported manifest version");
-    // Wire10 shapes are frozen before integration. No blob declaration is
-    // admitted until upload, transactional association and download enforcement
-    // land together; accepting a policy now would enable a placeholder grant.
-    ensure!(
-        m.blobs.is_none() || cfg!(test),
-        "blob runtime is not available"
-    );
     crate::assets::validate_declarations(&m.assets)?;
     ensure!(
         m.routes
