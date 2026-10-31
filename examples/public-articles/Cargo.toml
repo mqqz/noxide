@@ -9,6 +9,9 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 noxide = { path = "../../crates/noxide" }
 
+[dev-dependencies]
+serde_json = "1.0"
+
 [workspace]
 
 [profile.release]
