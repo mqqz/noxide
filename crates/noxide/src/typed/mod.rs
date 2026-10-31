@@ -15,6 +15,8 @@ mod assets;
 pub use assets::*;
 mod blobs;
 pub use blobs::*;
+mod effects;
+pub use effects::*;
 mod jobs;
 pub use jobs::*;
 mod page;
@@ -23,6 +25,7 @@ pub use page::*;
 #[doc(hidden)]
 #[derive(Default)]
 pub struct ApplicationDefinition {
+    effects: Option<noxide_protocol::effects::EffectContract>,
     jobs: Option<noxide_protocol::jobs::JobContract>,
     blobs: Option<noxide_protocol::blobs::BlobPolicy>,
     assets: BTreeMap<String, noxide_protocol::assets::AssetDeclaration>,
@@ -128,6 +131,7 @@ impl ApplicationDefinition {
             action.targets.sort_by(|a, b| a.name.cmp(&b.name));
         }
         Manifest {
+            effects: self.effects,
             jobs: self.jobs,
             blobs: self.blobs,
             assets: self.assets.into_values().collect(),

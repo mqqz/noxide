@@ -4,6 +4,7 @@ use std::path::Path;
 
 fn manifest() -> Manifest {
     Manifest {
+        effects: None,
         jobs: None,
         blobs: None,
         assets: Vec::new(),

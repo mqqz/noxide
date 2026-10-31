@@ -101,6 +101,7 @@ fn manifest() -> Manifest {
     );
     create_membership.bind.insert("workspace".into(), 6);
     Manifest {
+        effects: None,
         jobs: None,
         blobs: None,
         version: noxide_protocol::VERSION,

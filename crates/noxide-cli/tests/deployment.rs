@@ -3,6 +3,7 @@ use std::{path::Path, process::Output};
 
 fn manifest() -> Manifest {
     Manifest {
+        effects: None,
         jobs: None,
         version: VERSION,
         assets: Vec::new(),

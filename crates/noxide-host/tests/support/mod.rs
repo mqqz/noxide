@@ -9,6 +9,7 @@ pub fn manifest() -> Manifest {
         any: vec![vec![Predicate::Owner]],
     };
     Manifest {
+        effects: None,
         jobs: None,
         blobs: None,
         assets: Vec::new(),

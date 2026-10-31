@@ -4,6 +4,7 @@ pub mod assets;
 pub mod blobs;
 pub mod computation;
 pub mod document;
+pub mod effects;
 pub mod expiry;
 pub mod jobs;
 pub mod membership;
@@ -14,7 +15,7 @@ pub use computation::{Comparison, Guard, GuardCondition, GuardRejection, Literal
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const VERSION: u32 = 12;
+pub const VERSION: u32 = 13;
 pub const MAX_IR_BYTES: usize = 65_536;
 pub const MAX_NODES: usize = 1_024;
 pub const MAX_DEPTH: usize = 32;
@@ -588,6 +589,8 @@ pub struct Inspection {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects: Option<effects::EffectContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jobs: Option<jobs::JobContract>,
     pub assets: Vec<assets::AssetDeclaration>,
