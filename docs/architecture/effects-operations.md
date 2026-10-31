@@ -135,6 +135,9 @@ Tenant scheduling is fair. A 60-second durable lease fences row updates, while
 the exclusive owner and retained physical slots bound actual live work.
 
 Automatic retries allow five attempts within 24 hours of first eligibility.
+The window check uses the fixed durable lifecycle timestamp of the preflight
+transaction. Its commit admits the request; the original monotonic Root bounds
+the following I/O. This is not a physical wall-clock packet cutoff.
 Backoff is one minute, five minutes, thirty minutes and two hours, with bounded
 deterministic jitter and numeric Retry-After bounded by the remaining window.
 429, 5xx and ambiguous transport failures retry; redirects and other 4xx are
