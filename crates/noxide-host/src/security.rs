@@ -29,6 +29,7 @@ struct EditKey {
     signing: bool,
 }
 pub(crate) const ANONYMOUS_TTL: i64 = 900;
+pub(crate) const MAX_TOKEN_BYTES: usize = 2048;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -287,7 +288,7 @@ impl HostKeys {
         envelope.extend_from_slice(&nonce);
         envelope.extend_from_slice(&ciphertext);
         let encoded = URL_SAFE_NO_PAD.encode(envelope);
-        ensure!(encoded.len() <= 2048, "token limit");
+        ensure!(encoded.len() <= MAX_TOKEN_BYTES, "token limit");
         Ok((token, encoded))
     }
     pub(crate) fn verify(&self, encoded: &str, now: i64) -> Result<Token> {
@@ -312,7 +313,7 @@ impl HostKeys {
         cursor: bool,
         selection: bool,
     ) -> Result<Token> {
-        ensure!(encoded.len() <= 2048, "token limit");
+        ensure!(encoded.len() <= MAX_TOKEN_BYTES, "token limit");
         let envelope = URL_SAFE_NO_PAD.decode(encoded)?;
         ensure!(envelope.len() >= 41 && envelope[0] == 2, "invalid token");
         let key = self

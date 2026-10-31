@@ -105,7 +105,12 @@ pub(crate) fn parse_query(
     raw: Option<&str>,
 ) -> Result<(Option<String>, noxide_protocol::Fields)> {
     let raw = raw.unwrap_or("");
-    ensure!(raw.len() <= 1024, "query string limit");
+    const INPUT_BYTES: usize = 1024;
+    const CURSOR_COMPONENT_BYTES: usize = "cursor=".len() + crate::security::MAX_TOKEN_BYTES;
+    ensure!(
+        raw.len() <= INPUT_BYTES + CURSOR_COMPONENT_BYTES + 1,
+        "query string limit"
+    );
     let bytes = raw.as_bytes();
     for i in 0..bytes.len() {
         if bytes[i] == b'%' {
@@ -117,16 +122,36 @@ pub(crate) fn parse_query(
         }
     }
     let mut values = noxide_protocol::Fields::new();
-    for (key, value) in url::form_urlencoded::parse(bytes) {
+    let mut cursor_component = None;
+    for component in raw.split('&') {
+        for (key, value) in url::form_urlencoded::parse(component.as_bytes()) {
+            if key == "cursor" {
+                ensure!(
+                    component.len() <= CURSOR_COMPONENT_BYTES
+                        && value.len() <= crate::security::MAX_TOKEN_BYTES,
+                    "cursor transport limit"
+                );
+                cursor_component = Some(component.len());
+            }
+            ensure!(
+                values
+                    .insert(key.into_owned(), value.into_owned())
+                    .is_none(),
+                "duplicate query parameter"
+            );
+        }
+    }
+    // Only one bounded opaque cursor component, plus its separator, is outside
+    // the unchanged raw input allowance. Padding and encoded ordinary controls
+    // still count against the original limit.
+    let input_bytes = cursor_component.map_or(raw.len(), |length| {
+        raw.len() - length - usize::from(raw.len() > length)
+    });
+    ensure!(input_bytes <= INPUT_BYTES, "query string limit");
+    for key in values.keys() {
         ensure!(
-            key == "cursor" || route.params.iter().any(|name| name == &key),
+            key == "cursor" || route.params.iter().any(|name| name == key),
             "unknown query parameter"
-        );
-        ensure!(
-            values
-                .insert(key.into_owned(), value.into_owned())
-                .is_none(),
-            "duplicate query parameter"
         );
     }
     let cursor = values.remove("cursor");
@@ -1420,6 +1445,9 @@ mod parent_redirect_disconnect_tests {
 
 #[cfg(test)]
 mod binding_tests;
+
+#[cfg(test)]
+mod cursor_query_tests;
 
 #[cfg(test)]
 mod picker_form_tests {
