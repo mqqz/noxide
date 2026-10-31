@@ -86,3 +86,13 @@ Search must never issue an extra257th candidate beyond the shared request cap;
 without independently proven completion it returns `LimitExceeded`. All failures
 remain terminal for that scan. Empty count/sum are0, empty extrema are typed None,
 and checked i128 sum converts to i64 only at successful completion.
+
+The index registry now pins Records/Postings owning table, equality prefix,
+numeric/binary scalar ordering and stable ID tie in a canonical shape hash.
+Record index names intentionally change with that complete shape. A single
+physical `nx_search_tokens` index consumes one of eight shapes for each searchable
+resource; it is not recreated per resource. C schema consumers must use expected
+provider-specific DDL and verify actual table/namespace/column/expression/order/
+collation/predicate/validity. The temporary old consumer bridge is removed when
+C switches atomically; it cannot render binary P09 shapes. String-generation tests
+do not prove native index correctness or provider plan efficiency.
