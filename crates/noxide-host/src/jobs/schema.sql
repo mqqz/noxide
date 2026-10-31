@@ -1,5 +1,7 @@
 -- Central storage14 integration packet. Not executed/registered by the leaf.
 -- C adds the provider-native byte/JSON/affinity checks and fixed-layout audit.
+-- nx_jobs.reason permits fixed codes or validated terminal rejection JSON,
+-- bounded to 24576 bytes separately from the 16384-byte input payload.
 CREATE TABLE nx_job_runtime(singleton BIGINT PRIMARY KEY NOT NULL CHECK(singleton=1),deployment TEXT NOT NULL,contract TEXT NOT NULL,epoch TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('active','paused')));
 CREATE TABLE nx_job_queue(singleton BIGINT PRIMARY KEY NOT NULL CHECK(singleton=1),claim_seq BIGINT NOT NULL CHECK(claim_seq>=0));
 CREATE TABLE nx_job_grants(deployment TEXT NOT NULL,tenant TEXT NOT NULL,worker TEXT NOT NULL,version BIGINT NOT NULL CHECK(version>0),contract TEXT NOT NULL,epoch TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('active','revoked')),declaration TEXT NOT NULL,PRIMARY KEY(deployment,tenant,worker));

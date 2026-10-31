@@ -1,5 +1,6 @@
 use super::types::*;
 use crate::{
+    application::ValidatedActionRejection,
     database::{Transaction, lifecycle::RequestScope},
     query_plan::NativeProvider,
 };
@@ -21,14 +22,15 @@ pub(crate) enum Execution {
     Paused,
     Dead,
 }
-#[derive(Clone, Copy)]
 pub(crate) enum Failure {
     Transient,
     Rejected,
+    BusinessRejected(ValidatedActionRejection),
 }
 pub(crate) enum FailureResult {
     Retrying(Timestamp),
     Rejected,
+    BusinessRejected(ValidatedActionRejection),
     Dead,
     Paused,
     Recovered(String),
@@ -480,10 +482,22 @@ impl QueueContext<'_> {
                 .await?;
             return Ok(FailureResult::Paused);
         }
-        if matches!(failure, Failure::Rejected) {
-            self.transition(claim, "rejected", "business_or_authority", now)
-                .await?;
-            return Ok(FailureResult::Rejected);
+        match failure {
+            Failure::Rejected => {
+                self.transition(claim, "rejected", "business_or_authority", now)
+                    .await?;
+                return Ok(FailureResult::Rejected);
+            }
+            Failure::BusinessRejected(rejection) => {
+                ensure!(
+                    rejection.action() == row.job.action(),
+                    "rejection belongs to another action"
+                );
+                self.transition(claim, "rejected", rejection.stored_json(), now)
+                    .await?;
+                return Ok(FailureResult::BusinessRejected(rejection));
+            }
+            Failure::Transient => {}
         }
         let end = row
             .first_eligible

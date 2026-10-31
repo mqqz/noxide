@@ -536,6 +536,7 @@ async fn durable_contract(database: Database) {
         .await;
     registry.shutdown().await.unwrap();
     assert_eq!(state(&database, &second).await.0, "paused");
+    terminal_rejection_contract(&database).await;
     recurrence_contract(&database).await;
 }
 
@@ -825,4 +826,111 @@ async fn recurrence_contract(database: &Database) {
         .is_err()
     );
     tx.rollback().await.unwrap();
+}
+
+async fn terminal_rejection_contract(database: &Database) {
+    use crate::application::{ActionRejection, ValidatedActionRejection};
+    let job = captured(&grant("alpha"), "terminal_rejection", 0, 5);
+    enqueue(database, &job).await;
+    let claimed = claim(database, at(1000)).await.unwrap();
+    let action = noxide_protocol::Action {
+        id: 2,
+        version: 1,
+        name: "Expiry".into(),
+        targets: Vec::new(),
+        inputs: Vec::new(),
+        steps: Vec::new(),
+    };
+    let rejection = ActionRejection::Rejected {
+        field_errors: Fields::new(),
+        message: "Reservation already closed.".into(),
+    };
+    let validated = ValidatedActionRejection::new(&action, rejection.clone()).unwrap();
+    let expected = validated.stored_json().to_owned();
+    let (owner, registry) = admission();
+    owner
+        .run(async {
+            let mut tx = database
+                .begin(owner.work_deadline().into_std())
+                .await
+                .unwrap();
+            let mut calls = 16;
+            assert!(matches!(
+                QueueContext {
+                    tx: &mut tx,
+                    calls: &mut calls
+                }
+                .lock_execution(&claimed, at(1000), receipt)
+                .await
+                .unwrap(),
+                Execution::Ready(_)
+            ));
+            // The existing core rolls back a business rejection before the queue's
+            // separate fenced terminal transition. No receipt/mutation is committed.
+            tx.rollback().await.unwrap();
+        })
+        .await;
+    registry.shutdown().await.unwrap();
+    let mut other_action = action.clone();
+    other_action.id = 99;
+    let wrong = ValidatedActionRejection::new(&other_action, rejection.clone()).unwrap();
+    let mut tx = database
+        .begin(Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    let mut calls = 16;
+    assert!(
+        QueueContext {
+            tx: &mut tx,
+            calls: &mut calls
+        }
+        .fail(
+            &claimed,
+            at(1000),
+            Failure::BusinessRejected(wrong),
+            receipt
+        )
+        .await
+        .is_err()
+    );
+    tx.rollback().await.unwrap();
+    let mut tx = database
+        .begin(Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    let mut calls = 16;
+    let result = QueueContext {
+        tx: &mut tx,
+        calls: &mut calls,
+    }
+    .fail(
+        &claimed,
+        at(1000),
+        Failure::BusinessRejected(validated),
+        receipt,
+    )
+    .await
+    .unwrap();
+    let FailureResult::BusinessRejected(result) = result else {
+        panic!("expected structured terminal rejection")
+    };
+    assert!(result.as_rejection() == &rejection);
+    let column = tx.bounded_text("reason", crate::application::MAX_ACTION_REJECTION_BYTES);
+    let rows = tx
+        .fetch::<1>(
+            &format!("SELECT {column} FROM nx_jobs WHERE id=$1"),
+            &[job.id().unwrap().into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows[0][0], expected);
+    assert!(
+        ValidatedActionRejection::from_stored(&action, &rows[0][0])
+            .unwrap()
+            .as_rejection()
+            == &rejection
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(state(database, &job).await.0, "rejected");
+    assert!(claim(database, at(1000)).await.is_none());
 }

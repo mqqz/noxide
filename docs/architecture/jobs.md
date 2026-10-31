@@ -73,8 +73,23 @@ The methods are:
 supply the existing semantic receipt decoder, including version/outcome validation.
 A malformed, incomplete or mismatched receipt is unavailable; it is never proof
 of an abort. `Execution` is Ready(VerifiedJob), Recovered(String), Paused or Dead.
-`Failure` is Transient or Rejected. A rejection is terminal. FailureResult carries
-Retrying(Timestamp), Rejected, Dead, Paused or a validated Recovered(String).
+`Failure` is Transient, Rejected (fixed authorization/unavailable code), or
+BusinessRejected(ValidatedActionRejection). A rejection is terminal. FailureResult
+also returns BusinessRejected with that same validated structure; other variants
+are Retrying(Timestamp), Rejected, Dead, Paused or a validated Recovered(String).
+
+The shared core leaf `application/action/rejection.rs` preserves Rejected
+(field_errors, message) and GuardRejected (optional input, message). Its factory
+validates the existing web limits and declared input names. Guard results must
+match a declared guard/adjustment rejection. The private wrapper is the only
+serializable persistence input: `new(&Action, ActionRejection)` validates a core
+result; `from_stored(&Action, &str)` strictly decodes and repeats that validation
+before operator display. `as_rejection()`/`into_rejection()` retain the structured
+result, `action()` binds action ID/version, and `stored_json()` supplies bounded
+terminal metadata to the fenced queue transition. This metadata has a separately
+enforced 24 KiB serialized ceiling, preserving existing text bounds even under
+maximum JSON escaping; job input payloads retain their 16 KiB ceiling. No input
+values, record targets, step indices, diagnostic error chains or logs are added.
 
 Enqueue shares the action mutation/receipt transaction. Its queue lock serializes
 quota admission and insertion. App and per-tenant pending ceilings are 1,000 or a
