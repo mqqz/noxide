@@ -319,6 +319,25 @@ async fn app_fixture(database: &Database) -> Application {
         .await
         .unwrap();
     }
+    let beta = serde_json::to_string(&Fields::from([
+        ("body".into(), "synthetic".into()),
+        ("expires".into(), (now - 1).to_string()),
+        ("ready".into(), "true".into()),
+    ]))
+    .unwrap();
+    let filtered_alpha = serde_json::to_string(&Fields::from([
+        ("body".into(), "synthetic".into()),
+        ("expires".into(), (now - 1).to_string()),
+        ("ready".into(), "false".into()),
+    ]))
+    .unwrap();
+    // Put unrelated rows before every matching row. Half differ by tenant,
+    // half by the fixed filter, so either missing prefix causes a large scan.
+    for batch in 0..10 {
+        let first = batch * 10_000 + 1;
+        let last = (batch + 1) * 10_000;
+        tx.execute(&format!("WITH RECURSIVE numbers(n) AS (SELECT {first} UNION ALL SELECT n+1 FROM numbers WHERE n<{last}) INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) SELECT $1,1000000+n,CASE WHEN n<=50000 THEN $2 ELSE $4 END,CASE WHEN n<=50000 THEN 'beta' ELSE 'alpha' END,CASE WHEN n<=50000 THEN $3 ELSE $5 END,'unrelated_record',1,1000+n FROM numbers"),&[storage.into(),bob.into(),beta.as_str().into(),alice.into(),filtered_alpha.as_str().into()]).await.unwrap();
+    }
     for (id, expires, ready) in [
         (1i64, now - 1, true),
         (2, now - 1, true),
@@ -330,21 +349,10 @@ async fn app_fixture(database: &Database) -> Application {
             ("expires".into(), expires.to_string()),
             ("ready".into(), ready.to_string()),
         ]);
-        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,$3,'alpha',$4,$5,1,$2)",&[storage.into(),id.into(),alice.into(),serde_json::to_string(&fields).unwrap().into(),format!("record_{id}").into()]).await.unwrap();
-    }
-    let beta = serde_json::to_string(&Fields::from([
-        ("body".into(), "synthetic".into()),
-        ("expires".into(), (now - 1).to_string()),
-        ("ready".into(), "true".into()),
-    ]))
-    .unwrap();
-    for batch in 0..10 {
-        let first = batch * 10_000 + 1;
-        let last = (batch + 1) * 10_000;
-        tx.execute(&format!("WITH RECURSIVE numbers(n) AS (SELECT {first} UNION ALL SELECT n+1 FROM numbers WHERE n<{last}) INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) SELECT $1,1000000+n,$2,'beta',$3,'beta_record',1,1000+n FROM numbers"),&[storage.into(),bob.into(),beta.as_str().into()]).await.unwrap();
+        tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,$3,'alpha',$4,$5,1,200000+$2)",&[storage.into(),id.into(),alice.into(),serde_json::to_string(&fields).unwrap().into(),format!("record_{id}").into()]).await.unwrap();
     }
     tx.execute(
-        "UPDATE nx_creation_counter SET value=101000 WHERE singleton=1",
+        "UPDATE nx_creation_counter SET value=200004 WHERE singleton=1",
         &[],
     )
     .await
@@ -473,11 +481,13 @@ async fn provider(database: Database) {
             "SELECT id FROM nx_records WHERE resource={storage} AND tenant='alpha' AND {ready}='true' AND created_seq<={cutoff_seq} ORDER BY created_seq ASC,id ASC LIMIT 2"
         );
         let visits = tx.examined_rows(&sql).await.unwrap();
-        assert_eq!(
-            visits, 2,
-            "tenant/cutoff frontier must use its exact protected index"
+        // A valid plan may inspect the tiny matching set before LIMIT. It
+        // must never inspect the100k earlier tenant/filter-unrelated rows.
+        assert!(
+            (2..=4).contains(&visits),
+            "protected tenant/filter frontier examined {visits} rows"
         );
-        eprintln!("P10 selector100k other-tenant index visits={visits}");
+        eprintln!("P10 selector100k unrelated index visits={visits}");
         tx.rollback().await.unwrap();
     }
     // The barrier commits a new same-tenant expired row after the batch cutoff,
