@@ -374,7 +374,9 @@ impl Application {
     ) -> std::result::Result<Option<EffectClaim>, RequestError> {
         // Keep the real active-ID snapshot serialized until this claim is
         // registered. A forward wall jump cannot admit its live socket twice.
-        let _claim = owner.claim_lock.lock().await;
+        let _claim = timeout_at(scope.work_deadline(), owner.claim_lock.lock())
+            .await
+            .map_err(|_| RequestError::Busy)?;
         let admission = self.admit_effect_database(scope, physical).await?;
         admission
             .run(async {
