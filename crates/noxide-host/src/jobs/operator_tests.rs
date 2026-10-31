@@ -3,6 +3,7 @@ use crate::{
     job_deployment::{EffectiveJobDeployment, JobDeployment, JobGrant, JobLimits},
 };
 use noxide_protocol::jobs::{JobContract, Worker, WorkerAction};
+use sqlx::Connection;
 use std::{
     collections::BTreeSet,
     time::{Duration, Instant},
@@ -37,15 +38,6 @@ async fn setup(database: &Database) {
         .begin(Instant::now() + Duration::from_secs(5))
         .await
         .unwrap();
-    for line in include_str!("schema.sql")
-        .lines()
-        .filter(|line| line.starts_with("CREATE "))
-    {
-        let sql = line
-            .replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ")
-            .replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ");
-        tx.execute(&sql, &[]).await.unwrap();
-    }
     tx.execute("INSERT INTO nx_deployment(singleton,contract,incarnation,generation) VALUES(1,'approval','incarnation','generation') ON CONFLICT(singleton) DO UPDATE SET contract='approval',incarnation='incarnation',generation='generation'", &[]).await.unwrap();
     tx.commit().await.unwrap();
 }
@@ -165,6 +157,32 @@ async fn operator_lifecycle(database: Database) {
 }
 #[tokio::test]
 async fn sqlite_operator_restart_revocation_and_restore_do_not_resume_authority() {
-    let temp = tempfile::tempdir().unwrap();
-    operator_lifecycle(Database::sqlite(temp.path().join("operator.db"))).await;
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/capability-evidence/p10-operator-fixtures");
+    std::fs::create_dir_all(&root).unwrap();
+    let directory = tempfile::Builder::new()
+        .prefix("lifecycle-")
+        .tempdir_in(root)
+        .unwrap()
+        .keep();
+    let path = directory.join("operator.db");
+    // An idle fixture connection keeps the database open across setup and
+    // startup. This prevents the last SQLite handle's asynchronous close and
+    // WAL checkpoint from racing no-wait maintenance admission. Production
+    // timeouts and startup behavior are unchanged.
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Full)
+        .foreign_keys(true)
+        .pragma("trusted_schema", "OFF");
+    let _anchor = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    eprintln!(
+        "retained P10 operator lifecycle fixture: {}",
+        path.display()
+    );
+    operator_lifecycle(Database::sqlite(path)).await;
 }
