@@ -7,6 +7,7 @@ use tower::ServiceExt;
 fn declarations() -> Manifest {
     let mut m = crate::test_support::manifest();
     m.resources[0].fields.push(TextField {
+        immutable: false,
         name: "attachment".into(),
         label: "Attachment".into(),
         kind: FieldKind::Blob { max_bytes: 1024 },
@@ -15,6 +16,7 @@ fn declarations() -> Manifest {
         max_bytes: 67,
     });
     m.resources[0].fields.push(TextField {
+        immutable: false,
         name: "extra".into(),
         label: "Extra attachment".into(),
         kind: FieldKind::Blob { max_bytes: 1024 },
@@ -1108,6 +1110,7 @@ async fn anonymous_handover(absent: bool) {
     m.routes[0].operations.clear();
     m.routes[1].access = Access::PublicOptional;
     m.resources[0].fields.push(TextField {
+        immutable: false,
         name: "published".into(),
         label: "Published".into(),
         kind: FieldKind::Boolean,
@@ -1858,6 +1861,7 @@ async fn sqlite_download_instruction_requires_successful_read_and_exact_projecti
         let mut m = declarations();
         if read {
             m.resources[0].fields.push(TextField {
+                immutable: false,
                 name: "published".into(),
                 label: "Published".into(),
                 kind: FieldKind::Boolean,

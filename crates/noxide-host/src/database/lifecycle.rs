@@ -21,6 +21,8 @@ mod provider;
 #[cfg(test)]
 mod receipt_tests;
 #[cfg(test)]
+mod search_candidate_tests;
+#[cfg(test)]
 mod tests;
 
 const CLEANUP_RESERVE: Duration = maintenance::CLEANUP_RESERVE;
@@ -151,6 +153,7 @@ struct Root {
     provider: Arc<Semaphore>,
     meter: Arc<meter::Meter>,
     cancelled: AtomicBool,
+    search_candidates: std::sync::atomic::AtomicUsize,
 }
 /// One phase of a host-created request. Clones preserve the same root lifetime.
 #[derive(Clone)]
@@ -184,6 +187,7 @@ impl RequestScope {
                 provider: Arc::new(Semaphore::new(1)),
                 meter: meter::Meter::new(statement_limit),
                 cancelled: AtomicBool::new(false),
+                search_candidates: std::sync::atomic::AtomicUsize::new(256),
             }),
             deadline: outer,
         };
@@ -250,6 +254,27 @@ impl RequestScope {
     pub(crate) fn checkpoint_current() -> Result<()> {
         REQUEST
             .try_with(Self::checkpoint)
+            .map_err(|_| Unavailable::Closed)?
+    }
+    pub(crate) fn search_candidates_remaining() -> Result<usize> {
+        Self::checkpoint_current()?;
+        REQUEST
+            .try_with(|scope| scope.root.search_candidates.load(Ordering::Acquire))
+            .map_err(|_| Unavailable::Closed.into())
+    }
+    pub(crate) fn charge_search_candidates(count: usize) -> Result<()> {
+        Self::checkpoint_current()?;
+        REQUEST
+            .try_with(|scope| {
+                scope
+                    .root
+                    .search_candidates
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                        remaining.checked_sub(count)
+                    })
+                    .map(|_| ())
+                    .map_err(|_| anyhow::anyhow!("search candidate budget exhausted"))
+            })
             .map_err(|_| Unavailable::Closed)?
     }
     pub(crate) fn active() -> bool {

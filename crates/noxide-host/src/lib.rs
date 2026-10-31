@@ -66,6 +66,7 @@ async fn test_account(db: &Database, login: &str) -> String {
 }
 
 mod query_plan;
+mod search;
 
 #[cfg(test)]
 mod parameter_tests;
