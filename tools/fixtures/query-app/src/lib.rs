@@ -38,7 +38,7 @@ pub struct MinimumQuantity;
 #[query(max(SearchDocuments, quantity))]
 pub struct MaximumQuantity;
 
-#[action(inputs(title: String = 160, body: String = 2048, rank: i64, quantity: i64, included: bool),
+#[action(inputs(title: String = 160, body: String = 2048, rank: i64 = 0..=100, quantity: i64, included: bool),
     transaction(document = create(Document, set(title = title, body = body,
         rank = rank, quantity = quantity, included = included))),
     allow = owner, redirect = show(document))]

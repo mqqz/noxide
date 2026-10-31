@@ -12,7 +12,7 @@ Production P09 admission must be enabled before the normal CLI build can pass.
 
 ```sh
 export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
-target/debug/noxide build --framework "$PWD" --app tools/fixtures/query-app --name query-app --output "$RUNNER_TEMP/noxide-query-bundle"
+target/debug/noxide build --framework "$PWD" --app tools/fixtures/query-app --name query_app --output "$RUNNER_TEMP/noxide-query-bundle"
 python3 tools/test_query_http.py --bundle "$RUNNER_TEMP/noxide-query-bundle" --output "$RUNNER_TEMP/noxide-query-sqlite" --host-cli target/debug/noxide
 python3 tools/test_query_http.py --bundle "$RUNNER_TEMP/noxide-query-bundle" --output "$RUNNER_TEMP/noxide-query-postgres" --host-cli target/debug/noxide --postgres "$NOXIDE_QUERY_POSTGRES"
 ```
