@@ -527,7 +527,233 @@ async fn durable_contract(database: Database) {
     registry.shutdown().await.unwrap();
     assert_eq!(state(&database, &second).await.0, "paused");
     terminal_rejection_contract(&database).await;
+    retry_boundaries_contract(&database).await;
     recurrence_contract(&database).await;
+}
+
+/// A fixture mutation is allowed only after the real queue admission returns
+/// Ready. Its rollback models a confirmed abort, before a separate failure TX.
+async fn ready_then_abort(database: &Database, claimed: &Claim, now: Timestamp, probe: i64) {
+    let (owner, registry) = admission();
+    owner
+        .run(async {
+            let mut tx = database
+                .begin(owner.work_deadline().into_std())
+                .await
+                .unwrap();
+            let mut calls = 16;
+            assert!(matches!(
+                QueueContext {
+                    tx: &mut tx,
+                    calls: &mut calls
+                }
+                .lock_execution(claimed, now, receipt)
+                .await
+                .unwrap(),
+                Execution::Ready(_)
+            ));
+            tx.execute(
+                "INSERT INTO nx_job_test_mutations(id,value) VALUES($1,1)",
+                &[probe.into()],
+            )
+            .await
+            .unwrap();
+            tx.rollback().await.unwrap();
+        })
+        .await;
+    registry.shutdown().await.unwrap();
+}
+
+async fn known_abort(database: &Database, claimed: &Claim, now: Timestamp) -> FailureResult {
+    let (owner, registry) = admission();
+    let result = owner
+        .run(async {
+            let mut tx = database
+                .begin(owner.work_deadline().into_std())
+                .await
+                .unwrap();
+            let mut calls = 16;
+            let result = QueueContext {
+                tx: &mut tx,
+                calls: &mut calls,
+            }
+            .fail(claimed, now, Failure::Transient, receipt)
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            result
+        })
+        .await;
+    registry.shutdown().await.unwrap();
+    result
+}
+
+async fn retry_boundaries_contract(database: &Database) {
+    let job = captured(&grant("alpha"), "five_attempt_limit", 0, 6);
+    enqueue(database, &job).await;
+    let mut now = at(1_000);
+    // These are the specified retry delays and maximum additive 10% jitter,
+    // independently asserted rather than computed by the production helper.
+    let delays = [
+        (60_000, 66_000),
+        (300_000, 330_000),
+        (1_800_000, 1_980_000),
+        (7_200_000, 7_920_000),
+    ];
+    let mut fifth = None;
+    for attempt in 1..=5 {
+        let claimed = claim(database, now).await.unwrap();
+        assert_eq!(claimed.id(), job.id().unwrap());
+        assert_eq!(
+            state(database, &job).await,
+            (String::from("running"), attempt, attempt)
+        );
+        // The fifth execution is still eligible; a sixth execution is not.
+        ready_then_abort(database, &claimed, now, 100 + attempt).await;
+        let result = known_abort(database, &claimed, now).await;
+        if attempt < 5 {
+            let FailureResult::Retrying(next) = result else {
+                panic!("attempt {attempt} must retry")
+            };
+            let delay = next.unix_millis() - now.unix_millis();
+            let (minimum, maximum) = delays[(attempt - 1) as usize];
+            assert!((minimum..=maximum).contains(&delay));
+            assert!(claim(database, at(next.unix_millis() - 1)).await.is_none());
+            now = next;
+        } else {
+            assert!(matches!(result, FailureResult::Dead));
+            fifth = Some(claimed);
+        }
+    }
+    assert_eq!(state(database, &job).await, (String::from("dead"), 5, 5));
+    assert!(
+        claim(database, at(now.unix_millis() + 30_000))
+            .await
+            .is_none()
+    );
+    let (owner, registry) = admission();
+    owner
+        .run(async {
+            let mut tx = database
+                .begin(owner.work_deadline().into_std())
+                .await
+                .unwrap();
+            let mut calls = 16;
+            // Even the last claim cannot reenter the mutation path after terminal
+            // settlement, regardless of its previously granted lease timestamp.
+            assert!(
+                QueueContext {
+                    tx: &mut tx,
+                    calls: &mut calls
+                }
+                .lock_execution(&fifth.unwrap(), now, receipt)
+                .await
+                .is_err()
+            );
+            tx.rollback().await.unwrap();
+        })
+        .await;
+    registry.shutdown().await.unwrap();
+
+    // Enqueue two days ahead. Its 24-hour execution window starts at due time,
+    // and expires at the exact boundary even when the claim lease is still live.
+    let due = at(1_000 + 2 * 24 * 60 * 60 * 1_000);
+    let end = at(due.unix_millis() + 24 * 60 * 60 * 1_000);
+    let future = CapturedJob::capture(
+        &declaration(0),
+        "future_due_window".into(),
+        &grant("alpha"),
+        1,
+        due,
+        at(1_000),
+        Fields::new(),
+        targets(7),
+    )
+    .unwrap();
+    enqueue(database, &future).await;
+    assert!(claim(database, at(due.unix_millis() - 1)).await.is_none());
+    let before_end = at(end.unix_millis() - 1);
+    let claimed = claim(database, before_end).await.unwrap();
+    assert_eq!(claimed.id(), future.id().unwrap());
+    ready_then_abort(database, &claimed, before_end, 200).await;
+    let mut tx = database
+        .begin_read(Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        tx.fetch::<1>(
+            "SELECT CAST(first_eligible_ms AS TEXT) FROM nx_jobs WHERE id=$1",
+            &[future.id().unwrap().into()]
+        )
+        .await
+        .unwrap(),
+        [[due.unix_millis().to_string()]]
+    );
+    tx.commit().await.unwrap();
+    let (owner, registry) = admission();
+    owner
+        .run(async {
+            let mut tx = database
+                .begin(owner.work_deadline().into_std())
+                .await
+                .unwrap();
+            let mut calls = 16;
+            assert!(matches!(
+                QueueContext {
+                    tx: &mut tx,
+                    calls: &mut calls
+                }
+                .lock_execution(&claimed, end, receipt)
+                .await
+                .unwrap(),
+                Execution::Dead
+            ));
+            tx.commit().await.unwrap();
+        })
+        .await;
+    registry.shutdown().await.unwrap();
+    assert_eq!(state(database, &future).await, (String::from("dead"), 1, 1));
+    assert!(claim(database, end).await.is_none());
+
+    // The separate known-abort finalizer must also enforce the same exact
+    // boundary; one previous execution does not grant a fresh retry window.
+    let future_abort = CapturedJob::capture(
+        &declaration(0),
+        "future_abort_window".into(),
+        &grant("alpha"),
+        1,
+        due,
+        at(1_000),
+        Fields::new(),
+        targets(8),
+    )
+    .unwrap();
+    enqueue(database, &future_abort).await;
+    let claimed = claim(database, before_end).await.unwrap();
+    ready_then_abort(database, &claimed, before_end, 201).await;
+    assert!(matches!(
+        known_abort(database, &claimed, end).await,
+        FailureResult::Dead
+    ));
+    assert_eq!(
+        state(database, &future_abort).await,
+        (String::from("dead"), 1, 1)
+    );
+    assert!(claim(database, end).await.is_none());
+    let mut tx = database
+        .begin_read(Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        tx.fetch::<1>(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM nx_job_test_mutations WHERE id>=100",
+            &[]
+        )
+        .await
+        .unwrap(),
+        [[String::from("0")]]
+    );
+    tx.commit().await.unwrap();
 }
 
 #[tokio::test]
