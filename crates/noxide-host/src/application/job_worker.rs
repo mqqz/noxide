@@ -282,7 +282,9 @@ impl Application {
                 let Some([tenant, name]) = rows.first() else { return Self::finish_commit(&mut tx, ()).await };
                 let declaration = self.manifest.jobs.as_ref().and_then(|contract| contract.recurring.iter().find(|schedule| schedule.name == *name)).ok_or(RequestError::Rejected)?;
                 let scope = crate::jobs::JobScope { deployment: generation.clone(), tenant: tenant.clone() };
-                let mut calls = 15;
+                // Durable time and the due-schedule selection each consume one
+                // call from the same allowance used by selection and enqueue.
+                let mut calls = 14;
                 let proof = QueueContext { tx: &mut tx, calls: &mut calls }.schedule_grant(&scope, &declaration.worker, &self.contract).await.map_err(RequestError::database)?;
                 let Some(mut batch) = (QueueContext { tx: &mut tx, calls: &mut calls }).begin_recurrence(&scope, declaration, time.timestamp()).await.map_err(RequestError::database)? else { return Self::finish_commit(&mut tx, ()).await };
                 let input = declaration.inputs.iter().map(|(name, literal)| {

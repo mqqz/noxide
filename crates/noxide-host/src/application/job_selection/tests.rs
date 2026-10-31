@@ -613,6 +613,52 @@ async fn provider(database: Database) {
         })
         .await;
     app.request_lifecycle().wait_idle_for_test().await.unwrap();
+
+    // The other tenant is still due. Exercise the production worker adapter,
+    // including its clock/due-row costs, over the same100k indexed corpus.
+    app.checkpoint_clock().await.unwrap();
+    let (result, roots) =
+        crate::database::lifecycle::observe_roots(app.run_recurrence_once()).await;
+    result.unwrap();
+    assert_eq!(roots.len(), 1);
+    app.jobs
+        .as_ref()
+        .unwrap()
+        .lifecycle
+        .wait_idle_for_test()
+        .await
+        .unwrap();
+    let (_, reserved, spent) = roots[0].statement_snapshot();
+    assert_eq!(reserved, 0);
+    assert!(spent <= 256);
+    let mut tx = database
+        .begin_read(std::time::Instant::now() + Duration::from_secs(3))
+        .await
+        .unwrap();
+    let counts = tx
+        .fetch::<2>(
+            "SELECT tenant,CAST(COUNT(*) AS TEXT) FROM nx_jobs GROUP BY tenant ORDER BY tenant",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        counts,
+        [
+            [String::from("alpha"), String::from("2")],
+            [String::from("beta"), String::from("2")],
+        ]
+    );
+    let frontier = tx
+        .fetch::<2>(
+            "SELECT CAST(cutoff_seq AS TEXT),cursor FROM nx_job_recurring WHERE tenant='beta'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(frontier[0][0].parse::<u64>().unwrap() >= cutoff_seq);
+    assert!(!frontier[0][1].is_empty());
+    tx.commit().await.unwrap();
 }
 #[tokio::test]
 async fn sqlite_recurring_selector_cutoffs_scope_budget_and_native_frontier() {
