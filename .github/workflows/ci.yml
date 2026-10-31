@@ -429,6 +429,22 @@ jobs:
             --output "$RUNNER_TEMP/noxide-ci/catalog-postgres" \
             --host-cli target/debug/noxide \
             --postgres "${NOXIDE_TEST_POSTGRES%/*}/noxide_catalog"
+      - name: Build and test computed reservations
+        if: matrix.suite == 'examples'
+        run: |
+          target/debug/noxide build --framework "$PWD" \
+            --app examples/reservations --name reservations \
+            --output "$RUNNER_TEMP/noxide-ci/reservations"
+          python3 tools/test_reservations.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/reservations" \
+            --output "$RUNNER_TEMP/noxide-ci/reservations-sqlite" \
+            --host-cli target/debug/noxide
+          psql "$NOXIDE_TEST_POSTGRES" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE noxide_reservations'
+          python3 tools/test_reservations.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/reservations" \
+            --output "$RUNNER_TEMP/noxide-ci/reservations-postgres" \
+            --host-cli target/debug/noxide \
+            --postgres "${NOXIDE_TEST_POSTGRES%/*}/noxide_reservations"
       - name: Test NoJS browser flow with SQLite
         if: matrix.suite == 'sdk'
         run: |
