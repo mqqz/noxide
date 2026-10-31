@@ -234,6 +234,15 @@ impl Transaction {
         self.lock_effect_operator(generation).await?;
         let n=self.execute("UPDATE nx_effect_secrets SET state='revoked',version=version+1 WHERE deployment=$1 AND slot=$2 AND version<9223372036854775807",&[generation.into(),slot.into()]).await?;
         ensure!(n == 1, "secret grant missing");
+        self.pause_effect_secret_rows(generation, slot, "secret_revoked")
+            .await
+    }
+    async fn pause_effect_secret_rows(
+        &mut self,
+        generation: &str,
+        slot: &str,
+        reason: &str,
+    ) -> Result<()> {
         // Endpoint declarations contain no value/path. JSON extraction is not
         // needed: the bounded current grant list supplies exact endpoint pairs.
         let rows=self.fetch::<3>("SELECT tenant,endpoint,declaration FROM nx_effect_grants WHERE deployment=$1 ORDER BY tenant,endpoint LIMIT 65",&[generation.into()]).await?;
@@ -241,7 +250,7 @@ impl Transaction {
         for [tenant, endpoint, payload] in rows {
             let binding: EffectiveEffectGrant = serde_json::from_str(&payload)?;
             if binding.endpoint.secret_slot.as_deref() == Some(slot) {
-                self.execute("UPDATE nx_outbox SET state='paused',reason='secret_revoked',lease_until_ms=0 WHERE tenant=$1 AND endpoint=$2 AND state IN ('pending','running')",&[tenant.into(),endpoint.into()]).await?;
+                self.execute("UPDATE nx_outbox SET state='paused',reason=$1,lease_until_ms=0 WHERE tenant=$2 AND endpoint=$3 AND state IN ('pending','running')",&[reason.into(),tenant.into(),endpoint.into()]).await?;
             }
         }
         Ok(())
@@ -256,6 +265,7 @@ impl Transaction {
         ensure!(current == contract, "effect approval changed");
         let n=self.execute("UPDATE nx_effect_grants SET state='active',version=version+1,contract=$1,epoch=$2 WHERE deployment=$3 AND tenant=$4 AND endpoint=$5 AND declaration=$6 AND version<9223372036854775807",&[contract.into(),epoch.into(),generation.into(),binding.tenant.as_str().into(),binding.endpoint.name.as_str().into(),serde_json::to_string(binding)?.into()]).await?;
         ensure!(n == 1, "endpoint is not currently approved");
+        self.execute("UPDATE nx_outbox SET state='paused',reason='grant_changed',lease_until_ms=0 WHERE tenant=$1 AND endpoint=$2 AND state IN ('pending','running')",&[binding.tenant.as_str().into(),binding.endpoint.name.as_str().into()]).await?;
         self.execute(
             "UPDATE nx_job_runtime SET state='active' WHERE singleton=1",
             &[],
@@ -277,7 +287,8 @@ impl Transaction {
         );
         let n=self.execute("UPDATE nx_effect_secrets SET state='active',version=version+1,contract=$1,epoch=$2 WHERE deployment=$3 AND slot=$4 AND version<9223372036854775807",&[contract.into(),epoch.into(),generation.into(),slot.into()]).await?;
         ensure!(n == 1, "secret grant missing");
-        Ok(())
+        self.pause_effect_secret_rows(generation, slot, "grant_changed")
+            .await
     }
     pub(crate) async fn effect_operator_source(
         &mut self,

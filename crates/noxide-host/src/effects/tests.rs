@@ -354,11 +354,16 @@ async fn quota_contract(db: &Database, app_full: bool) {
         .unwrap();
         let id = &rows[0][0];
         phase(db, async |tx: &mut Transaction| {
-            tx.execute(
-                "UPDATE nx_outbox SET state='paused' WHERE id=$1",
-                &[id.as_str().into()],
-            )
-            .await?;
+            tx.grant_effect_endpoint("deployment", "contract", &effective.grants[0])
+                .await?;
+            assert_eq!(
+                tx.fetch::<1>(
+                    "SELECT state FROM nx_outbox WHERE id=$1",
+                    &[id.as_str().into()]
+                )
+                .await?,
+                [[String::from("paused")]]
+            );
             tx.resume_effect("deployment", "contract", &effective, id, 1, at(1002), false)
                 .await
         })
@@ -491,6 +496,63 @@ async fn retry_and_atomicity_contract(db: &Database) {
     .unwrap();
     assert_eq!(state(db, &lost.id().unwrap()).await, "dead");
 }
+async fn secret_grant_change_contract(db: &Database) {
+    let mut effective = approval();
+    effective
+        .grants
+        .iter_mut()
+        .for_each(|g| g.endpoint.secret_slot = Some("token".into()));
+    effective.contract.endpoints[0].secret_slot = Some("token".into());
+    effective.secrets = vec![crate::effect_deployment::EffectSecret {
+        slot: "token".into(),
+        path: "/host/test-only-no-read".into(),
+    }];
+    setup(db, &effective).await;
+    let capture = enqueue(db, "alpha", "slot-change").await;
+    phase(db, async |tx: &mut Transaction| {
+        tx.grant_effect_secret("deployment", "contract", "token", &effective)
+            .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(state(db, &capture.id().unwrap()).await, "paused");
+    phase(db, async |tx: &mut Transaction| {
+        tx.resume_effect(
+            "deployment",
+            "contract",
+            &effective,
+            &capture.id()?,
+            1,
+            at(1001),
+            false,
+        )
+        .await?;
+        let source = tx
+            .effect_operator_source("deployment", &capture.id()?)
+            .await?;
+        assert_eq!(source.receiver_key()?, capture.receiver_key()?);
+        assert_eq!(source.capture_digest()?, capture.capture_digest()?);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let claim = claim(db, 1001).await;
+    phase(db, async |tx: &mut Transaction| {
+        let mut calls = 16;
+        assert!(matches!(
+            OutboxContext {
+                tx,
+                calls: &mut calls
+            }
+            .preflight(&claim, at(1001))
+            .await?,
+            Preflight::Send(_)
+        ));
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
 async fn sqlite(label: &str) -> Database {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/capability-evidence/p11-store-fixtures");
@@ -541,6 +603,10 @@ async fn sqlite_atomicity_dedup_five_attempts_and_exact_window() {
     retry_and_atomicity_contract(&sqlite("retry-").await).await;
 }
 #[tokio::test]
+async fn sqlite_secret_grant_rotation_pauses_before_explicit_resume() {
+    secret_grant_change_contract(&sqlite("secret-change-").await).await;
+}
+#[tokio::test]
 #[ignore = "requires disposable NOXIDE_TEST_POSTGRES with CREATE DATABASE"]
 async fn postgres_known_success_survives_revocation_cancel_and_wall_expiry() {
     known_success_contract(&postgres("success").await).await;
@@ -559,4 +625,9 @@ async fn postgres_dead_retry_respects_lowered_tenant_quota_and_paused_resume() {
 #[ignore = "requires disposable NOXIDE_TEST_POSTGRES with CREATE DATABASE"]
 async fn postgres_atomicity_dedup_five_attempts_and_exact_window() {
     retry_and_atomicity_contract(&postgres("retry").await).await;
+}
+#[tokio::test]
+#[ignore = "requires disposable NOXIDE_TEST_POSTGRES with CREATE DATABASE"]
+async fn postgres_secret_grant_rotation_pauses_before_explicit_resume() {
+    secret_grant_change_contract(&postgres("secretchange").await).await;
 }
