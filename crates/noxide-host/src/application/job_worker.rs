@@ -288,6 +288,15 @@ impl Application {
                     // fanout 20 never grants twenty additional database calls.
                     let limit = batch.remaining();
                     let page = self.select_recurring(&mut tx, &proof, declaration, time, batch.cutoff(), batch.cutoff_seq().try_into().map_err(|_| RequestError::Rejected)?, batch.cursor(), limit, &mut calls).await.map_err(RequestError::database)?;
+                    if page.items.is_empty()
+                        && !page.complete
+                        && page.next_cursor.as_deref() == batch.cursor()
+                    {
+                        // Preserve the genuine scan frontier when this bounded
+                        // attempt cannot afford another candidate and enqueue.
+                        // A new poll gets a new work root without inventing progress.
+                        return Self::finish_commit(&mut tx, ()).await;
+                    }
                     for item in page.items {
                         // Q returns an independently List-authorized row sealed
                         // through A's current eligible-read helper. Reauthorizing

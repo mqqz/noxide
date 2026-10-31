@@ -1,9 +1,8 @@
-use super::*;
 use crate::{
     Database,
-    job_deployment::{JobDeployment, JobGrant, JobLimits},
+    job_deployment::{EffectiveJobDeployment, JobDeployment, JobGrant, JobLimits},
 };
-use noxide_protocol::jobs::{Worker, WorkerAction};
+use noxide_protocol::jobs::{JobContract, Worker, WorkerAction};
 use std::{
     collections::BTreeSet,
     time::{Duration, Instant},
@@ -103,7 +102,7 @@ async fn operator_lifecycle(database: Database) {
         tx.fetch::<2>("SELECT CAST(version AS TEXT),state FROM nx_job_grants", &[])
             .await
             .unwrap()[0],
-        ["1".into(), "revoked".into()]
+        [String::from("1"), String::from("revoked")]
     );
     tx.fork_job_runtime("generation").await.unwrap();
     let fork = tx
@@ -142,7 +141,7 @@ async fn operator_lifecycle(database: Database) {
         tx.fetch::<2>("SELECT CAST(version AS TEXT),state FROM nx_job_grants", &[])
             .await
             .unwrap()[0],
-        ["2".into(), "active".into()]
+        [String::from("2"), String::from("active")]
     );
     tx.commit().await.unwrap();
     activate(&database, "new_approval", &declaration, &effective).await;

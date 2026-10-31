@@ -208,6 +208,7 @@ pub async fn build(command: &str, args: &[OsString]) -> Result<()> {
             noxide_host::HostKeys::generate()?,
             Default::default(),
             noxide_host::DeploymentResources {
+                jobs: None,
                 assets,
                 blobs: None,
             },

@@ -11,6 +11,7 @@ mod jobs;
 mod navigation;
 mod submission;
 pub use jobs::JobRunOutcome;
+mod job_selection;
 mod job_worker;
 use crate::{
     Database, HostKeys, auth,
