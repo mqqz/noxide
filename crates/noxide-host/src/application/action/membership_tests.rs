@@ -137,14 +137,25 @@ async fn bootstrap_contract(db: Option<Database>) {
         "duplicate failure rolls back receipt"
     );
     let foreign = case.form(&case.alice, "Add member", workspace).await;
-    let result = case
-        .submit(
-            &case.alice,
-            "Add member",
-            &foreign,
-            Fields::from([("account".into(), case.accounts["eve"].clone())]),
-        )
-        .await;
+    let denied_start = Instant::now();
+    let (result, roots) = crate::database::lifecycle::observe_roots(case.submit(
+        &case.alice,
+        "Add member",
+        &foreign,
+        Fields::from([("account".into(), case.accounts["eve"].clone())]),
+    ))
+    .await;
+    if let Err(error) = &result {
+        eprintln!(
+            "foreign membership denial error={error:?}, elapsed={:?}, root statements={:?}, persisted counts={:?}, expected counts={count:?}",
+            denied_start.elapsed(),
+            roots
+                .iter()
+                .map(|root| root.statement_snapshot())
+                .collect::<Vec<_>>(),
+            case.counts().await,
+        );
+    }
     assert_eq!(result.unwrap().status, 404);
     assert_eq!(
         case.counts().await,
