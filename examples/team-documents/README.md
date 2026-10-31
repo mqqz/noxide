@@ -31,7 +31,17 @@ by the member form. Account IDs identify recipients; knowing one grants no acces
    requests immediately recheck authority. Demoting or revoking the last
    administrator removes management access; there is no implicit owner recovery.
 
-Every workspace, membership and document expires after one hour in this example.
+5. As a member, upload an attachment from the workspace page. The upload binding
+   and its 1 MiB file limit are declared explicitly in `blobs: [attachment_files]`;
+   a `BlobRef` field alone grants no upload. The operator approves the same
+   ceilings in the deployment `blobs` section before activation. Each download
+   link is issued per session and rechecks the current membership, so revoking a
+   member also blocks links that were already issued.
+6. Search a workspace's documents by title and body tokens. Results are sorted by
+   title and the page shows a bounded match count; both use the same membership
+   policy as the document list, so revoked or expired members see neither.
+
+Every workspace, membership, document and attachment expires after one hour in this example.
 The approved declaration caps new expiry values at one day. Expiry hides a row
 from ordinary reads and mutations; it does not delete data or release the unique
 membership tuple. An expired row cannot be revived through its ordinary edit

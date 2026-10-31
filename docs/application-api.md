@@ -276,6 +276,11 @@ noxide::application! {
 }
 ```
 
+`application!` also accepts `blobs: [policy_function]`, naming one function
+that returns the explicit `BlobPolicy` for the registered upload actions; see
+[team documents](../examples/team-documents/src/lib.rs). Without it the
+application declares no upload authority.
+
 The host filters rows in SQL, validates their complete stored fields, and returns
 only `title` and `body`. The SDK generates `PublishedArticlesRecord`, which has
 those typed fields and an `id()` method returning `Id<Article>`. Private queries

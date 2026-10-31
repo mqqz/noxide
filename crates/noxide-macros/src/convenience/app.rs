@@ -254,6 +254,7 @@ pub(crate) fn expand_app(mut module: syn::ItemMod) -> syn::Result<Tokens> {
         pages: pages.into_values().collect(),
         actions: actions.into_values().collect(),
         forms,
+        blobs: None,
     };
     if registration.pages.is_empty() {
         return Err(syn::Error::new(

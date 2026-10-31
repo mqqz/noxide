@@ -11,6 +11,7 @@ pub(crate) struct Registration {
     pub(crate) pages: Vec<syn::Path>,
     pub(crate) actions: Vec<(Type, Option<syn::Path>)>,
     pub(crate) forms: Vec<(Type, syn::Path)>,
+    pub(crate) blobs: Option<syn::Path>,
 }
 impl Parse for Registration {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
@@ -19,6 +20,7 @@ impl Parse for Registration {
             pages: Vec::new(),
             actions: Vec::new(),
             forms: Vec::new(),
+            blobs: None,
         };
         let mut sections = BTreeSet::new();
         while !input.is_empty() {
@@ -71,10 +73,18 @@ impl Parse for Registration {
                         }
                     }
                 }
+                "blobs" => {
+                    // One explicit policy function; no authority is inferred from fields.
+                    let policy: syn::Path = content.parse()?;
+                    if !content.is_empty() {
+                        return Err(content.error("register exactly one blob policy function"));
+                    }
+                    result.blobs = Some(policy);
+                }
                 _ => {
                     return Err(syn::Error::new(
                         section.span(),
-                        "expected assets, pages, actions, or forms",
+                        "expected assets, pages, actions, forms, or blobs",
                     ));
                 }
             }
@@ -178,6 +188,10 @@ pub(crate) fn expand_application(registration: Registration) -> syn::Result<Toke
         route_namespace.insert(path)?;
     }
     let route_exports = route_namespace.emit(1);
+    let blobs = registration
+        .blobs
+        .as_ref()
+        .map(|policy| quote!(builder.blobs(#policy());));
     let form_types: Vec<_> = registration
         .forms
         .iter()
@@ -217,6 +231,7 @@ pub(crate) fn expand_application(registration: Registration) -> syn::Result<Toke
                 builder.web_binding(<#actions as ::noxide::WebActionType>::web_binding());
             )*
             #(builder.layout(<#form_types as ::noxide::WebActionType>::web_binding().id, #form_functions(::noxide::FormFields::<#form_types>::new()).instructions);)*
+            #blobs
             builder.json()
         }
         struct __NoxideApplication;

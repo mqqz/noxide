@@ -1,6 +1,10 @@
 //! Private workspace documents with explicit record-scoped membership authority.
 use noxide::prelude::*;
-use noxide::{AccountId, Timestamp};
+use noxide::{
+    AccountId, Aggregate, BlobLimits, BlobPolicy, BlobRef, QueryForm, RouteRef, Timestamp,
+    UploadBinding, UploadHandle, WebActionType, download,
+};
+use std::collections::BTreeMap;
 
 #[derive(Choice)]
 pub enum Role {
@@ -41,7 +45,11 @@ pub struct Membership {
     pub expires_at: Timestamp,
 }
 #[derive(Resource)]
-#[resource(key = "documents", expiry(expires_at, max_after_seconds = 86400))]
+#[resource(
+    key = "documents",
+    expiry(expires_at, max_after_seconds = 86400),
+    search(fields(title, body), max_bytes = 4096)
+)]
 pub struct Document {
     #[id]
     pub id: Id<Self>,
@@ -51,6 +59,21 @@ pub struct Document {
     pub title: String,
     #[field(max_bytes = 4096)]
     pub body: String,
+    #[field()]
+    pub expires_at: Timestamp,
+}
+
+#[derive(Resource)]
+#[resource(key = "attachments", expiry(expires_at, max_after_seconds = 86400))]
+pub struct Attachment {
+    #[id]
+    pub id: Id<Self>,
+    #[field()]
+    pub workspace: Id<Workspace>,
+    #[field(max_bytes = 160)]
+    pub title: String,
+    #[field()]
+    pub file: BlobRef,
     #[field()]
     pub expires_at: Timestamp,
 }
@@ -76,6 +99,21 @@ pub struct Documents;
     reference = workspace, target = reference(workspace), account = account,
     conditions(active = true)))]
 pub struct ReadDocument;
+#[query(list(Document), scope(workspace), allow = exists_related(Membership,
+    reference = workspace, target = reference(workspace), account = account,
+    conditions(active = true)), search(fields(title, body), parameter = terms),
+    order = field(title, ascending, live_view), page_size = 10)]
+pub struct SearchDocuments;
+#[query(count(SearchDocuments))]
+pub struct CountMatches;
+#[query(list(Attachment), scope(workspace), allow = exists_related(Membership,
+    reference = workspace, target = reference(workspace), account = account,
+    conditions(active = true)), preview, page_size = 10)]
+pub struct Attachments;
+#[query(read(Attachment), allow = exists_related(Membership,
+    reference = workspace, target = reference(workspace), account = account,
+    conditions(active = true)))]
+pub struct ReadAttachment;
 #[query(list(Membership), scope(workspace), allow = exists_related(Membership,
     reference = workspace, target = reference(workspace), account = account,
     conditions(role = Role::Admin, active = true)), preview, page_size = 10)]
@@ -107,6 +145,43 @@ pub struct CreateDocument;
         account = account, conditions(role = Role::Admin, active = true)), redirect = workspace(target))]
 pub struct AddMember;
 
+#[action(inputs(title: String = 160, file: UploadHandle = bytes(1_048_576)), transaction(
+    attachment = create(Attachment, set(workspace = target, title = title, file = file,
+        expires_at = transaction_time() + seconds(3600)), eligible = ReadWorkspace)),
+    allow = exists_related(Membership, reference = workspace, target = reference(workspace),
+        account = account, conditions(active = true)), redirect = attachment(attachment))]
+pub struct UploadAttachment;
+
+/// Explicit operator-reviewed upload authority; Blob fields alone grant none.
+fn attachment_files() -> BlobPolicy {
+    BlobPolicy {
+        limits: BlobLimits {
+            file_bytes: 1 << 20,
+            app_bytes: 64 << 20,
+            objects: 256,
+            ..BlobLimits::default()
+        },
+        anonymous: None,
+        uploads: vec![UploadBinding {
+            id: noxide::stable_id("upload:team-documents:attachment"),
+            name: "workspace_attachment".into(),
+            web_binding: UploadAttachment::web_binding().id,
+            input: "file".into(),
+            anonymous: None,
+        }],
+    }
+}
+
+fn search_form(workspace: Id<Workspace>) -> QueryForm {
+    QueryForm::new(RouteRef {
+        route: search::id(),
+        target: Some(workspace.get()),
+        params: BTreeMap::new(),
+    })
+    .search_label("Search documents")
+    .submit("Search")
+}
+
 #[action(update(Membership), fields(role, active), allow = exists_related(Membership,
     reference = workspace, target = reference(workspace), account = account,
     conditions(role = Role::Admin, active = true)), redirect = member)]
@@ -133,6 +208,8 @@ pub fn index(mut workspaces: Query<Workspaces>, create: Form<CreateWorkspace>) -
     )
 }
 
+// Each extractor is an independent host-checked query or form.
+#[allow(clippy::too_many_arguments)]
 #[page(path = "/workspaces/{workspace}")]
 pub fn workspace(
     workspace: Id<Workspace>,
@@ -140,12 +217,15 @@ pub fn workspace(
     mut admin: Query<AdminWorkspace>,
     mut documents: Query<Documents>,
     mut members: Query<Members>,
+    mut attachments: Query<Attachments>,
     create: Form<CreateDocument>,
     add_member: Form<AddMember>,
+    upload: Form<UploadAttachment>,
 ) -> PageResult {
     let current = read.get(workspace).ok_or(NotFound)?;
     let administrator = admin.get(workspace).is_some();
     let documents = documents.fetch();
+    let attachments = attachments.fetch_preview();
     let members = if administrator {
         Some(members.fetch_preview())
     } else {
@@ -158,6 +238,12 @@ pub fn workspace(
             @if documents.is_empty() { p { "Create the first document for this workspace." } }
             @for document in documents { article { a href=(routes::document(document.id)) { (&document.title) } } }
             @if create.is_available() { h2 { "New document" } (create) }
+            h2 { "Search" } (search_form(workspace))
+            h2 { "Attachments" }
+            @if attachments.items.is_empty() { p { "No attachments yet." } }
+            @for attachment in attachments.items { article { a href=(routes::attachment(attachment.id)) { (&attachment.title) } } }
+            @if attachments.truncated { p { "The attachment preview reached its limit." } }
+            @if upload.is_available() { h2 { "Upload attachment" } p { "Files up to 1 MiB stay on this host and are shown only to active members." } (upload) }
             @if let Some(members) = members {
                 h2 { "Members" }
                 @for membership in members.items { article {
@@ -191,6 +277,44 @@ pub fn document(
     ))
 }
 
+#[page(path = "/workspaces/{workspace}/search", params(terms))]
+pub fn search(
+    workspace: Id<Workspace>,
+    mut read: Query<ReadWorkspace>,
+    mut matches: Query<SearchDocuments>,
+    mut count: Aggregate<CountMatches>,
+) -> PageResult {
+    let current = read.get(workspace).ok_or(NotFound)?;
+    let terms = matches.param("terms").unwrap_or_default().to_owned();
+    let total = count.fetch().ok();
+    let results = matches.fetch();
+    Ok(Page::new(
+        "Search documents",
+        html! { main {
+            h1 { "Search " (&current.name) }
+            (search_form(workspace))
+            p { "Terms: " (&terms) }
+            @if let Some(total) = total { p { "Matching documents: " (total) } } @else { p { "The match count is unavailable for these terms." } }
+            @for document in results { article { a href=(routes::document(document.id)) { (&document.title) } } }
+            a href=(routes::workspace(workspace)) { "Workspace" }
+        } },
+    ))
+}
+
+#[page(path = "/attachments/{attachment}")]
+pub fn attachment(attachment: Id<Attachment>, mut read: Query<ReadAttachment>) -> PageResult {
+    let record = read.get(attachment).ok_or(NotFound)?;
+    Ok(Page::new(
+        &record.title,
+        html! { main {
+            h1 { (&record.title) }
+            p { "Downloads are checked against your current membership each time." }
+            (download::<ReadAttachment>(&record, "file", "Download file"))
+            a href=(routes::workspace(record.workspace)) { "Workspace" }
+        } },
+    ))
+}
+
 #[page(path = "/memberships/{membership}")]
 pub fn member(
     membership: Id<Membership>,
@@ -209,6 +333,7 @@ pub fn member(
 }
 
 noxide::application! {
-    pages: [index, workspace, document, member],
-    actions: [CreateWorkspace, CreateDocument, AddMember, EditMember, EditDocument]
+    pages: [index, workspace, document, search, attachment, member],
+    actions: [CreateWorkspace, CreateDocument, AddMember, EditMember, EditDocument, UploadAttachment],
+    blobs: [attachment_files]
 }

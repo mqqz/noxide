@@ -1,13 +1,62 @@
 #!/usr/bin/env python3
 """Exercise the trusted membership SDK bundle through script-free HTTP forms."""
 import argparse
+import http.client
 import json
 from pathlib import Path
 import re
 import socket
 import subprocess
 import time
+import urllib.parse
 from test_forum import Client, Forms
+
+PAYLOAD = b"PRIVATE-ATTACHMENT-BYTES <script>alert(1)</script>"
+
+
+def upload(client, html, action, title, filename, payload):
+    """Submit the native multipart form in DOM order; the file stays last."""
+    form = next(f for f in Forms(html).forms if f[0] == action)
+    assert list(form[1])[-1] == "file", "file must be the final submitted control"
+    boundary = "noxide-team-documents-fixture"
+    body = bytearray()
+    for name, value in form[1].items():
+        if name == "file":
+            body += f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\nContent-Type: text/html\r\n\r\n'.encode()
+            body += payload + b"\r\n"
+        else:
+            value = title if name == "title" else value
+            body += f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+    body += f"--{boundary}--\r\n".encode()
+    conn = http.client.HTTPConnection("127.0.0.1", client.port, timeout=10)
+    try:
+        conn.request("POST", action, bytes(body), {
+            "Host": f"localhost:{client.port}", "Origin": f"http://localhost:{client.port}",
+            "Cookie": "; ".join(f"{k}={v}" for k, v in client.cookies.items()),
+            "Content-Type": f"multipart/form-data; boundary={boundary}"})
+        response = conn.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    finally:
+        conn.close()
+
+
+def fetch(client, path):
+    """GET raw bytes and headers for a download response."""
+    conn = http.client.HTTPConnection("127.0.0.1", client.port, timeout=10)
+    try:
+        conn.request("GET", path, headers={"Host": f"localhost:{client.port}",
+                                           "Cookie": "; ".join(f"{k}={v}" for k, v in client.cookies.items())})
+        response = conn.getresponse()
+        return response.status, {k.lower(): v for k, v in response.getheaders()}, response.read()
+    finally:
+        conn.close()
+
+
+def search(client, html, workspace, terms):
+    """Submit the native GET search form with its host-issued controls."""
+    action = f"{workspace}/search"
+    form = next(f for f in Forms(html).forms if f[0] == action)
+    return client.request("GET", action + "?" + urllib.parse.urlencode({**form[1], "terms": terms}))
 
 
 def main():
@@ -28,13 +77,19 @@ def main():
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
     config = output / "runtime.json"
-    config.write_text(json.dumps({
+    settings = {
         "database": {"postgres": args.postgres} if args.postgres else {"sqlite": "team-documents.db"},
         "keys": "keys.json", "manifest": str(manifest),
-        "component": str(bundle / "team_documents.component.wasm"),
-        "approved_contract": subprocess.check_output([cli, "contract-hash", manifest], text=True).strip(),
+        "component": str(bundle / "team_documents.component.wasm"), "approved_contract": "",
         "origin": f"http://localhost:{port}", "listen": {"tcp": f"127.0.0.1:{port}"},
-    }))
+        # The operator ceiling equals the declared policy; no anonymous uploads.
+        "blobs": {"directory": "objects", "ceilings": {"limits": contract["blobs"]["limits"]}},
+    }
+    config.write_text(json.dumps(settings))
+    approval = json.loads(subprocess.check_output([cli, "deployment-hash", config], text=True))
+    assert approval["effective_blobs"]["anonymous"] is None
+    settings["approved_contract"] = approval["deployment_digest"]
+    config.write_text(json.dumps(settings))
     subprocess.run([cli, "init", config], check=True, capture_output=True)
     # Index installation is explicit operator work; activation cannot invent it.
     subprocess.run([cli, "schema", "indexes", config], check=True, capture_output=True)
@@ -83,6 +138,29 @@ def main():
             assert status == 200 and "Private &lt;content&gt;" in html and actions["Edit document"] not in html
             assert eve.request("GET", document)[0] == 404
             (output / "member-document.html").write_text(html)
+            _, _, html = bob.request("GET", workspace)
+            status, headers, _ = upload(bob, html, actions["Upload attachment"], "Plan <v1>", "plan.html", PAYLOAD)
+            assert status == 303, f"Upload attachment: expected 303, received {status}"
+            attachment = headers["location"]
+            status, _, html = bob.request("GET", attachment)
+            assert status == 200 and "Plan &lt;v1&gt;" in html and "<script" not in html.lower()
+            (output / "member-attachment.html").write_text(html)
+            download = re.search(r'href="(/_noxide/download\?ticket=[^"]+)"', html).group(1).replace("&amp;", "&")
+            status, headers, body = fetch(bob, download)
+            assert status == 200 and body == PAYLOAD
+            assert headers["content-type"] == "application/octet-stream" and headers["x-content-type-options"] == "nosniff"
+            assert headers["content-disposition"] == 'attachment; filename="plan.html"' and headers["cache-control"] == "no-store"
+            assert eve.request("GET", attachment)[0] == 404 and fetch(eve, download)[0] == 404
+            _, _, html = alice.request("GET", attachment)
+            admin_download = re.search(r'href="(/_noxide/download\?ticket=[^"]+)"', html).group(1).replace("&amp;", "&")
+            assert fetch(alice, admin_download)[2] == PAYLOAD
+            _, _, html = bob.request("GET", workspace)
+            assert "Plan &lt;v1&gt;" in html
+            status, _, html = search(bob, html, workspace, "shared")
+            assert status == 200 and "Shared &lt;document&gt;" in html and "Matching documents: 1" in html, html
+            (output / "member-search.html").write_text(html)
+            status, _, html = search(bob, html, workspace, "absent")
+            assert status == 200 and "Matching documents: 0" in html and "Shared &lt;document&gt;" not in html
             _, _, html = alice.request("GET", document)
             assert alice.submit(html, actions["Edit document"], title="Updated", body="Admin content")[0] == 303
             _, _, html = alice.request("GET", workspace)
@@ -92,6 +170,9 @@ def main():
             assert alice.submit(html, actions["Edit member"], role="member", active="false")[0] == 303
             assert bob.request("GET", document)[0] == 404
             assert bob.request("GET", workspace)[0] == 404
+            # Revocation applies to pages, already issued download links and search.
+            assert bob.request("GET", attachment)[0] == 404 and fetch(bob, download)[0] == 404
+            assert bob.request("GET", f"{workspace}/search?terms=shared")[0] == 404
             status, _, html = alice.request("GET", workspace)
             assert status == 200 and "Updated" in html
             assert "<script" not in html.lower() and 'src="http' not in html.lower()
@@ -99,7 +180,7 @@ def main():
         finally:
             server.terminate()
             server.wait(timeout=10)
-    print("Team documents NoJS HTTP: bootstrap, principal binding, recipient/tenant checks, member create/read, admin-only management, escaped output and revocation passed.")
+    print("Team documents NoJS HTTP: bootstrap, principal binding, recipient/tenant checks, member create/read, private attachment upload/download, token search and count, admin-only management, escaped output and revocation passed.")
 
 
 if __name__ == "__main__":
