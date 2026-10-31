@@ -83,7 +83,9 @@ rows do not enter the bounded active scan (at most 1,001 candidates). Payloads a
 at most 16 KiB; due dates are at most 30 days ahead. Duplicate enqueue succeeds
 without consuming another quota slot, including when the queue is full.
 
-Claims commit in a short host-owned work transaction before execution. A separate
+Claims commit in a short host-owned work transaction before execution. PostgreSQL
+claims skip execution-locked job rows so an action that enqueues cannot deadlock
+with a claim retaining the queue lock. A separate
 queue lock preserves tenant rotation without serializing all action transactions.
 All Running rows consume the two/app concurrency ceiling, including expired
 leases. An expired Running row can itself be recovered under a new monotonic

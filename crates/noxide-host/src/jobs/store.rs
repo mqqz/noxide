@@ -284,7 +284,7 @@ impl QueueContext<'_> {
             );
             return Ok(false);
         }
-        // The runtime write lock serializes both quota checks and insertion.
+        // The queue write lock serializes both quota checks and insertion.
         // Old paused contracts count until explicitly reconciled by the operator.
         let counts = self.tx.fetch::<2>("SELECT CAST(COUNT(*) AS TEXT),CAST(COALESCE(SUM(CASE WHEN tenant=$1 THEN 1 ELSE 0 END),0) AS TEXT) FROM (SELECT tenant FROM nx_jobs WHERE state IN ('pending','running','paused') LIMIT 1001) AS active_jobs", &[job.scope.tenant.as_str().into()]).await?;
         ensure!(
@@ -314,7 +314,13 @@ impl QueueContext<'_> {
         // while an old execution transaction might still be alive.
         let running = self.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM (SELECT id FROM nx_jobs WHERE state='running' LIMIT 3) AS running_jobs", &[]).await?;
         let capacity = integer(&running[0][0])? < i64::from(MAX_WORKERS_PER_APP);
-        let rows = self.tx.fetch::<5>("SELECT j.id,j.tenant,CAST(j.fence AS TEXT),CAST(j.attempts AS TEXT),j.state FROM nx_jobs j JOIN nx_job_tenants t ON t.deployment=j.deployment AND t.tenant=j.tenant WHERE j.deployment=$1 AND ((j.state='running' AND j.lease_until_ms<=$2) OR (j.state='pending' AND j.eligible_ms<=$2 AND $3=1)) ORDER BY t.claim_seq,j.eligible_ms,j.id LIMIT 1", &[deployment.into(), now.unix_millis().into(), i64::from(capacity).into()]).await?;
+        // Never wait on a job row while retaining the queue lock: an existing
+        // action may hold that row and enqueue its own admitted next action.
+        let suffix = match self.tx.query_provider()? {
+            NativeProvider::Postgres => " FOR UPDATE OF j SKIP LOCKED",
+            NativeProvider::Sqlite => "",
+        };
+        let rows = self.tx.fetch::<5>(&format!("SELECT j.id,j.tenant,CAST(j.fence AS TEXT),CAST(j.attempts AS TEXT),j.state FROM nx_jobs j JOIN nx_job_tenants t ON t.deployment=j.deployment AND t.tenant=j.tenant WHERE j.deployment=$1 AND ((j.state='running' AND j.lease_until_ms<=$2) OR (j.state='pending' AND j.eligible_ms<=$2 AND $3=1)) ORDER BY t.claim_seq,j.eligible_ms,j.id LIMIT 1{suffix}"), &[deployment.into(), now.unix_millis().into(), i64::from(capacity).into()]).await?;
         let Some([id, tenant, fence, attempts, state]) = rows.first() else {
             return Ok(None);
         };

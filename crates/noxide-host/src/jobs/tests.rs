@@ -395,6 +395,30 @@ async fn durable_contract(database: Database) {
     tx.commit().await.unwrap();
     // Expired lease is recoverable only via a higher fence and the locked receipt
     // probe. The stale worker cannot finalize, and invocation digest is stable.
+    if !database.is_sqlite() {
+        // PostgreSQL claims skip an execution-held row instead of retaining the
+        // queue lock while waiting on an action that could itself enqueue.
+        let mut held = database
+            .begin(Instant::now() + std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        held.execute(
+            "UPDATE nx_jobs SET fence=fence WHERE id=$1",
+            &[second.id().unwrap().into()],
+        )
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                claim(&database, at(31_000))
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        held.rollback().await.unwrap();
+    }
     let newer = claim(&database, at(31_000)).await.unwrap();
     assert_eq!(newer.id(), second_claim.id());
     assert!(newer.fence() > second_claim.fence());
