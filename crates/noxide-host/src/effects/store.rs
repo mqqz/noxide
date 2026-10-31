@@ -21,6 +21,7 @@ pub(crate) struct EffectClaim {
     pub(super) scope: EffectScope,
     pub(super) fence: i64,
     pub(super) lease_until: Timestamp,
+    pub(super) epoch: String,
     pub(super) exhausted: bool,
 }
 pub(crate) struct PreparedEffect {
@@ -231,7 +232,7 @@ impl OutboxContext<'_> {
     ) -> Result<Option<EffectClaim>> {
         self.charge()?;
         ensure!(active.len() <= 2, "too many active delivery slots");
-        let (contract, _, state) = self
+        let (contract, epoch, state) = self
             .runtime(&EffectScope {
                 deployment: generation.into(),
                 tenant: String::new(),
@@ -269,6 +270,7 @@ impl OutboxContext<'_> {
             fence,
             lease_until: lease,
             exhausted,
+            epoch,
         }))
     }
     async fn row(&mut self, claim: &EffectClaim, lock: bool) -> Result<Option<Row>> {
@@ -425,6 +427,19 @@ impl OutboxContext<'_> {
     ) -> Result<Finalized> {
         self.charge()?;
         let runtime = self.runtime(&claim.scope).await?;
+        if matches!(result, DeliveryResult::Delivered) {
+            let Some(row) = self.row(claim, true).await? else {
+                return Ok(Finalized::Superseded);
+            };
+            // This is a known receiver observation, not permission to send.
+            // Revocation/cancellation and wall-lease expiry cannot retract it.
+            if runtime.2 == "changed" || runtime.1 != claim.epoch || row.epoch != claim.epoch {
+                return Ok(Finalized::Superseded);
+            }
+            let changed=self.tx.execute("UPDATE nx_outbox SET state='delivered',reason='',lease_until_ms=0,eligible_ms=$1 WHERE id=$2 AND deployment=$3 AND tenant=$4 AND fence=$5 AND epoch=$6",&[now.max(row.eligible).unix_millis().into(),claim.id.as_str().into(),claim.scope.deployment.as_str().into(),claim.scope.tenant.as_str().into(),claim.fence.into(),claim.epoch.as_str().into()]).await?;
+            ensure!(changed == 1, "delivery observation superseded");
+            return Ok(Finalized::Delivered);
+        }
         let Some(preview) = self.row(claim, false).await? else {
             return Ok(Finalized::Superseded);
         };
@@ -467,6 +482,34 @@ impl OutboxContext<'_> {
         };
         self.transition(claim, state, reason, eligible).await?;
         Ok(outcome)
+    }
+    pub(super) async fn check_operator_quota(
+        &mut self,
+        tenant: &str,
+        increment: bool,
+    ) -> Result<()> {
+        let n = self
+            .tx
+            .execute(
+                "UPDATE nx_effect_queue SET claim_seq=claim_seq WHERE singleton=1",
+                &[],
+            )
+            .await?;
+        ensure!(n == 1, "effect queue unavailable");
+        if !increment {
+            return Ok(());
+        }
+        let rows=self.tx.fetch::<4>("SELECT CAST(COUNT(*) AS TEXT),CAST(COALESCE(SUM(CASE WHEN tenant=$1 THEN 1 ELSE 0 END),0) AS TEXT),CAST((SELECT pending_limit FROM nx_effect_queue WHERE singleton=1) AS TEXT),CAST((SELECT tenant_limit FROM nx_effect_queue WHERE singleton=1) AS TEXT) FROM (SELECT tenant FROM nx_outbox WHERE state IN ('pending','running','paused') LIMIT 1001) AS active_effects",&[tenant.into()]).await?;
+        let [app, tenant, app_limit, tenant_limit] =
+            rows.first().context("effect quota unavailable")?;
+        ensure!(
+            integer(app)? < integer(app_limit)?
+                && integer(tenant)? < integer(tenant_limit)?
+                && (1..=1000).contains(&integer(app_limit)?)
+                && (1..=integer(app_limit)?).contains(&integer(tenant_limit)?),
+            "effect queue full"
+        );
+        Ok(())
     }
 }
 fn retry_at(

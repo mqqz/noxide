@@ -377,8 +377,15 @@ impl Transaction {
         let round = integer(round)?
             .checked_add(i64::from(retry))
             .context("effect retry round exhausted")?;
+        OutboxContext {
+            tx: self,
+            calls: &mut calls,
+        }
+        .check_operator_quota(&source.scope.tenant, state != "paused")
+        .await?;
         self.execute("INSERT INTO nx_effect_tenants(deployment,tenant,claim_seq) VALUES($1,$2,0) ON CONFLICT(deployment,tenant) DO NOTHING",&[generation.into(),source.scope.tenant.as_str().into()]).await?;
-        self.execute("UPDATE nx_outbox SET deployment=$1,contract=$2,epoch=$3,grant_version=$4,secret_version=$5,state='pending',reason='',eligible_ms=$6,first_eligible_ms=$7,attempts=$8,lease_until_ms=0,round=$9 WHERE id=$10",&[generation.into(),contract.into(),proof.grant.epoch.as_str().into(),proof.grant.version.into(),proof.grant.secret_version.into(),now.unix_millis().into(),if retry {now.unix_millis()} else {integer(first)?}.into(),if retry {0} else {integer(attempts)?}.into(),round.into(),id.into()]).await?;
+        let changed=self.execute("UPDATE nx_outbox SET deployment=$1,contract=$2,epoch=$3,grant_version=$4,secret_version=$5,state='pending',reason='',eligible_ms=$6,first_eligible_ms=$7,attempts=$8,lease_until_ms=0,round=$9,fence=fence+1 WHERE id=$10 AND fence<9223372036854775807",&[generation.into(),contract.into(),proof.grant.epoch.as_str().into(),proof.grant.version.into(),proof.grant.secret_version.into(),now.unix_millis().into(),if retry {now.unix_millis()} else {integer(first)?}.into(),if retry {0} else {integer(attempts)?}.into(),round.into(),id.into()]).await?;
+        ensure!(changed == 1, "effect fence exhausted");
         Ok(())
     }
 }
