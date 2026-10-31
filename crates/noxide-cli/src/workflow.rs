@@ -239,7 +239,7 @@ pub async fn schema(args: &[OsString]) -> Result<()> {
             let approved = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .decode(&config.approved_contract)?;
             ensure!(
-                approved.as_slice() == manifest::digest(&target)?,
+                approved.as_slice() == config.approval(&target)?.digest,
                 "target contract is not approved"
             );
             super::database(&config.database, &base)?
@@ -275,7 +275,7 @@ pub async fn schema(args: &[OsString]) -> Result<()> {
             let approved = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .decode(&config.approved_contract)?;
             ensure!(
-                approved.as_slice() == manifest::digest(&target)?,
+                approved.as_slice() == config.approval(&target)?.digest,
                 "target contract is not approved"
             );
             let bytes = super::read(Path::new(&args[2]), 65536)?;

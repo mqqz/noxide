@@ -42,7 +42,6 @@ pub async fn prepare(project: &Path, development: bool, approval: Option<&str>) 
     let manifest_path = bundle.join("manifest.json");
     let bytes = super::read(&manifest_path, 32768)?;
     let manifest = noxide_host::manifest::parse(&bytes)?;
-    let digest = URL_SAFE_NO_PAD.encode(noxide_host::manifest::digest(&manifest)?);
     let asset_path = bundle.join("assets.pack");
     noxide_host::assets::AssetBundle::from_pack(
         &manifest.assets,
@@ -62,10 +61,16 @@ pub async fn prepare(project: &Path, development: bool, approval: Option<&str>) 
     let mut configuration = if existing {
         serde_json::from_slice::<serde_json::Value>(&super::read(&path, 16384)?)?
     } else {
-        serde_json::json!({"database":{"sqlite":"application.db"},"keys":"host-keys.json",
+        serde_json::json!({"database":{"sqlite":"application.db"},"keys":"host-keys.json", "approved_contract":"",
             "origin":"http://localhost:8080", "listen":{"tcp":"127.0.0.1:8080"},
             "registration":if development {"open"} else {"closed"}})
     };
+    configuration["component"] = serde_json::to_value(component)?;
+    configuration["manifest"] = serde_json::to_value(manifest_path)?;
+    configuration["assets"] = serde_json::to_value(asset_path)?;
+    let parsed: super::Config = serde_json::from_value(configuration.clone())?;
+    let approval_policy = parsed.approval(&manifest)?;
+    let digest = URL_SAFE_NO_PAD.encode(approval_policy.digest);
     if configuration
         .get("approved_contract")
         .and_then(|v| v.as_str())
@@ -102,6 +107,16 @@ pub async fn prepare(project: &Path, development: bool, approval: Option<&str>) 
             );
         }
         println!("Contract: {digest}");
+        if let Some(effective) = &approval_policy.effective {
+            println!(
+                "Effective blob policy:\n{}",
+                serde_json::to_string_pretty(effective)?
+            );
+            println!(
+                "Manifest: {}",
+                URL_SAFE_NO_PAD.encode(approval_policy.manifest_digest)
+            );
+        }
         if development {
             println!(
                 "Development binds loopback and allows account registration. Approval applies only to this development deployment."
@@ -149,10 +164,6 @@ pub async fn prepare(project: &Path, development: bool, approval: Option<&str>) 
             "approval digest does not match the selected bundle"
         );
     }
-    configuration["component"] = serde_json::to_value(component)?;
-    configuration["manifest"] = serde_json::to_value(manifest_path)?;
-    configuration["assets"] = serde_json::to_value(asset_path)?;
-    let parsed: super::Config = serde_json::from_value(configuration.clone())?;
     let keys = state.join(&parsed.keys);
     if !keys.try_exists()? {
         ensure!(

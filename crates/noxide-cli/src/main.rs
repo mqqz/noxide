@@ -27,6 +27,8 @@ struct Config {
     manifest: PathBuf,
     #[serde(default)]
     assets: Option<PathBuf>,
+    #[serde(default)]
+    blobs: Option<noxide_host::BlobDeployment>,
     approved_contract: String,
     origin: String,
     listen: ListenConfig,
@@ -39,6 +41,17 @@ struct Config {
     registration: noxide_host::Registration,
     #[serde(default)]
     presentation: noxide_host::Presentation,
+}
+impl Config {
+    fn approval(
+        &self,
+        manifest: &noxide::__private::Manifest,
+    ) -> Result<noxide_host::blob_deployment::DeploymentApproval> {
+        noxide_host::blob_deployment::approval(
+            manifest,
+            self.blobs.as_ref().map(|blobs| &blobs.ceilings),
+        )
+    }
 }
 fn default_signed_in_reserve() -> u8 {
     25
@@ -168,7 +181,7 @@ async fn main() -> Result<()> {
         }
         "help" | "--help" | "-h" => {
             println!(
-                "Noxide {}\n\nCommands:\n  new NEW_DIRECTORY\n  setup [--kernel FILE] [--toolchain DIRECTORY]\n  dev [BUILD_OPTIONS]\n  approve [--dev] CONTRACT_DIGEST\n  check|test|build [--app APP] [--name CRATE] [--output NEW_DIR] [--isolated --kernel KERNEL --toolchain TOOLCHAIN] [--framework CHECKOUT]\n  deps check [--app APP] [BUILD_ENVIRONMENT_OPTIONS]\n  deps resolve [--app APP] --output NEW_DIRECTORY [BUILD_ENVIRONMENT_OPTIONS]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  schema indexes CONFIG\n  init CONFIG.json\n  account CONFIG.json LOGIN PASSWORD_FILE [TENANT]\n  account-lookup CONFIG.json LOGIN\n  account-disable|account-enable|account-delete CONFIG.json ACCOUNT_ID\n  role grant|revoke CONFIG.json USER ROLE (--global | --tenant TENANT)\n  role list CONFIG.json USER\n  contract-hash MANIFEST.json\n  component CORE.wasm COMPONENT.wasm\n  serve [CONFIG.json]\n  maintain CONFIG.json\n  recover-clock CONFIG.json (stop serving first; configure a fresh host key)\n  keygen NEW_KEYS.json\n  edit-key-rotate KEYS.json\n  invite CONFIG.json [--expires-days N]\n\nBUILD_ENVIRONMENT_OPTIONS: --framework CHECKOUT, --cargo-home DIRECTORY, --toolchain DIRECTORY, --seconds N, --isolated [--kernel FILE]. Dependency commands resolve offline without compiling or approving; resolve emits a candidate lock for review.\n\nApplication builds run locally with host access. Use --isolated for untrusted apps or dependencies. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
+                "Noxide {}\n\nCommands:\n  new NEW_DIRECTORY\n  setup [--kernel FILE] [--toolchain DIRECTORY]\n  dev [BUILD_OPTIONS]\n  approve [--dev] CONTRACT_DIGEST\n  check|test|build [--app APP] [--name CRATE] [--output NEW_DIR] [--isolated --kernel KERNEL --toolchain TOOLCHAIN] [--framework CHECKOUT]\n  deps check [--app APP] [BUILD_ENVIRONMENT_OPTIONS]\n  deps resolve [--app APP] --output NEW_DIRECTORY [BUILD_ENVIRONMENT_OPTIONS]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  schema indexes CONFIG\n  init CONFIG.json\n  account CONFIG.json LOGIN PASSWORD_FILE [TENANT]\n  account-lookup CONFIG.json LOGIN\n  account-disable|account-enable|account-delete CONFIG.json ACCOUNT_ID\n  role grant|revoke CONFIG.json USER ROLE (--global | --tenant TENANT)\n  role list CONFIG.json USER\n  contract-hash MANIFEST.json\n  deployment-hash CONFIG.json\n  component CORE.wasm COMPONENT.wasm\n  serve [CONFIG.json]\n  maintain CONFIG.json\n  recover-clock CONFIG.json (stop serving first; configure a fresh host key)\n  keygen NEW_KEYS.json\n  edit-key-rotate KEYS.json\n  invite CONFIG.json [--expires-days N]\n\nBUILD_ENVIRONMENT_OPTIONS: --framework CHECKOUT, --cargo-home DIRECTORY, --toolchain DIRECTORY, --seconds N, --isolated [--kernel FILE]. Dependency commands resolve offline without compiling or approving; resolve emits a candidate lock for review.\n\nApplication builds run locally with host access. Use --isolated for untrusted apps or dependencies. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
                 env!("CARGO_PKG_VERSION")
             );
         }
@@ -178,6 +191,22 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 URL_SAFE_NO_PAD.encode(noxide_host::manifest::digest(&manifest)?)
+            );
+        }
+        "deployment-hash" => {
+            ensure!(args.len() == 2, "usage: noxide deployment-hash CONFIG.json");
+            let (config, base) = config(Path::new(&args[1]))?;
+            let manifest =
+                noxide_host::manifest::parse(&read(&base.join(&config.manifest), 32_768)?)?;
+            let approval = config.approval(&manifest)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "manifest_digest": URL_SAFE_NO_PAD.encode(approval.manifest_digest),
+                    "requested_blobs": manifest.blobs,
+                    "effective_blobs": approval.effective,
+                    "deployment_digest": URL_SAFE_NO_PAD.encode(approval.digest),
+                }))?
             );
         }
         "keygen" => {
@@ -329,6 +358,10 @@ async fn main() -> Result<()> {
                 .map_err(|_| anyhow::anyhow!("invalid approved contract digest"))?;
             let declarations = read(&base.join(&config.manifest), 32_768)?;
             let manifest = noxide_host::manifest::parse(&declarations)?;
+            ensure!(
+                config.approval(&manifest)?.digest == approved,
+                "deployment did not approve this contract and effective policy"
+            );
             let assets = match &config.assets {
                 Some(path) => noxide_host::assets::AssetBundle::from_pack(
                     &manifest.assets,

@@ -54,7 +54,7 @@ pub async fn run(args: &[OsString]) -> Result<()> {
     if command == "grant" {
         let contract = manifest::parse(&super::read(&base.join(&config.manifest), 32_768)?)?;
         ensure!(
-            URL_SAFE_NO_PAD.encode(manifest::digest(&contract)?) == config.approved_contract,
+            URL_SAFE_NO_PAD.encode(config.approval(&contract)?.digest) == config.approved_contract,
             "configured manifest is not approved"
         );
         let tenant_scoped = matches!(scope, RoleScope::Tenant(_));
