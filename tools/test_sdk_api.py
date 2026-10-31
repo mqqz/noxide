@@ -283,7 +283,9 @@ def convenience_fixtures():
         ("repeated-owner-moderator-field", repeated.rsplit("\n}", 1)[0] + '\n fn forbidden(f: FormFields<r#EditReply>) { let _ = f.published; }\n}\n', "no field"),
         ("repeated-capability-moderator-field", repeated.rsplit("\n}", 1)[0] + '\n fn forbidden(f: FormFields<EditSecret>) { let _ = f.published; }\n}\n', "no field"),
     ]
-    query_example = (ROOT / "examples/public-articles/src/lib.rs").read_text()
+    # Query fixtures deliberately exclude the live example's packaged assets;
+    # the actual asset example has its own registration and browser checks.
+    query_example = (ROOT / "tools/fixtures/queries/public-articles.rs").read_text()
     passing.append(("public-query-features", query_example))
     failures += [
         ("public-param-disclosure", query_example.replace("disclose(category),", ""), "disclose must name"),

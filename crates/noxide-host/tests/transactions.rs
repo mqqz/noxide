@@ -9,6 +9,7 @@ use std::{sync::Arc, time::Duration};
 fn declarations() -> Manifest {
     let mut m: Manifest = serde_json::from_value(serde_json::json!({
         "version": VERSION,
+        "assets": [],
         "resources": [
             {"id":1,"name":"products","fields":[{"kind":{"integer":{"min":0,"max":10}},"optional":false,"initial":null,"name":"stock","label":"Stock","max_bytes":20},{"kind":"boolean","optional":false,"initial":null,"name":"open","label":"Open","max_bytes":5},{"kind":{"integer":{"min":i64::MIN,"max":i64::MAX}},"optional":false,"initial":null,"name":"counter","label":"Counter","max_bytes":20}]},
             {"id":2,"name":"orders","fields":[{"kind":{"integer":{"min":1,"max":10}},"optional":false,"initial":null,"name":"quantity","label":"Quantity","max_bytes":20},{"kind":{"reference":{"resource":"products"}},"optional":false,"initial":null,"name":"product","label":"Product","max_bytes":19}],"gate":{"field":"product","visible":{"field":"open","equals":"true"},"create_when":{"field":"open","equals":"true"}}},

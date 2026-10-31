@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     board = (ROOT / "tools/fixtures/sdk/task-board-advanced.rs").read_text()
     inbox = (ROOT / "tools/fixtures/queries/private-inbox.rs").read_text()
-    public = (ROOT / "examples/public-articles/src/lib.rs").read_text()
+    public = (ROOT / "tools/fixtures/queries/public-articles.rs").read_text()
     anchor = "list(Task), allow = owner"
     cases = [
         ("boolean", board.replace(anchor, anchor + ", filter(completed = false)"), True),
@@ -32,6 +32,8 @@ def main():
             (work / "src/lib.rs").write_text(source)
             result = subprocess.run(["cargo", "check", "--offline", "--quiet", "--manifest-path", str(work / "Cargo.toml")], env=env, capture_output=True, text=True)
             assert (result.returncode == 0) == valid, f"{name}: {result.stderr}"
+            if name == "disclosure":
+                assert "disclose must name" in result.stderr, result.stderr
     print(f"{len(cases)} SDK filter cases passed")
 
 
