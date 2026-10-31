@@ -126,7 +126,7 @@ pub mod reservations {
     )]
     struct Cancel;
 
-    #[page("/")]
+    #[page(path = "/")]
     fn index(mut products: Query<Products>, create: Form<CreateProduct>) -> Page {
         let products = products.fetch();
         Page::new(
@@ -138,7 +138,7 @@ pub mod reservations {
             }},
         )
     }
-    #[page("/products/{product}")]
+    #[page(path = "/products/{product}")]
     fn product(
         product: Id<Product>,
         mut read: Query<ReadProduct>,
@@ -158,7 +158,7 @@ pub mod reservations {
             }},
         ))
     }
-    #[page("/orders/{order}")]
+    #[page(path = "/orders/{order}")]
     fn order(order: Id<Order>, mut read: Query<OwnOrder>, cancel: Form<Cancel>) -> PageResult {
         let order = read.get(order).ok_or(NotFound)?;
         Ok(Page::new(

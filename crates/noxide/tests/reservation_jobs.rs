@@ -1,5 +1,7 @@
 //! The proof application uses only public SDK registration and job declarations.
 //! Runtime/clock/worker/provider acceptance belongs to the host integration lane.
+// Guest pages and handlers are reachable only through the wasm export.
+#[allow(dead_code, unused_imports)]
 #[path = "../../../examples/reservations/src/lib.rs"]
 mod proof;
 
