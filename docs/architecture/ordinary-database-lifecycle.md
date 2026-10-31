@@ -48,6 +48,14 @@ An unacknowledged sent COMMIT remains Unknown even if later cleanup succeeds.
 Non-action mutation wrappers retain the same distinction. Capacity uncertainty
 is separate from semantic commit uncertainty.
 
+Receipt replay carries evidence of the original validated commitment outside its
+cancellable delivery future. A failed fresh read or its aborted COMMIT cannot undo
+that earlier fact. The fallback contains no edit secret; fresh credential and
+navigation checks continue to govern handover and read access. Changed canonical
+input cannot acquire original receipt authority. Its existing already-used form
+response remains non-secret. Rotation replay likewise preserves known commitment
+while refusing to expose credentials when current target checks fail.
+
 If stop or close cannot be acknowledged by the original phase deadline, the slot
 is permanently quarantined in that Application instance. Its request/database
 permits cannot admit replacement work. Service drain reports uncertainty and still

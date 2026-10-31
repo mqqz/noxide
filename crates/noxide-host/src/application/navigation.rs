@@ -26,6 +26,11 @@ pub(super) struct ReferenceDestination {
     id: u64,
     incarnation: String,
 }
+/// Pure receipt contract evidence. Current read and credential authority is
+/// deliberately absent and must be checked during delivery.
+pub(super) struct ValidatedReceipt {
+    receipt: SemanticReceipt,
+}
 pub(super) struct Prepared {
     pub fallback: Rendered,
     navigation: Option<(ReferenceDestination, auth::Principal, bool)>,
@@ -129,14 +134,12 @@ impl Application {
         }))
     }
 
-    pub(super) async fn prepare_response(
+    pub(super) fn validate_receipt(
         &self,
-        tx: &mut Transaction,
         action: &manifest::WebAction<'_>,
         targets: &BTreeMap<String, RecordTarget>,
         payload: &str,
-        principal: &auth::Principal,
-    ) -> Result<Prepared> {
+    ) -> Result<ValidatedReceipt> {
         let receipt: SemanticReceipt = serde_json::from_str(payload)?;
         ensure!(
             receipt.version == 3
@@ -173,7 +176,7 @@ impl Application {
                 );
             }
         }
-        let public_create = action.steps.iter().enumerate().find(|(_, step)| {
+        let public_create = action.steps.iter().position(|step| {
             manifest::operation(&self.manifest, step.operation)
                 .is_ok_and(|op| op.kind == OperationKind::Create && manifest::is_public(op))
         });
@@ -181,31 +184,62 @@ impl Application {
             public_create.is_some() == receipt.handover.is_some(),
             "receipt handover differs"
         );
-        let handover = receipt.handover.is_some();
-        let fallback = if let Some(edit) = &receipt.handover {
-            let outcome = &receipt.outcomes[public_create.expect("handover operation").0];
+        if let Some(edit) = &receipt.handover {
+            let outcome = &receipt.outcomes[public_create.expect("handover operation")];
             ensure!(
                 edit.resource == outcome.resource
                     && edit.id == outcome.id
                     && edit.incarnation == outcome.incarnation,
                 "handover identity differs"
             );
+        }
+        let route = manifest::route(&self.manifest, action.redirect.route())?;
+        if let Some(destination) = &receipt.destination {
+            ensure!(
+                route.resource == Some(destination.resource) && destination.route == route.id,
+                "receipt destination differs"
+            );
+        } else {
+            ensure!(route.resource.is_none(), "receipt destination missing");
+        }
+        Ok(ValidatedReceipt { receipt })
+    }
+
+    #[cfg(test)]
+    pub(super) async fn prepare_response(
+        &self,
+        tx: &mut Transaction,
+        action: &manifest::WebAction<'_>,
+        targets: &BTreeMap<String, RecordTarget>,
+        payload: &str,
+        principal: &auth::Principal,
+    ) -> Result<Prepared> {
+        let validated = self.validate_receipt(action, targets, payload)?;
+        self.prepare_validated_response(tx, action, validated, principal)
+            .await
+    }
+
+    pub(super) async fn prepare_validated_response(
+        &self,
+        tx: &mut Transaction,
+        action: &manifest::WebAction<'_>,
+        validated: ValidatedReceipt,
+        principal: &auth::Principal,
+    ) -> Result<Prepared> {
+        let ValidatedReceipt { receipt } = validated;
+        let handover = receipt.handover.is_some();
+        let fallback = if let Some(edit) = &receipt.handover {
             self.edit_handover(tx, edit, None).await?
         } else {
             success()
         };
         let route = manifest::route(&self.manifest, action.redirect.route())?;
         if let Some(destination) = receipt.destination {
-            ensure!(
-                route.resource == Some(destination.resource) && destination.route == route.id,
-                "receipt destination differs"
-            );
             Ok(Prepared {
                 fallback,
                 navigation: Some((destination, principal.clone(), handover)),
             })
         } else {
-            ensure!(route.resource.is_none(), "receipt destination missing");
             if handover
                 || route.access == Access::Authenticated
                     && matches!(principal, auth::Principal::Anonymous)

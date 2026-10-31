@@ -8,6 +8,8 @@ mod auth_tests;
 mod connect;
 mod provider;
 #[cfg(test)]
+mod receipt_tests;
+#[cfg(test)]
 mod tests;
 
 const CLEANUP_RESERVE: Duration = maintenance::CLEANUP_RESERVE;

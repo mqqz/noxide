@@ -181,6 +181,7 @@ impl Application {
                 owner
                     .run(async {
                         let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
+                        let mut receipt_commit = false;
                         for _ in 0..3 {
                             let prepared = timeout_at(
                                 deadline,
@@ -193,10 +194,14 @@ impl Application {
                                     secret,
                                     deadline,
                                     &mut budget,
+                                    &mut receipt_commit,
                                 ),
                             )
                             .await;
                             let (mut tx, page) = match prepared {
+                                Err(_) | Ok(Err(_)) if receipt_commit => {
+                                    return Ok(navigation::success());
+                                }
                                 Err(_) => return Err(RequestError::Busy),
                                 Ok(Err(error))
                                     if retryable(&error) && Instant::now() < deadline =>
@@ -212,7 +217,7 @@ impl Application {
                             };
                             match timeout_at(deadline, tx.commit()).await {
                                 Ok(Ok(())) => return Ok(page),
-                                _ if tx.commit_acknowledged() => return Ok(page),
+                                _ if tx.commit_acknowledged() || receipt_commit => return Ok(page),
                                 Ok(Err(error))
                                     if !tx.commit_may_have_succeeded() && retryable(&error) =>
                                 {
@@ -241,6 +246,7 @@ impl Application {
         secret: &str,
         deadline: Instant,
         budget: &mut ExecutionBudget,
+        receipt_commit: &mut bool,
     ) -> Result<(Transaction, Rendered)> {
         let mut tx = self.database.begin(deadline.into_std()).await?;
         self.admission(&mut tx, false).await?;
@@ -294,9 +300,14 @@ impl Application {
             );
             let receipt: EditReceipt = serde_json::from_str(outcome)?;
             ensure!(
-                receipt.resource == resource && receipt.id == id,
+                receipt.resource == resource
+                    && receipt.id == id
+                    && receipt.incarnation == target.incarnation,
                 RequestError::InvalidRequest
             );
+            // Verified original receipt proves commitment; current target checks
+            // still exclusively govern whether a secret handover can be emitted.
+            *receipt_commit = true;
             let page = self.edit_handover(&mut tx, &receipt, target.route).await?;
             return Ok((tx, page));
         }
