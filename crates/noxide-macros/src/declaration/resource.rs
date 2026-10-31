@@ -90,6 +90,13 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
                 ));
             }
         }
+        let scalar_ty = generic_argument(ty)
+            .ok()
+            .filter(|(kind, _)| *kind == "Option")
+            .map(|(_, inner)| inner)
+            .unwrap_or(ty);
+        let duration = matches!(scalar_ty,syn::Type::Path(path) if path.path.segments.last().is_some_and(|segment|segment.ident=="Duration"));
+        let mut max_duration_seconds = None;
         let mut scope = false;
         let mut initial = None;
         let mut visible = None;
@@ -112,6 +119,18 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
         }
         if let Some(attr) = attrs.first() {
             attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("max_duration_seconds") {
+                    if !duration || max_duration_seconds.is_some() {
+                        return Err(meta.error("max_duration_seconds requires a Duration field"));
+                    }
+                    let seconds = meta.value()?.parse::<LitInt>()?.base10_parse::<i64>()?;
+                    max_duration_seconds = Some(
+                        seconds
+                            .checked_mul(1000)
+                            .ok_or_else(|| meta.error("duration bound overflow"))?,
+                    );
+                    return Ok(());
+                }
                 if meta.path.is_ident("scope") {
                     let value: Ident = meta.value()?.parse()?;
                     if scope || !account || value != "same_tenant" {
@@ -209,7 +228,23 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
                 "labels must contain 1 to 128 bytes without control characters",
             ));
         }
-        let bounds = if account {
+        let bounds = if duration {
+            let millis = max_duration_seconds.ok_or_else(|| {
+                syn::Error::new(ty.span(), "Duration fields require max_duration_seconds")
+            })?;
+            if min.is_some()
+                || max.is_some()
+                || initial.is_some()
+                || visible.is_some()
+                || create_when.is_some()
+            {
+                return Err(syn::Error::new(
+                    ty.span(),
+                    "duration requires only its explicit maximum and presentation options",
+                ));
+            }
+            quote!(::noxide::FieldKind::Duration { max_millis: #millis })
+        } else if account {
             if min.is_some() || max.is_some() || visible.is_some() || create_when.is_some() {
                 return Err(syn::Error::new(
                     ty.span(),

@@ -331,10 +331,17 @@ impl Application {
                 field_errors,
                 message,
             } => (field_errors, message),
-            Settled::GuardRejected { input, message } => (
+            Settled::GuardRejected {
+                input: Some(input),
+                message,
+            } => (
                 Fields::from([(input, message)]),
                 "Review the highlighted fields.".into(),
             ),
+            Settled::GuardRejected {
+                input: None,
+                message,
+            } => (Fields::new(), message),
         };
         render::recovery(
             &self.presentation,

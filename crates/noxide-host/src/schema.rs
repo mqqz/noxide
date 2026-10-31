@@ -340,6 +340,8 @@ fn same_kind(a: &FieldKind, b: &FieldKind) -> bool {
         (a, b),
         (FieldKind::Text, FieldKind::Text)
             | (FieldKind::Boolean, FieldKind::Boolean)
+            | (FieldKind::Timestamp, FieldKind::Timestamp)
+            | (FieldKind::Duration { .. }, FieldKind::Duration { .. })
             | (FieldKind::Integer { .. }, FieldKind::Integer { .. })
             | (FieldKind::Choice { .. }, FieldKind::Choice { .. })
     )

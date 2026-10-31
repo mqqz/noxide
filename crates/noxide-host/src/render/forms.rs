@@ -156,7 +156,9 @@ fn render_field(
             FieldKind::Account { .. } => Control::TextInput,
             FieldKind::Boolean if !field.optional => Control::Checkbox,
             FieldKind::Boolean | FieldKind::Choice { .. } => Control::Select,
-            FieldKind::Integer { .. } => Control::TextInput,
+            FieldKind::Integer { .. } | FieldKind::Timestamp | FieldKind::Duration { .. } => {
+                Control::TextInput
+            }
             FieldKind::Reference { .. } => anyhow::bail!("parent fields cannot be form controls"),
         },
         control => control.clone(),
@@ -170,7 +172,10 @@ fn render_field(
                 _
             ) | (
                 Control::TextInput,
-                FieldKind::Integer { .. } | FieldKind::Account { .. },
+                FieldKind::Integer { .. }
+                    | FieldKind::Account { .. }
+                    | FieldKind::Timestamp
+                    | FieldKind::Duration { .. },
                 _
             ) | (Control::Checkbox, FieldKind::Boolean, false)
                 | (Control::Select, FieldKind::Choice { .. }, _)
@@ -210,7 +215,10 @@ fn render_field(
         }
         Control::TextInput => {
             out.push("<input type=\"text\"")?;
-            if matches!(field.kind, FieldKind::Integer { .. }) {
+            if matches!(
+                field.kind,
+                FieldKind::Integer { .. } | FieldKind::Timestamp | FieldKind::Duration { .. }
+            ) {
                 out.push(" inputmode=\"numeric\"")?;
             }
             out.push(&format!(" maxlength=\"{}\" value=\"", field.max_bytes))?;
@@ -316,6 +324,10 @@ fn render_field(
                 ),
                 FieldKind::Boolean => "Choose a boolean value.".into(),
                 FieldKind::Integer { .. } => "Enter an integer within the declared bounds.".into(),
+                FieldKind::Timestamp => "Enter UTC milliseconds since the Unix epoch.".into(),
+                FieldKind::Duration { .. } => {
+                    "Enter duration milliseconds within the declared bound.".into()
+                }
                 FieldKind::Choice { .. } => "Choose a declared option.".into(),
                 FieldKind::Reference { .. } => {
                     anyhow::bail!("parent fields cannot be form controls")

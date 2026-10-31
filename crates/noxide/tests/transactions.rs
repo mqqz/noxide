@@ -70,7 +70,7 @@ fn transaction_lowering_keeps_shared_input_and_created_step_identity() {
     assert_eq!(action.steps[0].target, Target::Named("target".into()));
     assert_eq!(action.steps[1].target, Target::None);
     assert!(
-        matches!(&action.steps[0].assign[0].change, Change::Decrease { by, rejection } if by == "quantity" && rejection.input == "quantity" && rejection.message == "Not enough stock")
+        matches!(&action.steps[0].assign[0].change, Change::Decrease { by, rejection } if by == &Value::Input("quantity".into()) && rejection.input.as_deref() == Some("quantity") && rejection.message == "Not enough stock")
     );
     assert_eq!(
         action.steps[1].assign[1].change,
@@ -144,11 +144,12 @@ impl ActionType for Headless {
             targets: vec![],
             inputs: vec![],
             steps: vec![Step {
+                guards: vec![],
                 operation: 8,
                 target: Target::None,
                 assign: vec![Assignment {
                     field: "stock".into(),
-                    change: Change::Set(Value::Constant("1".into())),
+                    change: Change::Set(Value::Literal(noxide_protocol::Literal::Integer(1))),
                 }],
             }],
         }
@@ -316,5 +317,163 @@ fn named_target_helpers_lower_to_explicit_field_keyed_contract() {
     assert_eq!(
         action.steps[0].assign[1].change,
         Change::Set(Value::Target("right".into()))
+    );
+}
+
+#[derive(Resource)]
+#[resource(key = "timed_values")]
+struct TimedValue {
+    #[id]
+    id: Id<Self>,
+    #[field()]
+    at: noxide::Timestamp,
+    #[field(max_duration_seconds = 3600)]
+    duration: noxide::Duration,
+}
+#[test]
+fn typed_time_fields_keep_timestamp_and_duration_distinct() {
+    let schema = TimedValue::definition();
+    assert_eq!(schema.fields[0].kind, noxide::FieldKind::Timestamp);
+    assert_eq!(
+        schema.fields[1].kind,
+        noxide::FieldKind::Duration {
+            max_millis: 3_600_000
+        }
+    );
+    let row = TimedValue::from_record(noxide::Record {
+        resource: schema.id,
+        id: 1,
+        fields: noxide::Fields::from([
+            ("at".into(), "1".into()),
+            ("duration".into(), "1000".into()),
+        ]),
+    });
+    assert_eq!(row.at.unix_millis(), 1);
+    assert_eq!(row.duration.as_millis(), 1000);
+    assert_eq!(schema.fields[0].canonical("+001").unwrap(), "1");
+    assert!(schema.fields[0].canonical("-1").is_err());
+    assert!(schema.fields[1].canonical("3600001").is_err());
+}
+#[test]
+fn calculated_and_transition_helpers_equal_the_explicit_step() {
+    use noxide::__private::{
+        Assignment, Comparison, Guard, GuardCondition, GuardRejection, Literal, Step,
+    };
+    use noxide::{guards, values};
+    let rejection = GuardRejection {
+        input: None,
+        message: "Already cancelled".into(),
+    };
+    let expected = Step {
+        operation: 7,
+        target: Target::Named("order".into()),
+        guards: vec![Guard {
+            condition: GuardCondition::Compare {
+                left: Value::CurrentField {
+                    target: "order".into(),
+                    field: "status".into(),
+                },
+                comparison: Comparison::Equal,
+                right: Value::Literal(Literal::Choice("pending".into())),
+            },
+            rejection: rejection.clone(),
+        }],
+        assign: vec![Assignment {
+            field: "status".into(),
+            change: Change::Set(Value::Literal(Literal::Choice("cancelled".into()))),
+        }],
+    };
+    assert_eq!(
+        noxide::transition(
+            7,
+            "order",
+            "status",
+            Literal::Choice("pending".into()),
+            Literal::Choice("cancelled".into()),
+            rejection.clone()
+        ),
+        expected
+    );
+    assert_eq!(
+        noxide::CalculatedStep::new(7, Target::Named("order".into()))
+            .guard(guards::require(
+                guards::equal(
+                    values::current("order", "status"),
+                    values::choice("pending")
+                ),
+                None,
+                "Already cancelled"
+            ))
+            .set("status", values::choice("cancelled"))
+            .finish(),
+        expected
+    );
+    assert_eq!(
+        values::reviewed("product", "price"),
+        Value::SnapshotField {
+            target: "product".into(),
+            field: "price".into(),
+            reviewed: true
+        }
+    );
+}
+fn quantity_guard() -> noxide::__private::Guard {
+    noxide::guards::require(
+        noxide::guards::greater(
+            noxide::values::input("quantity"),
+            noxide::values::integer(0),
+        ),
+        Some("quantity"),
+        "Choose a positive quantity",
+    )
+}
+fn calculated_targets() -> noxide::TargetDeclarations {
+    noxide::TargetDeclarations::new().page::<ReadProduct>("product", Revision::Identity, &["stock"])
+}
+#[action(inputs(quantity:i64=1..=10),targets=calculated_targets,transaction(update(Product,product,guards(quantity_guard()),decrease(stock,by=quantity*2,reject("Stock unavailable")))),allow=owner,redirect=show_order(product))]
+struct CalculatedAdjustment;
+#[test]
+fn calculation_macro_uses_the_same_bounded_values_and_action_rejection() {
+    let definition = CalculatedAdjustment::definition();
+    assert_eq!(definition.steps[0].guards, vec![quantity_guard()]);
+    assert!(
+        matches!(&definition.steps[0].assign[0].change,Change::Decrease{by:Value::Multiply{left,right},rejection}if **left==Value::Input("quantity".into())&&**right==Value::Literal(noxide::__private::Literal::Integer(2))&&rejection.input.is_none())
+    );
+}
+
+#[action(inputs(quantity:i64=1..=10),targets=calculated_targets,transaction(
+    update(Product,product,allow=owner,decrease(stock,by=quantity,reject(quantity,"Stock unavailable"))),
+    update(Product,product,allow=same_tenant,increase(stock,by=quantity,reject("Stock limit"))),
+),allow=all(owner,same_tenant),redirect=show_order(product))]
+struct IndividuallyAuthorized;
+#[test]
+fn per_step_policies_equal_explicit_ordinary_operations() {
+    use noxide::__private::{Policy, Predicate};
+    let operations = IndividuallyAuthorized::operations();
+    assert_eq!(
+        operations[0].policy,
+        Policy {
+            any: vec![vec![Predicate::Owner]]
+        }
+    );
+    assert_eq!(
+        operations[1].policy,
+        Policy {
+            any: vec![vec![Predicate::SameTenant]]
+        }
+    );
+    let action = IndividuallyAuthorized::definition();
+    assert_eq!(
+        action.steps[0],
+        noxide::CalculatedStep::new(operations[0].id, Target::Named("product".into()))
+            .decrease(
+                "stock",
+                noxide::values::input("quantity"),
+                noxide::__private::GuardRejection {
+                    input: Some("quantity".into()),
+                    message: "Stock unavailable".into()
+                }
+            )
+            .finish()
     );
 }

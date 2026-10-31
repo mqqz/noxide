@@ -274,10 +274,6 @@ fn validate_progress(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AttemptTime(Timestamp);
 impl AttemptTime {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "P07 temporal consumers are not enabled yet")
-    )]
     pub(crate) const fn timestamp(self) -> Timestamp {
         self.0
     }

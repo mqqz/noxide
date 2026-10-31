@@ -1,13 +1,15 @@
 //! Versioned semantic protocol shared by the guest SDK and trusted host.
 
 pub mod assets;
+pub mod computation;
 pub mod document;
 pub mod time;
+pub use computation::{Comparison, Guard, GuardCondition, GuardRejection, Literal, Value};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 pub const MAX_IR_BYTES: usize = 65_536;
 pub const MAX_NODES: usize = 1_024;
 pub const MAX_DEPTH: usize = 32;
@@ -186,6 +188,10 @@ pub enum FieldKind {
         scope: AccountScope,
     },
     Boolean,
+    Timestamp,
+    Duration {
+        max_millis: i64,
+    },
     Reference {
         resource: String,
     },
@@ -474,6 +480,7 @@ pub struct Input {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Step {
+    pub guards: Vec<Guard>,
     pub operation: u32,
     pub target: Target,
     pub assign: Vec<Assignment>,
@@ -498,29 +505,13 @@ pub struct Assignment {
 pub enum Change {
     Set(Value),
     Decrease {
-        by: String,
+        by: Value,
         rejection: GuardRejection,
     },
     Increase {
-        by: String,
+        by: Value,
         rejection: GuardRejection,
     },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum Value {
-    Input(String),
-    Constant(String),
-    Target(String),
-    Created(u8),
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GuardRejection {
-    pub input: String,
-    pub message: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -635,6 +626,23 @@ fn canonical_scalar(
             }
             id.to_string()
         }
+        FieldKind::Timestamp => {
+            let value = input
+                .parse::<i64>()
+                .map_err(|_| "Enter UTC milliseconds.")?;
+            time::Timestamp::from_unix_millis(value)
+                .map_err(|_| "Timestamp is outside its permitted range.")?;
+            value.to_string()
+        }
+        FieldKind::Duration { max_millis } => {
+            let value = input
+                .parse::<i64>()
+                .map_err(|_| "Enter whole duration milliseconds.")?;
+            if value < 0 || value > *max_millis {
+                return Err("Duration is outside its permitted range.".into());
+            }
+            value.to_string()
+        }
         FieldKind::Integer { min, max } => {
             let value: i64 = input.parse().map_err(|_| "Enter a whole number.")?;
             if min.is_some_and(|min| value < min) || max.is_some_and(|max| value > max) {
@@ -735,7 +743,7 @@ mod tests {
         required::<Action>(
             serde_json::json!({
                 "targets": [], "id": 1, "version": 1, "name": "Create", "inputs": [],
-                "steps": [{"operation": 1, "target": "none", "assign": []}]
+                "steps": [{"guards": [], "operation": 1, "target": "none", "assign": []}]
             }),
             &["targets", "inputs", "steps"],
         );
@@ -771,6 +779,43 @@ pub struct Via {
 #[cfg(test)]
 mod reference_binding_tests {
     use super::*;
+    #[test]
+    fn time_scalars_are_distinct_bounded_canonical_milliseconds() {
+        let timestamp = Input {
+            name: "at".into(),
+            label: "At".into(),
+            kind: FieldKind::Timestamp,
+            optional: false,
+            max_bytes: 20,
+        };
+        assert_eq!(timestamp.canonical("+001").unwrap(), "1");
+        for invalid in ["-1", "9223372036854775808", "1.5", ""] {
+            assert!(timestamp.canonical(invalid).is_err());
+        }
+        let duration = Input {
+            kind: FieldKind::Duration {
+                max_millis: 900_000,
+            },
+            ..timestamp.clone()
+        };
+        assert_eq!(duration.canonical("900000").unwrap(), "900000");
+        assert_eq!(duration.canonical("0").unwrap(), "0");
+        for invalid in ["-1", "900001", "1.5", ""] {
+            assert!(duration.canonical(invalid).is_err());
+        }
+        assert_ne!(
+            serde_json::to_value(&timestamp.kind).unwrap(),
+            serde_json::to_value(&duration.kind).unwrap()
+        );
+        assert!(
+            serde_json::from_str::<Value>(
+                r#"{"snapshot_field":{"target":"product","field":"price"}}"#
+            )
+            .is_err()
+        );
+        assert!(serde_json::from_str::<Literal>(r#"{"timestamp":-1}"#).is_err());
+    }
+
     #[test]
     fn eligibility_fields_are_canonical_maps_and_duplicate_wire_keys_are_rejected() {
         let operation = r#"{"bind":{"right":2,"left":1},"scope":null,"via":null,"id":3,"resource":4,"kind":"create","policy":{"any":[["owner"]]}}"#;

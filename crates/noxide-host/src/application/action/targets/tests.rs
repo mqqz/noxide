@@ -70,6 +70,7 @@ fn declarations() -> Manifest {
         .map(|name| selected(name, Revision::Identity))
         .collect();
     m.actions[0].steps = vec![Step {
+        guards: vec![],
         operation: 4,
         target: Target::None,
         assign: names
@@ -91,6 +92,7 @@ fn declarations() -> Manifest {
         inputs: vec![],
         targets: vec![selected("a", Revision::Exact)],
         steps: vec![Step {
+            guards: vec![],
             operation: 6,
             target: Target::Named("a".into()),
             assign: vec![],
@@ -806,11 +808,14 @@ async fn created_contract(db: Option<Database>) {
     m.actions[0].steps.insert(
         0,
         Step {
+            guards: vec![],
             operation: 3,
             target: Target::None,
             assign: vec![Assignment {
                 field: "body".into(),
-                change: Change::Set(Value::Constant("created inside transaction".into())),
+                change: Change::Set(Value::Literal(noxide_protocol::Literal::Text(
+                    "created inside transaction".into(),
+                ))),
             }],
         },
     );
@@ -1021,11 +1026,12 @@ async fn sequential_alias_mutations_share_identity_without_self_conflicting() {
     m.actions[0].steps = [("a", "first"), ("b", "second")]
         .into_iter()
         .map(|(name, value)| Step {
+            guards: vec![],
             operation: 7,
             target: Target::Named(name.into()),
             assign: vec![Assignment {
                 field: "body".into(),
-                change: Change::Set(Value::Constant(value.into())),
+                change: Change::Set(Value::Literal(noxide_protocol::Literal::Text(value.into()))),
             }],
         })
         .collect();

@@ -1,3 +1,4 @@
+mod computation;
 use crate::{
     auth::Principal,
     database::{Param, Transaction},
@@ -5,6 +6,7 @@ use crate::{
     security::RecordTarget,
 };
 use anyhow::{Result, ensure};
+pub(crate) use computation::CalculationUnavailable;
 use noxide_protocol::*;
 use std::sync::Arc;
 
@@ -19,7 +21,7 @@ impl std::error::Error for ReferenceUnavailable {}
 
 #[derive(Debug)]
 pub(crate) struct GuardFailure {
-    pub input: String,
+    pub input: Option<String>,
     pub message: String,
 }
 impl std::fmt::Display for GuardFailure {
@@ -60,6 +62,38 @@ fn adjust(
             }
             .into()
         })
+}
+
+/// Candidate-dependent predicates are unknown until the proposed row resolves.
+/// Every other prerequisite remains checked before guest execution and guards.
+pub(crate) fn create_prerequisites(operation: &Operation, principal: &Principal) -> bool {
+    if manifest::is_public(operation) {
+        return true;
+    }
+    let Ok(user) = principal.user() else {
+        return false;
+    };
+    operation.policy.any.iter().any(|rule| {
+        !rule.is_empty()
+            && rule.iter().all(|predicate| match predicate {
+                Predicate::PrincipalIs { .. } => true,
+                Predicate::Public
+                | Predicate::Capability
+                | Predicate::Owner
+                | Predicate::SameTenant
+                | Predicate::Role { .. } => allowed(
+                    &Policy {
+                        any: vec![vec![predicate.clone()]],
+                    },
+                    principal,
+                    crate::policy::Row {
+                        owner: &user.id,
+                        tenant: &user.tenant,
+                        fields: &Fields::new(),
+                    },
+                ),
+            })
+    })
 }
 
 pub(crate) const MAX_LIST_DATABASE_CALLS: usize = 4096;
@@ -334,12 +368,17 @@ impl Effects {
     pub(crate) async fn execute_transaction(
         &mut self,
         action: crate::application::ActionCore<'_>,
+        time: Option<crate::lifecycle_clock::AttemptTime>,
     ) -> Result<Vec<MutationOutcome>> {
         ensure!(
             self.request.kind == RequestKind::Action(action.id),
             "transaction outside action"
         );
         manifest::validate_inputs(action.inputs, &self.request.input)?;
+        let context = computation::Context {
+            snapshots: self.target_rows.clone(),
+            time,
+        };
         let mut outcomes = Vec::with_capacity(action.steps.len());
         for step in action.steps {
             ensure!(self.calls > 0, "database call budget");
@@ -361,35 +400,21 @@ impl Effects {
                 }
             };
             self.authorize_step(&op, stored.as_ref())?;
+            if op.kind != OperationKind::Create {
+                self.current_guard_authority(action, step, stored.as_ref())
+                    .await?;
+                self.computation_values(&context, &outcomes, step, stored.as_ref())
+                    .guards(step, action)?;
+            }
             let mut values = Fields::new();
-            for assignment in &step.assign {
+            let mut assignments: Vec<_> = step.assign.iter().collect();
+            assignments.sort_by(|a, b| a.field.cmp(&b.field));
+            for assignment in assignments {
                 let value = match &assignment.change {
-                    Change::Set(value) => match value {
-                        Value::Input(name) => self
-                            .request
-                            .input
-                            .get(name)
-                            .ok_or_else(|| anyhow::anyhow!("missing transaction input"))?
-                            .clone(),
-                        Value::Constant(value) => value.clone(),
-                        Value::Target(name) => self
-                            .grants
-                            .get(name)
-                            .ok_or(ReferenceUnavailable)?
-                            .id
-                            .to_string(),
-                        Value::Created(index) => {
-                            let created = outcomes
-                                .get(usize::from(*index))
-                                .ok_or_else(|| anyhow::anyhow!("missing created result"))?;
-                            let created: &MutationOutcome = created;
-                            ensure!(
-                                created.kind == MutationKind::Created,
-                                "result is not a create"
-                            );
-                            created.id.to_string()
-                        }
-                    },
+                    Change::Set(value) => self
+                        .computation_values(&context, &outcomes, step, stored.as_ref())
+                        .value(value, action)?
+                        .encode(),
                     Change::Decrease { by, rejection } | Change::Increase { by, rejection } => {
                         let record = stored
                             .as_ref()
@@ -413,13 +438,13 @@ impl Effects {
                             .get(&assignment.field)
                             .ok_or_else(|| anyhow::anyhow!("missing adjustment field"))?
                             .parse()?;
-                        let amount: i64 = self
-                            .request
-                            .input
-                            .get(by)
-                            .ok_or_else(|| anyhow::anyhow!("missing adjustment amount"))?
-                            .parse()?;
-                        ensure!(amount > 0, "invalid adjustment amount");
+                        let computation::Scalar::Integer(amount) = self
+                            .computation_values(&context, &outcomes, step, Some(record))
+                            .value(by, action)?
+                        else {
+                            anyhow::bail!(CalculationUnavailable)
+                        };
+                        ensure!(amount > 0, CalculationUnavailable);
                         adjust(
                             current,
                             amount,
@@ -437,7 +462,10 @@ impl Effects {
                 );
             }
             let outcome = match op.kind {
-                OperationKind::Create => self.create_step(&op, step, values, &outcomes).await?,
+                OperationKind::Create => {
+                    self.create_step(&op, step, values, &outcomes, action, &context)
+                        .await?
+                }
                 OperationKind::Update => {
                     self.update_step(&op, stored.as_ref().ok_or(ReferenceUnavailable)?, values)
                         .await?
@@ -458,20 +486,8 @@ impl Effects {
 
     fn authorize_step(&self, op: &Operation, stored: Option<&StoredRecord>) -> Result<()> {
         if op.kind == OperationKind::Create {
-            if manifest::is_public(op) {
-                return Ok(());
-            }
-            let user = self.principal.user().map_err(|_| ReferenceUnavailable)?;
             ensure!(
-                allowed(
-                    &op.policy,
-                    &self.principal,
-                    crate::policy::Row {
-                        owner: &user.id,
-                        tenant: &user.tenant,
-                        fields: &Fields::new(),
-                    }
-                ),
+                create_prerequisites(op, &self.principal),
                 ReferenceUnavailable
             );
         } else {
@@ -510,6 +526,8 @@ impl Effects {
         step: &Step,
         mut fields: Fields,
         outcomes: &[MutationOutcome],
+        action: crate::application::ActionCore<'_>,
+        context: &computation::Context,
     ) -> Result<MutationOutcome> {
         let m = self.manifest.clone();
         let resource = manifest::resource(&m, op.resource)?;
@@ -592,14 +610,14 @@ impl Effects {
         let user = if public {
             None
         } else {
-            Some(self.principal.user()?)
+            Some(self.principal.user()?.clone())
         };
         if resource
             .fields
             .iter()
             .any(|f| matches!(f.kind, FieldKind::Account { .. }))
         {
-            let creator = self.principal.user()?;
+            let creator = self.principal.user().map_err(|_| ReferenceUnavailable)?;
             let rows = self
                 .tx
                 .fetch::<1>(
@@ -607,23 +625,22 @@ impl Effects {
                     &[creator.id.as_str().into()],
                 )
                 .await?;
-            let tenant = rows
-                .first()
-                .ok_or_else(|| anyhow::anyhow!("account binding unavailable"))?;
-            ensure!(tenant[0] == creator.tenant, "account binding unavailable");
+            let tenant = rows.first().ok_or(ReferenceUnavailable)?;
+            ensure!(tenant[0] == creator.tenant, ReferenceUnavailable);
             for field in resource
                 .fields
                 .iter()
                 .filter(|f| matches!(f.kind, FieldKind::Account { .. }))
             {
-                let id = fields
-                    .get(&field.name)
-                    .ok_or_else(|| anyhow::anyhow!("account binding unavailable"))?;
-                ensure!(!self.tx.fetch::<1>("SELECT id FROM nx_accounts WHERE id=$1 AND state='active' AND tenant=$2", &[id.as_str().into(), tenant[0].as_str().into()]).await?.is_empty(), "account binding unavailable");
+                let id = fields.get(&field.name).ok_or(ReferenceUnavailable)?;
+                ensure!(!self.tx.fetch::<1>("SELECT id FROM nx_accounts WHERE id=$1 AND state='active' AND tenant=$2", &[id.as_str().into(), tenant[0].as_str().into()]).await?.is_empty(), ReferenceUnavailable);
             }
         }
+        self.authorize_create_row(op, &fields).await?;
+        self.computation_values(context, outcomes, step, None)
+            .guards(step, action)?;
         let storage_resource = self.tx.storage_resource(&m, op.resource).await?;
-        if let Some(user) = user {
+        if let Some(user) = &user {
             let used = self.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM (SELECT id FROM nx_records WHERE resource=$1 AND owner=$2 LIMIT 10000) AS quota", &[storage_resource.into(), user.id.as_str().into()]).await?;
             ensure!(used[0][0].parse::<usize>()? < 10_000, "record quota");
         }
@@ -1374,7 +1391,7 @@ mod tests {
     #[test]
     fn transaction_adjustments_guard_overflow_and_both_bounds() {
         let rejection = GuardRejection {
-            input: "quantity".into(),
+            input: Some("quantity".into()),
             message: "Not enough stock".into(),
         };
         for (current, amount, min, max, increase) in [

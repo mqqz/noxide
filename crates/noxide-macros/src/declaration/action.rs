@@ -56,15 +56,16 @@ pub(crate) fn expand_action(
     item: syn::ItemStruct,
 ) -> syn::Result<Tokens> {
     marker(&item)?;
-    if declaration
-        .policy
-        .iter()
-        .flatten()
-        .any(|p| matches!(p, PolicyAtom::PrincipalIs(_)))
+    if declaration.kind != "create"
+        && declaration
+            .policy
+            .iter()
+            .flatten()
+            .any(|p| matches!(p, PolicyAtom::PrincipalIs(_)))
     {
         return Err(syn::Error::new(
             item.span(),
-            "principal_is requires read or list",
+            "principal_is requires read, list, or create",
         ));
     }
     if declaration.visible.is_some()
@@ -272,7 +273,7 @@ pub(crate) fn expand_action(
                 }).collect();
                 let assign = vec![#(::noxide::__private::Assignment { field: #keys.into(), change: ::noxide::__private::Change::Set(::noxide::__private::Value::Input(#keys.into())) }),*];
                 #reference_assignment
-                let steps = vec![::noxide::__private::Step { operation: <Self as ::noxide::ActionType>::operations()[0].id, target: #target, assign }];
+                let steps = vec![::noxide::__private::Step { guards: vec![], operation: <Self as ::noxide::ActionType>::operations()[0].id, target: #target, assign }];
                 let targets = ::noxide::page_targets(&<Self as ::noxide::ActionType>::operations(), &steps, ::noxide::__private::Revision::Exact, #inspection);
                 ::noxide::__private::Action { id: ::noxide::stable_id(concat!("action:", module_path!(), "::", stringify!(#name))), version: #version, name: #label.into(), steps, inputs, targets }
             }
@@ -330,6 +331,8 @@ struct TransactionStep {
     kind: syn::Ident,
     resource: syn::Type,
     assignments: Vec<(syn::Ident, DeclaredChange)>,
+    guards: Vec<syn::Expr>,
+    policy: Option<Vec<Vec<PolicyAtom>>>,
     eligible: Vec<(Option<syn::Ident>, syn::Type)>,
     target: Option<syn::Ident>,
 }
@@ -337,8 +340,8 @@ enum DeclaredChange {
     Set(syn::Expr),
     Adjustment {
         increase: bool,
-        by: syn::Ident,
-        input: syn::Ident,
+        by: syn::Expr,
+        input: Option<syn::Ident>,
         message: syn::LitStr,
     },
 }
@@ -487,6 +490,8 @@ impl syn::parse::Parse for TransactionDeclaration {
                             selected_target = Some(target);
                         }
                         let mut assignments = Vec::new();
+                        let mut guards = Vec::new();
+                        let mut step_policy = None;
                         let mut eligible = Vec::new();
                         while !args.is_empty() {
                             args.parse::<Token![,]>()?;
@@ -494,6 +499,26 @@ impl syn::parse::Parse for TransactionDeclaration {
                                 break;
                             }
                             let change: syn::Ident = args.parse()?;
+                            if change == "allow" {
+                                if step_policy.is_some() {
+                                    return Err(syn::Error::new(
+                                        change.span(),
+                                        "duplicate step allow",
+                                    ));
+                                }
+                                args.parse::<Token![=]>()?;
+                                step_policy = Some(crate::declaration::policy::policy(&args)?);
+                                continue;
+                            }
+                            if !matches!(
+                                change.to_string().as_str(),
+                                "eligible" | "guards" | "set" | "decrease" | "increase"
+                            ) {
+                                return Err(syn::Error::new(
+                                    change.span(),
+                                    "unsupported transaction step clause",
+                                ));
+                            }
                             if change == "eligible" {
                                 if args.peek(syn::token::Paren) {
                                     let content;
@@ -510,6 +535,15 @@ impl syn::parse::Parse for TransactionDeclaration {
                                     args.parse::<Token![=]>()?;
                                     eligible.push((None, args.parse()?));
                                 }
+                                continue;
+                            }
+                            if change == "guards" {
+                                let conditions;
+                                parenthesized!(conditions in args);
+                                guards.extend(
+                                    conditions
+                                        .parse_terminated(syn::Expr::parse, syn::Token![,])?,
+                                );
                                 continue;
                             }
                             let values;
@@ -545,8 +579,13 @@ impl syn::parse::Parse for TransactionDeclaration {
                                 }
                                 let rejection;
                                 parenthesized!(rejection in values);
-                                let error_input = rejection.parse()?;
-                                rejection.parse::<Token![,]>()?;
+                                let error_input = if rejection.peek(syn::LitStr) {
+                                    None
+                                } else {
+                                    let name = rejection.parse()?;
+                                    rejection.parse::<Token![,]>()?;
+                                    Some(name)
+                                };
                                 let message = rejection.parse()?;
                                 if !rejection.is_empty() || !values.is_empty() {
                                     return Err(values.error("invalid guard rejection"));
@@ -572,6 +611,8 @@ impl syn::parse::Parse for TransactionDeclaration {
                             kind,
                             resource,
                             assignments,
+                            guards,
+                            policy: step_policy,
                             eligible,
                             target: selected_target,
                         });
@@ -648,16 +689,57 @@ fn expand_transaction(
         let ty = &input.ty;
         let key = input.name.to_string();
         let label = action_label(&key);
+        let scalar_ty = crate::declaration::page::generic_argument(ty)
+            .ok()
+            .filter(|(kind, _)| *kind == "Option")
+            .map(|(_, ty)| ty)
+            .unwrap_or(ty);
+        let is_duration = matches!(scalar_ty,syn::Type::Path(path) if path.path.segments.last().is_some_and(|segment|segment.ident=="Duration"));
+        if is_duration
+            && !matches!(&input.bound,Some(syn::Expr::Call(call)) if matches!(&*call.func,syn::Expr::Path(path) if path.path.is_ident("seconds")))
+        {
+            return Err(syn::Error::new(
+                ty.span(),
+                "Duration inputs require seconds(maximum)",
+            ));
+        }
         let mut kind = quote!(<#ty as ::noxide::FieldValue>::kind());
         let mut max_bytes = quote!(match <#ty as ::noxide::FieldValue>::kind() {
             ::noxide::__private::FieldKind::Boolean => 5,
-            ::noxide::__private::FieldKind::Integer { .. } => 20,
+            ::noxide::__private::FieldKind::Integer { .. } | ::noxide::__private::FieldKind::Timestamp => 20,
             ::noxide::__private::FieldKind::Account { .. } => 43,
             ::noxide::__private::FieldKind::Choice { variants } => variants.iter().map(|v| v.key.len() as u32).max().unwrap_or(1),
             _ => 4096,
         });
         if let Some(bound) = &input.bound {
             match bound {
+                syn::Expr::Call(call)
+                    if matches!(&*call.func,syn::Expr::Path(path) if path.path.is_ident("seconds"))
+                        && call.args.len() == 1 =>
+                {
+                    if !is_duration {
+                        return Err(syn::Error::new(
+                            bound.span(),
+                            "seconds bound requires Duration input",
+                        ));
+                    }
+                    let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Int(seconds),
+                        ..
+                    }) = &call.args[0]
+                    else {
+                        return Err(syn::Error::new(
+                            bound.span(),
+                            "duration bound requires literal seconds",
+                        ));
+                    };
+                    let millis = seconds
+                        .base10_parse::<i64>()?
+                        .checked_mul(1000)
+                        .ok_or_else(|| syn::Error::new(bound.span(), "duration bound overflow"))?;
+                    kind = quote!(::noxide::__private::FieldKind::Duration { max_millis: #millis });
+                    max_bytes = quote!(20u32);
+                }
                 syn::Expr::Range(range)
                     if matches!(range.limits, syn::RangeLimits::Closed(_))
                         && range.start.is_some()
@@ -735,44 +817,13 @@ fn expand_transaction(
             let hash = stable_id(&field.to_string());
             let value = match change {
                 DeclaredChange::Set(expr) => {
-                    let value = match expr {
-                        syn::Expr::Path(path) if path.path.get_ident().is_some() => {
-                            let ident = path.path.get_ident().unwrap();
-                            let key = ident.to_string();
-                            if key == "target" {
-                                quote!(::noxide::__private::Value::Target("target".into()))
-                            } else if declared.contains(&key) {
-                                quote!(::noxide::__private::Value::Input(#key.into()))
-                            } else if let Some(previous) = created.get(&key) {
-                                quote!(::noxide::__private::Value::Created(#previous))
-                            } else if declaration.targets.is_some() {
-                                quote!(::noxide::__private::Value::Target(#key.into()))
-                            } else {
-                                return Err(syn::Error::new(
-                                    ident.span(),
-                                    "expected declared input, target, or earlier create",
-                                ));
-                            }
-                        }
-                        syn::Expr::Lit(lit) => match &lit.lit {
-                            syn::Lit::Str(value) => {
-                                quote!(::noxide::__private::Value::Constant(#value.into()))
-                            }
-                            syn::Lit::Int(_) | syn::Lit::Bool(_) => {
-                                quote!(::noxide::__private::Value::Constant((#expr).to_string()))
-                            }
-                            _ => return Err(syn::Error::new(expr.span(), "unsupported constant")),
-                        },
-                        _ if integer_literal(expr) => {
-                            quote!(::noxide::__private::Value::Constant((#expr).to_string()))
-                        }
-                        _ => {
-                            return Err(syn::Error::new(
-                                expr.span(),
-                                "assignments require an input, constant, target, or earlier create",
-                            ));
-                        }
-                    };
+                    let value = value_expression(
+                        expr,
+                        &declared,
+                        &created,
+                        declaration.targets.is_some(),
+                        Some((resource, hash)),
+                    )?;
                     quote!(::noxide::__private::Change::Set(#value))
                 }
                 DeclaredChange::Adjustment {
@@ -781,19 +832,30 @@ fn expand_transaction(
                     input,
                     message,
                 } => {
-                    let by = by.to_string();
-                    let input = input.to_string();
-                    if !declared.contains(&by) || !declared.contains(&input) {
-                        return Err(syn::Error::new(
-                            field.span(),
-                            "guard requires declared inputs",
-                        ));
-                    }
-                    let rejection = quote!(::noxide::__private::GuardRejection { input: #input.into(), message: #message.into() });
-                    if *increase {
-                        quote!(::noxide::__private::Change::Increase { by: #by.into(), rejection: #rejection })
+                    let by = value_expression(
+                        by,
+                        &declared,
+                        &created,
+                        declaration.targets.is_some(),
+                        None,
+                    )?;
+                    let input = if let Some(input) = input {
+                        let key = input.to_string();
+                        if !declared.contains(&key) {
+                            return Err(syn::Error::new(
+                                input.span(),
+                                "guard requires declared input",
+                            ));
+                        }
+                        quote!(Some(#key.into()))
                     } else {
-                        quote!(::noxide::__private::Change::Decrease { by: #by.into(), rejection: #rejection })
+                        quote!(None)
+                    };
+                    let rejection = quote!(::noxide::__private::GuardRejection { input: #input, message: #message.into() });
+                    if *increase {
+                        quote!(::noxide::__private::Change::Increase { by: #by, rejection: #rejection })
+                    } else {
+                        quote!(::noxide::__private::Change::Decrease { by: #by, rejection: #rejection })
                     }
                 }
             };
@@ -817,9 +879,22 @@ fn expand_transaction(
             |(_, key, eligible)| quote!((#key, <#eligible as ::noxide::QueryType>::operation().id)),
         );
         let bind = quote!(::std::collections::BTreeMap::from([#(#bindings),*]));
-        let policy = policy_tokens(&declaration.policy, resource);
+        let rules = step.policy.as_ref().unwrap_or(&declaration.policy);
+        if step.kind != "create"
+            && rules
+                .iter()
+                .flatten()
+                .any(|atom| matches!(atom, PolicyAtom::PrincipalIs(_)))
+        {
+            return Err(syn::Error::new(
+                resource.span(),
+                "principal_is requires read, list, or create",
+            ));
+        }
+        let policy = policy_tokens(rules, resource);
         operations.push(quote!(::noxide::__private::Operation { bind: #bind, scope: None, via: None, filter: Vec::new(), disclose: Vec::new(), list: None, id: #operation_id, resource: <#resource as ::noxide::ResourceType>::definition().id, kind: #kind, policy: #policy, visibility: None, fields: None }));
-        steps.push(quote!(::noxide::__private::Step { operation: #operation_id, target: #target, assign: vec![#(#assignments),*] }));
+        let guards = &step.guards;
+        steps.push(quote!(::noxide::__private::Step { guards: vec![#(#guards),*], operation: #operation_id, target: #target, assign: vec![#(#assignments),*] }));
         if let Some(step_name) = &step.name {
             let key = step_name.to_string();
             if key == "target" || declared.contains(&key) || !all_names.insert(key.clone()) {
@@ -981,4 +1056,158 @@ mod transaction_tests {
             assert!(result.is_err(), "{source}");
         }
     }
+}
+
+fn value_expression(
+    expr: &syn::Expr,
+    inputs: &std::collections::BTreeSet<String>,
+    created: &std::collections::BTreeMap<String, u8>,
+    named_targets: bool,
+    field: Option<(&syn::Type, u32)>,
+) -> syn::Result<Tokens> {
+    Ok(match expr {
+        syn::Expr::Paren(paren) => {
+            value_expression(&paren.expr, inputs, created, named_targets, field)?
+        }
+        syn::Expr::Path(path) if path.path.get_ident().is_some() => {
+            let ident = path.path.get_ident().unwrap();
+            let key = ident.to_string();
+            if inputs.contains(&key) {
+                quote!(::noxide::__private::Value::Input(#key.into()))
+            } else if let Some(step) = created.get(&key) {
+                quote!(::noxide::__private::Value::Created(#step))
+            } else if key == "target" || named_targets {
+                quote!(::noxide::__private::Value::Target(#key.into()))
+            } else {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    "expected declared input, target, or earlier create",
+                ));
+            }
+        }
+        syn::Expr::Lit(literal) => match &literal.lit {
+            syn::Lit::Str(value) => {
+                if let Some((resource, hash)) = field {
+                    quote!(::noxide::__private::Value::Literal(::noxide::field_literal(&<#resource as ::noxide::ResourceType>::definition().fields.into_iter().find(|field|field.name==<#resource as ::noxide::FieldSpec<#hash>>::KEY).expect("declared assignment field").kind,#value)))
+                } else {
+                    quote!(::noxide::__private::Value::Literal(::noxide::__private::Literal::Text(#value.into())))
+                }
+            }
+            syn::Lit::Int(_) => {
+                quote!(::noxide::__private::Value::Literal(::noxide::__private::Literal::Integer(#expr)))
+            }
+            syn::Lit::Bool(_) => {
+                quote!(::noxide::__private::Value::Literal(::noxide::__private::Literal::Boolean(#expr)))
+            }
+            _ => return Err(syn::Error::new(expr.span(), "unsupported typed literal")),
+        },
+        _ if integer_literal(expr) => {
+            quote!(::noxide::__private::Value::Literal(::noxide::__private::Literal::Integer(#expr)))
+        }
+        syn::Expr::Binary(binary) => {
+            let left = value_expression(&binary.left, inputs, created, named_targets, None)?;
+            let right = value_expression(&binary.right, inputs, created, named_targets, None)?;
+            match binary.op {
+                syn::BinOp::Add(_) => {
+                    quote!(::noxide::__private::Value::Add{left:Box::new(#left),right:Box::new(#right)})
+                }
+                syn::BinOp::Sub(_) => {
+                    quote!(::noxide::__private::Value::Subtract{left:Box::new(#left),right:Box::new(#right)})
+                }
+                syn::BinOp::Mul(_) => {
+                    quote!(::noxide::__private::Value::Multiply{left:Box::new(#left),right:Box::new(#right)})
+                }
+                _ => {
+                    return Err(syn::Error::new(
+                        binary.op.span(),
+                        "expressions support checked add, subtract and multiply only",
+                    ));
+                }
+            }
+        }
+        syn::Expr::Call(call) => {
+            let syn::Expr::Path(path) = &*call.func else {
+                return Err(syn::Error::new(
+                    call.func.span(),
+                    "unsupported expression function",
+                ));
+            };
+            let function = path.path.segments.last().unwrap().ident.to_string();
+            match (function.as_str(), call.args.len()) {
+                ("principal", 0) => quote!(::noxide::__private::Value::Principal),
+                ("transaction_time", 0) => quote!(::noxide::__private::Value::TransactionTime),
+                ("snapshot" | "reviewed" | "current", 2) => {
+                    fn key(expr: &syn::Expr) -> syn::Result<String> {
+                        match expr {
+                            syn::Expr::Path(path) if path.path.get_ident().is_some() => {
+                                Ok(path.path.get_ident().unwrap().to_string())
+                            }
+                            syn::Expr::Lit(syn::ExprLit {
+                                lit: syn::Lit::Str(value),
+                                ..
+                            }) => Ok(value.value()),
+                            _ => Err(syn::Error::new(expr.span(), "expected target/field name")),
+                        }
+                    }
+                    let target = key(&call.args[0])?;
+                    let name = key(&call.args[1])?;
+                    if function == "current" {
+                        quote!(::noxide::__private::Value::CurrentField{target:#target.into(),field:#name.into()})
+                    } else {
+                        let reviewed = function == "reviewed";
+                        quote!(::noxide::__private::Value::SnapshotField{target:#target.into(),field:#name.into(),reviewed:#reviewed})
+                    }
+                }
+                ("choice" | "account" | "text", 1) => {
+                    let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(value),
+                        ..
+                    }) = &call.args[0]
+                    else {
+                        return Err(syn::Error::new(
+                            call.span(),
+                            "typed literal requires a string literal",
+                        ));
+                    };
+                    match function.as_str() {
+                        "choice" => {
+                            quote!(::noxide::__private::Value::Literal(::noxide::__private::Literal::Choice(#value.into())))
+                        }
+                        "account" => {
+                            quote!(::noxide::__private::Value::Literal(::noxide::__private::Literal::Account(#value.into())))
+                        }
+                        _ => {
+                            quote!(::noxide::__private::Value::Literal(::noxide::__private::Literal::Text(#value.into())))
+                        }
+                    }
+                }
+                ("seconds" | "timestamp", 1) => {
+                    let value = &call.args[0];
+                    if !integer_literal(value) {
+                        return Err(syn::Error::new(
+                            value.span(),
+                            "time literals require integer literals",
+                        ));
+                    }
+                    if function == "seconds" {
+                        quote!(::noxide::__private::Value::Literal(::noxide::__private::Literal::Duration(::noxide::Duration::from_secs(#value).expect("duration literal"))))
+                    } else {
+                        quote!(::noxide::__private::Value::Literal(::noxide::__private::Literal::Timestamp(::noxide::Timestamp::from_unix_millis(#value).expect("timestamp literal"))))
+                    }
+                }
+                _ => {
+                    return Err(syn::Error::new(
+                        call.span(),
+                        "unsupported expression function or arguments",
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(syn::Error::new(
+                expr.span(),
+                "expected bounded typed expression",
+            ));
+        }
+    })
 }

@@ -80,7 +80,11 @@ pub(crate) fn validate(m: &Manifest, action: &Action, layout: &[FormInstruction]
                         Control::Auto => true,
                         Control::TextInput => matches!(
                             f.kind,
-                            FieldKind::Text | FieldKind::Account { .. } | FieldKind::Integer { .. }
+                            FieldKind::Text
+                                | FieldKind::Account { .. }
+                                | FieldKind::Integer { .. }
+                                | FieldKind::Timestamp
+                                | FieldKind::Duration { .. }
                         ),
                         Control::Textarea { rows } =>
                             matches!(f.kind, FieldKind::Text) && (1..=40).contains(rows),

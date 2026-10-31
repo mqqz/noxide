@@ -294,3 +294,207 @@ impl TargetDeclarations {
         self
     }
 }
+
+/// Explicit expression constructors; these emit approved data, never execute it.
+pub mod values {
+    use noxide_protocol::{Literal, Value};
+    pub fn input(name: impl Into<String>) -> Value {
+        Value::Input(name.into())
+    }
+    pub fn target(name: impl Into<String>) -> Value {
+        Value::Target(name.into())
+    }
+    pub fn created(step: u8) -> Value {
+        Value::Created(step)
+    }
+    pub fn integer(value: i64) -> Value {
+        Value::Literal(Literal::Integer(value))
+    }
+    pub fn text(value: impl Into<String>) -> Value {
+        Value::Literal(Literal::Text(value.into()))
+    }
+    pub fn choice(value: impl Into<String>) -> Value {
+        Value::Literal(Literal::Choice(value.into()))
+    }
+    pub fn boolean(value: bool) -> Value {
+        Value::Literal(Literal::Boolean(value))
+    }
+    pub fn account(value: impl Into<String>) -> Value {
+        Value::Literal(Literal::Account(value.into()))
+    }
+    pub fn principal() -> Value {
+        Value::Principal
+    }
+    pub fn transaction_time() -> Value {
+        Value::TransactionTime
+    }
+    pub fn timestamp(value: crate::Timestamp) -> Value {
+        Value::Literal(Literal::Timestamp(value))
+    }
+    pub fn duration(value: crate::Duration) -> Value {
+        Value::Literal(Literal::Duration(value))
+    }
+    pub fn snapshot(target: impl Into<String>, field: impl Into<String>) -> Value {
+        Value::SnapshotField {
+            target: target.into(),
+            field: field.into(),
+            reviewed: false,
+        }
+    }
+    pub fn reviewed(target: impl Into<String>, field: impl Into<String>) -> Value {
+        Value::SnapshotField {
+            target: target.into(),
+            field: field.into(),
+            reviewed: true,
+        }
+    }
+    pub fn current(target: impl Into<String>, field: impl Into<String>) -> Value {
+        Value::CurrentField {
+            target: target.into(),
+            field: field.into(),
+        }
+    }
+    pub fn add(left: Value, right: Value) -> Value {
+        Value::Add {
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+    pub fn subtract(left: Value, right: Value) -> Value {
+        Value::Subtract {
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+    pub fn multiply(left: Value, right: Value) -> Value {
+        Value::Multiply {
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+}
+/// Guard constructors share exactly the explicit protocol comparison vocabulary.
+pub mod guards {
+    use noxide_protocol::{Comparison, Guard, GuardCondition, GuardRejection, Value};
+    pub fn compare(left: Value, comparison: Comparison, right: Value) -> GuardCondition {
+        GuardCondition::Compare {
+            left,
+            comparison,
+            right,
+        }
+    }
+    pub fn equal(left: Value, right: Value) -> GuardCondition {
+        compare(left, Comparison::Equal, right)
+    }
+    pub fn not_equal(left: Value, right: Value) -> GuardCondition {
+        compare(left, Comparison::NotEqual, right)
+    }
+    pub fn less(left: Value, right: Value) -> GuardCondition {
+        compare(left, Comparison::Less, right)
+    }
+    pub fn less_or_equal(left: Value, right: Value) -> GuardCondition {
+        compare(left, Comparison::LessOrEqual, right)
+    }
+    pub fn greater(left: Value, right: Value) -> GuardCondition {
+        compare(left, Comparison::Greater, right)
+    }
+    pub fn greater_or_equal(left: Value, right: Value) -> GuardCondition {
+        compare(left, Comparison::GreaterOrEqual, right)
+    }
+    pub fn all(conditions: impl IntoIterator<Item = GuardCondition>) -> GuardCondition {
+        GuardCondition::All(conditions.into_iter().collect())
+    }
+    pub fn require(
+        condition: GuardCondition,
+        input: Option<&str>,
+        message: impl Into<String>,
+    ) -> Guard {
+        Guard {
+            condition,
+            rejection: GuardRejection {
+                input: input.map(str::to_owned),
+                message: message.into(),
+            },
+        }
+    }
+}
+/// Calculated steps lower to the same assignments, guards and operations.
+pub struct CalculatedStep(noxide_protocol::Step);
+impl CalculatedStep {
+    pub fn new(operation: u32, target: noxide_protocol::Target) -> Self {
+        Self(noxide_protocol::Step {
+            operation,
+            target,
+            assign: vec![],
+            guards: vec![],
+        })
+    }
+    pub fn set(mut self, field: impl Into<String>, value: noxide_protocol::Value) -> Self {
+        self.0.assign.push(noxide_protocol::Assignment {
+            field: field.into(),
+            change: noxide_protocol::Change::Set(value),
+        });
+        self
+    }
+    pub fn guard(mut self, guard: noxide_protocol::Guard) -> Self {
+        self.0.guards.push(guard);
+        self
+    }
+    pub fn increase(
+        mut self,
+        field: impl Into<String>,
+        by: noxide_protocol::Value,
+        rejection: noxide_protocol::GuardRejection,
+    ) -> Self {
+        self.0.assign.push(noxide_protocol::Assignment {
+            field: field.into(),
+            change: noxide_protocol::Change::Increase { by, rejection },
+        });
+        self
+    }
+    pub fn decrease(
+        mut self,
+        field: impl Into<String>,
+        by: noxide_protocol::Value,
+        rejection: noxide_protocol::GuardRejection,
+    ) -> Self {
+        self.0.assign.push(noxide_protocol::Assignment {
+            field: field.into(),
+            change: noxide_protocol::Change::Decrease { by, rejection },
+        });
+        self
+    }
+    pub fn finish(self) -> noxide_protocol::Step {
+        self.0
+    }
+}
+/// A transition is a current-state guard and one ordinary Set assignment.
+pub fn transition(
+    operation: u32,
+    target: &str,
+    field: &str,
+    from: noxide_protocol::Literal,
+    to: noxide_protocol::Literal,
+    rejection: noxide_protocol::GuardRejection,
+) -> noxide_protocol::Step {
+    CalculatedStep::new(operation, noxide_protocol::Target::Named(target.into()))
+        .guard(noxide_protocol::Guard {
+            condition: guards::equal(
+                values::current(target, field),
+                noxide_protocol::Value::Literal(from),
+            ),
+            rejection,
+        })
+        .set(field, noxide_protocol::Value::Literal(to))
+        .finish()
+}
+/// String syntax has field context for choice/account keys; the wire stays typed.
+#[doc(hidden)]
+pub fn field_literal(kind: &noxide_protocol::FieldKind, value: &str) -> noxide_protocol::Literal {
+    use noxide_protocol::{FieldKind, Literal};
+    match kind {
+        FieldKind::Choice { .. } => Literal::Choice(value.into()),
+        FieldKind::Account { .. } => Literal::Account(value.into()),
+        _ => Literal::Text(value.into()),
+    }
+}

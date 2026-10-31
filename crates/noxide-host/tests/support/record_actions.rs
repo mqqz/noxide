@@ -17,8 +17,8 @@ pub fn declarations() -> Manifest {
             {"id":2,"path":"/notes/{note}","resource":1,"operations":[2],"forms":[2,3]}
         ],
         "actions": [
-            {"id":2,"version":1,"name":"Save changes","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[2]}},"revision":"exact","projection":null,"inspect":{"operation":2,"fields":["body"]}}],"inputs":[{"name":"body","label":"Note","kind":"text","optional":false,"max_bytes":4096}],"steps":[{"operation":4,"target":{"named":"target"},"assign":[{"field":"body","change":{"set":{"input":"body"}}}]}]},
-            {"id":3,"version":1,"name":"Delete note","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[2]}},"revision":"exact","projection":null,"inspect":null}],"inputs":[],"steps":[{"operation":5,"target":{"named":"target"},"assign":[]}]}
+            {"id":2,"version":1,"name":"Save changes","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[2]}},"revision":"exact","projection":null,"inspect":{"guards": [], "operation":2,"fields":["body"]}}],"inputs":[{"name":"body","label":"Note","kind":"text","optional":false,"max_bytes":4096}],"steps":[{"guards": [], "operation":4,"target":{"named":"target"},"assign":[{"field":"body","change":{"set":{"input":"body"}}}]}]},
+            {"id":3,"version":1,"name":"Delete note","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[2]}},"revision":"exact","projection":null,"inspect":null}],"inputs":[],"steps":[{"guards": [], "operation":5,"target":{"named":"target"},"assign":[]}]}
         ],
         "web_bindings": [
             {"id":2,"version":1,"action":2,"layout":[],"redirect":{"route":2,"source":{"target":"target"}}},

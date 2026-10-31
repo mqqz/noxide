@@ -1,4 +1,5 @@
 use crate::Record;
+pub use noxide_protocol::time::{Duration, Timestamp};
 use noxide_protocol::{FieldKind, Resource};
 use std::marker::PhantomData;
 /// Deterministic bundle-local identifier. Host admission rejects collisions.
@@ -192,3 +193,30 @@ impl FieldValue for AccountId {
 pub trait ParamValue: FieldValue {}
 impl ParamValue for bool {}
 impl<T: ParamValue> ParamValue for Option<T> {}
+
+impl FieldValue for Timestamp {
+    fn kind() -> FieldKind {
+        FieldKind::Timestamp
+    }
+    fn encode(&self) -> String {
+        self.unix_millis().to_string()
+    }
+    fn decode(value: &str) -> Self {
+        Self::from_unix_millis(value.parse().expect("host timestamp integer"))
+            .expect("host timestamp contract")
+    }
+}
+impl FieldValue for Duration {
+    fn kind() -> FieldKind {
+        panic!("duration fields/inputs require an explicit maximum")
+    }
+    fn encode(&self) -> String {
+        self.as_millis().to_string()
+    }
+    fn decode(value: &str) -> Self {
+        Self::from_millis(value.parse().expect("host duration integer"))
+            .expect("host duration contract")
+    }
+}
+impl super::form::TextControl for Timestamp {}
+impl super::form::TextControl for Duration {}

@@ -262,7 +262,7 @@ async fn mutation_case(db: Database) {
     let mut invalid = m.clone();
     invalid.actions[1].steps[0].assign.push(Assignment {
         field: "thread".into(),
-        change: Change::Set(Value::Constant("20".into())),
+        change: Change::Set(Value::Literal(noxide_protocol::Literal::Integer(20))),
     });
     assert!(
         manifest::validate(&invalid)
@@ -298,14 +298,20 @@ async fn mutation_case(db: Database) {
         ("thread".into(), "20".into()),
     ]);
     assert!(
-        e.execute_transaction(crate::application::ActionCore::of(&m.actions[1]).unwrap())
-            .await
-            .is_err()
+        e.execute_transaction(
+            crate::application::ActionCore::of(&m.actions[1]).unwrap(),
+            None
+        )
+        .await
+        .is_err()
     );
     e.request.input.remove("thread");
-    e.execute_transaction(crate::application::ActionCore::of(&m.actions[1]).unwrap())
-        .await
-        .unwrap();
+    e.execute_transaction(
+        crate::application::ActionCore::of(&m.actions[1]).unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
     e.tx.commit().await.unwrap();
     let mut e = effects(&db, &m, 2, 12).await;
     let stored = crate::repository::load(&mut e.tx, &m, 1, 12)
@@ -400,7 +406,8 @@ async fn concurrent_case(db: Database) {
             e.grants.insert("target".into(), grant);
             assert!(
                 e.execute_transaction(
-                    crate::application::ActionCore::of(&child_manifest.actions[0]).unwrap()
+                    crate::application::ActionCore::of(&child_manifest.actions[0]).unwrap(),
+                    None
                 )
                 .await
                 .unwrap_err()
@@ -654,11 +661,14 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         roles: vec![("moderator".into(), "".into())],
     });
     assert!(
-        e.execute_transaction(crate::application::ActionCore::of(&m.actions[1]).unwrap())
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("parent has children")
+        e.execute_transaction(
+            crate::application::ActionCore::of(&m.actions[1]).unwrap(),
+            None
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("parent has children")
     );
     e.tx.rollback().await.unwrap();
     // Retargeting a declared relationship to an empty resource must fail atomically.
@@ -2027,10 +2037,13 @@ async fn follow_case(db: Database) {
         },
     );
     assert!(
-        e.execute_transaction(crate::application::ActionCore::of(&m.actions[0]).unwrap())
-            .await
-            .unwrap_err()
-            .is::<crate::repository::ReferenceUnavailable>(),
+        e.execute_transaction(
+            crate::application::ActionCore::of(&m.actions[0]).unwrap(),
+            None
+        )
+        .await
+        .unwrap_err()
+        .is::<crate::repository::ReferenceUnavailable>(),
         "eligible read policy is enforced independently of gates"
     );
     e.tx.rollback().await.unwrap();

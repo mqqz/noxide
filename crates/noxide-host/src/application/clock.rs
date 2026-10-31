@@ -92,6 +92,18 @@ impl Application {
             .map_err(|_| RequestError::Busy)
     }
 
+    /// The core calls this only after its existing admission/schema/deployment
+    /// checks and committed-receipt recovery. One durable clock read, no renewal.
+    pub(super) async fn temporal_after_admission(
+        &self,
+        tx: &mut Transaction,
+    ) -> std::result::Result<AttemptTime, RequestError> {
+        self.lifecycle_clock
+            .attempt(tx)
+            .await
+            .map_err(|_| RequestError::Busy)
+    }
+
     pub(crate) fn start_clock_service(self: &Arc<Self>) -> Result<ClockService> {
         ensure!(
             self.generation.get().is_some(),

@@ -1,4 +1,6 @@
 //! Core action execution and transactional replay semantics.
+#[cfg(test)]
+mod computation_tests;
 mod targets;
 use super::{Application, EditReceipt, RequestError, navigation};
 use crate::{
@@ -33,6 +35,20 @@ impl<'a> ActionCore<'a> {
             inputs: &action.inputs,
             steps: &action.steps,
             targets: &action.targets,
+        })
+    }
+
+    pub fn uses_time(self) -> bool {
+        self.steps.iter().any(|step| {
+            step.guards.iter().any(|guard| guard.condition.uses_time())
+                || step
+                    .assign
+                    .iter()
+                    .any(|assignment| match &assignment.change {
+                        noxide_protocol::Change::Set(value) => value.uses_time(),
+                        noxide_protocol::Change::Increase { by, .. }
+                        | noxide_protocol::Change::Decrease { by, .. } => by.uses_time(),
+                    })
         })
     }
 
@@ -141,7 +157,7 @@ pub(super) enum Settled {
         message: String,
     },
     GuardRejected {
-        input: String,
+        input: Option<String>,
         message: String,
     },
 }
@@ -191,6 +207,12 @@ impl Application {
                 },
             });
         }
+        let time = if a.uses_time() {
+            budget.spend(1)?;
+            Some(self.temporal_after_admission(&mut tx).await?)
+        } else {
+            None
+        };
         if self.authorize_create(a, &principal).is_err() {
             tx.rollback().await?;
             return Ok(Attempt::Settled(Settled::Unavailable));
@@ -342,13 +364,16 @@ impl Application {
             outcome == ResponseIntent::Execute,
             "invalid action decision"
         );
-        let outcomes = match effects.execute_transaction(a).await {
+        let outcomes = match effects.execute_transaction(a, time).await {
             Ok(outcomes) => outcomes,
             Err(error) => {
                 budget.database_calls = effects.calls;
                 effects.tx.rollback().await?;
                 if error.is::<repository::ReferenceUnavailable>() {
                     return Ok(Attempt::Settled(Settled::Unavailable));
+                }
+                if error.is::<repository::CalculationUnavailable>() {
+                    return Err(RequestError::InvalidRequest.into());
                 }
                 if let Some(guard) = error.downcast_ref::<repository::GuardFailure>() {
                     return Ok(Attempt::Settled(Settled::GuardRejected {
@@ -529,16 +554,7 @@ impl Application {
                 continue;
             }
             ensure!(
-                manifest::is_public(op)
-                    || principal.user().is_ok_and(|user| repository::allowed(
-                        &op.policy,
-                        principal,
-                        crate::policy::Row {
-                            owner: &user.id,
-                            tenant: &user.tenant,
-                            fields: &Default::default()
-                        }
-                    )),
+                repository::create_prerequisites(op, principal),
                 repository::ReferenceUnavailable
             );
         }

@@ -1,4 +1,6 @@
+mod computation;
 use anyhow::{Result, ensure};
+pub use computation::{ComputationDisclosure, ComputationSource, action_disclosures};
 use noxide_protocol::*;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -21,6 +23,11 @@ pub fn digest(manifest: &Manifest) -> Result<[u8; 32]> {
     canonical.actions.sort_by_key(|action| action.id);
     canonical.web_bindings.sort_by_key(|binding| binding.id);
     canonical_targets(&mut canonical);
+    for action in &mut canonical.actions {
+        for step in &mut action.steps {
+            step.assign.sort_by(|a, b| a.field.cmp(&b.field));
+        }
+    }
     Ok(Sha256::digest(serde_json::to_vec(&canonical)?).into())
 }
 
@@ -282,6 +289,11 @@ pub fn validate(m: &Manifest) -> Result<()> {
                     "account fields must be required without defaults"
                 ),
                 FieldKind::Text => {}
+                FieldKind::Timestamp => ensure!(f.max_bytes >= 20, "timestamp field budget"),
+                FieldKind::Duration { max_millis } => ensure!(
+                    f.max_bytes >= 20 && *max_millis >= 0,
+                    "duration field schema"
+                ),
                 FieldKind::Boolean => ensure!(f.max_bytes >= 5, "boolean field budget"),
                 FieldKind::Integer { min, max } => {
                     ensure!(
@@ -437,8 +449,11 @@ pub fn validate(m: &Manifest) -> Result<()> {
             for p in rule {
                 if let Predicate::PrincipalIs { field } = p {
                     ensure!(
-                        matches!(op.kind, OperationKind::Read | OperationKind::List),
-                        "principal_is requires read or list"
+                        matches!(
+                            op.kind,
+                            OperationKind::Read | OperationKind::List | OperationKind::Create
+                        ),
+                        "principal_is requires read, list, or create"
                     );
                     ensure!(
                         resource(m, op.resource)?.fields.iter().any(
@@ -875,6 +890,7 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
     let mut used = BTreeSet::new();
     let mut creates = 0;
     let mut exact = BTreeSet::new();
+    let mut computations = computation::Admission::default();
     for (index, step) in a.steps.iter().enumerate() {
         let op = operation(m, step.operation)?;
         let resource = resource(m, op.resource)?;
@@ -911,6 +927,7 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
             }
             _ => anyhow::bail!("action must declare a mutation"),
         }
+        computations.guards(m, a, index, &mut used)?;
         let mut assigned = BTreeSet::new();
         for assignment in &step.assign {
             ensure!(assigned.insert(&assignment.field), "duplicate assignment");
@@ -945,51 +962,21 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
                     if let Target::Named(name) = &step.target {
                         exact.insert(name.as_str());
                     }
-                    match value {
-                        Value::Input(name) => {
-                            let input = a
-                                .inputs
-                                .iter()
-                                .find(|input| input.name == *name)
-                                .ok_or_else(|| anyhow::anyhow!("undeclared input"))?;
-                            ensure!(
-                                input_fits(input, field),
-                                "input domain does not fit destination"
-                            );
-                            used.insert(name.as_str());
-                        }
-                        Value::Constant(value) => {
-                            ensure!(
-                                !matches!(field.kind, FieldKind::Reference { .. }),
-                                "reference requires a declared target"
-                            );
-                            validate_value(field, value)?;
-                        }
-                        Value::Target(name) => {
-                            let target = action_target(&a.targets, name)?;
-                            ensure!(
-                                reference_resource(m, resource.id, &field.name)?
-                                    .is_some_and(|resource| resource.id == target.resource),
-                                "wrong named reference type"
-                            );
-                        }
-                        Value::Created(created) => {
-                            let created = usize::from(*created);
-                            ensure!(
-                                created < index,
-                                "created reference must name an earlier step"
-                            );
-                            let source = operation(m, a.steps[created].operation)?;
-                            ensure!(
-                                source.kind == OperationKind::Create,
-                                "created reference requires create step"
-                            );
-                            ensure!(
-                                reference_resource(m, resource.id, &field.name)?
-                                    .is_some_and(|resource| resource.id == source.resource),
-                                "wrong created reference type"
-                            );
-                        }
+                    let domain = computations.value(m, a, index, value, false, &mut used)?;
+                    if matches!(field.kind, FieldKind::Reference { .. }) {
+                        ensure!(
+                            matches!(value, Value::Target(_) | Value::Created(_)),
+                            "reference requires a declared target or earlier create"
+                        );
+                        ensure!(
+                            domain.kind == field.kind,
+                            "wrong named or created reference type"
+                        );
+                    } else {
+                        ensure!(
+                            computation::fits(&domain, field),
+                            "expression/input domain does not fit destination"
+                        );
                     }
                 }
                 Change::Decrease { by, rejection } | Change::Increase { by, rejection } => {
@@ -1004,38 +991,21 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
                     else {
                         anyhow::bail!("adjustment requires bounded integer field")
                     };
-                    let input = a
-                        .inputs
-                        .iter()
-                        .find(|input| input.name == *by)
-                        .ok_or_else(|| anyhow::anyhow!("undeclared adjustment input"))?;
+                    let domain = computations.value(m, a, index, by, false, &mut used)?;
                     let FieldKind::Integer {
                         min: Some(amount_min),
                         max: Some(amount_max),
-                    } = input.kind
+                    } = domain.kind
                     else {
-                        anyhow::bail!("adjustment requires bounded integer input")
+                        anyhow::bail!("adjustment requires bounded integer expression")
                     };
                     ensure!(
-                        !input.optional
+                        !domain.optional
                             && amount_min >= 1
                             && i128::from(amount_max) <= i128::from(max) - i128::from(min),
                         "invalid adjustment amount domain"
                     );
-                    ensure!(
-                        names.contains(rejection.input.as_str()),
-                        "undeclared rejection input"
-                    );
-                    ensure!(
-                        !rejection.message.is_empty()
-                            && rejection.message.len() <= 256
-                            && !rejection
-                                .message
-                                .chars()
-                                .any(|c| c.is_control() && !matches!(c, '\n' | '\t')),
-                        "invalid guard rejection message"
-                    );
-                    used.insert(by.as_str());
+                    computation::rejection(a, rejection)?;
                 }
             }
         }
@@ -1140,6 +1110,11 @@ fn validate_input_schema(input: &Input) -> Result<()> {
     );
     match &input.kind {
         FieldKind::Text => {}
+        FieldKind::Timestamp => ensure!(input.max_bytes >= 20, "timestamp input budget"),
+        FieldKind::Duration { max_millis } => ensure!(
+            input.max_bytes >= 20 && *max_millis >= 0,
+            "duration input schema"
+        ),
         FieldKind::Boolean => ensure!(input.max_bytes >= 5, "boolean input budget"),
         FieldKind::Integer { min, max } => ensure!(
             input.max_bytes >= 20 && min.zip(*max).is_none_or(|(min, max)| min <= max),
@@ -1181,7 +1156,12 @@ fn input_fits(input: &Input, field: &TextField) -> bool {
     }
     match (&input.kind, &field.kind) {
         (FieldKind::Text, FieldKind::Text) => input.max_bytes <= field.max_bytes,
-        (FieldKind::Boolean, FieldKind::Boolean) => true,
+        (FieldKind::Boolean, FieldKind::Boolean) | (FieldKind::Timestamp, FieldKind::Timestamp) => {
+            true
+        }
+        (FieldKind::Duration { max_millis: input }, FieldKind::Duration { max_millis }) => {
+            input <= max_millis
+        }
         (FieldKind::Account { scope: input }, FieldKind::Account { scope }) => input == scope,
         (
             FieldKind::Integer {
@@ -1902,7 +1882,7 @@ mod initial_tests {
         bad = m.clone();
         bad.actions[0].steps[0].assign.push(Assignment {
             field: "published".into(),
-            change: Change::Set(Value::Constant("true".into())),
+            change: Change::Set(Value::Literal(noxide_protocol::Literal::Boolean(true))),
         });
         assert!(
             validate(&bad)
@@ -2074,20 +2054,22 @@ mod transaction_tests {
         };
         a.steps = vec![
             Step {
+                guards: vec![],
                 operation: 3,
                 target: Target::Named("target".into()),
                 assign: vec![Assignment {
                     field: "stock".into(),
                     change: Change::Decrease {
-                        by: "quantity".into(),
+                        by: Value::Input("quantity".into()),
                         rejection: GuardRejection {
-                            input: "quantity".into(),
+                            input: Some("quantity".into()),
                             message: "Not enough stock".into(),
                         },
                     },
                 }],
             },
             Step {
+                guards: vec![],
                 operation: 4,
                 target: Target::None,
                 assign: vec![
@@ -2096,6 +2078,7 @@ mod transaction_tests {
                 ],
             },
             Step {
+                guards: vec![],
                 operation: 6,
                 target: Target::None,
                 assign: vec![
@@ -2121,9 +2104,10 @@ mod transaction_tests {
         });
         validate(&initialized).unwrap();
         let mut forbidden = initialized.clone();
-        forbidden.actions[0].steps[0]
-            .assign
-            .push(set("published", Value::Constant("true".into())));
+        forbidden.actions[0].steps[0].assign.push(set(
+            "published",
+            Value::Literal(noxide_protocol::Literal::Boolean(true)),
+        ));
         assert!(
             validate(&forbidden)
                 .unwrap_err()
@@ -2137,9 +2121,10 @@ mod transaction_tests {
             vec![2],
             Revision::Exact,
         )];
-        initialized.actions[0].steps[0]
-            .assign
-            .push(set("published", Value::Constant("true".into())));
+        initialized.actions[0].steps[0].assign.push(set(
+            "published",
+            Value::Literal(noxide_protocol::Literal::Boolean(true)),
+        ));
         initialized.routes[0].forms.clear();
         initialized.routes[1].forms = vec![1];
         initialized.web_bindings[0].redirect.source = RedirectSource::Target("target".into());
@@ -2228,7 +2213,7 @@ mod transaction_tests {
             Value::Created(3),
             Value::Created(0),
             Value::Target("target".into()),
-            Value::Constant("1".into()),
+            Value::Literal(noxide_protocol::Literal::Integer(1)),
             Value::Input("body".into()),
         ] {
             let mut bad = m.clone();
@@ -2376,12 +2361,12 @@ mod transaction_tests {
         assert!(validate(&bad).is_err());
         let mut bad = m.clone();
         if let Change::Decrease { rejection, .. } = &mut bad.actions[0].steps[0].assign[0].change {
-            rejection.input = "missing".into();
+            rejection.input = Some("missing".into());
         }
         assert!(validate(&bad).is_err());
         let mut bad = m.clone();
         if let Change::Decrease { by, .. } = &mut bad.actions[0].steps[0].assign[0].change {
-            *by = "missing".into();
+            *by = Value::Input("missing".into());
         }
         assert!(validate(&bad).is_err());
     }
@@ -2390,7 +2375,8 @@ mod transaction_tests {
     fn transaction_admission_checks_revision_and_multistep_authority() {
         let m = declarations();
         let mut bad = m.clone();
-        bad.actions[0].steps[0].assign[0].change = Change::Set(Value::Constant("5".into()));
+        bad.actions[0].steps[0].assign[0].change =
+            Change::Set(Value::Literal(noxide_protocol::Literal::Integer(5)));
         assert!(
             validate(&bad)
                 .unwrap_err()
@@ -2546,9 +2532,11 @@ mod transaction_tests {
         changed(bad);
         let mut bad = m.clone();
         bad.actions[0].steps[1].assign.swap(0, 1);
-        changed(bad);
+        assert_eq!(digest(&bad).unwrap(), original);
         let mut bad = m.clone();
-        bad.actions[0].steps[2].assign[0].change = Change::Set(Value::Constant("note".into()));
+        bad.actions[0].steps[2].assign[0].change = Change::Set(Value::Literal(
+            noxide_protocol::Literal::Text("note".into()),
+        ));
         bad.actions[0].inputs.pop();
         changed(bad);
         let mut bad = m.clone();

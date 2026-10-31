@@ -20,7 +20,7 @@ from build_vm import (ROOT, DEFAULT_VM_SECONDS, MAX_OUTPUT, MAX_CONTRACT, Image,
                       check_build_status)
 
 
-EQUIVALENT_APPS = ("private-notes", "task-board", "public-articles", "policy-board", "repeated", "forum")
+EQUIVALENT_APPS = ("private-notes", "task-board", "public-articles", "policy-board", "repeated", "forum", "reservations")
 ADMISSION_FAILURES = {
     "notes-added-field": b"creation requires every writable field",
     "notes-renamed-field": b"creation requires every writable field",
@@ -476,6 +476,20 @@ def main():
     baseline = (ROOT / "tools/fixtures/sdk/task-board-advanced.rs").read_text()
     cases = fixtures(baseline)
     passing = positive_fixtures(baseline)
+    computed = r"""
+use noxide::prelude::*;
+#[derive(Resource)] #[resource(key="products")]
+pub struct Product { #[id] id: Id<Self>, #[field(min=0,max=100)] stock:i64 }
+mod show { pub fn id()->u32 {1} }
+#[action(inputs(quantity:i64=1..=10),transaction(update(Product,target,allow=owner,decrease(stock,by=quantity,reject(quantity,"Stock unavailable")))),allow=owner,redirect=show(target))]
+struct Reserve;
+"""
+    passing.append(("computed-step-policy", computed))
+    cases.extend([
+        ("duplicate-step-policy", computed.replace("allow=owner,decrease", "allow=owner,allow=same_tenant,decrease"), "duplicate step allow"),
+        ("unsupported-step-clause", computed.replace("allow=owner,decrease", "execute=owner,decrease"), "unsupported transaction step clause"),
+        ("computed-division", computed.replace("by=quantity,", "by=quantity/2,"), "checked add, subtract and multiply only"),
+    ])
     convenience, failures, comparisons = convenience_fixtures()
     passing += convenience
     cases += failures

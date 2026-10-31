@@ -111,6 +111,7 @@ pub fn manifest() -> Manifest {
                 max_bytes: 4096,
             }],
             steps: vec![Step {
+                guards: vec![],
                 operation: 3,
                 target: Target::None,
                 assign: vec![Assignment {
@@ -235,6 +236,7 @@ pub fn action(
         },
         inputs: vec![],
         steps: vec![Step {
+            guards: vec![],
             operation,
             target: target.clone(),
             assign: vec![],
