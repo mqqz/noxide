@@ -74,11 +74,13 @@ fn opaque_types_roundtrip_and_optional_fields_keep_immutability() {
     assert_eq!(UploadHandle::decode(&handle.encode()), handle);
     assert_eq!(Option::<BlobRef>::decode(""), None);
     assert_eq!(Option::<UploadHandle>::decode(""), None);
-    assert!(<Option<BlobRef> as FieldValue>::IMMUTABLE);
-    assert!(<Option<UploadHandle> as FieldValue>::IMMUTABLE);
-    assert!(<Option<Id<Attachment>> as FieldValue>::IMMUTABLE);
-    assert!(<Option<Id<Attachment>> as FieldValue>::REFERENCE);
-    assert!(!<Option<String> as FieldValue>::IMMUTABLE);
+    const {
+        assert!(<Option<BlobRef> as FieldValue>::IMMUTABLE);
+        assert!(<Option<UploadHandle> as FieldValue>::IMMUTABLE);
+        assert!(<Option<Id<Attachment>> as FieldValue>::IMMUTABLE);
+        assert!(<Option<Id<Attachment>> as FieldValue>::REFERENCE);
+        assert!(!<Option<String> as FieldValue>::IMMUTABLE);
+    }
     let schema = Attachment::definition();
     assert_eq!(schema.fields[0].max_bytes, 64);
     for field in &schema.fields[1..] {

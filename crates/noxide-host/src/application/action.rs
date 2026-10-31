@@ -107,7 +107,7 @@ pub(super) struct InvocationContext<'a> {
     subject: String,
     expires: i64,
     navigation: Option<NavigationPlan<'a>>,
-    upload: Option<super::blobs::UploadContext>,
+    upload: Option<super::blobs::UploadScope>,
 }
 
 #[derive(Clone, Copy)]
@@ -193,6 +193,11 @@ impl Application {
             .map(|(name, grant)| (name.clone(), grant.target.clone()))
             .collect();
         let input_hash = identity.as_str();
+        if let Some(scope) = &upload {
+            crate::blob_metadata::MetadataContext { tx: &mut tx }
+                .lock_form(scope.store.identity())
+                .await?;
+        }
         let claimed = tx.execute("INSERT INTO nx_receipts(nonce,subject,contract,action,input,outcome,expires) VALUES($1,$2,$3,$4,$5,'',$6) ON CONFLICT(nonce) DO NOTHING", &[
             nonce.as_str().into(), subject.as_str().into(), self.contract.as_str().into(), Param::Number(a.id.into()), input_hash.into(), Param::Number(expires),
         ]).await?;
@@ -217,6 +222,12 @@ impl Application {
         } else {
             None
         };
+        let upload = upload
+            .map(|scope| {
+                time.map(|time| scope.at(time))
+                    .ok_or_else(|| anyhow::anyhow!("upload lifecycle time missing"))
+            })
+            .transpose()?;
         let mut authority = self.authority_context(time)?;
         if self.authorize_create(a, &principal).is_err() {
             tx.rollback().await?;
@@ -474,7 +485,7 @@ impl Application {
         let identity = self
             .web_invocation_identity(binding, &token, &session, &principal, input_hash, &sealed)?;
         let context = InvocationContext {
-            upload: self.upload_context(binding.id, &token.nonce, &session, &principal, now)?,
+            upload: self.upload_scope(binding.id, &token.nonce, &session, &principal)?,
             action: core,
             input,
             principal,

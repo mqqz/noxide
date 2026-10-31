@@ -14,6 +14,14 @@ fn declarations() -> Manifest {
         initial: None,
         max_bytes: 67,
     });
+    m.resources[0].fields.push(TextField {
+        name: "extra".into(),
+        label: "Extra attachment".into(),
+        kind: FieldKind::Blob { max_bytes: 1024 },
+        optional: true,
+        initial: None,
+        max_bytes: 67,
+    });
     m.actions[0].inputs.push(Input {
         name: "attachment".into(),
         label: "Attachment".into(),
@@ -88,6 +96,14 @@ fn emit(bytes: &[u8]) -> String {
         .collect()
 }
 fn component() -> Vec<u8> {
+    component_with_read(true)
+}
+fn component_with_read(read: bool) -> Vec<u8> {
+    let read_call = if read {
+        "i32.const 2 local.get $id call $invoke drop"
+    } else {
+        ""
+    };
     let root = emit(
         &serde_json::to_vec(&ResponseIntent::Page(Document::new(
             "Upload",
@@ -126,7 +142,7 @@ fn component() -> Vec<u8> {
            local.get $id i64.const 10 i64.mul local.get $c i32.const 48 i32.sub i64.extend_i32_u i64.add local.set $id
            local.get $i i32.const 1 i32.add local.set $i br $digits
           end end
-          i32.const 2 local.get $id call $invoke drop
+          {read_call}
           {prefix}
           i32.const {target} local.set $i
           block $out_done loop $out
@@ -409,6 +425,9 @@ struct Case {
 }
 impl Case {
     async fn new(db: Option<Database>, manifest: Manifest) -> Self {
+        Self::with_component(db, manifest, component()).await
+    }
+    async fn with_component(db: Option<Database>, manifest: Manifest, bytes: Vec<u8>) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let db = db.unwrap_or_else(|| Database::sqlite(temp.path().join("blobs.db")));
         db.initialize().await.unwrap();
@@ -418,7 +437,7 @@ impl Case {
         let ceilings = BlobCeilings::default();
         let app = Arc::new(
             Application::new(
-                &component(),
+                &bytes,
                 &serde_json::to_vec(&manifest).unwrap(),
                 crate::blob_deployment::approval_digest(&manifest, Some(&ceilings)).unwrap(),
                 db.clone(),
@@ -459,7 +478,7 @@ impl Case {
             .unwrap();
         let mut tx = self
             .db
-            .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
+            .begin((Instant::now() + std::time::Duration::from_secs(2)).into_std())
             .await
             .unwrap();
         let blobs = tx
@@ -676,7 +695,7 @@ async fn postgres_nojs_upload_download_retry_and_gc() {
     use sqlx::Connection;
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-    for index in 0..5 {
+    for index in 0..9 {
         let name = format!("nx_p08_flow_{}_{}", std::process::id(), index);
         sqlx::query(&format!("CREATE DATABASE {name}"))
             .execute(&mut admin)
@@ -690,10 +709,14 @@ async fn postgres_nojs_upload_download_retry_and_gc() {
             1 => retry_and_delete(Some(db)).await,
             2 => restart_after_finalize(Some(db), false).await,
             3 => restart_after_finalize(Some(db), true).await,
-            _ => {
+            4 => {
                 #[cfg(unix)]
                 native_http(Some(db)).await;
             }
+            5 => attachment_wins_gc(Some(db)).await,
+            6 => absence_and_prefix_are_serialized(Some(db)).await,
+            7 => empty_cannot_discard_stage(Some(db)).await,
+            _ => lifecycle_clock_safety(Some(db)).await,
         }
         sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
             .execute(&mut admin)
@@ -1075,9 +1098,12 @@ async fn sqlite_forged_prefix_is_denied_before_any_quota_or_file() {
         ("", "0", "0", "0")
     );
 }
-#[tokio::test]
-async fn sqlite_anonymous_upload_requires_approval_and_retains_single_create_handover() {
+async fn anonymous_handover(absent: bool) {
     let mut m = declarations();
+    if absent {
+        m.resources[0].fields[1].optional = true;
+        m.actions[0].inputs[1].optional = true;
+    }
     m.routes[0].access = Access::PublicOptional;
     m.routes[0].operations.clear();
     m.routes[1].access = Access::PublicOptional;
@@ -1153,7 +1179,13 @@ async fn sqlite_anonymous_upload_requires_approval_and_retains_single_create_han
         app.clone(),
         crate::http::Origin::parse("http://localhost:8080").unwrap(),
     );
-    let mut request = post("", &page, "anonymous", "file.bin", b"abc");
+    let mut request = post(
+        "",
+        &page,
+        "anonymous",
+        if absent { "" } else { "file.bin" },
+        if absent { b"" } else { b"abc" },
+    );
     request.headers_mut().insert(
         "cookie",
         format!("noxide_anon={anonymous}").parse().unwrap(),
@@ -1171,7 +1203,13 @@ async fn sqlite_anonymous_upload_requires_approval_and_retains_single_create_han
         handover.contains("edit secret") || handover.contains("Edit secret"),
         "{handover}"
     );
-    let mut request = post("", &page, "anonymous", "ignored.bin", b"never stage again");
+    let mut request = post(
+        "",
+        &page,
+        "anonymous",
+        if absent { "" } else { "ignored.bin" },
+        if absent { b"" } else { b"never stage again" },
+    );
     request.headers_mut().insert(
         "cookie",
         format!("noxide_anon={anonymous}").parse().unwrap(),
@@ -1187,12 +1225,15 @@ async fn sqlite_anonymous_upload_requires_approval_and_retains_single_create_han
         .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
         .await
         .unwrap();
-    assert_eq!(
-        tx.fetch::<2>("SELECT state,CAST(anonymous AS TEXT) FROM nx_blobs", &[])
-            .await
-            .unwrap()[0],
-        ["attached".to_owned(), "1".to_owned()]
-    );
+    let rows = tx
+        .fetch::<2>("SELECT state,CAST(anonymous AS TEXT) FROM nx_blobs", &[])
+        .await
+        .unwrap();
+    if absent {
+        assert!(rows.is_empty());
+    } else {
+        assert_eq!(rows[0], ["attached".to_owned(), "1".to_owned()]);
+    }
     assert_eq!(
         tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_receipts", &[])
             .await
@@ -1200,6 +1241,12 @@ async fn sqlite_anonymous_upload_requires_approval_and_retains_single_create_han
         "1"
     );
     tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_anonymous_upload_requires_approval_and_retains_single_create_handover() {
+    anonymous_handover(false).await;
+    anonymous_handover(true).await;
 }
 
 #[cfg(unix)]
@@ -1392,4 +1439,790 @@ async fn sqlite_download_slot_and_no_poll_watchdog_hold_until_actual_native_stop
             .as_ref(),
         b"abc"
     );
+}
+
+#[tokio::test]
+async fn sqlite_live_stage_quota_is_per_account_across_sessions() {
+    let case = Case::new(None, declarations()).await;
+    let other = login(&case.app, "alice").await;
+    let mut leases = Vec::new();
+    for index in 0..5 {
+        let session = if index % 2 == 0 {
+            &case.session
+        } else {
+            &other
+        };
+        let page = String::from_utf8(case.app.view(session, 1, None).await.unwrap().body).unwrap();
+        let result = case
+            .app
+            .prepare_upload(
+                session,
+                1,
+                &prefix(&page, "note"),
+                Some(crate::blob_transport::AttachmentName::normalize("file.bin").unwrap()),
+            )
+            .await;
+        if index < 4 {
+            leases.push(result.unwrap());
+        } else {
+            assert!(
+                result.is_err(),
+                "another login must not create four additional stages"
+            );
+        }
+    }
+    drop(leases);
+    case.maintenance().await;
+    assert_eq!(case.state().await.2, "0");
+}
+#[tokio::test]
+async fn sqlite_canceled_committed_gc_claim_recovers_without_restart() {
+    let case = Case::new(None, declarations()).await;
+    let prepared = case
+        .app
+        .prepare_upload(
+            &case.session,
+            1,
+            &prefix(&case.page().await, "note"),
+            Some(crate::blob_transport::AttachmentName::normalize("file.bin").unwrap()),
+        )
+        .await
+        .unwrap();
+    let PreparedUpload::Created(row, lease) = prepared else {
+        panic!("reservation")
+    };
+    drop(lease);
+    let barrier = Arc::new(Barrier::default());
+    *case
+        .app
+        .blobs
+        .as_ref()
+        .unwrap()
+        .gc_after_commit
+        .lock()
+        .unwrap() = Some(barrier.clone());
+    let app = case.app.clone();
+    let task = tokio::spawn(async move {
+        app.reconcile_blobs(Instant::now() + std::time::Duration::from_secs(2))
+            .await
+    });
+    barrier.entered.notified().await;
+    assert_eq!(case.state().await.0, "deleting");
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    *case
+        .app
+        .blobs
+        .as_ref()
+        .unwrap()
+        .gc_after_commit
+        .lock()
+        .unwrap() = None;
+    case.maintenance().await;
+    let state = case.state().await;
+    assert_eq!(
+        (state.0.as_str(), state.2.as_str(), state.3.as_str()),
+        ("deleted", "0", "0")
+    );
+    assert!(
+        case.app
+            .blobs
+            .as_ref()
+            .unwrap()
+            .undispatched
+            .lock()
+            .unwrap()
+            .get(row.metadata.key.as_str())
+            .is_none()
+    );
+}
+async fn attachment_wins_gc(db: Option<Database>) {
+    use std::{future::Future, task::Poll};
+    let mut m = declarations();
+    m.actions[0].steps[0].guards.push(Guard {
+        condition: GuardCondition::Compare {
+            left: Value::Input("body".into()),
+            comparison: Comparison::Equal,
+            right: Value::Literal(Literal::Text("corrected".into())),
+        },
+        rejection: GuardRejection {
+            input: None,
+            message: "Correct this note".into(),
+        },
+    });
+    let case = Case::new(db, m).await;
+    let response = case
+        .router
+        .clone()
+        .oneshot(post(
+            &case.session,
+            &case.page().await,
+            "bad",
+            "file.bin",
+            b"abc",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let recovery = String::from_utf8(
+        to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let state = case.state().await;
+    let key = ObjectKey::parse(
+        case.app
+            .blobs
+            .as_ref()
+            .unwrap()
+            .workers
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    let mut tx = case
+        .db
+        .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    let row = MetadataContext { tx: &mut tx }
+        .object(&key)
+        .await
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+    let barrier = Arc::new(Barrier::default());
+    *case
+        .app
+        .blobs
+        .as_ref()
+        .unwrap()
+        .verification
+        .lock()
+        .unwrap() = Some(barrier.clone());
+    let app = case.app.clone();
+    let session = case.session.clone();
+    let token = crate::test_support::hidden(&recovery, "_submission");
+    let csrf = crate::test_support::hidden(&recovery, "_csrf");
+    let action = tokio::spawn(async move {
+        app.submit(
+            &session,
+            1,
+            &token,
+            &csrf,
+            Fields::from([
+                ("body".into(), "corrected".into()),
+                ("attachment".into(), state.1),
+            ]),
+        )
+        .await
+    });
+    barrier.entered.notified().await;
+    // Poll the competing provider attempt while attachment owns the stage lock.
+    // Its stale expired-stage claim must fail after the attachment commits.
+    let scope = case.app.blob_phase(std::time::Duration::from_secs(2));
+    let app = case.app.clone();
+    let gc = scope.run(async {
+        let admission = app.admit_invocation(false).await?;
+        let owner = admission.owner;
+        owner
+            .run(async {
+                let mut tx = app.database.begin(owner.work_deadline().into_std()).await?;
+                let result = MetadataContext { tx: &mut tx }
+                    .claim_collectable(
+                        &row,
+                        &app.blobs.as_ref().unwrap().process,
+                        row.metadata.expires,
+                    )
+                    .await;
+                tx.rollback().await?;
+                result.map(|_| ())
+            })
+            .await
+    });
+    tokio::pin!(gc);
+    std::future::poll_fn(|cx| {
+        assert!(gc.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    barrier.release.notify_one();
+    let (action, gc) = tokio::join!(action, gc);
+    action.unwrap().unwrap();
+    assert!(gc.is_err());
+    let state = case.state().await;
+    assert_eq!(
+        (state.0.as_str(), state.3.as_str(), state.4.as_str()),
+        ("attached", "3", "1")
+    );
+}
+#[tokio::test]
+async fn sqlite_attachment_row_lock_excludes_competing_gc() {
+    attachment_wins_gc(None).await;
+}
+
+struct WaitingBody {
+    first: Option<axum::body::Bytes>,
+    waiting: Option<tokio::sync::oneshot::Sender<()>>,
+}
+impl hyper::body::Body for WaitingBody {
+    type Data = axum::body::Bytes;
+    type Error = std::io::Error;
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<std::result::Result<hyper::body::Frame<Self::Data>, Self::Error>>>
+    {
+        if let Some(bytes) = self.first.take() {
+            return std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(bytes))));
+        }
+        if let Some(waiting) = self.waiting.take() {
+            let _ = waiting.send(());
+        }
+        std::task::Poll::Pending
+    }
+}
+#[tokio::test]
+async fn sqlite_slow_prefix_and_file_enforce_original_root_and_idle_deadlines() {
+    for file in [false, true] {
+        let case = Case::new(None, declarations()).await;
+        let (mut parts, body) = post(
+            &case.session,
+            &case.page().await,
+            "note",
+            "file.bin",
+            b"partial",
+        )
+        .into_parts();
+        let bytes = to_bytes(body, 65536).await.unwrap();
+        let first = if file {
+            bytes.slice(..bytes.len() - b"\r\n--test-boundary--\r\n".len())
+        } else {
+            axum::body::Bytes::from_static(b"--test-boundary\r\n")
+        };
+        parts.extensions.insert(crate::http::TransportDeadline(
+            Instant::now() + std::time::Duration::from_secs(60),
+        ));
+        let (waiting, entered) = tokio::sync::oneshot::channel();
+        let request = Request::from_parts(
+            parts,
+            Body::new(WaitingBody {
+                first: Some(first),
+                waiting: Some(waiting),
+            }),
+        );
+        let router = case.router.clone();
+        let task = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
+        entered.await.unwrap();
+        case.app
+            .request_lifecycle
+            .wait_idle_for_test()
+            .await
+            .unwrap();
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+        if file {
+            assert!(
+                !task.is_finished(),
+                "the approved transfer phase retains the original outer deadline"
+            );
+            tokio::time::advance(std::time::Duration::from_secs(13)).await;
+        }
+        tokio::time::resume();
+        let response = task.await.unwrap();
+        assert!(response.status().is_client_error());
+        let workers: Vec<_> = case
+            .app
+            .blobs
+            .as_ref()
+            .unwrap()
+            .workers
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        for worker in workers {
+            tokio::time::timeout(std::time::Duration::from_secs(2), worker.wait_stopped())
+                .await
+                .unwrap();
+        }
+        if file {
+            case.maintenance().await;
+        }
+        let state = case.state().await;
+        assert_eq!(
+            (state.2.as_str(), state.3.as_str(), state.4.as_str()),
+            ("0", "0", "0")
+        );
+        if file {
+            assert_eq!(state.0, "deleted");
+        } else {
+            assert!(state.0.is_empty());
+        }
+    }
+}
+#[tokio::test]
+async fn sqlite_optional_absence_is_host_canonical_and_no_blob_id_mints_a_download() {
+    let mut m = declarations();
+    m.resources[0].fields[1].optional = true;
+    m.actions[0].inputs[1].optional = true;
+    let case = Case::new(None, m).await;
+    let page = case.page().await;
+    let response = case
+        .router
+        .clone()
+        .oneshot(post(&case.session, &page, "note", "", b""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let original = response.headers()["location"].clone();
+    let mut tx = case
+        .db
+        .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    let rows = tx
+        .fetch::<1>("SELECT fields FROM nx_records", &[])
+        .await
+        .unwrap();
+    let fields: Fields = serde_json::from_str(&rows[0][0]).unwrap();
+    assert_eq!(fields.get("attachment").unwrap(), "");
+    assert_eq!(fields.get("extra").unwrap(), "");
+    assert_eq!(
+        tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_blobs", &[])
+            .await
+            .unwrap()[0][0],
+        "0"
+    );
+    tx.commit().await.unwrap();
+    let replay = case
+        .router
+        .clone()
+        .oneshot(post(&case.session, &page, "note", "", b""))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::SEE_OTHER);
+    assert_eq!(replay.headers()["location"], original);
+    let changed = case
+        .router
+        .clone()
+        .oneshot(post(&case.session, &page, "changed", "", b""))
+        .await
+        .unwrap();
+    assert!(changed.status().is_client_error());
+    let replacement = case
+        .router
+        .clone()
+        .oneshot(post(
+            &case.session,
+            &page,
+            "note",
+            "new.bin",
+            b"never staged",
+        ))
+        .await
+        .unwrap();
+    assert!(replacement.status().is_client_error());
+    assert_eq!(case.state().await.4, "1");
+    for path in [
+        format!("/_noxide/download?ticket=b1_{}", "a".repeat(64)),
+        "/_noxide/download?read=2&target=1&field=attachment".into(),
+    ] {
+        let response = case
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("Host", "localhost:8080")
+                    .header("Cookie", format!("session={}", case.session))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
+#[tokio::test]
+async fn sqlite_download_instruction_requires_successful_read_and_exact_projection() {
+    for read in [false, true] {
+        let mut m = declarations();
+        if read {
+            m.resources[0].fields.push(TextField {
+                name: "published".into(),
+                label: "Published".into(),
+                kind: FieldKind::Boolean,
+                optional: false,
+                initial: Some("true".into()),
+                max_bytes: 5,
+            });
+            m.operations[1].policy = Policy {
+                any: vec![vec![Predicate::Public]],
+            };
+            m.operations[1].visibility = Some(Visibility {
+                field: "published".into(),
+                equals: "true".into(),
+            });
+            m.operations[1].fields = Some(vec!["body".into()]);
+            m.routes[1].access = Access::PublicOptional;
+        }
+        let case = Case::with_component(None, m, component_with_read(read)).await;
+        let response = case
+            .router
+            .clone()
+            .oneshot(post(
+                &case.session,
+                &case.page().await,
+                "note",
+                "file.bin",
+                b"abc",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let id = response.headers()["location"]
+            .to_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            case.app.view(&case.session, 2, Some(id)).await.is_err(),
+            "an instruction alone cannot synthesize Read provenance or widen its projection"
+        );
+        assert_eq!(case.state().await.0, "attached");
+    }
+}
+
+async fn lifecycle_clock_safety(db: Option<Database>) {
+    let case = Case::new(db, declarations()).await;
+    assert!(crate::authority::uses_time(&case.app.manifest));
+    let mut tx = case
+        .db
+        .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    let clock=tx.fetch::<2>("SELECT CAST(lifecycle_ms AS TEXT),CAST(lifecycle_version AS TEXT) FROM nx_clock WHERE singleton=1",&[]).await.unwrap();
+    let future = (clock[0][0].parse::<i64>().unwrap() / 1000 + 7200) * 1000 + 123;
+    tx.execute("UPDATE nx_clock SET lifecycle_ms=$1,lifecycle_version=lifecycle_version+1 WHERE singleton=1",&[future.into()]).await.unwrap();
+    tx.commit().await.unwrap();
+    // The existing startup tick sees a lower wall sample and preserves the
+    // durable watermark, including its subsecond precision.
+    case.app
+        .request_lifecycle
+        .wait_idle_for_test()
+        .await
+        .unwrap();
+    case.app.activate().await.unwrap();
+    let original = case.page().await;
+    let response = case
+        .router
+        .clone()
+        .oneshot(post(&case.session, &original, "note", "file.bin", b"abc"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let id = response.headers()["location"]
+        .to_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut tx = case
+        .db
+        .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    let row = tx
+        .fetch::<2>(
+            "SELECT CAST(created_ms AS TEXT),CAST(expires_ms AS TEXT) FROM nx_blobs",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        row[0],
+        [
+            future.to_string(),
+            (future + STAGE_LIFETIME_MILLIS).to_string()
+        ]
+    );
+    let before=tx.fetch::<3>("SELECT CAST(observed AS TEXT),CAST(lifecycle_ms AS TEXT),CAST(lifecycle_version AS TEXT) FROM nx_clock",&[]).await.unwrap();
+    tx.commit().await.unwrap();
+    let detail = String::from_utf8(
+        case.app
+            .view(&case.session, 2, Some(id))
+            .await
+            .unwrap()
+            .body,
+    )
+    .unwrap();
+    let path = format!(
+        "/_noxide/download?{}",
+        detail
+            .split_once("href=\"/_noxide/download?")
+            .unwrap()
+            .1
+            .split('"')
+            .next()
+            .unwrap()
+    );
+    let get = || {
+        Request::builder()
+            .uri(&path)
+            .header("Host", "localhost:8080")
+            .header("Cookie", format!("session={}", case.session))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = case.router.clone().oneshot(get()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"abc"
+    );
+    let mut tx = case
+        .db
+        .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(tx.fetch::<3>("SELECT CAST(observed AS TEXT),CAST(lifecycle_ms AS TEXT),CAST(lifecycle_version AS TEXT) FROM nx_clock",&[]).await.unwrap(),before,"GET and download must not write clock state");
+    tx.commit().await.unwrap();
+    let fresh = case.page().await;
+    case.app
+        .request_lifecycle
+        .wait_idle_for_test()
+        .await
+        .unwrap();
+    // This expires the existing freshness lease; it does not order a race.
+    tokio::time::sleep(
+        crate::lifecycle_clock::FRESHNESS_LIMIT + std::time::Duration::from_millis(50),
+    )
+    .await;
+    let error = case
+        .app
+        .prepare_upload(
+            &case.session,
+            1,
+            &prefix(&fresh, "new"),
+            Some(crate::blob_transport::AttachmentName::normalize("new.bin").unwrap()),
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error.downcast_ref::<RequestError>(),
+        Some(RequestError::Busy)
+    ));
+    assert_eq!(
+        case.router.clone().oneshot(get()).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    assert!(
+        case.app
+            .reconcile_blobs(Instant::now() + std::time::Duration::from_secs(2))
+            .await
+            .is_err()
+    );
+    let replay = case
+        .router
+        .clone()
+        .oneshot(post(
+            &case.session,
+            &original,
+            "note",
+            "ignored.bin",
+            b"never staged",
+        ))
+        .await
+        .unwrap();
+    assert!(
+        replay.status() == StatusCode::OK || replay.status() == StatusCode::SEE_OTHER,
+        "known receipts recover before stale lifecycle checks"
+    );
+    assert_eq!(case.state().await.4, "1");
+}
+
+async fn absence_and_prefix_are_serialized(db: Option<Database>) {
+    use std::{future::Future, task::Poll};
+    let mut m = declarations();
+    m.resources[0].fields[1].optional = true;
+    m.actions[0].inputs[1].optional = true;
+    let case = Case::new(db, m).await;
+    let page = case.page().await;
+    let fields = prefix(&page, "note");
+    let barrier = Arc::new(Barrier::default());
+    *case
+        .app
+        .blobs
+        .as_ref()
+        .unwrap()
+        .verification
+        .lock()
+        .unwrap() = Some(barrier.clone());
+    let app = case.app.clone();
+    let session = case.session.clone();
+    let token = crate::test_support::hidden(&page, "_submission");
+    let csrf = crate::test_support::hidden(&page, "_csrf");
+    let absence = tokio::spawn(async move {
+        app.submit(
+            &session,
+            1,
+            &token,
+            &csrf,
+            Fields::from([
+                ("body".into(), "note".into()),
+                ("attachment".into(), String::new()),
+            ]),
+        )
+        .await
+    });
+    barrier.entered.notified().await;
+    let filename = crate::blob_transport::AttachmentName::normalize("new.bin").unwrap();
+    let competing = case
+        .app
+        .prepare_upload(&case.session, 1, &fields, Some(filename));
+    tokio::pin!(competing);
+    std::future::poll_fn(|cx| {
+        assert!(competing.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    barrier.release.notify_one();
+    let (absence, competing) = tokio::join!(absence, competing);
+    absence.unwrap().unwrap();
+    assert!(matches!(
+        competing.err().unwrap().downcast_ref::<RequestError>(),
+        Some(RequestError::InvalidRequest)
+    ));
+    let state = case.state().await;
+    assert_eq!(
+        (
+            state.0.as_str(),
+            state.2.as_str(),
+            state.3.as_str(),
+            state.4.as_str()
+        ),
+        ("", "0", "0", "1")
+    );
+    let mut tx = case
+        .db
+        .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    let records = tx
+        .fetch::<1>("SELECT fields FROM nx_records", &[])
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    let fields: Fields = serde_json::from_str(&records[0][0]).unwrap();
+    assert_eq!(fields["attachment"], "");
+    tx.commit().await.unwrap();
+}
+async fn empty_cannot_discard_stage(db: Option<Database>) {
+    let mut m = declarations();
+    m.resources[0].fields[1].optional = true;
+    m.actions[0].inputs[1].optional = true;
+    m.actions[0].steps[0].guards.push(Guard {
+        condition: GuardCondition::Compare {
+            left: Value::Input("body".into()),
+            comparison: Comparison::Equal,
+            right: Value::Literal(Literal::Text("corrected".into())),
+        },
+        rejection: GuardRejection {
+            input: None,
+            message: "Correct this note".into(),
+        },
+    });
+    let case = Case::new(db, m).await;
+    let response = case
+        .router
+        .clone()
+        .oneshot(post(
+            &case.session,
+            &case.page().await,
+            "bad",
+            "file.bin",
+            b"abc",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let recovery = String::from_utf8(
+        to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("_csrf", &crate::test_support::hidden(&recovery, "_csrf"))
+        .append_pair(
+            "_submission",
+            &crate::test_support::hidden(&recovery, "_submission"),
+        )
+        .append_pair("body", "corrected")
+        .append_pair("attachment", "")
+        .finish();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/actions/1")
+        .header("Host", "localhost:8080")
+        .header("Origin", "http://localhost:8080")
+        .header("Cookie", format!("session={}", case.session))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(Body::from(body))
+        .unwrap();
+    assert!(
+        case.router
+            .clone()
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status()
+            .is_client_error()
+    );
+    let state = case.state().await;
+    assert_eq!(
+        (state.0.as_str(), state.3.as_str(), state.4.as_str()),
+        ("staged", "3", "0")
+    );
+    let response = case
+        .router
+        .clone()
+        .oneshot(post(&case.session, &recovery, "corrected", "", b""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let state = case.state().await;
+    assert_eq!(
+        (state.0.as_str(), state.3.as_str(), state.4.as_str()),
+        ("attached", "3", "1")
+    );
+}
+#[tokio::test]
+async fn sqlite_inflight_optional_absence_blocks_file_prefix_and_empty_submit_cannot_drop_stage() {
+    absence_and_prefix_are_serialized(None).await;
+    empty_cannot_discard_stage(None).await;
+}
+
+#[tokio::test]
+async fn sqlite_blob_lifecycle_uses_durable_milliseconds_and_stale_reads_fail_closed() {
+    lifecycle_clock_safety(None).await;
 }

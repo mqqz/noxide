@@ -214,6 +214,10 @@ impl GcClaim {
 
 impl Metadata {
     #[cfg(test)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test-only quota/state reference model"
+    )]
     pub(crate) fn reserve(
         blob: BlobRef,
         pending_handle: UploadHandle,

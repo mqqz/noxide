@@ -415,6 +415,11 @@ impl Effects {
                     };
                     let raw = self.request.input.get(name).ok_or(ReferenceUnavailable)?;
                     if raw.is_empty() && destination.optional {
+                        self.upload
+                            .as_ref()
+                            .ok_or(ReferenceUnavailable)?
+                            .absent(&mut self.tx)
+                            .await?;
                         values.insert(assignment.field.clone(), String::new());
                         continue;
                     }

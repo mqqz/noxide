@@ -25,6 +25,11 @@ pub(crate) struct BlobRuntime {
     metadata_cursor: Mutex<String>,
     pub(crate) quarantined: AtomicBool,
     pub(crate) workers: Mutex<BTreeMap<String, IoWitness>>,
+    undispatched: Mutex<BTreeMap<String, IoWitness>>,
+    #[cfg(test)]
+    verification: Mutex<Option<Arc<Barrier>>>,
+    #[cfg(test)]
+    gc_after_commit: Mutex<Option<Arc<Barrier>>>,
 }
 impl BlobRuntime {
     pub(super) fn open(deployment: crate::BlobDeployment, policy: BlobPolicy) -> Result<Self> {
@@ -46,6 +51,11 @@ impl BlobRuntime {
             metadata_cursor: Mutex::new(String::new()),
             quarantined: AtomicBool::new(false),
             workers: Mutex::new(BTreeMap::new()),
+            undispatched: Mutex::new(BTreeMap::new()),
+            #[cfg(test)]
+            verification: Mutex::new(None),
+            #[cfg(test)]
+            gc_after_commit: Mutex::new(None),
         })
     }
     pub(crate) fn available(&self) -> Result<()> {
@@ -64,11 +74,31 @@ impl BlobRuntime {
 
 /// Sealed at verified web admission. It contains no guest-selected identity.
 #[derive(Clone)]
-pub(crate) struct UploadContext {
+pub(crate) struct UploadScope {
     pub(crate) store: BlobStore,
     pub(crate) binding: UploadBinding,
     verify: Arc<IoPool>,
+    #[cfg(test)]
+    barrier: Option<Arc<Barrier>>,
+}
+#[derive(Clone)]
+pub(crate) struct UploadContext {
+    scope: UploadScope,
     pub(crate) now: Timestamp,
+}
+impl std::ops::Deref for UploadContext {
+    type Target = UploadScope;
+    fn deref(&self) -> &UploadScope {
+        &self.scope
+    }
+}
+impl UploadScope {
+    pub(super) fn at(self, time: crate::lifecycle_clock::AttemptTime) -> UploadContext {
+        UploadContext {
+            scope: self,
+            now: time.timestamp(),
+        }
+    }
 }
 fn commitment(domain: &str, values: &[&str]) -> Result<Commitment> {
     let mut hash = Sha256::new();
@@ -140,14 +170,13 @@ impl Application {
         blobs.ready.store(true, Ordering::Release);
         Ok(())
     }
-    pub(super) fn upload_context(
+    pub(super) fn upload_scope(
         &self,
         binding: u32,
         nonce: &str,
         session: &Token,
         principal: &auth::Principal,
-        now: i64,
-    ) -> Result<Option<UploadContext>> {
+    ) -> Result<Option<UploadScope>> {
         let Some(blobs) = &self.blobs else {
             return Ok(None);
         };
@@ -169,9 +198,11 @@ impl Application {
             )?,
         };
         let binding_id = binding.to_string();
-        Ok(Some(UploadContext {
+        Ok(Some(UploadScope {
             store: blobs.store.clone(),
             verify: blobs.uploads.clone(),
+            #[cfg(test)]
+            barrier: blobs.verification.lock().unwrap().clone(),
             binding: UploadBinding {
                 slot: commitment("noxide/upload-slot/v1", &[&self.deployment, nonce])?,
                 subject,
@@ -181,9 +212,6 @@ impl Application {
                 )?,
                 input: commitment("noxide/upload-input/v1", &[&upload.input])?,
             },
-            now: Timestamp::from_unix_millis(
-                now.checked_mul(1000).context("upload clock overflow")?,
-            )?,
         }))
     }
     pub(crate) fn upload_ticket(&self, binding: u32, submission: &str) -> String {
@@ -213,13 +241,32 @@ impl UploadContext {
                 },
             )?
             .finish()
-            .await
+            .await?;
+        #[cfg(test)]
+        if let Some(barrier) = &self.barrier {
+            barrier.wait().await;
+        }
+        Ok(())
+    }
+    pub(crate) async fn absent(&self, tx: &mut Transaction) -> Result<()> {
+        ensure!(
+            MetadataContext { tx }
+                .slot(&self.binding.slot)
+                .await?
+                .is_none(),
+            repository::ReferenceUnavailable
+        );
+        #[cfg(test)]
+        if let Some(barrier) = &self.barrier {
+            barrier.wait().await;
+        }
+        Ok(())
     }
 }
 
 pub(crate) enum PreparedUpload {
     Existing { input: String, replay: bool },
-    Created(crate::blob_metadata::BlobRow, ReservationLease),
+    Created(Box<crate::blob_metadata::BlobRow>, ReservationLease),
     Absent,
 }
 impl Application {
@@ -392,8 +439,11 @@ impl Application {
                     now,
                 )?;
                 let context = self
-                    .upload_context(binding, &token.nonce, &session, &principal, now)?
+                    .upload_scope(binding, &token.nonce, &session, &principal)?
                     .context("upload context missing")?;
+                MetadataContext { tx: &mut tx }
+                    .lock_form(blobs.store.identity())
+                    .await?;
                 // This is the authoritative prior-commit check before accepting any
                 // file bytes. Existing nonce rows serialize the eventual core claim.
                 let receipt = self
@@ -402,9 +452,12 @@ impl Application {
                 if let Some([_, outcome]) = &receipt {
                     ensure!(!outcome.is_empty(), RequestError::OutcomeUnknown);
                 }
-                if receipt.is_none() {
+                let time = if receipt.is_none() {
                     blobs.available()?;
-                }
+                    Some(self.temporal_after_admission(&mut tx).await?.timestamp())
+                } else {
+                    None
+                };
                 let existing = MetadataContext { tx: &mut tx }
                     .slot(&context.binding.slot)
                     .await?;
@@ -417,7 +470,8 @@ impl Application {
                     ensure!(
                         replay
                             || (row.metadata.state == crate::blob_state::State::Staged
-                                && context.now < row.metadata.expires),
+                                && time.context("upload lifecycle time missing")?
+                                    < row.metadata.expires),
                         "upload is not reusable"
                     );
                     ensure!(
@@ -429,7 +483,16 @@ impl Application {
                         replay,
                     }
                 } else if receipt.is_some() {
-                    anyhow::bail!(RequestError::OutcomeUnknown)
+                    if input.optional && filename.is_none() {
+                        PreparedUpload::Existing {
+                            input: String::new(),
+                            replay: true,
+                        }
+                    } else if filename.is_some() {
+                        anyhow::bail!(RequestError::InvalidRequest)
+                    } else {
+                        anyhow::bail!(RequestError::OutcomeUnknown)
+                    }
                 } else if let Some(filename) = filename {
                     let FieldKind::UploadHandle { max_bytes } = input.kind else {
                         anyhow::bail!("invalid upload input");
@@ -439,7 +502,7 @@ impl Application {
                             binding: context.binding.clone(),
                             filename,
                             limit: max_bytes.min(blobs.policy.limits.file_bytes),
-                            now: context.now,
+                            now: time.context("upload lifecycle time missing")?,
                             policy: &blobs.policy,
                             capability: upload.anonymous,
                             store: blobs.store.identity(),
@@ -459,7 +522,7 @@ impl Application {
                             );
                             workers.insert(row.metadata.key.as_str().into(), witness.clone());
                             PreparedUpload::Created(
-                                row,
+                                Box::new(row),
                                 ReservationLease {
                                     witness,
                                     armed: true,
@@ -497,10 +560,8 @@ impl Application {
                 let deadline = owner.work_deadline();
                 let mut tx = self.database.begin(deadline.into_std()).await?;
                 self.admission(&mut tx, false).await?;
-                let now = self.observe_clock_write(&mut tx, security::now()?).await?;
-                let now = Timestamp::from_unix_millis(
-                    now.checked_mul(1000).context("upload clock overflow")?,
-                )?;
+                self.observe_clock_write(&mut tx, security::now()?).await?;
+                let now = self.temporal_after_admission(&mut tx).await?.timestamp();
                 let guard = IoGuard::new(deadline.into_std(), Arc::new(AtomicBool::new(false)));
                 let staged = MetadataContext { tx: &mut tx }
                     .publish(row, object, now, blobs.store.identity(), &guard)
@@ -883,10 +944,8 @@ impl Application {
                             .await?;
                         let mut tx = self.database.begin(deadline.into_std()).await?;
                         self.admission(&mut tx, false).await?;
-                        let seconds = self.observe_clock_write(&mut tx, security::now()?).await?;
-                        let now = Timestamp::from_unix_millis(
-                            seconds.checked_mul(1000).context("blob clock overflow")?,
-                        )?;
+                        self.observe_clock_write(&mut tx, security::now()?).await?;
+                        let now = self.temporal_after_admission(&mut tx).await?.timestamp();
                         for (key, physical) in batch.items {
                             let row = MetadataContext { tx: &mut tx }.object(&key).await?;
                             if row.is_none()
@@ -948,12 +1007,28 @@ impl Application {
                                 .finish()
                                 .await?
                                 .0;
-                            let stopped = blobs
+                            let matching = |witness: &IoWitness| {
+                                witness.stopped().is_some_and(|proof| {
+                                    proof.generation() == row.metadata.generation
+                                })
+                            };
+                            let witness = blobs
                                 .workers
                                 .lock()
                                 .unwrap()
                                 .get(row.metadata.key.as_str())
-                                .and_then(IoWitness::stopped);
+                                .filter(|w| matching(w))
+                                .cloned()
+                                .or_else(|| {
+                                    blobs
+                                        .undispatched
+                                        .lock()
+                                        .unwrap()
+                                        .get(row.metadata.key.as_str())
+                                        .filter(|w| matching(w))
+                                        .cloned()
+                                });
+                            let stopped = witness.as_ref().and_then(IoWitness::stopped);
                             let stopped_refs: Vec<_> = stopped.iter().collect();
                             let page = InspectionPage::plan(
                                 blobs.store.identity(),
@@ -972,6 +1047,18 @@ impl Application {
                             if kind.requires_operator() {
                                 blobs.quarantined.store(true, Ordering::Release);
                                 continue;
+                            }
+                            if kind == FindingKind::RetainTombstone {
+                                blobs
+                                    .workers
+                                    .lock()
+                                    .unwrap()
+                                    .remove(row.metadata.key.as_str());
+                                blobs
+                                    .undispatched
+                                    .lock()
+                                    .unwrap()
+                                    .remove(row.metadata.key.as_str());
                             }
                             if !kind.recoverable_hint() {
                                 continue;
@@ -1034,8 +1121,35 @@ impl Application {
                                     continue;
                                 }
                             };
+                            // Retain stopped proof for both possible commit
+                            // generations until native dispatch is authoritative.
+                            if let Some(witness) = witness {
+                                blobs
+                                    .workers
+                                    .lock()
+                                    .unwrap()
+                                    .insert(row.metadata.key.as_str().into(), witness);
+                            }
+                            let pending =
+                                IoWitness::pending(claim.key().clone(), claim.generation());
+                            blobs
+                                .undispatched
+                                .lock()
+                                .unwrap()
+                                .insert(row.metadata.key.as_str().into(), pending.clone());
+                            let dispatch = ReservationLease {
+                                witness: pending,
+                                armed: true,
+                            };
                             Self::blob_commit(&mut tx).await?;
                             ensure!(tx.commit_acknowledged(), "blob deletion claim unconfirmed");
+                            #[cfg(test)]
+                            {
+                                let barrier = { blobs.gc_after_commit.lock().unwrap().clone() };
+                                if let Some(barrier) = barrier {
+                                    barrier.wait().await;
+                                }
+                            }
                             let store = blobs.store.clone();
                             let key = claim.key().clone();
                             let job = blobs.uploads.try_start(
@@ -1050,6 +1164,12 @@ impl Application {
                                 .lock()
                                 .unwrap()
                                 .insert(row.metadata.key.as_str().into(), job.witness());
+                            blobs
+                                .undispatched
+                                .lock()
+                                .unwrap()
+                                .remove(row.metadata.key.as_str());
+                            dispatch.dispatched();
                             job.finish().await?;
                             let mut tx = self.database.begin(deadline.into_std()).await?;
                             self.admission(&mut tx, false).await?;
@@ -1129,5 +1249,19 @@ impl Application {
         }
         result?;
         anyhow::bail!("blob metadata commit lacks acknowledgment")
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct Barrier {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+#[cfg(test)]
+impl Barrier {
+    async fn wait(&self) {
+        self.entered.notify_one();
+        self.release.notified().await;
     }
 }

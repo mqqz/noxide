@@ -155,20 +155,13 @@ pub struct AnonymousCapabilityQuota {
 
 /// Operator configuration, never guest authority. Anonymous staging is denied
 /// unless both requested by the app and explicitly allowed by this policy.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct BlobCeilings {
     pub limits: BlobLimits,
     pub anonymous: Option<AnonymousCeilings>,
 }
-impl Default for BlobCeilings {
-    fn default() -> Self {
-        Self {
-            limits: BlobLimits::default(),
-            anonymous: None,
-        }
-    }
-}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnonymousCeilings {

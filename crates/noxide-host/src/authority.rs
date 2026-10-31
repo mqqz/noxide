@@ -47,10 +47,14 @@ pub(crate) struct Row<'a> {
 }
 
 pub(crate) fn uses_time(manifest: &Manifest) -> bool {
-    manifest
-        .resources
-        .iter()
-        .any(|resource| resource.expiry.is_some())
+    manifest.blobs.is_some()
+        || manifest.resources.iter().any(|resource| {
+            resource.expiry.is_some()
+                || resource
+                    .fields
+                    .iter()
+                    .any(|field| matches!(field.kind, noxide_protocol::FieldKind::Blob { .. }))
+        })
         || manifest.operations.iter().any(|op| {
             op.policy
                 .any

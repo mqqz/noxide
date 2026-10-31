@@ -720,13 +720,13 @@ impl BlobRow {
                 "invalid deleted charge"
             ),
         }
-        if metadata.state != State::Deleted {
-            if let Some(digest) = metadata.digest {
-                ensure!(
-                    metadata.expected_handle(metadata.bytes, digest)? == metadata.handle,
-                    "finalized handle does not match immutable object"
-                );
-            }
+        if metadata.state != State::Deleted
+            && let Some(digest) = metadata.digest
+        {
+            ensure!(
+                metadata.expected_handle(metadata.bytes, digest)? == metadata.handle,
+                "finalized handle does not match immutable object"
+            );
         }
         let name = AttachmentName::normalize(&filename)?;
         ensure!(name.as_str() == filename, "invalid stored filename");
@@ -782,7 +782,7 @@ fn hex(value: &[u8; 32]) -> String {
 fn hash(value: &str) -> Result<[u8; 32]> {
     ensure!(value.len() == 64, "invalid blob digest");
     let mut out = [0; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let digit = |b: u8| -> Result<u8> {
             match b {
                 b'0'..=b'9' => Ok(b - b'0'),
@@ -836,6 +836,82 @@ pub(crate) struct PairPreparation {
     pub(crate) record: PairRecord,
     pub(crate) step: PairStep,
     pub(crate) pending_inserted: bool,
+}
+
+impl MetadataContext<'_> {
+    /// Caller retains this process's exclusive store lease. A prior process can
+    /// no longer have a file descriptor or native worker on that store.
+    pub(crate) async fn recover_prior_upload(
+        &mut self,
+        row: &BlobRow,
+        fence: &crate::blob_store::ProcessFence,
+        now: Timestamp,
+    ) -> Result<(BlobRow, GcClaim)> {
+        let process = fence.process();
+        let paired = self.fetch::<1>("SELECT identity FROM nx_blob_store WHERE singleton=1 AND identity=$1 AND pair_state='paired'", &[fence.store().as_str().into()]).await?;
+        ensure!(
+            paired.len() == 1,
+            "blob process fence belongs to another store"
+        );
+        ensure!(
+            &row.process != process,
+            "live process upload cannot be abandoned"
+        );
+        let (transition, claim) = row.metadata.recover_prior_upload()?;
+        let next = self.persist_claim(row, &transition, process, now).await?;
+        Ok((next, claim))
+    }
+    pub(crate) async fn resume_deletion(
+        &mut self,
+        row: &BlobRow,
+        fence: &crate::blob_store::ProcessFence,
+        now: Timestamp,
+        stopped: Option<&crate::blob_io::StoppedIo>,
+    ) -> Result<(BlobRow, GcClaim)> {
+        let process = fence.process();
+        let paired = self.fetch::<1>("SELECT identity FROM nx_blob_store WHERE singleton=1 AND identity=$1 AND pair_state='paired'", &[fence.store().as_str().into()]).await?;
+        ensure!(
+            paired.len() == 1,
+            "blob process fence belongs to another store"
+        );
+        ensure!(
+            &row.process != process
+                || stopped
+                    .is_some_and(|s| s.key() == &row.metadata.key
+                        && s.generation() == row.metadata.generation),
+            "deletion worker may still be running"
+        );
+        let (transition, claim) = row.metadata.resume_deletion()?;
+        let next = self.persist_claim(row, &transition, process, now).await?;
+        Ok((next, claim))
+    }
+    pub(crate) async fn quarantine_unknown(
+        &mut self,
+        key: &ObjectKey,
+        bytes: u64,
+        paths: u8,
+        store: &ObjectKey,
+        process: &ObjectKey,
+        now: Timestamp,
+    ) -> Result<()> {
+        ensure!((1..=2).contains(&paths), "invalid orphan evidence");
+        let inserted = self.execute("INSERT INTO nx_blob_orphans(object_key,generation,state,first_seen_ms,claimed_ms,charged_bytes,charged_objects,owner_process) SELECT $1,1,'observed',$2,0,$3,$4,$5 WHERE NOT EXISTS(SELECT 1 FROM nx_blobs WHERE object_key=$1) ON CONFLICT(object_key) DO NOTHING", &[key.as_str().into(), now.unix_millis().into(), number(bytes)?, i64::from(paths).into(), process.as_str().into()]).await?;
+        if inserted == 1 {
+            let changed = self.execute("UPDATE nx_blob_store SET used_bytes=used_bytes+$2,objects=objects+$3,serial=serial+1 WHERE singleton=1 AND identity=$1 AND pair_state='paired' AND used_bytes<=9223372036854775807-$2 AND objects<=9223372036854775807-$3 AND serial<9223372036854775807", &[store.as_str().into(), number(bytes)?, i64::from(paths).into()]).await?;
+            ensure!(changed == 1, "orphan quota accounting overflow");
+        }
+        Ok(())
+    }
+}
+
+impl MetadataContext<'_> {
+    /// Upload prefix and core attempts take this existing paired row before
+    /// receipt probe/claim, then stage rows. Transport runs after its commit.
+    pub(crate) async fn lock_form(&mut self, store: &ObjectKey) -> Result<()> {
+        let changed=self.execute("UPDATE nx_blob_store SET serial=serial WHERE singleton=1 AND identity=$1 AND pair_state='paired'",&[store.as_str().into()]).await?;
+        ensure!(changed == 1, "blob store pairing unavailable");
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -959,71 +1035,5 @@ mod tests {
         ] {
             assert!(hash(&bad).is_err());
         }
-    }
-}
-
-impl MetadataContext<'_> {
-    /// Caller retains this process's exclusive store lease. A prior process can
-    /// no longer have a file descriptor or native worker on that store.
-    pub(crate) async fn recover_prior_upload(
-        &mut self,
-        row: &BlobRow,
-        fence: &crate::blob_store::ProcessFence,
-        now: Timestamp,
-    ) -> Result<(BlobRow, GcClaim)> {
-        let process = fence.process();
-        let paired = self.fetch::<1>("SELECT identity FROM nx_blob_store WHERE singleton=1 AND identity=$1 AND pair_state='paired'", &[fence.store().as_str().into()]).await?;
-        ensure!(
-            paired.len() == 1,
-            "blob process fence belongs to another store"
-        );
-        ensure!(
-            &row.process != process,
-            "live process upload cannot be abandoned"
-        );
-        let (transition, claim) = row.metadata.recover_prior_upload()?;
-        let next = self.persist_claim(row, &transition, process, now).await?;
-        Ok((next, claim))
-    }
-    pub(crate) async fn resume_deletion(
-        &mut self,
-        row: &BlobRow,
-        fence: &crate::blob_store::ProcessFence,
-        now: Timestamp,
-        stopped: Option<&crate::blob_io::StoppedIo>,
-    ) -> Result<(BlobRow, GcClaim)> {
-        let process = fence.process();
-        let paired = self.fetch::<1>("SELECT identity FROM nx_blob_store WHERE singleton=1 AND identity=$1 AND pair_state='paired'", &[fence.store().as_str().into()]).await?;
-        ensure!(
-            paired.len() == 1,
-            "blob process fence belongs to another store"
-        );
-        ensure!(
-            &row.process != process
-                || stopped
-                    .is_some_and(|s| s.key() == &row.metadata.key
-                        && s.generation() == row.metadata.generation),
-            "deletion worker may still be running"
-        );
-        let (transition, claim) = row.metadata.resume_deletion()?;
-        let next = self.persist_claim(row, &transition, process, now).await?;
-        Ok((next, claim))
-    }
-    pub(crate) async fn quarantine_unknown(
-        &mut self,
-        key: &ObjectKey,
-        bytes: u64,
-        paths: u8,
-        store: &ObjectKey,
-        process: &ObjectKey,
-        now: Timestamp,
-    ) -> Result<()> {
-        ensure!((1..=2).contains(&paths), "invalid orphan evidence");
-        let inserted = self.execute("INSERT INTO nx_blob_orphans(object_key,generation,state,first_seen_ms,claimed_ms,charged_bytes,charged_objects,owner_process) SELECT $1,1,'observed',$2,0,$3,$4,$5 WHERE NOT EXISTS(SELECT 1 FROM nx_blobs WHERE object_key=$1) ON CONFLICT(object_key) DO NOTHING", &[key.as_str().into(), now.unix_millis().into(), number(bytes)?, i64::from(paths).into(), process.as_str().into()]).await?;
-        if inserted == 1 {
-            let changed = self.execute("UPDATE nx_blob_store SET used_bytes=used_bytes+$2,objects=objects+$3,serial=serial+1 WHERE singleton=1 AND identity=$1 AND pair_state='paired' AND used_bytes<=9223372036854775807-$2 AND objects<=9223372036854775807-$3 AND serial<9223372036854775807", &[store.as_str().into(), number(bytes)?, i64::from(paths).into()]).await?;
-            ensure!(changed == 1, "orphan quota accounting overflow");
-        }
-        Ok(())
     }
 }
