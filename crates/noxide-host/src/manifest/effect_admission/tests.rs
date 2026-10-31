@@ -88,13 +88,10 @@ fn hash(m: &Manifest) -> [u8; 32] {
     Sha256::digest(serde_json::to_vec(&canonical).unwrap()).into()
 }
 #[test]
-fn explicit_identity_and_optional_disclosures_remain_disabled_until_integration() {
+fn explicit_identity_and_optional_disclosures_pass_independent_admission() {
     let m = fixture();
     admitted(&m).unwrap();
-    assert!(
-        super::super::validate(&m).is_err(),
-        "the production integration guard stays closed"
-    );
+    super::super::validate(&m).unwrap();
     let summary = disclosures(&m, 1).unwrap();
     assert!(summary.iter().any(|entry| entry.field.kind
         == FieldKind::Account {
@@ -153,9 +150,10 @@ fn forged_names_limits_kinds_and_domains_fail_closed() {
             1 => effects.emissions.push(effects.emissions[0].clone()),
             2 => effects.emissions[0].ordinal = 2,
             3 => effects.emissions[0].endpoint = "unknown".into(),
-            4 => effects.emissions[0]
-                .fields
-                .push(effects.emissions[0].fields[0].clone()),
+            4 => {
+                let duplicate = effects.emissions[0].fields[0].clone();
+                effects.emissions[0].fields.push(duplicate);
+            }
             5 => effects.emissions[0].fields[0].schema.kind = FieldKind::Blob { max_bytes: 10 },
             6 => {
                 effects.emissions[0].fields[0].schema.kind =

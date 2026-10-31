@@ -525,8 +525,18 @@ impl Case {
         tx.commit().await.unwrap();
         (records, receipts, outbox, rows)
     }
+    pub(in crate::application) async fn stop_clock(&mut self) {
+        self.clock
+            .take()
+            .expect("fixture clock already stopped")
+            .shutdown()
+            .await
+            .unwrap();
+    }
     pub(in crate::application) async fn close(mut self) {
-        self.clock.take().unwrap().shutdown().await.unwrap();
+        if self.clock.is_some() {
+            self.stop_clock().await;
+        }
         if let Some(jobs) = &self.app.jobs {
             jobs.lifecycle.wait_idle_for_test().await.unwrap();
         }

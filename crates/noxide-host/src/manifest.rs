@@ -307,10 +307,6 @@ fn unique(ids: impl Iterator<Item = u32>) -> Result<()> {
 pub use noxide_protocol::identifier;
 
 pub fn validate(m: &Manifest) -> Result<()> {
-    ensure!(
-        m.effects.is_none(),
-        "external effect integration unavailable"
-    );
     ensure!(m.version == VERSION, "unsupported manifest version");
     query::validate_declarations(m)?;
     crate::assets::validate_declarations(&m.assets)?;

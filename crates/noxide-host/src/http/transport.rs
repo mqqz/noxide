@@ -6,6 +6,8 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Transport f
 pub struct Listener(pub(super) ListenerKind);
 
 pub(super) enum ListenerKind {
+    #[cfg(test)]
+    AcceptError(Arc<tokio::sync::Notify>),
     Tcp(tokio::net::TcpListener),
     #[cfg(unix)]
     Unix {
@@ -16,6 +18,10 @@ pub(super) enum ListenerKind {
     },
 }
 impl Listener {
+    #[cfg(test)]
+    pub(crate) fn test_accept_error(release: Arc<tokio::sync::Notify>) -> Self {
+        Self(ListenerKind::AcceptError(release))
+    }
     pub async fn loopback(address: std::net::SocketAddr) -> Result<Self> {
         ensure!(address.ip().is_loopback(), "listener must bind loopback");
         Ok(Self(ListenerKind::Tcp(
@@ -66,6 +72,11 @@ impl Listener {
     }
     async fn accept(&self) -> std::io::Result<(Box<dyn Transport>, bool)> {
         match &self.0 {
+            #[cfg(test)]
+            ListenerKind::AcceptError(release) => {
+                release.notified().await;
+                Err(std::io::Error::other("test listener stopped"))
+            }
             ListenerKind::Tcp(l) => Ok((Box::new(l.accept().await?.0), false)),
             #[cfg(unix)]
             ListenerKind::Unix { listener, tor, .. } => {
@@ -263,12 +274,16 @@ pub async fn serve(
     let circuits: CircuitCounts = Arc::new(Mutex::new(HashMap::new()));
     let mut connections = tokio::task::JoinSet::new();
     tokio::pin!(shutdown);
+    let mut accept_error = None;
     loop {
         tokio::select! {
             _=&mut shutdown=>break,
             Some(_)=connections.join_next(),if !connections.is_empty()=>{},
             accepted=listener.accept()=>{
-                let (stream, tor)=accepted?;
+                let (stream, tor)=match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => { accept_error = Some(error); break; }
+                };
                 let Ok(permit)=slots.clone().try_acquire_owned() else {drop(stream);continue};
                 let router = router.clone();
                 let circuits = circuits.clone();
@@ -318,6 +333,9 @@ pub async fn serve(
     jobs_stopped?;
     ordinary_stopped?;
     clock_stopped?;
+    if let Some(error) = accept_error {
+        return Err(error.into());
+    }
     Ok(())
 }
 

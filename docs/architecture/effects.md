@@ -1,8 +1,10 @@
 # Approved external effects
 
-P11 integration is unfinished. Effect declarations currently fail host admission;
-no outbox delivery capability is enabled by this preparation. P10's existing
-service executor and reviewed, unregistered Tor transport are the foundations.
+P11 acceptance is unfinished. The isolated integration branch connects effect
+admission, the common action executor, outbox workers and the reviewed Tor
+transport. Delivery requires explicit operator endpoint and secret-slot grants.
+The accepted branch remains at P10 until the native and independent review gates
+pass. No deployment or live external delivery is authorized by this work.
 
 ## Frozen integration contract
 
