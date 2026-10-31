@@ -142,6 +142,8 @@ pub(crate) struct CapturedJob {
     pub(super) due: Timestamp,
     pub(super) input: Fields,
     pub(super) targets: BTreeMap<String, SealedTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) reconciled_from: Option<String>,
 }
 impl CapturedJob {
     #[allow(clippy::too_many_arguments)]
@@ -175,6 +177,7 @@ impl CapturedJob {
             due,
             input,
             targets,
+            reconciled_from: None,
         };
         job.validate()?;
         ensure!(
@@ -188,6 +191,10 @@ impl CapturedJob {
     }
     pub(crate) fn validate(&self) -> Result<()> {
         self.scope.validate()?;
+        ensure!(
+            self.reconciled_from.as_ref().is_none_or(|id| opaque(id)),
+            "invalid reconciliation parent"
+        );
         ensure!(
             opaque(&self.origin)
                 && noxide_protocol::identifier(&self.worker)
@@ -257,6 +264,54 @@ impl CapturedJob {
     }
     pub(crate) fn contract(&self) -> &str {
         &self.contract
+    }
+    pub(crate) fn reconciled_from(&self) -> Option<&str> {
+        self.reconciled_from.as_deref()
+    }
+    /// Operator-only fresh identity. The caller must have validated canonical
+    /// inputs and current eligible target reads using the existing action
+    /// adapter in this same transaction; previous seals confer no authority.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn reconcile(
+        previous: &Self,
+        declaration: &Schedule,
+        grant: &Grant,
+        action_version: u32,
+        due: Timestamp,
+        now: Timestamp,
+        input: Fields,
+        targets: BTreeMap<String, SealedTarget>,
+    ) -> Result<Self> {
+        let parent = previous.id()?;
+        let origin = format!(
+            "o1_{}",
+            digest(&(
+                1,
+                "operator-reconcile",
+                &parent,
+                &grant.scope,
+                &grant.contract,
+                &grant.epoch,
+                grant.version
+            ))?
+        );
+        let mut job = Self::capture(
+            declaration,
+            origin,
+            grant,
+            action_version,
+            due,
+            now,
+            input,
+            targets,
+        )?;
+        job.reconciled_from = Some(parent);
+        job.validate()?;
+        ensure!(
+            job.id()? != previous.id()?,
+            "reconciliation reused job identity"
+        );
+        Ok(job)
     }
 }
 
