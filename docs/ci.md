@@ -53,6 +53,17 @@ stock decrement, order/note creation, escaping, replay and stock rejection. Shop
 source is included in the example formatting check. These checks use fresh output
 directories and never reset an operator database.
 
+The same matrix builds the trusted explicit SDK fixture in
+`tools/fixtures/blob-app` and runs `tools/test_blob_http.py` against SQLite and a
+separate empty PostgreSQL database (`noxide_blobs`). The normal CLI calculates
+deployment approval, initializes the paired store and serves the application.
+The walkthrough checks staged-file reuse after rejection, atomic attachment and
+receipt replay, current private-read authorization, attachment headers and
+revocation. Forged CSRF, foreign nonce/session, raw blob IDs and Range requests
+must fail with the expected persisted resource, receipt and quota state. The
+PostgreSQL walkthrough requires `psql`; each run requires fresh output and a
+dedicated empty fixture database. It does not reset or delete existing data.
+
 `Hostile application builds` runs weekly and on manual dispatch. It checks
 build-script and procedural-macro containment in two fresh VMs, including host
 file/socket/network access, writes outside scratch, cross-build persistence, and

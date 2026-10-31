@@ -41,6 +41,7 @@ jobs:
         run: |
           cargo fmt --all --check
           rustfmt --edition 2024 --check examples/*/src/lib.rs
+          rustfmt --edition 2024 --check tools/fixtures/blob-app/src/lib.rs tools/fixtures/blob-app/src/bin/manifest.rs
       - name: Cache Rust dependencies and workspace builds
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -461,6 +462,23 @@ jobs:
             --output "$RUNNER_TEMP/noxide-ci/team-documents-postgres" \
             --host-cli target/debug/noxide \
             --postgres "${NOXIDE_TEST_POSTGRES%/*}/noxide_team_documents"
+      - name: Build and test private blob transfers
+        if: matrix.suite == 'examples'
+        env:
+          NOXIDE_BLOB_POSTGRES: postgresql://noxide:ci-only-password@127.0.0.1:5432/noxide_blobs
+        run: |
+          target/debug/noxide build --framework "$PWD" \
+            --app tools/fixtures/blob-app --name blob_app \
+            --output "$RUNNER_TEMP/noxide-ci/blob-app"
+          python3 tools/test_blob_http.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/blob-app" \
+            --output "$RUNNER_TEMP/noxide-ci/blob-sqlite" \
+            --host-cli target/debug/noxide
+          psql "$NOXIDE_TEST_POSTGRES" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE noxide_blobs'
+          python3 tools/test_blob_http.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/blob-app" \
+            --output "$RUNNER_TEMP/noxide-ci/blob-postgres" \
+            --host-cli target/debug/noxide --postgres "$NOXIDE_BLOB_POSTGRES"
       - name: Test NoJS browser flow with SQLite
         if: matrix.suite == 'sdk'
         run: |
