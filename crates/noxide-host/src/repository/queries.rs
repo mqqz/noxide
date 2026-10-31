@@ -104,7 +104,7 @@ impl FrontierContext<'_> {
             ListOrder::Field { .. } => after.map_or_else(
                 || Ok(String::new()),
                 |key| {
-                    plan.scalar(&self.manifest)?
+                    plan.scalar(self.manifest)?
                         .keyset_sql(self.tx.query_provider()?, key, params)
                 },
             ),
@@ -114,7 +114,7 @@ impl FrontierContext<'_> {
     fn query_order(&self, plan: &ListPlan) -> Result<String> {
         Ok(match &plan.order {
             ListOrder::Field { .. } => plan
-                .scalar(&self.manifest)?
+                .scalar(self.manifest)?
                 .order_sql(self.tx.query_provider()?)?,
             _ => format!("created_seq {},id {}", plan.direction(), plan.direction()),
         })
@@ -139,9 +139,9 @@ impl FrontierContext<'_> {
                 params.len()
             ));
         }
-        clause.push_str(&plan.selection_sql(&self.tx, params, self.params)?);
+        clause.push_str(&plan.selection_sql(self.tx, params, self.params)?);
         if let Some(range) = op.query.as_ref().and_then(|q| q.range.as_ref()) {
-            clause.push_str(&plan.scalar(&self.manifest)?.range_sql(
+            clause.push_str(&plan.scalar(self.manifest)?.range_sql(
                 self.tx.query_provider()?,
                 range,
                 self.params,
@@ -162,7 +162,7 @@ impl FrontierContext<'_> {
         RequestScope::checkpoint_current()?;
         ensure!(cap > 0 && cap <= 256, "query window cap");
         if let Some(key) = after {
-            plan.validate_cursor(&self.manifest, key)?;
+            plan.validate_cursor(self.manifest, key)?;
         }
         let posting = terms.is_some_and(|(_, tokens)| !tokens.is_empty())
             && plan.scope.is_none()
@@ -229,7 +229,7 @@ impl FrontierContext<'_> {
         for policy in policies {
             let mut params = vec![storage.into()];
             let policy =
-                crate::policy::sql(&self.tx, &policy, &self.principal, &mut params).join(" OR ");
+                crate::policy::sql(self.tx, &policy, self.principal, &mut params).join(" OR ");
             let restrictions = self.query_restrictions(op, plan, &mut params)?;
             let keyset = self.query_keyset(plan, after, &mut params)?;
             let upper = self.upper_clause("created_seq", &mut params)?;
@@ -248,7 +248,7 @@ impl FrontierContext<'_> {
                         let record = record.parse()?;
                         let key = match &plan.order {
                             ListOrder::Field { field, .. } => plan
-                                .scalar(&self.manifest)?
+                                .scalar(self.manifest)?
                                 .row_key(record, &Fields::from([(field.clone(), value)]))?,
                             _ => CursorKey::Created {
                                 sequence: seq.parse()?,

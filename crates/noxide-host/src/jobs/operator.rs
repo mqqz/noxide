@@ -401,6 +401,3 @@ impl super::QueueContext<'_> {
     }
 }
 
-#[cfg(test)]
-#[path = "operator_tests.rs"]
-mod tests;

@@ -16,7 +16,7 @@ pub(crate) struct QueueContext<'a> {
 }
 
 pub(crate) enum Execution {
-    Ready(VerifiedJob),
+    Ready(Box<VerifiedJob>),
     /// Complete receipt has been validated by the existing semantic decoder.
     Recovered(String),
     Paused,
@@ -493,11 +493,11 @@ impl QueueContext<'_> {
         ensure!(row.attempts > 0, "job has no claimed attempt");
         Ok((
             capture,
-            Execution::Ready(VerifiedJob {
+            Execution::Ready(Box::new(VerifiedJob {
                 claim: claim.clone(),
                 job: row.job,
                 grant,
-            }),
+            })),
         ))
     }
     #[cfg(test)]

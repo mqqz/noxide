@@ -325,9 +325,11 @@ pub(crate) struct Claim {
     pub(super) exhausted: bool,
 }
 impl Claim {
+    #[cfg(test)]
     pub(crate) fn id(&self) -> &str {
         &self.id
     }
+    #[cfg(test)]
     pub(crate) fn fence(&self) -> i64 {
         self.fence
     }
@@ -372,6 +374,7 @@ impl VerifiedJob {
     pub(crate) fn invocation_digest(&self) -> Result<String> {
         self.job.invocation_digest()
     }
+    #[cfg(test)]
     pub(crate) fn fence(&self) -> i64 {
         self.claim.fence
     }
