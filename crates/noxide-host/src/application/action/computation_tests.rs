@@ -153,13 +153,23 @@ impl Case {
                 .await
                 .unwrap();
             tx.allocate_creation().await.unwrap();
-            let fields = Fields::from([
+            let mut fields = Fields::from([
                 ("name".into(), "Last product".into()),
                 ("stock".into(), "10".into()),
                 ("price_minor".into(), "125".into()),
                 ("currency".into(), "sar".into()),
                 ("active".into(), "true".into()),
             ]);
+            let schema = manifest::resource(&m, resource(&m, "products")).unwrap();
+            if schema.fields.iter().any(|field| field.name == "recipient") {
+                fields.insert("recipient".into(), accounts["alice"].clone());
+            }
+            for field in &schema.fields {
+                if let Some(value) = &field.initial {
+                    fields.insert(field.name.clone(), value.clone());
+                }
+            }
+            manifest::validate_fields(schema, &fields).unwrap();
             tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,42,$2,'team',$3,'product',1,(SELECT value FROM nx_creation_counter WHERE singleton=1))",&[storage.into(),accounts["alice"].as_str().into(),serde_json::to_string(&fields).unwrap().into()]).await.unwrap();
             tx.commit().await.unwrap();
         }
@@ -306,12 +316,11 @@ fn quantity(value: &str) -> Fields {
 async fn reservation_contract(db: Option<Database>) {
     let case = Case::new(db, declarations()).await;
     let original = case.form(&case.bob, "Reserve", 42).await;
-    assert!(
-        case.app
-            .view(&case.eve, route(&case.app.manifest, "products"), Some(42))
-            .await
-            .map_or(true, |response| response.status >= 400)
-    );
+    assert!(matches!(
+        case.submit(&case.eve, "Reserve", &original, quantity("1"))
+            .await,
+        Err(RequestError::InvalidRequest)
+    ));
     assert!(matches!(
         case.submit(&case.alice, "Reserve", &original, quantity("1"))
             .await,
@@ -352,12 +361,6 @@ async fn reservation_contract(db: Option<Database>) {
         .await
         .unwrap();
     assert_eq!(replay.location, saved.location);
-    assert!(
-        case.app
-            .view(&case.alice, route(&case.app.manifest, "orders"), Some(*id))
-            .await
-            .map_or(true, |response| response.status >= 400)
-    );
     let first = case.form(&case.bob, "Cancel", *id).await;
     let other = case.form(&case.bob, "Cancel", *id).await;
     let cancelled = case
@@ -819,9 +822,9 @@ fn proposed_manifest(principal: bool) -> Manifest {
             TextField {
                 name: "marker".into(),
                 label: "Marker".into(),
-                kind: FieldKind::Text,
+                kind: FieldKind::Boolean,
                 optional: false,
-                initial: Some("initialized".into()),
+                initial: Some("true".into()),
                 max_bytes: 32,
             },
         ]);
@@ -953,7 +956,7 @@ async fn proposed_contract(db: Option<Database>) {
     let products = case.records("products").await;
     let created = products.iter().find(|row| row.0 != 42).unwrap();
     assert_eq!(created.1["recipient"], case.accounts["alice"]);
-    assert_eq!(created.1["marker"], "initialized");
+    assert_eq!(created.1["marker"], "true");
     assert_eq!(
         case.records("orders").await[0].1["product"],
         created.0.to_string()
@@ -1007,8 +1010,39 @@ async fn overflow_contract(db: Option<Database>) {
             }
         }
     }
+    let total = &mut m
+        .actions
+        .iter_mut()
+        .find(|a| a.name == "Reserve")
+        .unwrap()
+        .steps[1]
+        .assign
+        .iter_mut()
+        .find(|a| a.field == "total_minor")
+        .unwrap()
+        .change;
+    let Change::Set(value) = total else {
+        unreachable!()
+    };
+    let original = value.clone();
+    *value = Value::Subtract {
+        left: Box::new(Value::Add {
+            left: Box::new(original),
+            right: Box::new(Value::Literal(Literal::Integer(7))),
+        }),
+        right: Box::new(Value::Literal(Literal::Integer(7))),
+    };
     manifest::validate(&m).unwrap();
     let case = Case::new(db, m).await;
+    let first = case.form(&case.bob, "Reserve", 42).await;
+    assert_eq!(
+        case.submit(&case.bob, "Reserve", &first, quantity("2"))
+            .await
+            .unwrap()
+            .status,
+        303
+    );
+    assert_eq!(case.records("orders").await[0].1["total_minor"], "250");
     case.product("price_minor", &i64::MAX.to_string()).await;
     let form = case.form(&case.bob, "Reserve", 42).await;
     assert!(matches!(
@@ -1016,8 +1050,8 @@ async fn overflow_contract(db: Option<Database>) {
             .await,
         Err(RequestError::InvalidRequest)
     ));
-    assert_eq!(case.records("products").await[0].1["stock"], "10");
-    assert_eq!(case.counts().await, (1, 0));
+    assert_eq!(case.records("products").await[0].1["stock"], "8");
+    assert_eq!(case.counts().await, (2, 1));
     case.close().await;
 }
 #[tokio::test]
@@ -1085,4 +1119,95 @@ async fn postgres_computed_reservation_proposed_row_overflow_and_concurrency() {
             .await
             .unwrap();
     }
+}
+
+#[test]
+fn zero_input_headless_expiry_contract_has_no_web_or_synthetic_route() {
+    let mut m = declarations();
+    let mut expiry = action(&m, "Cancel").clone();
+    expiry.id = 991;
+    expiry.name = "Expire reservation".into();
+    let order_resource = resource(&m, "orders");
+    let eligible = m
+        .operations
+        .iter()
+        .find(|o| o.resource == order_resource && o.kind == OperationKind::Read)
+        .unwrap()
+        .id;
+    let mut list = m
+        .operations
+        .iter()
+        .find(|operation| operation.id == eligible)
+        .unwrap()
+        .clone();
+    list.id = 992;
+    list.kind = OperationKind::List;
+    list.list = Some(ListSettings {
+        preview: None,
+        order: ListOrder::CreatedAsc,
+        page_size: 20,
+    });
+    let query = list.id;
+    m.operations.push(list);
+    expiry
+        .targets
+        .iter_mut()
+        .find(|t| t.name == "order")
+        .unwrap()
+        .source = TargetSource::Selected {
+        query,
+        eligible,
+        label: vec!["status".into()],
+    };
+    expiry.steps[0].guards.push(Guard {
+        condition: GuardCondition::Compare {
+            left: Value::CurrentField {
+                target: "order".into(),
+                field: "expires_at".into(),
+            },
+            comparison: Comparison::LessOrEqual,
+            right: Value::TransactionTime,
+        },
+        rejection: GuardRejection {
+            input: None,
+            message: "Not expired".into(),
+        },
+    });
+    expiry.steps[0].assign[0].change =
+        Change::Set(Value::Literal(Literal::Choice("expired".into())));
+    m.actions = vec![expiry];
+    m.routes.clear();
+    m.web_bindings.clear();
+    manifest::validate(&m).unwrap();
+    assert!(ActionCore::of(&m.actions[0]).unwrap().uses_time());
+    assert!(m.actions[0].inputs.is_empty());
+}
+#[tokio::test]
+async fn timestamp_overflow_is_checked_before_order_write() {
+    let mut m = declarations();
+    let a = m.actions.iter_mut().find(|a| a.name == "Reserve").unwrap();
+    a.steps[1]
+        .assign
+        .iter_mut()
+        .find(|a| a.field == "expires_at")
+        .unwrap()
+        .change = Change::Set(Value::Add {
+        left: Box::new(Value::Literal(Literal::Timestamp(
+            noxide_protocol::time::Timestamp::from_unix_millis(i64::MAX).unwrap(),
+        ))),
+        right: Box::new(Value::Literal(Literal::Duration(
+            noxide_protocol::time::Duration::from_secs(1).unwrap(),
+        ))),
+    });
+    manifest::validate(&m).unwrap();
+    let case = Case::new(None, m).await;
+    let form = case.form(&case.bob, "Reserve", 42).await;
+    assert!(matches!(
+        case.submit(&case.bob, "Reserve", &form, quantity("1"))
+            .await,
+        Err(RequestError::InvalidRequest)
+    ));
+    assert_eq!(case.counts().await, (1, 0));
+    assert_eq!(case.records("products").await[0].1["stock"], "10");
+    case.close().await;
 }

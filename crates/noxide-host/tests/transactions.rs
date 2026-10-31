@@ -31,7 +31,7 @@ fn declarations() -> Manifest {
         ],
         "actions": [
             {"id":1,"version":1,"name":"Place order","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[1]}},"revision":"identity","projection":null,"inspect":null}],"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20},{"name":"body","label":"Note","kind":"text","optional":false,"max_bytes":200}],"steps":[{"guards": [], "operation":2,"target":{"named":"target"},"assign":[{"field":"stock","change":{"decrease":{"by":{"input":"quantity"},"rejection":{"input":"quantity","message":"Not enough stock"}}}}]},{"guards": [], "operation":3,"target":"none","assign":[{"field":"quantity","change":{"set":{"input":"quantity"}}},{"field":"product","change":{"set":{"target":"target"}}}]},{"guards": [], "operation":5,"target":"none","assign":[{"field":"body","change":{"set":{"input":"body"}}},{"field":"order","change":{"set":{"created":1}}}]}]},
-            {"id":2,"version":1,"name":"Edit stock","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[1]}},"revision":"exact","projection":null,"inspect":{"guards": [], "operation":1,"fields":["stock"]}}],"inputs":[{"name":"stock","label":"Stock","kind":{"integer":{"min":0,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"guards": [], "operation":2,"target":{"named":"target"},"assign":[{"field":"stock","change":{"set":{"input":"stock"}}}]}]},
+            {"id":2,"version":1,"name":"Edit stock","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[1]}},"revision":"exact","projection":null,"inspect":{"operation":1,"fields":["stock"]}}],"inputs":[{"name":"stock","label":"Stock","kind":{"integer":{"min":0,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"guards": [], "operation":2,"target":{"named":"target"},"assign":[{"field":"stock","change":{"set":{"input":"stock"}}}]}]},
             {"id":3,"version":1,"name":"Two signed steps","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[1]}},"revision":"identity","projection":null,"inspect":null}],"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"guards": [], "operation":2,"target":{"named":"target"},"assign":[{"field":"stock","change":{"increase":{"by":{"input":"quantity"},"rejection":{"input":"quantity","message":"Stock limit"}}}}]},{"guards": [], "operation":2,"target":{"named":"target"},"assign":[{"field":"stock","change":{"decrease":{"by":{"input":"quantity"},"rejection":{"input":"quantity","message":"Not enough stock"}}}}]}]},
             {"id":4,"version":1,"name":"Open then order","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[1]}},"revision":"exact","projection":null,"inspect":null}],"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"guards": [], "operation":2,"target":{"named":"target"},"assign":[{"field":"open","change":{"set":{"literal":{"boolean":true}}}}]},{"guards": [], "operation":3,"target":"none","assign":[{"field":"quantity","change":{"set":{"input":"quantity"}}},{"field":"product","change":{"set":{"target":"target"}}}]}]},
             {"id":5,"version":1,"name":"Close then order","targets":[{"name":"target","resource":1,"source":{"page":{"reads":[1]}},"revision":"exact","projection":null,"inspect":null}],"inputs":[{"name":"quantity","label":"Quantity","kind":{"integer":{"min":1,"max":10}},"optional":false,"max_bytes":20}],"steps":[{"guards": [], "operation":2,"target":{"named":"target"},"assign":[{"field":"open","change":{"set":{"literal":{"boolean":false}}}}]},{"guards": [], "operation":3,"target":"none","assign":[{"field":"quantity","change":{"set":{"input":"quantity"}}},{"field":"product","change":{"set":{"target":"target"}}}]}]},
@@ -825,13 +825,30 @@ async fn contract_changes_invalidate_tokens(mut case: Case) {
         } else {
             order("1", "unchanged input")
         };
-        assert!(
-            matches!(
+        let result = changed
+            .submit(&case.alice, action, &token, &csrf, input.clone())
+            .await;
+        if scenario == 1 {
+            assert_eq!(
+                result.unwrap().status,
+                303,
+                "assignment order must preserve the approved contract"
+            );
+            let committed = case.inspect.state().await;
+            assert_ne!(committed, before);
+            assert_eq!(
                 changed
                     .submit(&case.alice, action, &token, &csrf, input)
-                    .await,
-                Err(noxide_host::RequestError::InvalidRequest)
-            ),
+                    .await
+                    .unwrap()
+                    .status,
+                303
+            );
+            assert_eq!(case.inspect.state().await, committed);
+            continue;
+        }
+        assert!(
+            matches!(result, Err(noxide_host::RequestError::InvalidRequest)),
             "changed contract scenario {scenario}"
         );
         assert_eq!(

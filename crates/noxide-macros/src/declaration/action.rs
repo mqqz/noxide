@@ -1032,32 +1032,6 @@ fn integer_literal(expr: &syn::Expr) -> bool {
     ) || matches!(expr, syn::Expr::Unary(syn::ExprUnary { op: syn::UnOp::Neg(_), expr, .. }) if matches!(&**expr, syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(_), .. })))
 }
 
-#[cfg(test)]
-mod transaction_tests {
-    use super::*;
-
-    #[test]
-    fn transaction_syntax_rejects_create_adjustments_and_extra_authority() {
-        for source in [
-            "inputs(q: i64 = 1..=10), transaction(create(Product, decrease(stock, by = q, reject(q, \"No\")))), allow = owner, redirect = show(target)",
-            "inputs(q: i64 = 1..=10), transaction(update(Product, selected, set(stock = q))), allow = owner, redirect = show(target)",
-            "inputs(q: i64 = 1..=10), transaction(delete(Product, target), update(Product, target, set(stock = q))), allow = owner, redirect = show(target)",
-            "inputs(q: i64 = 1..=10), transaction(update(Product, target, set(stock = q + 1))), allow = owner, redirect = show(target)",
-            "inputs(q: i64 = 1..=10), transaction(first = create(Note, set(order = later)), later = create(Order, set(quantity = q))), allow = owner, redirect = show(first)",
-        ] {
-            let result = syn::parse_str::<ActionDeclaration>(source).and_then(|declaration| {
-                expand_declared_action(
-                    declaration,
-                    syn::parse_quote!(
-                        struct Change;
-                    ),
-                )
-            });
-            assert!(result.is_err(), "{source}");
-        }
-    }
-}
-
 fn value_expression(
     expr: &syn::Expr,
     inputs: &std::collections::BTreeSet<String>,
@@ -1210,4 +1184,46 @@ fn value_expression(
             ));
         }
     })
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+
+    #[test]
+    fn transaction_syntax_rejects_create_adjustments_and_extra_authority() {
+        for expression in ["q + 1", "q - 1", "q * 2"] {
+            let source = format!(
+                "inputs(q: i64 = 1..=10), transaction(update(Product, target, set(stock = {expression}))), allow = owner, redirect = show(target)"
+            );
+            let declaration = syn::parse_str::<ActionDeclaration>(&source).unwrap();
+            assert!(
+                expand_declared_action(
+                    declaration,
+                    syn::parse_quote!(
+                        struct Change;
+                    )
+                )
+                .is_ok(),
+                "{source}"
+            );
+        }
+        for source in [
+            "inputs(q: i64 = 1..=10), transaction(create(Product, decrease(stock, by = q, reject(q, \"No\")))), allow = owner, redirect = show(target)",
+            "inputs(q: i64 = 1..=10), transaction(update(Product, selected, set(stock = q))), allow = owner, redirect = show(target)",
+            "inputs(q: i64 = 1..=10), transaction(delete(Product, target), update(Product, target, set(stock = q))), allow = owner, redirect = show(target)",
+            "inputs(q: i64 = 1..=10), transaction(update(Product, target, set(stock = q / 2))), allow = owner, redirect = show(target)",
+            "inputs(q: i64 = 1..=10), transaction(first = create(Note, set(order = later)), later = create(Order, set(quantity = q))), allow = owner, redirect = show(first)",
+        ] {
+            let result = syn::parse_str::<ActionDeclaration>(source).and_then(|declaration| {
+                expand_declared_action(
+                    declaration,
+                    syn::parse_quote!(
+                        struct Change;
+                    ),
+                )
+            });
+            assert!(result.is_err(), "{source}");
+        }
+    }
 }

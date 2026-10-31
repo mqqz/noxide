@@ -66,6 +66,7 @@ impl Admission {
     ) -> Result<Domain> {
         self.walk(m, a, index, value, guard, used, 1)
     }
+    #[allow(clippy::too_many_arguments)]
     fn walk<'a>(
         &mut self,
         m: &Manifest,

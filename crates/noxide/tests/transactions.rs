@@ -326,7 +326,7 @@ struct TimedValue {
     #[id]
     id: Id<Self>,
     #[field()]
-    at: noxide::Timestamp,
+    pub at: noxide::Timestamp,
     #[field(max_duration_seconds = 3600)]
     duration: noxide::Duration,
 }
@@ -476,4 +476,35 @@ fn per_step_policies_equal_explicit_ordinary_operations() {
             )
             .finish()
     );
+}
+
+#[derive(Resource)]
+#[resource(key = "temporal_settings")]
+pub struct TemporalSettings {
+    #[id]
+    id: Id<Self>,
+    #[field()]
+    pub at: noxide::Timestamp,
+    #[field(max_duration_seconds = 60)]
+    pub ttl: noxide::Duration,
+}
+#[action(create(TemporalSettings),fields(at,ttl),allow=owner,redirect=show_order)]
+struct CreateTemporalSettings;
+#[test]
+fn temporal_resource_and_form_inputs_keep_distinct_bounded_types() {
+    use noxide::__private::FieldKind;
+    let resource = TemporalSettings::definition();
+    assert_eq!(resource.fields[0].kind, FieldKind::Timestamp);
+    assert_eq!(
+        resource.fields[1].kind,
+        FieldKind::Duration { max_millis: 60_000 }
+    );
+    let definition = CreateTemporalSettings::definition();
+    assert_eq!(definition.inputs[0].kind, FieldKind::Timestamp);
+    assert_eq!(
+        definition.inputs[1].kind,
+        FieldKind::Duration { max_millis: 60_000 }
+    );
+    assert_eq!(definition.inputs[1].canonical("60000").unwrap(), "60000");
+    assert!(definition.inputs[1].canonical("60001").is_err());
 }

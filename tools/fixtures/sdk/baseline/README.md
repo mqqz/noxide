@@ -1,7 +1,7 @@
 # Frozen SDK contracts
 
 Captured with the trusted local SDK harness and re-recorded for declared action
-transactions. Action input schemas, ordered step assignments, revision rules,
+transactions. Action input schemas, ordered mutation steps and field-keyed assignments, revision rules,
 operation reference eligibility and navigation sources replace the prior contract. The SDK equivalence fixtures define the application
 being compared; query-track snapshots may evolve independently. In particular,
 `public-articles-simple.rs` is paired with `public-articles-explicit.rs`, while
@@ -12,6 +12,12 @@ host-computed approved contract digests. Do not normalize away identities,
 policies, ordering, layouts or projections. `forum.json` preserves the pre-layout
 conversion pair, while `forum-layout.json` represents the actual post-PR example.
 The harness compares frozen -> shorthand -> explicit and checks approval hashes.
+
+Protocol 8 adds required empty guard vectors to existing actions and typed
+computed values to the reservation pair. Assignment maps are hashed by field;
+mutation-step order remains semantic. Every listed approval digest is deliberately
+regenerated and requires operator reapproval. The query public-articles snapshot
+remains its frozen source without the live example's asset declarations.
 
 These are contract baselines, not Wasm binary hashes, deployment approvals,
 wire-token ciphertext snapshots or proof of runtime security.

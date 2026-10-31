@@ -3,8 +3,9 @@
 This trusted example reserves inventory at the product price reviewed by the
 customer. Prices and totals are integer minor units; it does not process payments.
 
-Build with the normal `noxide build --local` workflow, approve the generated
-contract, then serve its bundle. Create two active accounts in the same tenant.
+Build with `noxide build --app examples/reservations --name reservations
+--framework . --output NEW_DIR`, approve the generated contract, then serve its
+bundle. Create two active accounts in the same tenant.
 The product owner creates a product; another account can review the product and
 submit a quantity from one to ten. The host decrements stock and creates the order
 in one transaction. A changed product revision requires another review.
