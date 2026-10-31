@@ -373,22 +373,112 @@ async fn provider(database: Database) {
         deployment: app.generation.get().unwrap().clone(),
         tenant: "alpha".into(),
     };
-    let (cutoff,cutoff_seq,cursor)=request(&app).run(async {
-        let mut tx=database.begin(std::time::Instant::now()+app.runtime.limits().wall_time).await.unwrap();app.admission(&mut tx,false).await.unwrap();let mut calls=16;
-        calls-=1;let time=app.temporal_after_admission(&mut tx).await.unwrap();
-        let locked=QueueContext{tx:&mut tx,calls:&mut calls}.schedule_grant(&scope,"expiry",&app.contract).await.unwrap();
-        let mut batch=QueueContext{tx:&mut tx,calls:&mut calls}.begin_recurrence(&scope,&schedule,time.timestamp()).await.unwrap().unwrap();
-        let page=app.select_recurring(&mut tx,&locked,&schedule,time,batch.cutoff(),u64::try_from(batch.cutoff_seq()).unwrap(),batch.cursor(),batch.remaining(),&mut calls).await.unwrap();
-        assert_eq!(page.items.iter().map(|item|item.target.id).collect::<Vec<_>>(),[1,2]);assert!(!page.complete);let cursor=page.next_cursor.unwrap();assert!(cursor.len()<=4096);
-        #[cfg(feature="query-metrics")]
-        {
-            let storage=tx.storage_resource(&app.manifest,1).await.unwrap();let ready=tx.field_expression("ready").unwrap();let sql=format!("SELECT id FROM nx_records WHERE resource={storage} AND tenant='alpha' AND {ready}='true' AND created_seq<={} ORDER BY created_seq ASC,id ASC LIMIT 2",batch.cutoff_seq());let visits=tx.examined_rows(&sql).await.unwrap();assert!(visits<=3,"tenant/cutoff frontier visited {visits}");eprintln!("P10 selector100k other-tenant index visits={visits}");
-        }
-        for item in page.items {assert_eq!(item.target.revision,1);assert!(item.expiry.unwrap()<=batch.cutoff());assert!(QueueContext{tx:&mut tx,calls:&mut calls}.emit_recurrence(&mut batch,1,Fields::new(),BTreeMap::from([("order".into(),item.target)]),item.expiry,1000).await.unwrap());}
-        QueueContext{tx:&mut tx,calls:&mut calls}.finish_recurrence(&batch,Some(&cursor)).await.unwrap();assert!(calls<=16);
-        let result=(batch.cutoff(),u64::try_from(batch.cutoff_seq()).unwrap(),cursor);tx.commit().await.unwrap();result
-    }).await;
+    let (cutoff, cutoff_seq, cursor) = request(&app)
+        .run(async {
+            let mut tx = database
+                .begin(std::time::Instant::now() + app.runtime.limits().wall_time)
+                .await
+                .unwrap();
+            app.admission(&mut tx, false).await.unwrap();
+            let mut calls = 16;
+            calls -= 1;
+            let time = app.temporal_after_admission(&mut tx).await.unwrap();
+            let locked = QueueContext {
+                tx: &mut tx,
+                calls: &mut calls,
+            }
+            .schedule_grant(&scope, "expiry", &app.contract)
+            .await
+            .unwrap();
+            let mut batch = QueueContext {
+                tx: &mut tx,
+                calls: &mut calls,
+            }
+            .begin_recurrence(&scope, &schedule, time.timestamp())
+            .await
+            .unwrap()
+            .unwrap();
+            let page = app
+                .select_recurring(
+                    &mut tx,
+                    &locked,
+                    &schedule,
+                    time,
+                    batch.cutoff(),
+                    u64::try_from(batch.cutoff_seq()).unwrap(),
+                    batch.cursor(),
+                    batch.remaining(),
+                    &mut calls,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                page.items
+                    .iter()
+                    .map(|item| item.target.id)
+                    .collect::<Vec<_>>(),
+                [1, 2]
+            );
+            assert!(!page.complete);
+            let cursor = page.next_cursor.unwrap();
+            assert!(cursor.len() <= 4096);
+            for item in page.items {
+                assert_eq!(item.target.revision, 1);
+                assert!(item.expiry.unwrap() <= batch.cutoff());
+                assert!(
+                    QueueContext {
+                        tx: &mut tx,
+                        calls: &mut calls
+                    }
+                    .emit_recurrence(
+                        &mut batch,
+                        1,
+                        Fields::new(),
+                        BTreeMap::from([("order".into(), item.target)]),
+                        item.expiry,
+                        1000
+                    )
+                    .await
+                    .unwrap()
+                );
+            }
+            QueueContext {
+                tx: &mut tx,
+                calls: &mut calls,
+            }
+            .finish_recurrence(&batch, Some(&cursor))
+            .await
+            .unwrap();
+            assert!(calls <= 16);
+            let result = (
+                batch.cutoff(),
+                u64::try_from(batch.cutoff_seq()).unwrap(),
+                cursor,
+            );
+            tx.commit().await.unwrap();
+            result
+        })
+        .await;
     app.request_lifecycle().wait_idle_for_test().await.unwrap();
+    #[cfg(feature = "query-metrics")]
+    {
+        let mut tx = database
+            .begin(std::time::Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+        let storage = tx.storage_resource(&app.manifest, 1).await.unwrap();
+        let ready = tx.field_expression("ready").unwrap();
+        let sql = format!(
+            "SELECT id FROM nx_records WHERE resource={storage} AND tenant='alpha' AND {ready}='true' AND created_seq<={cutoff_seq} ORDER BY created_seq ASC,id ASC LIMIT 2"
+        );
+        let visits = tx.examined_rows(&sql).await.unwrap();
+        assert_eq!(
+            visits, 2,
+            "tenant/cutoff frontier must use its exact protected index"
+        );
+        eprintln!("P10 selector100k other-tenant index visits={visits}");
+        tx.rollback().await.unwrap();
+    }
     // The barrier commits a new same-tenant expired row after the batch cutoff,
     // before opening the next selector transaction. No timing sleeps are used.
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -417,16 +507,22 @@ async fn provider(database: Database) {
         tx.commit().await.unwrap();
         other.wait().await;
     });
-    barrier.wait().await;
-    barrier.wait().await;
+    tokio::time::timeout(Duration::from_secs(5), barrier.wait())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), barrier.wait())
+        .await
+        .unwrap();
     insertion.await.unwrap();
     app.checkpoint_clock().await.unwrap();
     request(&app).run(async {
         let mut tx=database.begin(std::time::Instant::now()+app.runtime.limits().wall_time).await.unwrap();app.admission(&mut tx,false).await.unwrap();let mut calls=16;calls-=1;let time=app.temporal_after_admission(&mut tx).await.unwrap();let locked=QueueContext{tx:&mut tx,calls:&mut calls}.schedule_grant(&scope,"expiry",&app.contract).await.unwrap();
+        calls-=1;
         let stored=tx.fetch::<3>("SELECT CAST(cutoff_ms AS TEXT),CAST(cutoff_seq AS TEXT),cursor FROM nx_job_recurring WHERE deployment=$1 AND tenant='alpha' AND name='repair'",&[scope.deployment.as_str().into()]).await.unwrap();assert_eq!(stored[0],[cutoff.unix_millis().to_string(),cutoff_seq.to_string(),cursor.clone()]);
         // Inspect the persisted selector continuation directly; the worker's
         // separate sixty-second due gate is not bypassed or changed here.
         let page=app.select_recurring(&mut tx,&locked,&schedule,time,cutoff,cutoff_seq,Some(&cursor),20,&mut calls).await.unwrap();assert!(page.items.is_empty());assert!(page.complete);assert!(page.next_cursor.is_none(),"future expiry and post-cutoff insertion are not selected");
+        calls-=1;
         let jobs=tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_jobs",&[]).await.unwrap();assert_eq!(jobs[0][0],"2");tx.rollback().await.unwrap();
     }).await;
     app.request_lifecycle().wait_idle_for_test().await.unwrap();
