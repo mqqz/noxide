@@ -85,6 +85,11 @@ async fn clock_recovery_requires_a_private_new_key() {
         "{}",
         String::from_utf8_lossy(&recovered.stderr)
     );
+    // Recovery itself persisted the new incarnation, before activation of a
+    // replacement application could independently supersede the old instance.
+    let already_recovered = recover(&config).await;
+    assert!(!already_recovered.status.success());
+    assert!(String::from_utf8_lossy(&already_recovered.stderr).contains("fresh host key"));
     let fresh: HostKeys = serde_json::from_slice(&std::fs::read(&key_path).unwrap()).unwrap();
     let new = Application::new(
         &component,
