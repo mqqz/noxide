@@ -553,6 +553,157 @@ async fn secret_grant_change_contract(db: &Database) {
     .await
     .unwrap();
 }
+async fn recovered_activation(
+    db: &Database,
+    generation: &str,
+    effective: &EffectiveEffectDeployment,
+) {
+    let permits = Arc::new(Semaphore::new(1));
+    let mut lease = crate::database::MaintenanceLease::new(
+        permits.try_acquire_owned().unwrap(),
+        Instant::now() + Duration::from_secs(5),
+        crate::lifecycle_clock::Freshness::default(),
+    );
+    lease.begin(db).await.unwrap();
+    lease
+        .tx()
+        .activate_jobs(generation, "contract", None, None, true)
+        .await
+        .unwrap();
+    lease
+        .tx()
+        .activate_effects(
+            generation,
+            "contract",
+            Some(effective),
+            Some("prepared-directory-fixture-proof"),
+        )
+        .await
+        .unwrap();
+    let memory = std::sync::atomic::AtomicI64::new(0);
+    let _tick = crate::lifecycle_clock::tick(lease.tx(), &memory)
+        .await
+        .unwrap();
+    lease.finish().await.unwrap();
+}
+async fn actual_clock_recovery_contract(db: &Database) {
+    let effective = approval();
+    setup(db, &effective).await;
+    let initial = noxide_protocol::time::Timestamp::from_system_time(SystemTime::now()).unwrap();
+    let capture = phase(db, async |tx: &mut Transaction| {
+        tx.execute(
+            "UPDATE nx_clock SET lifecycle_ms=$1,lifecycle_version=7 WHERE singleton=1",
+            &[initial.unix_millis().into()],
+        )
+        .await?;
+        let mut calls = 16;
+        let mut outbox = OutboxContext {
+            tx,
+            calls: &mut calls,
+        };
+        let proof = outbox
+            .endpoint_grant(
+                &EffectScope {
+                    deployment: "deployment".into(),
+                    tenant: "alpha".into(),
+                },
+                "events",
+                "contract",
+            )
+            .await?;
+        let captured = CapturedEffect::capture(
+            &effective.contract.emissions[0],
+            "actual-clock-recovery".into(),
+            1,
+            &proof,
+            b"{}".to_vec(),
+            initial,
+        )?;
+        outbox.enqueue(&captured, initial).await?;
+        Ok(captured)
+    })
+    .await
+    .unwrap();
+    let _old = claim(db, initial.unix_millis()).await;
+    db.recover_clock(&crate::HostKeys::generate().unwrap())
+        .await
+        .unwrap();
+    let recovered=phase(db,async |tx:&mut Transaction| {Ok(tx.fetch::<4>("SELECT generation,CAST((SELECT lifecycle_ms FROM nx_clock WHERE singleton=1) AS TEXT),(SELECT state FROM nx_outbox WHERE id=$1),(SELECT state FROM nx_job_runtime WHERE singleton=1) FROM nx_deployment WHERE singleton=1",&[capture.id()?.into()]).await?)}).await.unwrap();
+    assert_ne!(recovered[0][0], "deployment");
+    assert_eq!(recovered[0][1], initial.unix_millis().to_string());
+    assert_eq!(recovered[0][2], "paused");
+    assert_eq!(recovered[0][3], "paused");
+    let generation = &recovered[0][0];
+    recovered_activation(db, generation, &effective).await;
+    let snapshot=phase(db,async |tx:&mut Transaction| {Ok(tx.fetch::<4>("SELECT epoch,state,(SELECT state FROM nx_effect_grants WHERE deployment=$1 AND tenant='alpha' AND endpoint='events'),(SELECT state FROM nx_outbox WHERE id=$2) FROM nx_job_runtime WHERE singleton=1",&[generation.as_str().into(),capture.id()?.into()]).await?)}).await.unwrap();
+    assert_eq!(
+        &snapshot[0][1..],
+        &[
+            String::from("paused"),
+            String::from("revoked"),
+            String::from("paused")
+        ]
+    );
+    recovered_activation(db, generation, &effective).await;
+    phase(db, async |tx: &mut Transaction| {
+        let rows = tx
+            .fetch::<2>(
+                "SELECT epoch,state FROM nx_job_runtime WHERE singleton=1",
+                &[],
+            )
+            .await?;
+        assert_eq!(rows, [[snapshot[0][0].clone(), String::from("paused")]]);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    phase(db, async |tx: &mut Transaction| {
+        let rows = tx
+            .fetch::<1>(
+                "SELECT CAST(lifecycle_ms AS TEXT) FROM nx_clock WHERE singleton=1",
+                &[],
+            )
+            .await?;
+        let now = at(rows[0][0].parse()?);
+        tx.grant_effect_endpoint(generation, "contract", &effective.grants[0])
+            .await?;
+        tx.resume_effect(
+            generation,
+            "contract",
+            &effective,
+            &capture.id()?,
+            1,
+            now,
+            false,
+        )
+        .await?;
+        let source = tx
+            .effect_operator_source(generation, &capture.id()?)
+            .await?;
+        assert_eq!(source.capture_digest()?, capture.capture_digest()?);
+        assert_eq!(source.receiver_key()?, capture.receiver_key()?);
+        let mut calls = 16;
+        let claim = OutboxContext {
+            tx,
+            calls: &mut calls,
+        }
+        .claim(generation, "contract", now, &[])
+        .await?
+        .unwrap();
+        assert!(matches!(
+            OutboxContext {
+                tx,
+                calls: &mut calls
+            }
+            .preflight(&claim, now)
+            .await?,
+            Preflight::Send(_)
+        ));
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
 async fn sqlite(label: &str) -> Database {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/capability-evidence/p11-store-fixtures");
@@ -607,6 +758,10 @@ async fn sqlite_secret_grant_rotation_pauses_before_explicit_resume() {
     secret_grant_change_contract(&sqlite("secret-change-").await).await;
 }
 #[tokio::test]
+async fn sqlite_actual_clock_recovery_preserves_pause_until_current_reconciliation() {
+    actual_clock_recovery_contract(&sqlite("clock-recovery-").await).await;
+}
+#[tokio::test]
 #[ignore = "requires disposable NOXIDE_TEST_POSTGRES with CREATE DATABASE"]
 async fn postgres_known_success_survives_revocation_cancel_and_wall_expiry() {
     known_success_contract(&postgres("success").await).await;
@@ -630,4 +785,9 @@ async fn postgres_atomicity_dedup_five_attempts_and_exact_window() {
 #[ignore = "requires disposable NOXIDE_TEST_POSTGRES with CREATE DATABASE"]
 async fn postgres_secret_grant_rotation_pauses_before_explicit_resume() {
     secret_grant_change_contract(&postgres("secretchange").await).await;
+}
+#[tokio::test]
+#[ignore = "requires disposable NOXIDE_TEST_POSTGRES with CREATE DATABASE"]
+async fn postgres_actual_clock_recovery_preserves_pause_until_current_reconciliation() {
+    actual_clock_recovery_contract(&postgres("clockrecovery").await).await;
 }
