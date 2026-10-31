@@ -390,7 +390,7 @@ async fn durable_contract(database: Database) {
         )
         .await
         .unwrap(),
-        [["1".into()]]
+        [[String::from("1")]]
     );
     tx.commit().await.unwrap();
     // Expired lease is recoverable only via a higher fence and the locked receipt
@@ -542,8 +542,9 @@ async fn durable_contract(database: Database) {
 
 #[tokio::test]
 async fn sqlite_durable_claim_fence_lost_ack_retry_and_forged_receipts() {
-    let directory = tempfile::tempdir().unwrap();
-    durable_contract(Database::sqlite(directory.path().join("jobs.db"))).await;
+    let directory = tempfile::tempdir().unwrap().keep();
+    println!("retained_fixture={}", directory.display());
+    durable_contract(Database::sqlite(directory.join("jobs.db"))).await;
 }
 #[tokio::test]
 #[ignore = "requires authorized disposable NOXIDE_TEST_POSTGRES; fixture retained"]

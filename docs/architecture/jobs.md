@@ -183,3 +183,13 @@ resumed cutoff/cursor and expiry repair deduplication. These fixtures use a narr
 fixture receipt decoder only; executor/normal-policy integration needs C's real
 adapter tests. All compilation and provider tests remain unrun in this preparation
 packet. Rustfmt parsed/formatted the owned Rust leaves successfully.
+
+## First isolated integration execution
+
+C joined accepted P09 atc581b7d, then compiled all workspace targets successfully
+after one test-only explicit String conversion. Four core rejection tests, four
+queue tests (including SQLite and disposable PostgreSQL) and two protocol tests
+pass under `target/capability-evidence/p10-first-compile`. SQLite fixture state is
+now retained as well as PostgreSQL. This is leaf proof using the narrow fixture
+receipt decoder. Service invocation/schema/operator/selection integration remains
+unavailable and unaccepted; unused integration-hook warnings are not suppressed.
