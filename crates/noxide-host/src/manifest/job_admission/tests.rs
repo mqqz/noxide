@@ -79,7 +79,7 @@ fn deployment_approval_binds_service_scope_limits_and_canonical_grants() {
         limits: JobLimits::default(),
     };
     let digest = |configuration: &JobDeployment| {
-        crate::deployment::approval_digest(&manifest, None, Some(configuration)).unwrap()
+        crate::deployment::approval_digest(&manifest, None, Some(configuration), None).unwrap()
     };
     let approved = digest(&configured);
     assert_ne!(approved, super::super::digest(&manifest).unwrap());
@@ -106,12 +106,12 @@ fn deployment_approval_binds_service_scope_limits_and_canonical_grants() {
     configured.limits = JobLimits::default();
     configured.grants[0].tenant = "gamma".into();
     assert_ne!(approved, digest(&configured));
-    assert!(crate::deployment::approval_digest(&manifest, None, None).is_err());
+    assert!(crate::deployment::approval_digest(&manifest, None, None, None).is_err());
     let mut ordinary = manifest.clone();
     ordinary.jobs = None;
     ordinary.actions.truncate(1);
     ordinary.operations.truncate(3);
-    assert!(crate::deployment::approval_digest(&ordinary, None, Some(&configured)).is_err());
+    assert!(crate::deployment::approval_digest(&ordinary, None, Some(&configured), None).is_err());
 }
 fn sum(leaves: usize) -> Value {
     if leaves == 1 {

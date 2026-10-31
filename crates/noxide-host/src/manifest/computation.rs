@@ -55,6 +55,13 @@ impl Domain {
         Ok((min.unwrap_or(i64::MIN), max.unwrap_or(i64::MAX)))
     }
 }
+#[derive(Clone, Copy)]
+enum ValueSite {
+    Step { index: usize, guard: bool },
+    Schedule,
+    Effect,
+}
+
 #[derive(Default)]
 pub(super) struct Admission {
     pub nodes: usize,
@@ -78,16 +85,29 @@ impl Admission {
         guard: bool,
         used: &mut BTreeSet<&'a str>,
     ) -> Result<Domain> {
-        self.walk(m, a, index, value, guard, used, 1)
+        let site = if index < a.steps.len() {
+            ValueSite::Step { index, guard }
+        } else {
+            ValueSite::Schedule
+        };
+        self.walk(m, a, site, value, used, 1)
+    }
+    pub(super) fn effect_value<'a>(
+        &mut self,
+        m: &Manifest,
+        a: &'a Action,
+        value: &Value,
+        used: &mut BTreeSet<&'a str>,
+    ) -> Result<Domain> {
+        self.walk(m, a, ValueSite::Effect, value, used, 1)
     }
     #[allow(clippy::too_many_arguments)]
     fn walk<'a>(
         &mut self,
         m: &Manifest,
         a: &'a Action,
-        index: usize,
+        site: ValueSite,
         value: &Value,
-        guard: bool,
         used: &mut BTreeSet<&'a str>,
         depth: usize,
     ) -> Result<Domain> {
@@ -105,9 +125,8 @@ impl Admission {
             Value::Literal(literal) => literal_domain(literal)?,
             Value::Principal => {
                 ensure!(
-                    !guard
-                        && index < a.steps.len()
-                        && operation(m, a.steps[index].operation)?.kind == OperationKind::Create,
+                    matches!(site, ValueSite::Effect)
+                        || matches!(site, ValueSite::Step { index, guard: false } if operation(m, a.steps[index].operation)?.kind == OperationKind::Create),
                     "principal is create-account-only"
                 );
                 Domain {
@@ -125,8 +144,8 @@ impl Admission {
             },
             Value::Target(name) => {
                 ensure!(
-                    index < a.steps.len(),
-                    "target identity is not a persisted scalar"
+                    !matches!(site, ValueSite::Schedule),
+                    "target identity is not a scheduled scalar"
                 );
                 let target = action_target(&a.targets, name)?;
                 Domain {
@@ -138,13 +157,16 @@ impl Admission {
                 }
             }
             Value::Created(created) => {
-                ensure!(
-                    index < a.steps.len(),
-                    "created identity is not a persisted scalar"
-                );
+                let bound = match site {
+                    ValueSite::Step { index, .. } => index,
+                    ValueSite::Effect => a.steps.len(),
+                    ValueSite::Schedule => {
+                        anyhow::bail!("created identity is not a scheduled scalar")
+                    }
+                };
                 let created = usize::from(*created);
                 ensure!(
-                    created < index,
+                    created < bound,
                     "created reference must name an earlier step"
                 );
                 let op = operation(m, a.steps[created].operation)?;
@@ -170,8 +192,7 @@ impl Admission {
                 }
                 if matches!(value, Value::CurrentField { .. }) {
                     ensure!(
-                        guard
-                            && matches!(&a.steps[index].target,Target::Named(name) if name==target),
+                        matches!(site, ValueSite::Step { index, guard: true } if matches!(&a.steps[index].target,Target::Named(name) if name==target)),
                         "current fields are current-step guard-only"
                     );
                 }
@@ -200,8 +221,8 @@ impl Admission {
             Value::Add { left, right }
             | Value::Subtract { left, right }
             | Value::Multiply { left, right } => {
-                let left = self.walk(m, a, index, left, guard, used, depth + 1)?;
-                let right = self.walk(m, a, index, right, guard, used, depth + 1)?;
+                let left = self.walk(m, a, site, left, used, depth + 1)?;
+                let right = self.walk(m, a, site, right, used, depth + 1)?;
                 if matches!(value, Value::Add { .. })
                     && left.kind == FieldKind::Timestamp
                     && matches!(right.kind, FieldKind::Duration { .. })

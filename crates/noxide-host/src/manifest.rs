@@ -1,10 +1,12 @@
 mod authority;
 mod blobs;
 mod computation;
+mod effect_admission;
 mod job_admission;
 mod query;
 use anyhow::{Result, ensure};
 pub use computation::{ComputationDisclosure, ComputationSource, action_disclosures};
+pub use effect_admission::{EffectDisclosure, EffectSource, effect_disclosures};
 use noxide_protocol::*;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -15,6 +17,7 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest> {
     validate(&manifest)?;
     canonical_targets(&mut manifest);
     canonical_jobs(&mut manifest);
+    canonical_effects(&mut manifest);
     query::canonicalize(&mut manifest);
     Ok(manifest)
 }
@@ -33,6 +36,7 @@ pub fn digest(manifest: &Manifest) -> Result<[u8; 32]> {
     canonical.web_bindings.sort_by_key(|binding| binding.id);
     canonical_targets(&mut canonical);
     canonical_jobs(&mut canonical);
+    canonical_effects(&mut canonical);
     query::canonicalize(&mut canonical);
     for resource in &mut canonical.resources {
         resource.unique.sort();
@@ -43,6 +47,20 @@ pub fn digest(manifest: &Manifest) -> Result<[u8; 32]> {
         }
     }
     Ok(Sha256::digest(serde_json::to_vec(&canonical)?).into())
+}
+
+fn canonical_effects(manifest: &mut Manifest) {
+    if let Some(effects) = &mut manifest.effects {
+        effects.endpoints.sort_by(|a, b| a.name.cmp(&b.name));
+        effects
+            .emissions
+            .sort_by_key(|emission| (emission.source_action, emission.ordinal));
+        for emission in &mut effects.emissions {
+            emission
+                .fields
+                .sort_by(|a, b| a.schema.name.cmp(&b.schema.name));
+        }
+    }
 }
 
 fn canonical_jobs(manifest: &mut Manifest) {
@@ -289,7 +307,10 @@ fn unique(ids: impl Iterator<Item = u32>) -> Result<()> {
 pub use noxide_protocol::identifier;
 
 pub fn validate(m: &Manifest) -> Result<()> {
-    ensure!(m.effects.is_none(), "external effect integration unavailable");
+    ensure!(
+        m.effects.is_none(),
+        "external effect integration unavailable"
+    );
     ensure!(m.version == VERSION, "unsupported manifest version");
     query::validate_declarations(m)?;
     crate::assets::validate_declarations(&m.assets)?;
@@ -812,6 +833,7 @@ pub fn validate(m: &Manifest) -> Result<()> {
         validate_web_binding(m, &web_action(m, binding.id)?)?;
     }
     job_admission::validate(m)?;
+    effect_admission::validate(m)?;
     blobs::validate_blobs(m)?;
     Ok(())
 }
@@ -1172,6 +1194,7 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
         }
     }
     job_admission::action_values(m, a, &mut computations, &mut used)?;
+    effect_admission::action_values(m, a, &mut computations, &mut used)?;
     for name in exact {
         let target = action_target(&a.targets, name)?;
         ensure!(
