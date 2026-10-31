@@ -197,3 +197,13 @@ The SDK lowering suite keeps the original public-articles producer frozen for
 exact convenience/explicit contract comparisons. It additionally compiles the
 current category/preview example for WASM and rejects missing public parameter
 disclosure and account-valued route links.
+
+The application-example job also builds `tools/fixtures/query-app` through the
+normal trusted CLI and runs `tools/test_query_http.py` on SQLite and a dedicated
+empty PostgreSQL database. This checks native GET search controls, private
+aggregates, typed overflow, scalar pagination, cursor binding and unchanged
+record/receipt/postings/index state across GETs. The harness explicitly activates
+approved native indexes before serving and retains failures; it never resets a
+preexisting database. Browser-engine and final integrated checks remain separate.
+Wire11 golden refreshes deliberately change the version and consequent digests;
+all other canonical fixture fields must retain their reviewed semantics.

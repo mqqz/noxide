@@ -41,7 +41,7 @@ jobs:
         run: |
           cargo fmt --all --check
           rustfmt --edition 2024 --check examples/*/src/lib.rs
-          rustfmt --edition 2024 --check tools/fixtures/blob-app/src/lib.rs tools/fixtures/blob-app/src/bin/manifest.rs
+          rustfmt --edition 2024 --check tools/fixtures/blob-app/src/lib.rs tools/fixtures/blob-app/src/bin/manifest.rs tools/fixtures/query-app/src/lib.rs
       - name: Cache Rust dependencies and workspace builds
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -479,6 +479,23 @@ jobs:
             --bundle "$RUNNER_TEMP/noxide-ci/blob-app" \
             --output "$RUNNER_TEMP/noxide-ci/blob-postgres" \
             --host-cli target/debug/noxide --postgres "$NOXIDE_BLOB_POSTGRES"
+      - name: Build and test indexed queries
+        if: matrix.suite == 'examples'
+        env:
+          NOXIDE_QUERY_POSTGRES: postgresql://noxide:ci-only-password@127.0.0.1:5432/noxide_queries
+        run: |
+          target/debug/noxide build --framework "$PWD" \
+            --app tools/fixtures/query-app --name query_app \
+            --output "$RUNNER_TEMP/noxide-ci/query-app"
+          python3 tools/test_query_http.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/query-app" \
+            --output "$RUNNER_TEMP/noxide-ci/query-sqlite" \
+            --host-cli target/debug/noxide
+          psql "$NOXIDE_TEST_POSTGRES" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE noxide_queries'
+          python3 tools/test_query_http.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/query-app" \
+            --output "$RUNNER_TEMP/noxide-ci/query-postgres" \
+            --host-cli target/debug/noxide --postgres "$NOXIDE_QUERY_POSTGRES"
       - name: Test NoJS browser flow with SQLite
         if: matrix.suite == 'sdk'
         run: |

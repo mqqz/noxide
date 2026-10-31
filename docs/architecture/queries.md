@@ -126,11 +126,19 @@ command. The implemented workflow uses exclusive transactional maintenance on bo
 backends. Any future PostgreSQL concurrent creation must run outside migration
 transactions.
 
-Parameters are declared, never inferred. The strict URL parser admits only
+Parameter names are declared; their types come from approved query metadata.
+The strict URL parser admits only
 `cursor` and declared required canonical values, with bounded length and no
-duplicate keys. Invalid inputs receive the same not-found result as unknown
-routes without inspecting data or logging values. Typed link parameters never
+duplicate keys. Malformed route/query shapes are unavailable; invalid cursors,
+canonical search bounds and dynamic ranges are rejected through their structured
+request categories without logging values. Typed link parameters never
 bypass target validation.
+
+Search, immutable/live scalar ordering, indexed ranges and bounded Count/Sum/
+Min/Max extend these plans. See the [bounded query contract](p09-query-contract.md)
+for tokenizer identity, exact-or-error aggregates, native GET forms, cursor
+transport and explicit index activation/rebuilds. All ordinary read authority,
+membership, visibility, gates and expiry still apply before output or operands.
 
 Previews share request budgets with the paginated list. They ignore cursors,
 report truncation on row, byte or residual bounds, and can link to an equivalent
@@ -141,12 +149,10 @@ full list with canonical parameters. Guest cooperation cannot enforce any budget
 | Feature | Precondition |
 | --- | --- |
 | Query refinements (`refine(Base)`) | Repeated boilerplate in real apps; SDK-only resolution cannot widen policy, visibility, projection or budgets |
-| Integer ranges | Demand; range column last before creation sequence |
 | Optional parameters | A strategy that avoids multiplying index shapes |
 | Account-field filters | Account-ID parameter disclosure analysis and demonstrated need |
-| Mutable-field ordering | Weaker documented semantics or snapshots |
 | Independent pagination of several lists | One signed page-state token |
-| Counts, OR filters, joins | Demonstrated need |
+| General OR filters and joins | Demonstrated need; approved policy alternatives and bounded membership remain separate |
 | Arbitrary SQL | Never |
 
 Guest query builders, host prefetch, host-rendered facets and multiple cursor

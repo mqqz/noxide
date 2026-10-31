@@ -180,12 +180,11 @@ impl ListPlan {
     }
 }
 
-pub(crate) use indexes::{
-    IndexOrder, IndexRequirement, NativeProvider, ScalarRepresentation,
-    required_indexes,
-};
 #[cfg(test)]
 pub(crate) use indexes::IndexTable;
+pub(crate) use indexes::{
+    IndexOrder, IndexRequirement, NativeProvider, ScalarRepresentation, required_indexes,
+};
 mod indexes;
 
 fn operand_value<'a>(
