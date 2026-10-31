@@ -37,9 +37,6 @@ impl RecurrenceBatch {
     pub(crate) fn remaining(&self) -> u8 {
         MAX_RECURRENCE_FANOUT - self.emitted
     }
-    pub(crate) fn scope(&self) -> &JobScope {
-        &self.position.scope
-    }
 }
 
 /// Ordinary occurrences include the fixed scan cutoff; expiry repair deliberately
