@@ -86,10 +86,31 @@ impl Application {
                                         grant.tenant == tenant && grant.worker.name == worker
                                     })
                                     .ok_or(RequestError::Rejected)?;
-                                tx.grant_job_service(generation, &self.contract, configured)
-                                    .await
-                                    .map_err(RequestError::database)?;
-                                Output::Done
+                                tx.grant_job_service(
+                                    generation,
+                                    &self.contract,
+                                    configured,
+                                    self.manifest.jobs.as_ref().ok_or(RequestError::Rejected)?,
+                                )
+                                .await
+                                .map_err(RequestError::database)?;
+                                let recurring_resumed = self
+                                    .manifest
+                                    .jobs
+                                    .as_ref()
+                                    .ok_or(RequestError::Rejected)?
+                                    .recurring
+                                    .iter()
+                                    .filter(|schedule| {
+                                        schedule.worker == configured.worker.name
+                                            && configured
+                                                .worker
+                                                .actions
+                                                .iter()
+                                                .any(|action| action.action == schedule.action)
+                                    })
+                                    .count();
+                                Output::Granted { recurring_resumed }
                             }
                             Command::Fork => {
                                 tx.fork_job_runtime(generation)
@@ -108,7 +129,14 @@ impl Application {
                                     tx: &mut tx,
                                     calls: &mut calls,
                                 }
-                                .schedule_grant(previous.scope(), previous.worker(), &self.contract)
+                                .schedule_grant(
+                                    &crate::jobs::JobScope {
+                                        deployment: generation.clone(),
+                                        tenant: previous.scope().tenant.clone(),
+                                    },
+                                    previous.worker(),
+                                    &self.contract,
+                                )
                                 .await
                                 .map_err(RequestError::database)?;
                                 let input = self

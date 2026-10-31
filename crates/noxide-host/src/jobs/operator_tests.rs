@@ -126,11 +126,16 @@ async fn operator_lifecycle(database: Database) {
         fork
     );
     assert!(
-        tx.grant_job_service("generation", "retired_approval", &effective.grants[0])
-            .await
-            .is_err()
+        tx.grant_job_service(
+            "generation",
+            "retired_approval",
+            &effective.grants[0],
+            &declaration
+        )
+        .await
+        .is_err()
     );
-    tx.grant_job_service("generation", "approval", &effective.grants[0])
+    tx.grant_job_service("generation", "approval", &effective.grants[0], &declaration)
         .await
         .unwrap();
     assert_eq!(

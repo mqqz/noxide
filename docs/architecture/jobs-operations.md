@@ -50,7 +50,8 @@ noxide jobs worker-once /srv/app/runtime.json
 ```
 
 Inspection returns at most 100 records in ID order. Pass the last returned ID to
-read the next page. Results include identity, tenant, worker, action, state,
+read the next page. The listing includes retained generations so paused jobs
+from an earlier approved contract can be reconciled or cancelled. Results include identity, captured deployment generation, tenant, worker, action, state,
 attempt count and due/eligible timestamps. Inputs, sealed target identities,
 receipts, rejection details and secrets are omitted.
 
@@ -58,7 +59,10 @@ Revocation waits for the authoritative runtime/grant locks and pauses pending
 and running captures. It cannot undo an action that already committed. Restarting
 with the same approved configuration preserves the revoked grant. `grant`
 explicitly installs a new grant version within the approved configuration; it
-does not resume captures made under the previous version.
+does not resume captures made under the previous version. It explicitly resumes
+current declared recurring schedules for that worker, tenant and approved action
+subset, with a fresh cursor and a coalesced current tick. Existing expiry-repair
+occurrence keys remain stable; a new grant version does not replay old captures.
 
 `cancel` settles an unresolved job without executing it. `reconcile` rechecks the
 current approved action, canonical input and every eligible target read. If

@@ -20,12 +20,14 @@ pub enum JobOperatorCommand {
 pub enum JobOperatorResult {
     Jobs(Vec<JobSummary>),
     Reconciled { id: String },
+    Granted { recurring_resumed: usize },
     Done,
 }
 
 #[derive(Debug, Serialize)]
 pub struct JobSummary {
     pub id: String,
+    pub deployment: String,
     pub tenant: String,
     pub worker: String,
     pub action: u32,
@@ -44,7 +46,12 @@ impl Transaction {
         self.lock_job_operator_runtime(generation).await?;
         ensure!(opaque(id), "invalid reconciliation identity");
         let payload = self.bounded_text("payload", noxide_protocol::jobs::MAX_JOB_BYTES);
-        let rows = self.fetch::<3>(&format!("SELECT {payload},payload_digest,state FROM nx_jobs WHERE deployment=$1 AND id=$2"), &[generation.into(), id.into()]).await?;
+        let rows = self
+            .fetch::<3>(
+                &format!("SELECT {payload},payload_digest,state FROM nx_jobs WHERE id=$1"),
+                &[id.into()],
+            )
+            .await?;
         let [payload, stored_digest, state] =
             rows.first().context("reconciliation source missing")?;
         ensure!(
@@ -54,9 +61,7 @@ impl Transaction {
         let source: CapturedJob = serde_json::from_str(payload)?;
         source.validate()?;
         ensure!(
-            source.id()? == id
-                && source.scope.deployment == generation
-                && source.invocation_digest()? == *stored_digest,
+            source.id()? == id && source.invocation_digest()? == *stored_digest,
             "reconciliation source differs from capture"
         );
         Ok(source)
@@ -243,6 +248,7 @@ impl Transaction {
         generation: &str,
         approved_contract: &str,
         approved: &crate::job_deployment::EffectiveJobGrant,
+        declarations: &JobContract,
     ) -> Result<()> {
         let (contract, epoch, _) = self.lock_job_operator_runtime(generation).await?;
         ensure!(contract == approved_contract, "operator approval retired");
@@ -265,6 +271,13 @@ impl Transaction {
         grant.validate()?;
         self.execute("UPDATE nx_job_grants SET version=$1,contract=$2,epoch=$3,state='active',declaration=$4 WHERE deployment=$5 AND tenant=$6 AND worker=$7", &[version.into(), grant.contract.as_str().into(), grant.epoch.as_str().into(), serde_json::to_string(&grant)?.into(), generation.into(), grant.scope.tenant.as_str().into(), grant.worker.name.as_str().into()]).await?;
         self.execute("UPDATE nx_jobs SET state='paused',reason='grant_changed',lease_until_ms=0 WHERE deployment=$1 AND tenant=$2 AND worker=$3 AND state IN ('pending','running')", &[generation.into(), grant.scope.tenant.as_str().into(), grant.worker.name.as_str().into()]).await?;
+        for schedule in declarations.recurring.iter().filter(|s| {
+            s.worker == grant.worker.name
+                && grant.worker.actions.iter().any(|a| a.action == s.action)
+        }) {
+            cpu_checkpoint(self)?;
+            self.execute("INSERT INTO nx_job_recurring(deployment,tenant,name,contract,epoch,grant_version,version,state,next_ms,cutoff_ms,cutoff_seq,cursor) VALUES($1,$2,$3,$4,$5,$6,1,'active',0,0,0,'') ON CONFLICT(deployment,tenant,name) DO UPDATE SET contract=$4,epoch=$5,grant_version=$6,version=nx_job_recurring.version+1,state='active',next_ms=0,cutoff_ms=0,cutoff_seq=0,cursor=''", &[generation.into(), grant.scope.tenant.as_str().into(), schedule.name.as_str().into(), grant.contract.as_str().into(), grant.epoch.as_str().into(), version.into()]).await?;
+        }
         self.execute(
             "UPDATE nx_job_runtime SET state='active' WHERE singleton=1",
             &[],
@@ -278,7 +291,7 @@ impl Transaction {
         ensure!(opaque(id), "invalid job identity");
         // Runtime exclusive lock waits for actual execution termination. A lease
         // timestamp alone is never evidence that a previous transaction stopped.
-        let changed = self.execute("UPDATE nx_jobs SET state='rejected',reason='operator_cancelled',lease_until_ms=0 WHERE deployment=$1 AND id=$2 AND state IN ('pending','running','paused','dead')", &[generation.into(), id.into()]).await?;
+        let changed = self.execute("UPDATE nx_jobs SET state='rejected',reason='operator_cancelled',lease_until_ms=0 WHERE id=$1 AND state IN ('pending','running','paused','dead')", &[id.into()]).await?;
         ensure!(changed == 1, "job cannot be cancelled");
         Ok(())
     }
@@ -319,17 +332,28 @@ impl Transaction {
             opaque(generation) && (after.is_empty() || opaque(after)),
             "invalid job cursor"
         );
-        let rows = self.fetch::<8>("SELECT id,tenant,worker,CAST(action AS TEXT),state,CAST(attempts AS TEXT),CAST(due_ms AS TEXT),CAST(eligible_ms AS TEXT) FROM nx_jobs WHERE deployment=$1 AND id>$2 ORDER BY id LIMIT 100", &[generation.into(), after.into()]).await?;
+        let rows = self.fetch::<9>("SELECT id,deployment,tenant,worker,CAST(action AS TEXT),state,CAST(attempts AS TEXT),CAST(due_ms AS TEXT),CAST(eligible_ms AS TEXT) FROM nx_jobs WHERE EXISTS(SELECT 1 FROM nx_job_runtime r JOIN nx_deployment d ON d.singleton=r.singleton AND d.generation=r.deployment WHERE r.singleton=1 AND r.deployment=$1) AND id>$2 ORDER BY id LIMIT 100", &[generation.into(), after.into()]).await?;
         rows.into_iter()
             .map(
-                |[id, tenant, worker, action, state, attempts, due, eligible]| {
+                |[
+                    id,
+                    deployment,
+                    tenant,
+                    worker,
+                    action,
+                    state,
+                    attempts,
+                    due,
+                    eligible,
+                ]| {
                     cpu_checkpoint(self)?;
                     ensure!(
-                        opaque(&id) && noxide_protocol::identifier(&worker),
+                        opaque(&id) && opaque(&deployment) && noxide_protocol::identifier(&worker),
                         "invalid job metadata"
                     );
                     Ok(JobSummary {
                         id,
+                        deployment,
                         tenant,
                         worker,
                         action: integer(&action)?.try_into()?,
