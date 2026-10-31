@@ -67,7 +67,7 @@ impl Application {
         if remaining > 16 {
             return Err(RequestError::InvalidRequest);
         }
-        let entry = self.request_scope(self.runtime.limits().wall_time);
+        let entry = self.job_request_scope()?;
         entry
             .run(async {
                 let admission = self.admit_job_invocation_work().await?;

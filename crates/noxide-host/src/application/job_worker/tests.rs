@@ -55,7 +55,7 @@ async fn shutdown_waits_for_in_flight_effect_and_actual_provider_drain() {
     let capacity = usize::from(runtime.effective.limits.worker_concurrency);
     assert!(runtime.workers.available_permits() < capacity);
     assert!(runtime.database.available_permits() < capacity);
-    assert!(case.app.request_lifecycle.ensure_idle().is_err());
+    assert!(runtime.lifecycle.ensure_idle().is_err());
     assert_eq!(
         case.stored(&job).await,
         (String::from("running"), String::from("ready"), 0)
@@ -69,12 +69,19 @@ async fn shutdown_waits_for_in_flight_effect_and_actual_provider_drain() {
     );
     assert!(runtime.workers.available_permits() < capacity);
     assert!(runtime.database.available_permits() < capacity);
-    assert!(case.app.request_lifecycle.ensure_idle().is_err());
+    assert!(runtime.lifecycle.ensure_idle().is_err());
     gate.resume();
     shutdown.await.unwrap();
     // Assert immediately after shutdown, before any extra await could mask an
     // early return while registered provider cleanup still owns capacity.
-    assert!(case.app.request_lifecycle.ensure_idle().is_ok());
+    {
+        let mut idle = std::pin::pin!(runtime.lifecycle.wait_idle_for_test());
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(
+            idle.as_mut().poll(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+    }
     assert_eq!(runtime.workers.available_permits(), capacity);
     assert_eq!(runtime.database.available_permits(), capacity);
     assert!(!runtime.running.load(Ordering::Acquire));

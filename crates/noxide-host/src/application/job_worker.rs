@@ -17,6 +17,7 @@ pub(crate) struct JobRuntime {
     effective: EffectiveJobDeployment,
     workers: Arc<Semaphore>,
     database: Arc<Semaphore>,
+    lifecycle: Arc<Registry>,
     running: std::sync::atomic::AtomicBool,
 }
 impl JobRuntime {
@@ -26,6 +27,7 @@ impl JobRuntime {
             effective,
             workers: Arc::new(Semaphore::new(concurrency)),
             database: Arc::new(Semaphore::new(concurrency)),
+            lifecycle: Arc::new(Registry::default()),
             running: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -35,6 +37,15 @@ impl JobRuntime {
 }
 
 impl Application {
+    pub(super) fn job_request_scope(&self) -> std::result::Result<RequestScope, RequestError> {
+        let jobs = self.jobs.as_ref().ok_or(RequestError::Rejected)?;
+        Ok(RequestScope::current_or_new(
+            jobs.lifecycle.clone(),
+            self.runtime.limits().wall_time,
+            self.database_statement_limit,
+        ))
+    }
+
     /// Trusted local operator control. Choices must remain within the current
     /// approved configuration; this entry point is never registered as HTTP.
     pub async fn operate_jobs(
@@ -209,16 +220,16 @@ impl Application {
             .map_err(|_| RequestError::Busy)?
             .map_err(|_| RequestError::Busy)?;
         Ok(action::InvocationAdmission {
-            owner: self.owned_request(
+            owner: AdmissionOwner::new(
+                self.job_request_scope()?,
                 request,
                 Arc::new(database),
                 None,
-                self.runtime.limits().wall_time,
             ),
         })
     }
 
-    async fn claim_job(&self) -> std::result::Result<Option<Claim>, RequestError> {
+    async fn claim_job(&self) -> std::result::Result<Option<(Claim, u32)>, RequestError> {
         let admission = self.admit_job_invocation_work().await?;
         admission
             .owner
@@ -231,7 +242,9 @@ impl Application {
                 // Deployment admission precedes the fresh durable lifecycle sample.
                 let now = self.temporal_attempt(&mut tx).await?.timestamp();
                 let generation = self.generation.get().ok_or(RequestError::Busy)?;
-                let mut calls = 16;
+                // The durable time read and queue claim consume the same
+                // logical allowance as the following action invocation.
+                let mut calls = 15;
                 let claim = QueueContext {
                     tx: &mut tx,
                     calls: &mut calls,
@@ -239,7 +252,7 @@ impl Application {
                 .claim(generation, now)
                 .await
                 .map_err(RequestError::database)?;
-                Self::finish_commit(&mut tx, claim).await
+                Self::finish_commit(&mut tx, claim.map(|claim| (claim, calls))).await
             })
             .await
     }
@@ -258,7 +271,7 @@ impl Application {
         {
             return Ok(());
         }
-        let scope = self.request_scope(self.runtime.limits().wall_time);
+        let scope = self.job_request_scope()?;
         scope.run(async {
             let admission = self.admit_job_invocation_work().await?;
             admission.owner.run(async {
@@ -292,9 +305,10 @@ impl Application {
                         && !page.complete
                         && page.next_cursor.as_deref() == batch.cursor()
                     {
-                        // Preserve the genuine scan frontier when this bounded
-                        // attempt cannot afford another candidate and enqueue.
-                        // A new poll gets a new work root without inventing progress.
+                        // Preserve the genuine scan frontier and let another
+                        // due tenant proceed before this scan's next attempt.
+                        QueueContext { tx: &mut tx, calls: &mut calls }
+                            .defer_recurrence(batch).await.map_err(RequestError::database)?;
                         return Self::finish_commit(&mut tx, ()).await;
                     }
                     for item in page.items {
@@ -328,7 +342,7 @@ impl Application {
                 .try_acquire_owned()
                 .map_err(|_| RequestError::Busy)?,
         );
-        let scope = self.request_scope(self.runtime.limits().wall_time);
+        let scope = self.job_request_scope()?;
         WORKER_SLOT
             .scope(
                 WorkerSlot {
@@ -336,10 +350,12 @@ impl Application {
                     permit: slot,
                 },
                 scope.run(async {
-                    let Some(claim) = self.claim_job().await? else {
+                    let Some((claim, remaining)) = self.claim_job().await? else {
                         return Ok(None);
                     };
-                    self.invoke_job(&claim).await.map(Some)
+                    self.invoke_job_with_calls(&claim, remaining)
+                        .await
+                        .map(Some)
                 }),
             )
             .await
@@ -353,18 +369,21 @@ impl Application {
             self.generation.get().is_some(),
             "application is not activated"
         );
+        jobs.lifecycle.ensure_idle()?;
         jobs.running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| anyhow::anyhow!("job workers already running"))?;
         let (stop, stopping) = tokio::sync::watch::channel(false);
         let concurrency = jobs.effective.limits.worker_concurrency;
         let app = self.clone();
+        #[cfg(test)]
+        let fault = crate::failure_tests::capture_context();
         let task = tokio::spawn(async move {
             let mut tasks = tokio::task::JoinSet::new();
             for _ in 0..concurrency {
                 let app = app.clone();
                 let mut stopping = stopping.clone();
-                tasks.spawn(async move {
+                let work = async move {
                     let mut polls = tokio::time::interval(std::time::Duration::from_secs(1));
                     polls.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     loop {
@@ -380,15 +399,29 @@ impl Application {
                         let _ = app.run_recurrence_once().await;
                         let _ = app.run_job_once().await;
                     }
-                });
+                };
+                #[cfg(test)]
+                let work = crate::failure_tests::with_context(fault.clone(), work);
+                tasks.spawn(work);
             }
             let mut failed = false;
             while let Some(result) = tasks.join_next().await {
                 failed |= result.is_err();
             }
+            // Worker tasks can return after acknowledged COMMIT while provider
+            // cleanup still owns its request and database permits. The same
+            // registry waits for physical stop using original admitted deadlines.
+            let drained = app
+                .jobs
+                .as_ref()
+                .expect("worker runtime")
+                .lifecycle
+                .shutdown()
+                .await;
             if failed {
                 anyhow::bail!("job worker task failed; ownership quarantined");
             }
+            drained?;
             app.jobs
                 .as_ref()
                 .expect("worker runtime")
