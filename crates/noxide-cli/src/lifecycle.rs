@@ -173,7 +173,13 @@ pub async fn prepare(project: &Path, development: bool, approval: Option<&str>) 
 
 // This scans metadata only; it never invokes Cargo or application code.
 fn fingerprint(project: &Path) -> Result<Vec<u8>> {
-    fn walk(path: &Path, hash: &mut Sha256, count: &mut usize, depth: usize) -> Result<()> {
+    fn walk(
+        path: &Path,
+        hash: &mut Sha256,
+        count: &mut usize,
+        depth: usize,
+        public: bool,
+    ) -> Result<()> {
         ensure!(depth <= 32, "watch nesting limit");
         let mut entries = fs::read_dir(path)?
             .take(2049)
@@ -182,7 +188,8 @@ fn fingerprint(project: &Path) -> Result<Vec<u8>> {
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
             let name = entry.file_name();
-            if name == "target" || name.to_string_lossy().starts_with('.') {
+            let public = public || (depth == 0 && name == "public");
+            if (name == "target" && !public) || name.to_string_lossy().starts_with('.') {
                 continue;
             }
             *count += 1;
@@ -191,7 +198,7 @@ fn fingerprint(project: &Path) -> Result<Vec<u8>> {
             ensure!(!metadata.file_type().is_symlink(), "linked watch input");
             hash.update(entry.path().as_os_str().as_encoded_bytes());
             if metadata.is_dir() {
-                walk(&entry.path(), hash, count, depth + 1)?;
+                walk(&entry.path(), hash, count, depth + 1, public)?;
             } else {
                 ensure!(metadata.is_file(), "nonregular watch input");
                 hash.update(metadata.len().to_le_bytes());
@@ -207,7 +214,7 @@ fn fingerprint(project: &Path) -> Result<Vec<u8>> {
         Ok(())
     }
     let mut hash = Sha256::new();
-    walk(project, &mut hash, &mut 0, 0)?;
+    walk(project, &mut hash, &mut 0, 0, false)?;
     Ok(hash.finalize().to_vec())
 }
 
@@ -308,5 +315,24 @@ pub async fn dev(args: &[OsString]) -> Result<()> {
             _ = &mut shutdown => { if let Some(child) = &mut running { stop(child).await?; } return Ok(()); }
             _ = tokio::time::sleep(std::time::Duration::from_millis(750)) => {},
         }
+    }
+}
+
+#[cfg(test)]
+mod asset_watch_tests {
+    use super::*;
+    #[test]
+    fn public_target_changes_are_watched_ordinary_build_outputs_are_excluded() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("public/target")).unwrap();
+        fs::create_dir(root.join("target")).unwrap();
+        fs::write(root.join("public/target/site.css"), b"p{color:red}").unwrap();
+        fs::write(root.join("target/build-output"), b"ignored").unwrap();
+        let before = fingerprint(root).unwrap();
+        fs::write(root.join("target/build-output"), b"ignored change").unwrap();
+        assert_eq!(fingerprint(root).unwrap(), before);
+        fs::write(root.join("public/target/site.css"), b"p{color:blue}").unwrap();
+        assert_ne!(fingerprint(root).unwrap(), before);
     }
 }

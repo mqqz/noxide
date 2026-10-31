@@ -1,8 +1,9 @@
 # Public package assets and rich documents
 
-P05 implementation slice: independent leaf admission and executor transport. The
-shared manifest, SDK lowering, HTTP dispatch and full application browser wiring
-remain integration gates. These modules do not enable an asset capability alone.
+Protocol v7 implements asset admission, SDK lowering, the executor transport and
+host HTTP/rendering integration. Application construction requires an independently
+admitted bundle matching the approved manifest. This is tested implementation,
+not an audited security or transport-anonymity claim.
 
 An asset declaration names a canonical relative package entry, its lowercase
 SHA-256 source digest and one of PNG, JPEG, WebP, WOFF2 or CSS. The complete bundle
@@ -64,8 +65,8 @@ Allowed at-rules are `@media`, `@container`, `@keyframes` and `@font-face`.
 Media/container queries are parenthesized min/max width/height literal lengths
 joined by `and`; container queries may name one ASCII container. Keyframes use
 `nxa-` names, from/to/0–100% selectors, at most 32 blocks, finite duration/delay
-at most ten seconds and iteration count at most ten. Font faces have a literal
-family, exactly one declared WOFF2 URL and optional enumerated style/weight/display.
+at most ten seconds and iteration count at most ten. Font faces have a literal `nxa-` family (preventing global replacement of host
+control fonts), exactly one declared WOFF2 URL and optional enumerated style/weight/display.
 
 Only `background-image: url(...)` and font-face `src: url(...)` can load resources.
 URLs must exactly equal an already-declared digest asset path of the corresponding
@@ -116,3 +117,49 @@ Malformed/duplicate/incomplete envelopes fail, and deadlines/process cleanup sti
 apply. This boundary is transport validation, not deployment or audited anonymity
 proof. The complete integrated SHA still requires hostile-VM and NoJS all-network
 attempt browser evidence.
+
+## SDK and lifecycle
+
+Place only public declared files under the application's `public/` directory.
+Declare markers inside `#[noxide::app]`:
+
+```rust,ignore
+#[asset("site.css", Css)]
+pub struct Theme;
+#[asset("tile.png", Png)]
+pub struct Tile;
+// In a page: html! { (stylesheet::<Theme>()) main { (image::<Tile>("Tile")) } }
+```
+
+The attribute hashes bounded files during compilation inside the selected build
+executor and emits only logical name, MIME and digest metadata; asset bytes never
+enter guest Wasm. `#[app]` registers the markers. The explicit equivalent implements
+`AssetType`, the relevant `ImageAsset`/`StylesheetAsset` marker, and registers its
+`AssetDeclaration` with `ApplicationDefinition::asset` or
+`application! { assets: [Theme, Tile], pages: [...] }`. `AssetRef` admits logical
+names, never host paths or user URLs. Rich helpers lower to the canonical
+`Instruction::Rich`; stylesheets lower to `Instruction::Stylesheet`.
+
+Build validates assets.pack independently; activation and startup re-admit it.
+`Config.assets` is the operator's pack path; omission grants only an empty bundle
+and fails when any asset is declared. Asset changes require contract approval.
+Wire v7 requires a rebuild/reapproval of old contracts; receipt3 and storage11
+remain unchanged. No database deletion or compatibility executor is required.
+
+Digest-only GET responses clone immutable Arc-owned bytes with a maximum of eight
+outstanding asset bodies and no asset queue. Permits live until those bytes drop;
+the existing60-second connection deadline bounds delivery. Nonempty/chunked GET
+bodies are rejected with connection close. No per-request4MiB file copy, filesystem
+IO, database lookup, user cache validator or ambient network authority is involved.
+The CSS root is emitted only when an application stylesheet is linked, preserving
+unstyled output and host credential-page privacy. Operator CSS policy is separate.
+
+The working public-articles `/assets_demo` and authenticated `/assets_preview`
+pages use original CC0 PNG/WOFF2/CSS fixtures with reproduction/provenance alongside
+the example. Its native test compares the complete convenience manifest with
+explicit registration and compares typed helpers with exact canonical IR.
+`tools/test_packaged_assets.py` exercises a real packaged component in Firefox
+with JavaScript disabled and a strict recording proxy, including login/register/
+account exclusion, host toolbar isolation, native details/table/nav, startup
+forgeries and byte immutability after pack-file tampering. Handover/recovery
+exclusion is also covered directly through the host's credential renderers.

@@ -414,15 +414,22 @@ mod tests {
         assert!(css::validate(&format!("p{{background-image:url('{url}?x')}}"), &urls).is_err());
         assert!(
             css::validate(
-                &format!("@font-face{{font-family:'Face';src:url('{url}')}}"),
+                &format!("@font-face{{font-family:'nxa-face';src:url('{url}')}}"),
                 &urls
             )
             .is_err()
         );
         assert!(css::validate(&format!("p{{background-image:url({url}"), &urls).is_err());
         urls.insert(url.clone(), AssetMediaType::Woff2);
+        assert!(
+            css::validate(
+                &format!("@font-face{{font-family:'Arial';src:url('{url}')}}"),
+                &urls
+            )
+            .is_err()
+        );
         css::validate(
-            &format!("@font-face{{font-family:'Face';src:url('{url}')}}"),
+            &format!("@font-face{{font-family:'nxa-face';src:url('{url}')}}"),
             &urls,
         )
         .unwrap();

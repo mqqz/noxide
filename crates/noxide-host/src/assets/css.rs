@@ -474,7 +474,10 @@ fn declarations(
         let v = &c[2..];
         let ok = if font {
             match name {
-                "font-family" => v.len() == 1 && matches!(v[0],Atom::String(n) if safe_ident(n)),
+                "font-family" => {
+                    v.len() == 1
+                        && matches!(v[0],Atom::String(n) if safe_ident(n) && n.starts_with("nxa-"))
+                }
                 "src" => v.len() == 1 && asset_url(v[0], urls, true),
                 "font-style" => v.len() == 1 && keywords(v, &["normal", "italic", "oblique"]),
                 "font-weight" => weight(v),

@@ -2,7 +2,7 @@ example-catalog-links.json r9z5dS2XcDsUgzVr1djTuAIuWGFJ4EdUPZSw9Nmg-Nc
 example-forum.json Q-gwvXDv8obzjy0TZOq0Yor5ZEJgJMNGFcmff4AjqSo
 example-private-inbox.json qyXdY23H6X4Y4SO07lZh7dw-sDVszxXJkPrB4d4y_zs
 example-private-notes.json kqrbLP3-ZDjKbSz7dejPV9NiiUNOL_nHZGmvIVnRRvo
-example-public-articles.json uQ67NhvQr6kjW_eQ6wAXzYAPJ9gm03fYHeMJCv98Ok4
+example-public-articles.json Qyz8oUrXF9ydkhPG0UP2Oi0yHb-RXAxQB6XPoxIMBIQ
 example-shop.json y0DeFNsG2ZgDESQ3UsZi3OuJxxZtvnVJ6NGNClrNFo4
 example-task-board.json SAimpACG7MXZyK96pvoQjsAyDpV0P1LZ-uL4TNyNdpY
 sdk-forum-explicit.json b5nJ5SSGdIx5pg9JaQtpACPePvNttN2hZpO1Ck-b2QQ

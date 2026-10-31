@@ -1,0 +1,7 @@
+@font-face { font-family: 'nxa-proof'; src: url('/_noxide/assets/8b184cbc79278947afdb8109f66072996da835059cafe043c481913225f45c68'); font-display: swap; }
+p { color: rgb(12, 34, 56); font-family: 'nxa-proof', sans-serif; }
+a { color: rgb(12, 34, 56); }
+.card { display: grid; grid-template-columns: 1fr 2fr; gap: 1rem; padding: 1rem; border: 1px solid navy; }
+@media (min-width: 30rem) { table { width: 100%; } }
+@container panel (max-width: 20rem) { p { font-size: 1rem; } }
+@keyframes nxa-fade { from { opacity: 0; } to { opacity: 1; } }

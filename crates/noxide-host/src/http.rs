@@ -430,7 +430,7 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                 .iter()
                 .any(|value| value.as_bytes() != b"0")
         {
-            return StatusCode::BAD_REQUEST.into_response();
+            return (StatusCode::BAD_REQUEST, [(header::CONNECTION, "close")]).into_response();
         }
         if request.method() != axum::http::Method::GET || request.uri().query().is_some() {
             return StatusCode::NOT_FOUND.into_response();

@@ -192,7 +192,10 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
         out.text(csrf)?;
         out.push("\"><button>Sign out</button></form></nav>")?;
     }
-    out.push("<div class=\"noxide-app\">")?;
+    let scoped_css = !styles.is_empty();
+    if scoped_css {
+        out.push("<div class=\"noxide-app\">")?;
+    }
     let explicit_main = doc
         .nodes
         .iter()
@@ -349,7 +352,9 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
     if !explicit_main {
         out.push("</main>")?;
     }
-    out.push("</div>")?;
+    if scoped_css {
+        out.push("</div>")?;
+    }
     for reference in &context.preview_links {
         let manifest = context
             .manifest
@@ -1055,4 +1060,48 @@ pub(crate) fn form_already_used(
 
 pub(crate) fn target_conflict() -> Rendered {
     Rendered { status: 409, body: b"<!doctype html><html lang=\"en\"><title>Selection changed</title><main><h1>A selection changed</h1><p>Reload the original form and review your selections.</p><a href=\"/\">Return to the application</a></main></html>".to_vec(), location: None, anonymous_cookie: None }
+}
+
+#[cfg(test)]
+mod asset_credential_style_tests {
+    use super::*;
+    #[test]
+    fn host_handover_rotation_and_recovery_never_link_application_css() {
+        let mut m = crate::test_support::manifest();
+        m.assets.push(noxide_protocol::assets::AssetDeclaration {
+            name: "private_theme.css".into(),
+            digest: "a".repeat(64),
+            media_type: noxide_protocol::assets::AssetMediaType::Css,
+        });
+        let credentials = FormCredentials {
+            csrf: "csrf".into(),
+            submission: "submission".into(),
+            values: Fields::new(),
+            selections: Default::default(),
+            selected: Default::default(),
+        };
+        let presentation = crate::Presentation {
+            stylesheet: Some("p{color:blue}".into()),
+            ..Default::default()
+        };
+        for page in [
+            capability_handover(Some("host secret"), None).unwrap(),
+            capability_rotation(&presentation, &credentials, 1, 1).unwrap(),
+            recovery(
+                &presentation,
+                &m,
+                1,
+                &credentials,
+                &Fields::new(),
+                Recovery::Committed,
+            )
+            .unwrap(),
+            unavailable(&presentation, &m).unwrap(),
+        ] {
+            let html = String::from_utf8(page.body).unwrap();
+            assert!(!html.contains(noxide_protocol::assets::ASSET_PATH_PREFIX));
+            assert!(!html.contains("private_theme.css"));
+            assert!(!html.contains("noxide-app"));
+        }
+    }
 }
