@@ -5,6 +5,7 @@ use crate::{
 use anyhow::{Result, ensure};
 use noxide_protocol::{ListOrder, Manifest, Operation, OperationKind};
 use std::{collections::BTreeMap, sync::Arc};
+pub(crate) mod aggregate;
 
 /// Compiled from an admitted list operation. Grants nothing; authorization
 /// and visibility are always read from the operation itself.

@@ -76,3 +76,13 @@ pairs and after serialization. This payload bound does not establish physical
 storage/write bytes, provider plan visits or runtime budget fit. The independent
 leaf harness preserves root-locked registry identities and exercises all2,048
 pairs without truncation, cancellation failure and handwritten Unicode payloads.
+
+The arithmetic leaf `query_plan/aggregate.rs` visits every seeded candidate once,
+including nonmatching/hidden candidates, and accepts typed operands only after the
+caller authorizes them. Its local search cap cannot exceed256 and grants no new
+shared allowance. It exposes no partial-value getter; only proven source exhaustion
+can finish successfully. The ordinary1,001st lookahead poisons prior arithmetic.
+Search must never issue an extra257th candidate beyond the shared request cap;
+without independently proven completion it returns `LimitExceeded`. All failures
+remain terminal for that scan. Empty count/sum are0, empty extrema are typed None,
+and checked i128 sum converts to i64 only at successful completion.
