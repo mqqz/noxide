@@ -124,12 +124,25 @@ impl Transaction {
             old_generation,
             old_contract,
             old_epoch,
-            _,
+            old_state,
             pending_limit,
             tenant_limit,
             concurrency,
         ] = rows.first().context("job runtime missing")?;
-        let changed = old_generation != generation || old_contract != contract;
+        let generation_changed = old_generation != generation;
+        let changed = generation_changed || old_contract != contract;
+        // Clock recovery and copied-storage fencing retire a generation while
+        // paused. Rebinding to the new deployment must preserve that operator
+        // pause until an explicit current-generation grant, even when approval
+        // bytes are unchanged.
+        let preserve_pause = generation_changed && old_state == "paused";
+        let runtime_state = if effective.is_some() && !preserve_pause {
+            "active"
+        } else {
+            "paused"
+        };
+        let grant_state = if preserve_pause { "revoked" } else { "active" };
+        let recurring_state = if preserve_pause { "paused" } else { "active" };
         if !changed {
             ensure!(
                 integer(pending_limit)? == i64::from(limits.pending_per_app)
@@ -155,7 +168,7 @@ impl Transaction {
                 &[],
             )
             .await?;
-            self.execute("UPDATE nx_job_runtime SET deployment=$1,contract=$2,epoch=$3,state=$4,pending_limit=$5,tenant_limit=$6,concurrency=$7 WHERE singleton=1", &[generation.into(), contract.into(), epoch.as_str().into(), if effective.is_some() { "active" } else { "paused" }.into(), i64::from(limits.pending_per_app).into(), i64::from(limits.pending_per_tenant).into(), i64::from(limits.worker_concurrency).into()]).await?;
+            self.execute("UPDATE nx_job_runtime SET deployment=$1,contract=$2,epoch=$3,state=$4,pending_limit=$5,tenant_limit=$6,concurrency=$7 WHERE singleton=1", &[generation.into(), contract.into(), epoch.as_str().into(), runtime_state.into(), i64::from(limits.pending_per_app).into(), i64::from(limits.pending_per_tenant).into(), i64::from(limits.worker_concurrency).into()]).await?;
         }
         self.execute("INSERT INTO nx_job_queue(singleton,claim_seq) VALUES(1,0) ON CONFLICT(singleton) DO NOTHING", &[]).await?;
         let Some(effective) = effective else {
@@ -198,12 +211,12 @@ impl Transaction {
                 epoch: epoch.clone(),
             };
             grant.validate()?;
-            self.execute("INSERT INTO nx_job_grants(deployment,tenant,worker,version,contract,epoch,state,declaration) VALUES($1,$2,$3,$4,$5,$6,'active',$7) ON CONFLICT(deployment,tenant,worker) DO UPDATE SET version=$4,contract=$5,epoch=$6,state='active',declaration=$7", &[generation.into(), scope.tenant.as_str().into(), grant.worker.name.as_str().into(), version.into(), contract.into(), epoch.as_str().into(), serde_json::to_string(&grant)?.into()]).await?;
+            self.execute("INSERT INTO nx_job_grants(deployment,tenant,worker,version,contract,epoch,state,declaration) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(deployment,tenant,worker) DO UPDATE SET version=$4,contract=$5,epoch=$6,state=$7,declaration=$8", &[generation.into(), scope.tenant.as_str().into(), grant.worker.name.as_str().into(), version.into(), contract.into(), epoch.as_str().into(), grant_state.into(), serde_json::to_string(&grant)?.into()]).await?;
             for schedule in declarations.recurring.iter().filter(|s| {
                 s.worker == grant.worker.name
                     && grant.worker.actions.iter().any(|a| a.action == s.action)
             }) {
-                self.execute("INSERT INTO nx_job_recurring(deployment,tenant,name,contract,epoch,grant_version,version,state,next_ms,cutoff_ms,cutoff_seq,cursor) VALUES($1,$2,$3,$4,$5,$6,1,'active',0,0,0,'') ON CONFLICT(deployment,tenant,name) DO UPDATE SET contract=$4,epoch=$5,grant_version=$6,version=nx_job_recurring.version+1,state='active',next_ms=0,cutoff_ms=0,cutoff_seq=0,cursor=''", &[generation.into(), scope.tenant.as_str().into(), schedule.name.as_str().into(), contract.into(), epoch.as_str().into(), version.into()]).await?;
+                self.execute("INSERT INTO nx_job_recurring(deployment,tenant,name,contract,epoch,grant_version,version,state,next_ms,cutoff_ms,cutoff_seq,cursor) VALUES($1,$2,$3,$4,$5,$6,1,$7,0,0,0,'') ON CONFLICT(deployment,tenant,name) DO UPDATE SET contract=$4,epoch=$5,grant_version=$6,version=nx_job_recurring.version+1,state=$7,next_ms=0,cutoff_ms=0,cutoff_seq=0,cursor=''", &[generation.into(), scope.tenant.as_str().into(), schedule.name.as_str().into(), contract.into(), epoch.as_str().into(), version.into(), recurring_state.into()]).await?;
             }
         }
         Ok(())
@@ -400,4 +413,3 @@ impl super::QueueContext<'_> {
         Ok(id)
     }
 }
-

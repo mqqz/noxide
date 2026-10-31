@@ -6,7 +6,7 @@ use crate::{
     },
     job_deployment::{EffectiveJobDeployment, JobDeployment, JobGrant, JobLimits},
 };
-use noxide_protocol::jobs::{JobContract, Worker, WorkerAction};
+use noxide_protocol::jobs::{JobContract, RecurringSchedule, Worker, WorkerAction};
 use sqlx::Connection;
 use std::{
     collections::BTreeSet,
@@ -22,6 +22,14 @@ fn approved() -> (JobContract, EffectiveJobDeployment) {
                 targets: Default::default(),
             }],
         }],
+        recurring: vec![RecurringSchedule {
+            name: "periodic".into(),
+            worker: "repair".into(),
+            action: 2,
+            interval: noxide_protocol::time::Duration::from_millis(60_000).unwrap(),
+            inputs: Default::default(),
+            selection: None,
+        }],
         ..Default::default()
     };
     let effective = JobDeployment {
@@ -36,12 +44,7 @@ fn approved() -> (JobContract, EffectiveJobDeployment) {
     .unwrap();
     (declaration, effective)
 }
-// Real operator commands use admitted ordinary transactions. Drain their
-// registered providers before opening the next no-wait startup transaction.
-async fn operator_phase<T>(
-    database: &Database,
-    operation: impl for<'a> std::ops::AsyncFnOnce(&'a mut Transaction) -> T,
-) -> T {
+fn operator_admission() -> (AdmissionOwner, std::sync::Arc<Registry>) {
     let registry = std::sync::Arc::new(Registry::default());
     let cap = Duration::from_secs(5);
     let scope = RequestScope::new(
@@ -58,6 +61,15 @@ async fn operator_phase<T>(
         std::sync::Arc::new(databases.try_acquire_owned().unwrap()),
         None,
     );
+    (owner, registry)
+}
+// Real operator commands use admitted ordinary transactions. Drain their
+// registered providers before opening the next no-wait startup transaction.
+async fn operator_phase<T>(
+    database: &Database,
+    operation: impl for<'a> std::ops::AsyncFnOnce(&'a mut Transaction) -> T,
+) -> T {
+    let (owner, registry) = operator_admission();
     let value = owner
         .run(async {
             let mut tx = database
@@ -78,8 +90,9 @@ async fn setup(database: &Database) {
         tx.execute("INSERT INTO nx_deployment(singleton,contract,incarnation,generation) VALUES(1,'approval','incarnation','generation') ON CONFLICT(singleton) DO UPDATE SET contract='approval',incarnation='incarnation',generation='generation'", &[]).await.unwrap();
     }).await;
 }
-async fn activate(
+async fn activate_generation(
     database: &Database,
+    generation: &str,
     contract: &str,
     declaration: &JobContract,
     effective: &EffectiveJobDeployment,
@@ -97,11 +110,28 @@ async fn activate(
         .unwrap_or_else(|error| panic!("P10 operator activation phase={phase} begin: {error:#}"));
     lease
         .tx()
-        .activate_jobs("generation", contract, Some(effective), Some(declaration))
+        .activate_jobs(generation, contract, Some(effective), Some(declaration))
         .await
         .unwrap();
     lease.tx().commit().await.unwrap();
     lease.finish().await.unwrap();
+}
+async fn activate(
+    database: &Database,
+    contract: &str,
+    declaration: &JobContract,
+    effective: &EffectiveJobDeployment,
+    phase: &str,
+) {
+    activate_generation(
+        database,
+        "generation",
+        contract,
+        declaration,
+        effective,
+        phase,
+    )
+    .await;
 }
 async fn operator_lifecycle(database: Database) {
     setup(&database).await;
@@ -207,6 +237,153 @@ async fn operator_lifecycle(database: Database) {
                 .await
                 .unwrap()[0][0],
             "3"
+        );
+    })
+    .await;
+    paused_generation_restart(&database, &declaration, &effective).await;
+}
+async fn paused_generation_restart(
+    database: &Database,
+    declaration: &JobContract,
+    effective: &EffectiveJobDeployment,
+) {
+    let (job_id, watermark) = operator_phase(database, async |tx: &mut Transaction| {
+        let payload = tx.fetch::<1>("SELECT declaration FROM nx_job_grants WHERE deployment='generation'", &[]).await.unwrap();
+        let grant: crate::jobs::Grant = serde_json::from_str(&payload[0][0]).unwrap();
+        let schedule = noxide_protocol::jobs::Schedule { source_action: 1, ordinal: 0, worker: "repair".into(), action: 2, targets: Default::default(), inputs: Default::default(), due_at: noxide_protocol::Value::TransactionTime };
+        let now = noxide_protocol::time::Timestamp::UNIX_EPOCH;
+        let job = crate::jobs::CapturedJob::capture(&schedule, "clock_recovery_pending".into(), &grant, 1, now, now, Default::default(), Default::default()).unwrap();
+        let mut calls = 16;
+        assert!(crate::jobs::QueueContext { tx: &mut *tx, calls: &mut calls }.enqueue(&job, now, 1000).await.unwrap());
+        tx.execute("UPDATE nx_clock SET lifecycle_ms=123456,lifecycle_version=9 WHERE singleton=1", &[]).await.unwrap();
+        let clock = tx.fetch::<2>("SELECT CAST(lifecycle_ms AS TEXT),CAST(lifecycle_version AS TEXT) FROM nx_clock WHERE singleton=1", &[]).await.unwrap()[0].clone();
+        (job.id().unwrap(), clock)
+    }).await;
+    // Exercise the actual central clock recovery with a new key incarnation.
+    // It retires the generation without resetting the observed lifecycle clock.
+    let keys = crate::HostKeys::generate().unwrap();
+    let (owner, registry) = operator_admission();
+    owner.run(database.recover_clock(&keys)).await.unwrap();
+    registry.shutdown().await.unwrap();
+    let generation = operator_phase(database, async |tx: &mut Transaction| {
+        let generation = tx.fetch::<1>("SELECT generation FROM nx_deployment WHERE singleton=1", &[]).await.unwrap()[0][0].clone();
+        assert_ne!(generation, "generation");
+        assert_eq!(tx.fetch::<2>("SELECT CAST(lifecycle_ms AS TEXT),CAST(lifecycle_version AS TEXT) FROM nx_clock WHERE singleton=1", &[]).await.unwrap()[0], watermark);
+        assert_eq!(tx.fetch::<1>("SELECT state FROM nx_jobs WHERE id=$1", &[job_id.as_str().into()]).await.unwrap()[0][0], "paused");
+        assert_eq!(tx.fetch::<1>("SELECT state FROM nx_job_recurring WHERE deployment='generation'", &[]).await.unwrap()[0][0], "paused");
+        assert_eq!(tx.fetch::<1>("SELECT state FROM nx_job_runtime", &[]).await.unwrap()[0][0], "paused");
+        generation
+    }).await;
+    for phase in [
+        "paused_generation_change",
+        "paused_generation_second_restart",
+    ] {
+        activate_generation(
+            database,
+            &generation,
+            "new_approval",
+            declaration,
+            effective,
+            phase,
+        )
+        .await;
+        operator_phase(database, async |tx: &mut Transaction| {
+            assert_eq!(
+                tx.fetch::<2>("SELECT deployment,state FROM nx_job_runtime", &[])
+                    .await
+                    .unwrap()[0],
+                [generation.clone(), String::from("paused")]
+            );
+            assert_eq!(
+                tx.fetch::<1>(
+                    "SELECT state FROM nx_job_grants WHERE deployment=$1",
+                    &[generation.as_str().into()]
+                )
+                .await
+                .unwrap()[0][0],
+                "revoked"
+            );
+            assert_eq!(
+                tx.fetch::<1>(
+                    "SELECT state FROM nx_job_recurring WHERE deployment=$1",
+                    &[generation.as_str().into()]
+                )
+                .await
+                .unwrap()[0][0],
+                "paused"
+            );
+            let mut calls = 16;
+            assert!(
+                crate::jobs::QueueContext {
+                    tx,
+                    calls: &mut calls
+                }
+                .claim(&generation, noxide_protocol::time::Timestamp::UNIX_EPOCH)
+                .await
+                .is_err()
+            );
+        })
+        .await;
+    }
+    operator_phase(database, async |tx: &mut Transaction| {
+        tx.grant_job_service(
+            &generation,
+            "new_approval",
+            &effective.grants[0],
+            declaration,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tx.fetch::<1>("SELECT state FROM nx_job_runtime", &[])
+                .await
+                .unwrap()[0][0],
+            "active"
+        );
+        assert_eq!(
+            tx.fetch::<1>(
+                "SELECT state FROM nx_job_grants WHERE deployment=$1",
+                &[generation.as_str().into()]
+            )
+            .await
+            .unwrap()[0][0],
+            "active"
+        );
+        assert_eq!(
+            tx.fetch::<1>(
+                "SELECT state FROM nx_job_recurring WHERE deployment=$1",
+                &[generation.as_str().into()]
+            )
+            .await
+            .unwrap()[0][0],
+            "active"
+        );
+        assert_eq!(
+            tx.fetch::<1>(
+                "SELECT state FROM nx_job_grants WHERE deployment='generation'",
+                &[]
+            )
+            .await
+            .unwrap()[0][0],
+            "revoked"
+        );
+        assert_eq!(
+            tx.fetch::<1>(
+                "SELECT state FROM nx_job_recurring WHERE deployment='generation'",
+                &[]
+            )
+            .await
+            .unwrap()[0][0],
+            "paused"
+        );
+        assert_eq!(
+            tx.fetch::<1>(
+                "SELECT state FROM nx_jobs WHERE id=$1",
+                &[job_id.as_str().into()]
+            )
+            .await
+            .unwrap()[0][0],
+            "paused"
         );
     })
     .await;
