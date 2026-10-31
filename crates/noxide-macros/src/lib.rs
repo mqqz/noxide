@@ -1,6 +1,7 @@
 //! Declarations and templates for the Noxide guest SDK.
 //!
 //! Macro expansion happens inside the isolated application build.
+mod assets;
 mod convenience;
 mod declaration;
 mod registration;
@@ -737,4 +738,13 @@ mod parent_redirect_tests {
             );
         }
     }
+}
+
+/// Declare public package metadata; file hashing stays inside the selected executor.
+#[proc_macro_attribute]
+pub fn asset(attr: TokenStream, input: TokenStream) -> TokenStream {
+    finish(assets::expand(
+        parse_macro_input!(attr as assets::Declaration),
+        parse_macro_input!(input as syn::ItemStruct),
+    ))
 }

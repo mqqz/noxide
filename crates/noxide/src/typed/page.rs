@@ -4,7 +4,7 @@ use noxide_protocol::Container;
 /// An escaped, composable document instruction sequence.
 #[derive(Clone, Default)]
 pub struct Fragment {
-    nodes: Vec<Instruction>,
+    pub(super) nodes: Vec<Instruction>,
 }
 impl Fragment {
     pub fn new() -> Self {

@@ -43,6 +43,14 @@ pub async fn prepare(project: &Path, development: bool, approval: Option<&str>) 
     let bytes = super::read(&manifest_path, 32768)?;
     let manifest = noxide_host::manifest::parse(&bytes)?;
     let digest = URL_SAFE_NO_PAD.encode(noxide_host::manifest::digest(&manifest)?);
+    let asset_path = bundle.join("assets.pack");
+    noxide_host::assets::AssetBundle::from_pack(
+        &manifest.assets,
+        &super::read(
+            &asset_path,
+            noxide_host::assets::MAX_ASSET_PACK_BYTES as u64,
+        )?,
+    )?;
     let component = bundle.join(format!("{}.component.wasm", descriptor.name));
     noxide_host::runtime::Runtime::compile(
         &super::read(&component, 2 * 1024 * 1024)?,
@@ -126,6 +134,7 @@ pub async fn prepare(project: &Path, development: bool, approval: Option<&str>) 
     }
     configuration["component"] = serde_json::to_value(component)?;
     configuration["manifest"] = serde_json::to_value(manifest_path)?;
+    configuration["assets"] = serde_json::to_value(asset_path)?;
     let parsed: super::Config = serde_json::from_value(configuration.clone())?;
     let keys = state.join(&parsed.keys);
     if !keys.try_exists()? {

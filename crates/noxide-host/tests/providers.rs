@@ -31,6 +31,7 @@ async fn conformance(
             database.clone(),
             keys,
             Limits::default(),
+            noxide_host::assets::AssetBundle::default(),
         )
         .unwrap(),
     );
@@ -99,6 +100,7 @@ async fn conformance(
         database.clone(),
         serde_json::from_slice(&saved_keys).unwrap(),
         Limits::default(),
+        noxide_host::assets::AssetBundle::default(),
     )
     .unwrap();
     restarted.activate().await.unwrap();
@@ -136,6 +138,7 @@ async fn conformance(
             database.clone(),
             serde_json::from_slice(&saved_keys).unwrap(),
             Limits::default(),
+            noxide_host::assets::AssetBundle::default(),
         )
         .unwrap();
         hostile.activate().await.unwrap();
@@ -186,6 +189,7 @@ async fn conformance(
         database.clone(),
         serde_json::from_slice(&saved_keys).unwrap(),
         Limits::default(),
+        noxide_host::assets::AssetBundle::default(),
     )
     .unwrap();
     assert!(replacement.activate().await.is_err());
@@ -206,6 +210,7 @@ async fn conformance(
         database.clone(),
         serde_json::from_slice(&saved_keys).unwrap(),
         Limits::default(),
+        noxide_host::assets::AssetBundle::default(),
     )
     .unwrap();
     replacement.activate().await.unwrap();
@@ -217,6 +222,7 @@ async fn conformance(
         database.clone(),
         serde_json::from_slice(&saved_keys).unwrap(),
         Limits::default(),
+        noxide_host::assets::AssetBundle::default(),
     )
     .unwrap();
     rollback.activate().await.unwrap();
@@ -229,6 +235,7 @@ async fn conformance(
         database.clone(),
         HostKeys::generate().unwrap(),
         Limits::default(),
+        noxide_host::assets::AssetBundle::default(),
     )
     .unwrap();
     restored.activate().await.unwrap();
@@ -250,6 +257,7 @@ async fn application_again(
         db,
         serde_json::from_slice(keys).unwrap(),
         Limits::default(),
+        noxide_host::assets::AssetBundle::default(),
     )
     .unwrap();
     app.activate().await.unwrap();

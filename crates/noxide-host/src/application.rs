@@ -201,6 +201,8 @@ impl std::error::Error for RequestError {}
 
 pub struct Application {
     pub(crate) presentation: crate::Presentation,
+    pub(crate) assets: Arc<crate::assets::AssetBundle>,
+    pub(crate) asset_responses: Arc<tokio::sync::Semaphore>,
     pub(crate) registration: auth::Registration,
     pub(crate) manifest: Arc<Manifest>,
     pub(crate) plans: BTreeMap<u32, Arc<crate::query_plan::ListPlan>>,
@@ -498,8 +500,10 @@ impl Application {
         database: Database,
         keys: HostKeys,
         limits: Limits,
+        assets: crate::assets::AssetBundle,
     ) -> Result<Self> {
         let m = manifest::parse(declarations)?;
+        assets.verify_declarations(&m.assets)?;
         let digest = manifest::digest(&m)?;
         ensure!(
             digest == approved,
@@ -520,6 +524,8 @@ impl Application {
         .with_wasm_capacity(concurrency);
         Ok(Self {
             presentation: crate::Presentation::default(),
+            assets: Arc::new(assets),
+            asset_responses: Arc::new(tokio::sync::Semaphore::new(8)),
             registration: auth::Registration::Closed,
             plans: crate::query_plan::compile_all(&m)?,
             manifest: Arc::new(m),
@@ -1243,6 +1249,7 @@ impl Application {
                 &response,
                 &RenderContext {
                     presentation: &self.presentation,
+                    assets: &self.assets,
                     manifest: Some(&self.manifest),
                     forms,
                     logout_csrf: session
@@ -1292,6 +1299,7 @@ mod clock_tests {
                 db.clone(),
                 HostKeys::generate().unwrap(),
                 Limits::default(),
+                crate::assets::AssetBundle::default(),
             )
             .unwrap(),
         );
@@ -1403,6 +1411,7 @@ mod clock_tests {
             db.clone(),
             HostKeys::generate().unwrap(),
             Limits::default(),
+            crate::assets::AssetBundle::default(),
         )
         .unwrap();
         app.activate().await.unwrap();
@@ -1570,6 +1579,7 @@ mod clock_tests {
             db.clone(),
             HostKeys::generate().unwrap(),
             Limits::default(),
+            crate::assets::AssetBundle::default(),
         )
         .unwrap();
         app.activate().await.unwrap();
@@ -1655,6 +1665,7 @@ mod identity_time_tests {
             Database::sqlite(temp.path().join("absent.db")),
             HostKeys::generate().unwrap(),
             Limits::default(),
+            crate::assets::AssetBundle::default(),
         )
         .unwrap();
         let now = security::now().unwrap();

@@ -11,12 +11,15 @@ mod action;
 pub use action::*;
 mod form;
 pub use form::*;
+mod assets;
+pub use assets::*;
 mod page;
 pub use page::*;
 /// Untrusted build metadata; the trusted host independently admits its output.
 #[doc(hidden)]
 #[derive(Default)]
 pub struct ApplicationDefinition {
+    assets: BTreeMap<String, noxide_protocol::assets::AssetDeclaration>,
     resources: BTreeMap<String, Resource>,
     operations: BTreeMap<u32, Operation>,
     routes: BTreeMap<u32, Route>,
@@ -26,6 +29,12 @@ pub struct ApplicationDefinition {
 impl ApplicationDefinition {
     pub fn new() -> Self {
         Self::default()
+    }
+    pub fn asset(&mut self, asset: noxide_protocol::assets::AssetDeclaration) {
+        assert!(
+            self.assets.insert(asset.name.clone(), asset).is_none(),
+            "duplicate asset"
+        );
     }
     pub fn resource(&mut self, resource: Resource) {
         if let Some(old) = self
@@ -113,6 +122,7 @@ impl ApplicationDefinition {
             action.targets.sort_by(|a, b| a.name.cmp(&b.name));
         }
         Manifest {
+            assets: self.assets.into_values().collect(),
             version: VERSION,
             resources: self.resources.into_values().collect(),
             operations: self.operations.into_values().collect(),

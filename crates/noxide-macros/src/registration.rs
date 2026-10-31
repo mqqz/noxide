@@ -7,6 +7,7 @@ use syn::{
     spanned::Spanned,
 };
 pub(crate) struct Registration {
+    pub(crate) assets: Vec<Type>,
     pub(crate) pages: Vec<syn::Path>,
     pub(crate) actions: Vec<(Type, Option<syn::Path>)>,
     pub(crate) forms: Vec<(Type, syn::Path)>,
@@ -14,6 +15,7 @@ pub(crate) struct Registration {
 impl Parse for Registration {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let mut result = Self {
+            assets: Vec::new(),
             pages: Vec::new(),
             actions: Vec::new(),
             forms: Vec::new(),
@@ -31,6 +33,12 @@ impl Parse for Registration {
             let content;
             syn::bracketed!(content in input);
             match section.to_string().as_str() {
+                "assets" => {
+                    result.assets = content
+                        .parse_terminated(Type::parse, Token![,])?
+                        .into_iter()
+                        .collect();
+                }
                 "pages" => {
                     result.pages = content
                         .parse_terminated(syn::Path::parse, Token![,])?
@@ -66,7 +74,7 @@ impl Parse for Registration {
                 _ => {
                     return Err(syn::Error::new(
                         section.span(),
-                        "expected pages, actions, or forms",
+                        "expected assets, pages, actions, or forms",
                     ));
                 }
             }
@@ -159,6 +167,7 @@ impl RouteNamespace {
 
 pub(crate) fn expand_application(registration: Registration) -> syn::Result<Tokens> {
     let pages = &registration.pages;
+    let assets = &registration.assets;
     let actions: Vec<_> = registration
         .actions
         .iter()
@@ -198,6 +207,7 @@ pub(crate) fn expand_application(registration: Registration) -> syn::Result<Toke
         pub mod routes { #route_exports }
         pub fn noxide_manifest() -> String {
             let mut builder = ::noxide::ApplicationDefinition::new();
+            #(builder.asset(<#assets as ::noxide::AssetType>::declaration());)*
             #(#pages::register(&mut builder);)*
             #(
                 for resource in <#actions as ::noxide::ActionType>::resources() { builder.resource(resource); }

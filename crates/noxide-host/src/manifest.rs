@@ -14,6 +14,7 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest> {
 pub fn digest(manifest: &Manifest) -> Result<[u8; 32]> {
     validate(manifest)?;
     let mut canonical = manifest.clone();
+    canonical.assets.sort_by(|a, b| a.name.cmp(&b.name));
     canonical.resources.sort_by(|a, b| a.name.cmp(&b.name));
     canonical.operations.sort_by_key(|operation| operation.id);
     canonical.routes.sort_by_key(|route| route.id);
@@ -195,6 +196,13 @@ pub use noxide_protocol::identifier;
 
 pub fn validate(m: &Manifest) -> Result<()> {
     ensure!(m.version == VERSION, "unsupported manifest version");
+    crate::assets::validate_declarations(&m.assets)?;
+    ensure!(
+        m.routes
+            .iter()
+            .all(|r| !r.path.starts_with("/_noxide/assets")),
+        "reserved asset path"
+    );
     ensure!(
         !m.resources.is_empty() && m.resources.len() <= 16,
         "resource limit"

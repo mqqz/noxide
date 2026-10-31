@@ -394,6 +394,7 @@ mod tests {
             db.clone(),
             HostKeys::generate().unwrap(),
             Limits::default(),
+            crate::assets::AssetBundle::default(),
         )
         .unwrap();
         app.activate().await.unwrap();
@@ -522,6 +523,7 @@ mod tests {
             db.clone(),
             HostKeys::generate().unwrap(),
             Limits::default(),
+            crate::assets::AssetBundle::default(),
         )
         .unwrap();
         app.activate().await.unwrap();

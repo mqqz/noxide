@@ -137,6 +137,7 @@ impl Case {
                 db.clone(),
                 HostKeys::generate().unwrap(),
                 Limits::default(),
+                crate::assets::AssetBundle::default(),
             )
             .unwrap(),
         );

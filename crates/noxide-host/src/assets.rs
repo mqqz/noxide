@@ -4,6 +4,8 @@
 //! build executor; hostile source trees must use the disposable build VM.
 #[path = "assets/css.rs"]
 mod css;
+pub(crate) static EMPTY: std::sync::LazyLock<AssetBundle> =
+    std::sync::LazyLock::new(AssetBundle::default);
 #[path = "assets/document.rs"]
 pub mod document;
 use anyhow::{Result, ensure};
@@ -27,6 +29,9 @@ pub struct PublicAsset {
 impl PublicAsset {
     pub fn declaration(&self) -> &AssetDeclaration {
         &self.declaration
+    }
+    pub fn shared_bytes(&self) -> Arc<[u8]> {
+        self.bytes.clone()
     }
     pub fn bytes(&self) -> &[u8] {
         &self.bytes

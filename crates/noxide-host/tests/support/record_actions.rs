@@ -2,6 +2,7 @@ use noxide_protocol::{Manifest, VERSION};
 
 pub fn declarations() -> Manifest {
     serde_json::from_value(serde_json::json!({
+        "assets": [],
         "version": VERSION,
         "resources": [
             {"id":1,"name":"notes","fields":[{"kind":"text","optional":false,"initial":null,"name":"body","label":"Note","max_bytes":4096},{"kind":"text","optional":false,"initial":null,"name":"tag","label":"Tag","max_bytes":128}]}

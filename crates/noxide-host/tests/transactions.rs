@@ -315,6 +315,7 @@ impl Case {
                 db.clone(),
                 serde_json::from_slice(keys).unwrap(),
                 limits,
+                noxide_host::assets::AssetBundle::default(),
             )
             .unwrap(),
         );
@@ -814,6 +815,7 @@ async fn contract_changes_invalidate_tokens(mut case: Case) {
             case.db.clone(),
             serde_json::from_slice(&case.keys).unwrap(),
             Limits::default(),
+            noxide_host::assets::AssetBundle::default(),
         )
         .unwrap();
         changed.activate().await.unwrap();

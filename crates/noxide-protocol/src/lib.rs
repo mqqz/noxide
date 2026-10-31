@@ -1,11 +1,13 @@
 //! Versioned semantic protocol shared by the guest SDK and trusted host.
 
+pub mod assets;
+pub mod document;
 pub mod time;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 pub const MAX_IR_BYTES: usize = 65_536;
 pub const MAX_NODES: usize = 1_024;
 pub const MAX_DEPTH: usize = 32;
@@ -56,6 +58,8 @@ pub enum Instruction {
     BeginLink { destination: RouteRef },
     EndLink,
     Form { action: u32 },
+    Stylesheet { asset: String },
+    Rich(document::PresentationNode),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -536,6 +540,7 @@ pub struct Inspection {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
+    pub assets: Vec<assets::AssetDeclaration>,
     pub version: u32,
     pub resources: Vec<Resource>,
     pub operations: Vec<Operation>,

@@ -97,6 +97,7 @@ impl Presentation {
             &self.capability_path,
         ];
         for (i, path) in paths.iter().enumerate() {
+            ensure!(!path.starts_with("/_noxide/assets"), "reserved asset path");
             ensure!(
                 path.len() <= 128
                     && path.starts_with('/')

@@ -1,4 +1,5 @@
 //! Trusted execution, rendering, and persistence for Noxide applications.
+pub mod assets;
 mod database;
 mod lifecycle_clock;
 pub mod manifest;

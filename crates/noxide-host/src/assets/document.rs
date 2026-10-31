@@ -88,7 +88,7 @@ fn element(n: &PresentationNode) -> Option<Element> {
         None
     }
 }
-fn inline(n: &PresentationNode) -> bool {
+pub(crate) fn inline(n: &PresentationNode) -> bool {
     matches!(
         n,
         PresentationNode::Text(_) | PresentationNode::Image { .. } | PresentationNode::Link { .. }

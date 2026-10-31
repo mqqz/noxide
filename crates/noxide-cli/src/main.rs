@@ -25,6 +25,8 @@ struct Config {
     keys: PathBuf,
     component: PathBuf,
     manifest: PathBuf,
+    #[serde(default)]
+    assets: Option<PathBuf>,
     approved_contract: String,
     origin: String,
     listen: ListenConfig,
@@ -325,14 +327,27 @@ async fn main() -> Result<()> {
                 .decode(&config.approved_contract)?
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("invalid approved contract digest"))?;
+            let declarations = read(&base.join(&config.manifest), 32_768)?;
+            let manifest = noxide_host::manifest::parse(&declarations)?;
+            let assets = match &config.assets {
+                Some(path) => noxide_host::assets::AssetBundle::from_pack(
+                    &manifest.assets,
+                    &read(
+                        &base.join(path),
+                        noxide_host::assets::MAX_ASSET_PACK_BYTES as u64,
+                    )?,
+                )?,
+                None => noxide_host::assets::AssetBundle::default(),
+            };
             let app = Arc::new(
                 Application::new(
                     &read(&base.join(config.component), 2 * 1024 * 1024)?,
-                    &read(&base.join(config.manifest), 32_768)?,
+                    &declarations,
                     approved,
                     database(&config.database, &base)?,
                     keys,
                     Limits::default(),
+                    assets,
                 )?
                 .with_presentation(config.presentation)?
                 .with_signed_in_reserve(config.signed_in_reserve)?

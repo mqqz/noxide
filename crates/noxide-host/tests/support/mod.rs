@@ -9,6 +9,7 @@ pub fn manifest() -> Manifest {
         any: vec![vec![Predicate::Owner]],
     };
     Manifest {
+        assets: Vec::new(),
         version: VERSION,
         resources: vec![Resource {
             gate: None,

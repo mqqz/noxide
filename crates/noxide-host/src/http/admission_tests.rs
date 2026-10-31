@@ -120,6 +120,7 @@ async fn application() -> (tempfile::TempDir, Arc<Application>) {
             db,
             HostKeys::generate().unwrap(),
             Limits::default(),
+            crate::assets::AssetBundle::default(),
         )
         .unwrap(),
     );
@@ -755,6 +756,7 @@ async fn runtime_concurrency_below_global_cap_returns_busy_at_admission() {
                 concurrency: 1,
                 ..Limits::default()
             },
+            crate::assets::AssetBundle::default(),
         )
         .unwrap(),
     );
@@ -806,6 +808,7 @@ async fn identity_provider_checks(db: Database) {
             db.clone(),
             HostKeys::generate().unwrap(),
             Limits::default(),
+            crate::assets::AssetBundle::default(),
         )
         .unwrap(),
     );
@@ -927,6 +930,7 @@ async fn verified_http_pages_work_with_small_reserves_and_one_runtime_slot() {
                     concurrency: 1,
                     ..Limits::default()
                 },
+                crate::assets::AssetBundle::default(),
             )
             .unwrap()
             .with_signed_in_reserve(reserve)

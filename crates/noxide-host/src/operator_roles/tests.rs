@@ -303,6 +303,7 @@ async fn fresh_forms(db: &Database) {
         db.clone(),
         HostKeys::generate().unwrap(),
         Limits::default(),
+        crate::assets::AssetBundle::default(),
     )
     .unwrap();
     app.activate().await.unwrap();
@@ -617,6 +618,7 @@ async fn ordinary_actions_cannot_write_moderator_fields_or_reuse_credential() {
             db.clone(),
             keys,
             Limits::default(),
+            crate::assets::AssetBundle::default(),
         )
         .unwrap();
         app.activate().await.unwrap();

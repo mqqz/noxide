@@ -367,8 +367,9 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
         };
         return finish(StatusCode::NOT_FOUND.into_response());
     }
-    let public = (path == presentation.registration_path
-        && app.registration == crate::Registration::Closed)
+    let public = path.starts_with(noxide_protocol::assets::ASSET_PATH_PREFIX)
+        || (path == presentation.registration_path
+            && app.registration == crate::Registration::Closed)
         || app
             .manifest
             .routes
@@ -422,6 +423,44 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
         return StatusCode::BAD_REQUEST.into_response();
     }
     let path = request.uri().path().to_owned();
+    if path.starts_with(noxide_protocol::assets::ASSET_PATH_PREFIX) {
+        if headers.contains_key(header::TRANSFER_ENCODING)
+            || headers
+                .get_all(header::CONTENT_LENGTH)
+                .iter()
+                .any(|value| value.as_bytes() != b"0")
+        {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+        if request.method() != axum::http::Method::GET || request.uri().query().is_some() {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        let Some(asset) = gateway.app.assets.at_path(&path) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let Ok(permit) = gateway.app.asset_responses.clone().try_acquire_owned() else {
+            return busy();
+        };
+        struct AssetBody {
+            bytes: Arc<[u8]>,
+            _permit: tokio::sync::OwnedSemaphorePermit,
+        }
+        impl AsRef<[u8]> for AssetBody {
+            fn as_ref(&self) -> &[u8] {
+                &self.bytes
+            }
+        }
+        let bytes = axum::body::Bytes::from_owner(AssetBody {
+            bytes: asset.shared_bytes(),
+            _permit: permit,
+        });
+        return (
+            [(header::CONTENT_TYPE, asset.declaration().media_type.mime())],
+            bytes,
+        )
+            .into_response();
+    }
+
     if path == presentation.registration_path
         && gateway.app.registration == crate::Registration::Closed
     {
@@ -849,6 +888,7 @@ mod tests {
                     db,
                     HostKeys::generate().unwrap(),
                     Limits::default(),
+                    crate::assets::AssetBundle::default(),
                 )
                 .unwrap(),
             );
@@ -1021,6 +1061,7 @@ mod tests {
                     db,
                     HostKeys::generate().unwrap(),
                     Limits::default(),
+                    crate::assets::AssetBundle::default(),
                 )
                 .unwrap()
                 .with_presentation(p.clone())

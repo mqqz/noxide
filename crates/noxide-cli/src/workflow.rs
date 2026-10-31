@@ -156,6 +156,13 @@ pub async fn build(command: &str, args: &[OsString]) -> Result<()> {
     );
     let contract = manifest::parse(&super::read(&output.join("manifest.json"), 32768)?)?;
     let digest = manifest::digest(&contract)?;
+    let assets = noxide_host::assets::AssetBundle::from_pack(
+        &contract.assets,
+        &super::read(
+            &output.join("assets.pack"),
+            noxide_host::assets::MAX_ASSET_PACK_BYTES as u64,
+        )?,
+    )?;
     if command != "check" {
         let core = super::read(&output.join(format!("{name}.wasm")), 2 * 1024 * 1024)?;
         let component = wit_component::ComponentEncoder::default()
@@ -200,6 +207,7 @@ pub async fn build(command: &str, args: &[OsString]) -> Result<()> {
             database,
             noxide_host::HostKeys::generate()?,
             Default::default(),
+            assets,
         )?;
         app.activate().await?;
         println!("Runtime admission and activation passed with disposable test storage.");

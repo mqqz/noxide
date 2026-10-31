@@ -514,6 +514,7 @@ async fn forms_case(db: Database, _sqlite: bool) {
         db.clone(),
         HostKeys::generate().unwrap(),
         Limits::default(),
+        crate::assets::AssetBundle::default(),
     )
     .unwrap();
     app.activate().await.unwrap();
@@ -815,6 +816,7 @@ async fn optional_auth_pages_omit_declared_owner_forms_for_anonymous_visitors() 
         db.clone(),
         HostKeys::generate().unwrap(),
         Limits::default(),
+        crate::assets::AssetBundle::default(),
     )
     .unwrap();
     app.activate().await.unwrap();
@@ -1187,6 +1189,7 @@ async fn opaque_cursors_bind_parent_contract_deployment_and_identity() {
         db.clone(),
         serde_json::from_slice(&serde_json::to_vec(&keys).unwrap()).unwrap(),
         Limits::default(),
+        crate::assets::AssetBundle::default(),
     )
     .unwrap();
     app.activate().await.unwrap();
@@ -1272,6 +1275,7 @@ async fn opaque_cursors_bind_parent_contract_deployment_and_identity() {
         db.clone(),
         serde_json::from_slice(&serde_json::to_vec(&keys).unwrap()).unwrap(),
         Limits::default(),
+        crate::assets::AssetBundle::default(),
     )
     .unwrap();
     redeployed.activate().await.unwrap();
@@ -1290,6 +1294,7 @@ async fn opaque_cursors_bind_parent_contract_deployment_and_identity() {
         db.clone(),
         keys,
         Limits::default(),
+        crate::assets::AssetBundle::default(),
     )
     .unwrap();
     redeployed.activate().await.unwrap();
@@ -1316,6 +1321,7 @@ async fn full_creation_benchmark(db: Database) {
             db.clone(),
             HostKeys::generate().unwrap(),
             Limits::default(),
+            crate::assets::AssetBundle::default(),
         )
         .unwrap(),
     );
@@ -1455,6 +1461,7 @@ pub(crate) async fn redirect_app(db: Database) -> (Application, Manifest) {
         db.clone(),
         HostKeys::generate().unwrap(),
         Limits::default(),
+        crate::assets::AssetBundle::default(),
     )
     .unwrap();
     app.activate().await.unwrap();

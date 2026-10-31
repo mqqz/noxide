@@ -21,6 +21,7 @@ async fn application_with(db: &Database, keys: &[u8], mode: &str, m: Manifest) -
             db.clone(),
             serde_json::from_slice(keys).unwrap(),
             Limits::default(),
+            noxide_host::assets::AssetBundle::default(),
         )
         .unwrap(),
     );

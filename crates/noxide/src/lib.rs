@@ -99,7 +99,9 @@ macro_rules! export {
 }
 
 mod typed;
-pub use noxide_macros::{Choice, Resource, action, app, application, form, html, page, query};
+pub use noxide_macros::{
+    Choice, Resource, action, app, application, asset, form, html, page, query,
+};
 pub use noxide_protocol::{ChoiceVariant, Control, FieldKind, FormInstruction};
 pub use typed::*;
 #[doc(hidden)]
@@ -110,8 +112,10 @@ pub mod __private {
 /// Common application declarations, capabilities, and rendering types.
 pub mod prelude {
     pub use crate::{
-        AccountId, ActionError, Choice, Execute, Form, FormFields, FormLayout, Fragment, Id,
-        NotFound, Page, PageResult, Query, Resource, Submission, action, app, application, form,
-        html, page, query,
+        AccountId, ActionError, AssetMediaType, AssetRef, AssetType, Choice, ClassTokens, Element,
+        Execute, FontAsset, Form, FormFields, FormLayout, Fragment, Id, ImageAsset, NotFound, Page,
+        PageResult, PresentationNode, Query, Resource, StylesheetAsset, Submission, action, app,
+        application, asset, element, form, html, image, navigation, page, query, route_link,
+        stylesheet,
     };
 }

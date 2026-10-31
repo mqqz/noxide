@@ -663,6 +663,7 @@ mod tests {
             crate::Database::sqlite(":memory:"),
             crate::HostKeys::generate().unwrap(),
             crate::runtime::Limits::default(),
+            crate::assets::AssetBundle::default(),
         )
         .unwrap();
         assert!(matches!(
@@ -694,6 +695,7 @@ mod tests {
                 db.clone(),
                 HostKeys::generate().unwrap(),
                 Limits::default(),
+                crate::assets::AssetBundle::default(),
             )
             .unwrap(),
         );
@@ -859,6 +861,7 @@ mod tests {
             Database::sqlite(":memory:"),
             HostKeys::generate().unwrap(),
             Limits::default(),
+            crate::assets::AssetBundle::default(),
         )
         .unwrap();
         let principal = auth::Principal::User(auth::User {
@@ -946,6 +949,7 @@ mod tests {
                 db.clone(),
                 HostKeys::generate().unwrap(),
                 Limits::default(),
+                crate::assets::AssetBundle::default(),
             )
             .unwrap(),
         );

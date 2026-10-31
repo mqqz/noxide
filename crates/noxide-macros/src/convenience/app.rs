@@ -105,6 +105,7 @@ pub(crate) fn expand_app(mut module: syn::ItemMod) -> syn::Result<Tokens> {
     let mut pages = BTreeMap::new();
     let mut actions: BTreeMap<String, (Type, Option<syn::Path>)> = BTreeMap::new();
     let mut layouts = BTreeMap::new();
+    let mut assets = Vec::new();
     let mut associations = Vec::new();
     let mut retained = Vec::new();
     for item in std::mem::take(items) {
@@ -140,7 +141,7 @@ pub(crate) fn expand_app(mut module: syn::ItemMod) -> syn::Result<Tokens> {
             _ => continue,
         };
         let declaration = attrs.iter().any(|a| {
-            ["page", "resource", "query", "action", "choice"]
+            ["page", "resource", "query", "action", "choice", "asset"]
                 .iter()
                 .any(|name| app_attribute(a, name))
         }) || attrs.iter().any(|a| {
@@ -162,6 +163,10 @@ pub(crate) fn expand_app(mut module: syn::ItemMod) -> syn::Result<Tokens> {
                 }
             }
             syn::Item::Struct(i) => {
+                if i.attrs.iter().any(|a| app_attribute(a, "asset")) {
+                    let name = &i.ident;
+                    assets.push(syn::parse_quote!(#name));
+                }
                 for field in &i.fields {
                     unconditional(&field.attrs)?;
                 }
@@ -245,6 +250,7 @@ pub(crate) fn expand_app(mut module: syn::ItemMod) -> syn::Result<Tokens> {
         .map(|(name, function)| (actions[&name].0.clone(), function))
         .collect();
     let registration = Registration {
+        assets,
         pages: pages.into_values().collect(),
         actions: actions.into_values().collect(),
         forms,

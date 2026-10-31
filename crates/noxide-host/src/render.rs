@@ -4,7 +4,7 @@ use forms::{form, hidden};
 use noxide_protocol::*;
 use std::collections::BTreeMap;
 
-pub const CSP: &str = "default-src 'none'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+pub const CSP: &str = "default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
 #[derive(Clone)]
 pub struct FormCredentials {
@@ -16,6 +16,7 @@ pub struct FormCredentials {
 }
 
 pub struct RenderContext<'a> {
+    pub assets: &'a crate::assets::AssetBundle,
     pub presentation: &'a crate::Presentation,
     pub manifest: Option<&'a Manifest>,
     /// Missing entries are undeclared; None is declared but denied by policy.
@@ -28,6 +29,7 @@ pub struct RenderContext<'a> {
 impl RenderContext<'_> {
     pub fn empty() -> Self {
         Self {
+            assets: &crate::assets::EMPTY,
             presentation: &crate::presentation::DEFAULT,
             manifest: None,
             forms: BTreeMap::new(),
@@ -158,6 +160,26 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
     out.text(&doc.title)?;
     out.push("</title>")?;
     stylesheet(&mut out, context.presentation)?;
+    let mut styles = std::collections::BTreeSet::new();
+    let mut nesting = 0i32;
+    let mut in_link = false;
+    for node in &doc.nodes {
+        match node {
+            Instruction::Begin(_) => nesting += 1,
+            Instruction::End => nesting -= 1,
+            Instruction::BeginLink { .. } => in_link = true,
+            Instruction::EndLink => in_link = false,
+            Instruction::Stylesheet { asset } => {
+                ensure!(
+                    nesting == 0 && !in_link && styles.len() < 4 && styles.insert(asset),
+                    "stylesheet placement or count"
+                );
+                out.push(&crate::assets::document::stylesheet(asset, context.assets)?)?;
+            }
+            _ => {}
+        }
+        ensure!(nesting >= 0, "unmatched document end");
+    }
     out.push("</head><body>")?;
     if let Some(csrf) = &context.logout_csrf {
         out.push("<nav aria-label=\"Account\"><a href=\"/\">Home</a> <a href=\"")?;
@@ -170,6 +192,7 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
         out.text(csrf)?;
         out.push("\"><button>Sign out</button></form></nav>")?;
     }
+    out.push("<div class=\"noxide-app\">")?;
     let explicit_main = doc
         .nodes
         .iter()
@@ -181,8 +204,36 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
     let mut stack = Vec::new();
     let mut forms = 0;
     let mut link_depth = None;
+    let mut remaining_nodes = MAX_NODES;
     for node in &doc.nodes {
+        if !matches!(node, Instruction::Rich(_)) {
+            ensure!(remaining_nodes > 0, "document node limit");
+            remaining_nodes -= 1;
+        }
         match node {
+            Instruction::Stylesheet { .. } => {}
+            Instruction::Rich(node) => {
+                ensure!(
+                    link_depth.is_none()
+                        && (flow(&stack)
+                            || (stack.last().is_some_and(phrasing)
+                                && crate::assets::document::inline(node))),
+                    "rich document placement"
+                );
+                let manifest = context.manifest;
+                out.push(&crate::assets::document::fragment(
+                    node,
+                    context.assets,
+                    &|reference| {
+                        resolve(
+                            manifest.ok_or_else(|| anyhow::anyhow!("no routes"))?,
+                            reference,
+                        )
+                    },
+                    &mut remaining_nodes,
+                    MAX_DEPTH.saturating_sub(stack.len()),
+                )?)?;
+            }
             Instruction::Begin(c) => {
                 ensure!(link_depth.is_none() || inline(c), "link content");
                 ensure!(stack.len() < MAX_DEPTH, "document depth");
@@ -295,6 +346,10 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
         stack.is_empty() && link_depth.is_none(),
         "unclosed document"
     );
+    if !explicit_main {
+        out.push("</main>")?;
+    }
+    out.push("</div>")?;
     for reference in &context.preview_links {
         let manifest = context
             .manifest
@@ -308,9 +363,6 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
         out.push("<nav aria-label=\"Pages\"><a href=\"")?;
         out.text(next)?;
         out.push("\">Next page</a></nav>")?;
-    }
-    if !explicit_main {
-        out.push("</main>")?;
     }
     out.push("</body></html>")?;
     Ok(Rendered {
