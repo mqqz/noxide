@@ -220,8 +220,6 @@ impl Database {
                         .filename(options.get_filename())
                         .create_if_missing(false)
                         .foreign_keys(true)
-                        .synchronous(SqliteSynchronous::Full)
-                        .pragma("trusted_schema", "OFF")
                         .busy_timeout(Duration::ZERO)
                         .optimize_on_close(false, None)
                 } else {
@@ -233,6 +231,18 @@ impl Database {
                     cx.lock_handle().await?.set_progress_handler(1000, move || {
                         !flag.load(Ordering::Relaxed) && Instant::now() < deadline
                     });
+                    if maintenance.is_some() {
+                        // synchronous reads the schema. Run it only after we
+                        // own cx, so a busy schema read follows acknowledged
+                        // cleanup instead of escaping through connect_with.
+                        // Disable schema trust before that first schema read.
+                        sqlx::query("PRAGMA trusted_schema = OFF")
+                            .execute(&mut cx)
+                            .await?;
+                        sqlx::query("PRAGMA synchronous = FULL")
+                            .execute(&mut cx)
+                            .await?;
+                    }
                     let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
                         .fetch_one(&mut cx)
                         .await?;
