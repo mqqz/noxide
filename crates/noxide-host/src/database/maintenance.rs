@@ -298,6 +298,138 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn sqlite_blocked_setup_confirms_stop_before_releasing_capacity() {
+        use tokio::sync::Semaphore;
+        let root = tempfile::tempdir().unwrap().keep();
+        eprintln!("retained blocked maintenance fixture: {}", root.display());
+        let database = Database::sqlite(root.join("maintenance-blocked.db"));
+        database.initialize().await.unwrap();
+        let DatabaseOptions::Sqlite { path, .. } = &database.options else {
+            unreachable!()
+        };
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false);
+        let mut writer = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode=DELETE")
+            .fetch_one(&mut writer)
+            .await
+            .unwrap();
+        assert_eq!(mode, "delete");
+        // DELETE + EXCLUSIVE blocks the schema read in synchronous=FULL,
+        // unlike an ordinary WAL writer that permits concurrent readers.
+        sqlx::query("BEGIN EXCLUSIVE")
+            .execute(&mut writer)
+            .await
+            .unwrap();
+        let slots = Arc::new(Semaphore::new(1));
+        let mut lease = MaintenanceLease::new(
+            slots.clone().acquire_owned().await.unwrap(),
+            Instant::now() + Duration::from_secs(1),
+            crate::lifecycle_clock::Freshness::default(),
+        );
+        let stopped = Arc::new(AtomicBool::new(false));
+        let result = MAINTENANCE_CLOSE_PROBE
+            .scope(stopped.clone(), lease.begin(&database))
+            .await;
+        let confirmed = result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.is::<ConnectStopped>());
+        drop(lease);
+        // Observe acknowledgement/capacity while the fixture lock is still held.
+        let acknowledged = stopped.load(Ordering::Acquire);
+        let available = slots.available_permits();
+        sqlx::query("ROLLBACK").execute(&mut writer).await.unwrap();
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&mut writer)
+            .await
+            .unwrap();
+        assert_eq!(
+            mode, "delete",
+            "failed maintenance must preserve journal mode"
+        );
+        // Only explicit fixture/bootstrap setup may restore WAL.
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode=WAL")
+            .fetch_one(&mut writer)
+            .await
+            .unwrap();
+        assert_eq!(mode, "wal");
+        writer.close().await.unwrap();
+        assert!(confirmed, "blocked setup must confirm stop: {result:?}");
+        assert!(acknowledged, "blocked setup must await worker shutdown");
+        assert_eq!(
+            available, 1,
+            "confirmed setup failure must release capacity"
+        );
+        let mut next = database
+            .begin_maintenance(Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
+        next.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_maintenance_preserves_journal_and_confirms_failed_setup_stop() {
+        let root = tempfile::tempdir().unwrap().keep();
+        eprintln!("retained maintenance journal fixture: {}", root.display());
+        let database = Database::sqlite(root.join("maintenance-journal.db"));
+        database.initialize().await.unwrap();
+        let DatabaseOptions::Sqlite { path, .. } = &database.options else {
+            unreachable!()
+        };
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false);
+        let mut fixture = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode=DELETE")
+            .fetch_one(&mut fixture)
+            .await
+            .unwrap();
+        assert_eq!(mode, "delete");
+        fixture.close().await.unwrap();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let attempt = MAINTENANCE_CLOSE_PROBE
+            .scope(
+                stopped.clone(),
+                database.begin_maintenance(Instant::now() + Duration::from_secs(2)),
+            )
+            .await;
+        match attempt {
+            Ok(mut transaction) => {
+                let persisted = transaction
+                    .fetch::<1>("PRAGMA journal_mode", &[])
+                    .await
+                    .unwrap();
+                eprintln!("unexpected maintenance journal: {}", persisted[0][0]);
+                transaction.rollback().await.unwrap();
+                panic!("maintenance must refuse existing non-WAL storage");
+            }
+            Err(error) => assert!(error.is::<ConnectStopped>(), "{error}"),
+        }
+        assert!(
+            stopped.load(Ordering::Acquire),
+            "setup rejection must await worker shutdown"
+        );
+        let mut fixture = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&mut fixture)
+            .await
+            .unwrap();
+        assert_eq!(
+            mode, "delete",
+            "maintenance must not repair persisted durability"
+        );
+        fixture.close().await.unwrap();
+    }
+
+    #[tokio::test]
     #[ignore = "requires NOXIDE_TEST_POSTGRES disposable local server"]
     async fn postgres_control_does_not_cancel_a_different_backend_identity() {
         let root = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();

@@ -85,7 +85,11 @@ async fn clock_recovery_requires_a_private_new_key() {
         "{}",
         String::from_utf8_lossy(&recovered.stderr)
     );
-    assert!(old.login_challenge().await.is_err());
+    // Recovery itself persisted the new incarnation, before activation of a
+    // replacement application could independently supersede the old instance.
+    let already_recovered = recover(&config).await;
+    assert!(!already_recovered.status.success());
+    assert!(String::from_utf8_lossy(&already_recovered.stderr).contains("fresh host key"));
     let fresh: HostKeys = serde_json::from_slice(&std::fs::read(&key_path).unwrap()).unwrap();
     let new = Application::new(
         &component,
@@ -101,6 +105,10 @@ async fn clock_recovery_requires_a_private_new_key() {
     )
     .unwrap();
     new.activate().await.unwrap();
+    // Finish the replacement's startup before issuing a deliberately rejected
+    // request to the retired instance. Its asynchronous provider cleanup must
+    // not overlap SQLite's no-wait maintenance connection setup.
+    assert!(old.login_challenge().await.is_err());
     assert!(new.view(&session, 1, None).await.is_err());
     let challenge = new.login_challenge().await.unwrap();
     new.login(
