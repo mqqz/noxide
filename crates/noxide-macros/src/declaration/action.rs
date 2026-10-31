@@ -219,7 +219,7 @@ pub(crate) fn expand_action(
         quote!(())
     };
     let immutable_check = if declaration.kind == "update" {
-        quote!(const _: () = { #(assert!(!<#values as ::noxide::FieldValue>::IMMUTABLE, "account fields are immutable");)* };)
+        quote!(const _: () = { #(assert!(!<#values as ::noxide::FieldValue>::IMMUTABLE, "immutable fields cannot be updated");)* };)
     } else {
         Tokens::new()
     };
@@ -280,6 +280,7 @@ pub(crate) fn expand_action(
                 let schema = <#resource as ::noxide::ResourceType>::definition();
                 let inputs = vec![#(#keys),*].into_iter().map(|key: &str| {
                     let field = schema.fields.iter().find(|field| field.name == key).expect("declared action field");
+                    assert!(!matches!(field.kind, ::noxide::__private::FieldKind::Blob { .. }), "Blob fields require explicit UploadHandle inputs");
                     ::noxide::__private::Input { name: field.name.clone(), label: field.label.clone(), kind: field.kind.clone(), optional: field.optional, max_bytes: field.max_bytes }
                 }).collect();
                 let assign = vec![#(::noxide::__private::Assignment { field: #keys.into(), change: ::noxide::__private::Change::Set(::noxide::__private::Value::Input(#keys.into())) }),*];
@@ -729,6 +730,7 @@ fn expand_transaction(
             ::noxide::__private::FieldKind::Boolean => 5,
             ::noxide::__private::FieldKind::Integer { .. } | ::noxide::__private::FieldKind::Timestamp => 20,
             ::noxide::__private::FieldKind::Account { .. } => 43,
+            ::noxide::__private::FieldKind::Blob { .. } | ::noxide::__private::FieldKind::UploadHandle { .. } => 67,
             ::noxide::__private::FieldKind::Choice { variants } => variants.iter().map(|v| v.key.len() as u32).max().unwrap_or(1),
             _ => 4096,
         });
@@ -804,7 +806,11 @@ fn expand_transaction(
                 }
             }
         }
-        schemas.push(quote!(::noxide::__private::Input { name: #key.into(), label: #label.into(), kind: #kind, optional: <#ty as ::noxide::FieldValue>::OPTIONAL, max_bytes: #max_bytes }));
+        schemas.push(quote!({
+            let kind = #kind;
+            assert!(!matches!(kind, ::noxide::__private::FieldKind::Blob { .. }), "Blob references cannot be action inputs; use UploadHandle");
+            ::noxide::__private::Input { name: #key.into(), label: #label.into(), kind, optional: <#ty as ::noxide::FieldValue>::OPTIONAL, max_bytes: #max_bytes }
+        }));
     }
     let declared: BTreeSet<_> = names.iter().map(|n| n.to_string()).collect();
     let mut created = BTreeMap::new();

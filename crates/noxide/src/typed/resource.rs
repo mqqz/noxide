@@ -143,6 +143,8 @@ impl FieldValue for i64 {
 }
 impl<T: FieldValue> FieldValue for Option<T> {
     const FILTERABLE: bool = T::FILTERABLE;
+    const IMMUTABLE: bool = T::IMMUTABLE;
+    const REFERENCE: bool = T::REFERENCE;
     const OPTIONAL: bool = true;
     fn kind() -> FieldKind {
         T::kind()

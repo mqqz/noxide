@@ -202,6 +202,7 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
                 "text fields require an explicit max_bytes bound",
             ));
         }
+        let default_maximum = maximum.is_none();
         let maximum = maximum.unwrap_or_else(|| LitInt::new("64", field.span()));
         let maximum_value = maximum.base10_parse::<u32>()?;
         if maximum_value == 0 || maximum_value > 4096 {
@@ -321,12 +322,21 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
             }
             None => quote!(None),
         };
-        definitions.push(quote! {
+        let maximum_output = if default_maximum {
+            quote!(match &kind {
+                ::noxide::FieldKind::Blob { .. } | ::noxide::FieldKind::UploadHandle { .. } => 67,
+                _ => 64,
+            })
+        } else {
+            quote!(#maximum)
+        };
+        definitions.push(quote! {{
+            let kind={#bounds};
             ::noxide::__private::TextField {
-                name: #field_key.into(), label: #label.into(), max_bytes: #maximum,
-                initial: #initial, kind: { #bounds }, optional: <#ty as ::noxide::FieldValue>::OPTIONAL,
+                name: #field_key.into(), label: #label.into(), max_bytes: #maximum_output,
+                initial: #initial, kind, optional: <#ty as ::noxide::FieldValue>::OPTIONAL,
             }
-        });
+        }});
         decoding.push(quote! {
             #rust_name: <#ty as ::noxide::FieldValue>::decode(record.fields.get(#field_key).expect("host resource field"))
         });

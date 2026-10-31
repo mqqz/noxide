@@ -102,7 +102,7 @@ impl<T> ControlField<T> {
             marker: PhantomData,
         }
     }
-    fn control(self, control: Control) -> FormLayout {
+    pub(super) fn control(self, control: Control) -> FormLayout {
         FormLayout {
             instructions: vec![FormInstruction::Field {
                 name: self.key.into(),

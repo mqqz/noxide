@@ -13,12 +13,15 @@ mod form;
 pub use form::*;
 mod assets;
 pub use assets::*;
+mod blobs;
+pub use blobs::*;
 mod page;
 pub use page::*;
 /// Untrusted build metadata; the trusted host independently admits its output.
 #[doc(hidden)]
 #[derive(Default)]
 pub struct ApplicationDefinition {
+    blobs: Option<noxide_protocol::blobs::BlobPolicy>,
     assets: BTreeMap<String, noxide_protocol::assets::AssetDeclaration>,
     resources: BTreeMap<String, Resource>,
     operations: BTreeMap<u32, Operation>,
@@ -122,7 +125,7 @@ impl ApplicationDefinition {
             action.targets.sort_by(|a, b| a.name.cmp(&b.name));
         }
         Manifest {
-            blobs: None,
+            blobs: self.blobs,
             assets: self.assets.into_values().collect(),
             version: VERSION,
             resources: self.resources.into_values().collect(),
