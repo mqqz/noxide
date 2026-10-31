@@ -202,6 +202,9 @@ impl Case {
         if let Some(clock) = self.clock.take() {
             clock.shutdown().await.unwrap();
         }
+        if let Some(jobs) = &self.app.jobs {
+            jobs.lifecycle.wait_idle_for_test().await.unwrap();
+        }
         self.app
             .request_lifecycle
             .wait_idle_for_test()

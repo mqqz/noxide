@@ -524,7 +524,7 @@ async fn provider(database: Database) {
         // separate sixty-second due gate is not bypassed or changed here.
         let page=app.select_recurring(&mut tx,&locked,&schedule,time,cutoff,cutoff_seq,Some(&cursor),20,&mut calls).await.unwrap();assert!(page.items.is_empty());assert!(page.complete);assert!(page.next_cursor.is_none(),"future expiry and post-cutoff insertion are not selected");
         calls-=1;
-        let jobs=tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_jobs",&[]).await.unwrap();assert_eq!(jobs[0][0],"2");tx.rollback().await.unwrap();
+        let jobs=tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_jobs",&[]).await.unwrap();assert_eq!(jobs[0][0],"2");tx.rollback().await.unwrap();eprintln!("recurring resume logical calls remaining={calls}");
     }).await;
     app.request_lifecycle().wait_idle_for_test().await.unwrap();
     request(&app)

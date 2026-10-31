@@ -17,7 +17,7 @@ pub(crate) struct JobRuntime {
     effective: EffectiveJobDeployment,
     workers: Arc<Semaphore>,
     database: Arc<Semaphore>,
-    lifecycle: Arc<Registry>,
+    pub(super) lifecycle: Arc<Registry>,
     running: std::sync::atomic::AtomicBool,
 }
 impl JobRuntime {
