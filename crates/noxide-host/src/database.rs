@@ -1,4 +1,6 @@
 mod blob_layout;
+#[cfg(test)]
+mod bootstrap_close_tests;
 mod commit;
 mod jobs_layout;
 pub(crate) mod lifecycle;
@@ -42,7 +44,7 @@ enum DatabaseOptions {
 tokio::task_local! {pub(crate) static MAINTENANCE_CLOSE_PROBE: Arc<AtomicBool>;}
 
 pub(crate) enum Backend {
-    // Only installed while consuming a maintenance transaction during close.
+    // Connection ownership has moved into physical provider cleanup.
     Closed,
     Sqlite(sqlx::SqliteConnection),
     Postgres(sqlx::PgConnection),
@@ -967,7 +969,30 @@ impl Transaction {
         }
         self.release_gate()
             .await
-            .map_err(commit::CommitFailure::cleanup)
+            .map_err(commit::CommitFailure::cleanup)?;
+        if !self.maintenance_work && matches!(self.backend, Backend::Sqlite(_)) {
+            let Backend::Sqlite(connection) = std::mem::replace(&mut self.backend, Backend::Closed)
+            else {
+                unreachable!("operator SQLite connection checked above")
+            };
+            // Untracked operator/bootstrap transactions have no request owner
+            // to await SQLx's worker close. Finish it here after acknowledged
+            // COMMIT, before a caller can start no-wait clock maintenance.
+            // Close failure cannot retrospectively change the commit frontier.
+            tokio::time::timeout_at(self.deadline, async {
+                #[cfg(test)]
+                bootstrap_close_tests::before_operator_close().await;
+                connection.close().await?;
+                #[cfg(test)]
+                bootstrap_close_tests::operator_closed();
+                Ok::<(), anyhow::Error>(())
+            })
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|result| result)
+            .map_err(commit::CommitFailure::cleanup)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn commit_acknowledged(&self) -> bool {
