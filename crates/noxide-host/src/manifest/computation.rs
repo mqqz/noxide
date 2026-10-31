@@ -105,7 +105,9 @@ impl Admission {
             Value::Literal(literal) => literal_domain(literal)?,
             Value::Principal => {
                 ensure!(
-                    !guard && operation(m, a.steps[index].operation)?.kind == OperationKind::Create,
+                    !guard
+                        && index < a.steps.len()
+                        && operation(m, a.steps[index].operation)?.kind == OperationKind::Create,
                     "principal is create-account-only"
                 );
                 Domain {
@@ -122,6 +124,10 @@ impl Admission {
                 max_bytes: 20,
             },
             Value::Target(name) => {
+                ensure!(
+                    index < a.steps.len(),
+                    "target identity is not a persisted scalar"
+                );
                 let target = action_target(&a.targets, name)?;
                 Domain {
                     kind: FieldKind::Reference {
@@ -132,6 +138,10 @@ impl Admission {
                 }
             }
             Value::Created(created) => {
+                ensure!(
+                    index < a.steps.len(),
+                    "created identity is not a persisted scalar"
+                );
                 let created = usize::from(*created);
                 ensure!(
                     created < index,
@@ -302,7 +312,7 @@ impl Admission {
         Ok(())
     }
 }
-fn literal_domain(literal: &Literal) -> Result<Domain> {
+pub(super) fn literal_domain(literal: &Literal) -> Result<Domain> {
     let (kind, encoded) = match literal {
         Literal::Text(value) => (FieldKind::Text, value.clone()),
         Literal::Integer(value) => return Ok(Domain::integer(*value, *value)),
@@ -371,6 +381,20 @@ pub(super) fn fits(domain: &Domain, field: &TextField) -> bool {
         max_bytes: domain.max_bytes,
     };
     input_fits(&input, field)
+}
+pub(super) fn fits_input(domain: &Domain, input: &Input) -> bool {
+    fits(
+        domain,
+        &TextField {
+            immutable: false,
+            kind: input.kind.clone(),
+            optional: input.optional,
+            initial: None,
+            name: input.name.clone(),
+            label: input.label.clone(),
+            max_bytes: input.max_bytes,
+        },
+    )
 }
 pub(super) fn rejection(action: &Action, rejection: &GuardRejection) -> Result<()> {
     ensure!(

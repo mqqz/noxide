@@ -1,6 +1,7 @@
 mod authority;
 mod blobs;
 mod computation;
+mod job_admission;
 mod query;
 use anyhow::{Result, ensure};
 pub use computation::{ComputationDisclosure, ComputationSource, action_disclosures};
@@ -289,23 +290,6 @@ pub use noxide_protocol::identifier;
 
 pub fn validate(m: &Manifest) -> Result<()> {
     ensure!(m.version == VERSION, "unsupported manifest version");
-    // Fail closed while the isolated job contract/queue is being integrated.
-    // Remove only with the complete service adapter and deployment approval.
-    ensure!(
-        m.jobs.is_none()
-            && m.operations.iter().all(|operation| !operation.maintenance
-                && operation
-                    .policy
-                    .any
-                    .iter()
-                    .flatten()
-                    .all(|predicate| !matches!(predicate, Predicate::Service { .. })))
-            && m.actions
-                .iter()
-                .flat_map(|action| &action.targets)
-                .all(|target| !matches!(target.source, TargetSource::Service { .. })),
-        "background jobs are unavailable"
-    );
     query::validate_declarations(m)?;
     crate::assets::validate_declarations(&m.assets)?;
     ensure!(
@@ -826,6 +810,7 @@ pub fn validate(m: &Manifest) -> Result<()> {
     for binding in &m.web_bindings {
         validate_web_binding(m, &web_action(m, binding.id)?)?;
     }
+    job_admission::validate(m)?;
     blobs::validate_blobs(m)?;
     Ok(())
 }
@@ -1185,9 +1170,14 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
             );
         }
     }
+    job_admission::action_values(m, a, &mut computations, &mut used)?;
     for name in exact {
+        let target = action_target(&a.targets, name)?;
         ensure!(
-            action_target(&a.targets, name)?.revision == Revision::Exact,
+            matches!(
+                target.source,
+                TargetSource::Service { .. } | TargetSource::Reference { .. }
+            ) || target.revision == Revision::Exact,
             "identity revision is weaker than required exact revision"
         );
     }
