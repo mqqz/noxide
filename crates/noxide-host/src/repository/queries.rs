@@ -10,15 +10,15 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-struct Candidate {
-    key: CursorKey,
-    incarnation: String,
-    revision: i64,
+pub(crate) struct Candidate {
+    pub(crate) key: CursorKey,
+    pub(crate) incarnation: String,
+    pub(crate) revision: i64,
 }
-struct Window {
-    rows: Vec<Candidate>,
-    exhausted: bool,
-    raw_work: usize,
+pub(crate) struct Window {
+    pub(crate) rows: Vec<Candidate>,
+    pub(crate) exhausted: bool,
+    pub(crate) raw_work: usize,
 }
 fn id(key: &CursorKey) -> u64 {
     match key {
@@ -60,26 +60,39 @@ fn compare(a: &CursorKey, b: &CursorKey) -> Ordering {
         _ => unreachable!("validated single-order keys"),
     }
 }
-impl Effects {
-    async fn search_ready(&mut self, op: &Operation, storage: i64) -> Result<()> {
-        if op.query.as_ref().is_none_or(|query| query.search.is_none()) {
-            return Ok(());
+/// Borrow the existing transaction, policy identity and logical work owner.
+/// A caller-supplied upper bound is host bookkeeping, never a guest query input.
+pub(crate) struct FrontierContext<'a> {
+    pub(crate) tx: &'a mut Transaction,
+    pub(crate) manifest: &'a Manifest,
+    pub(crate) principal: &'a Principal,
+    pub(crate) budget: ReadBudget<'a>,
+    pub(crate) params: &'a Fields,
+    pub(crate) target: Option<u64>,
+    pub(crate) created_seq_upper: Option<u64>,
+}
+impl FrontierContext<'_> {
+    fn upper_clause(&self, column: &str, params: &mut Vec<Param>) -> Result<String> {
+        let Some(upper) = self.created_seq_upper else {
+            return Ok(String::new());
+        };
+        params.push(i64::try_from(upper)?.into());
+        Ok(format!(" AND {column}<=${}", params.len()))
+    }
+    fn visibility_clause(&self, op: &Operation, params: &mut Vec<Param>) -> Result<String> {
+        if !manifest::is_public(op) {
+            return Ok(String::new());
         }
-        let index = manifest::resource(&self.manifest, op.resource)?
-            .search
+        let visible = op
+            .visibility
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("search index missing"))?
-            .clone();
-        crate::search::require_tokenizer(&index.tokenizer)?;
-        self.charge_list_calls(1)?;
-        let rows = self.tx.fetch::<2>("SELECT tokenizer,declaration FROM nx_search_state WHERE resource=$1 AND version=1 AND state='ready'", &[storage.into()]).await?;
-        ensure!(
-            rows.len() == 1
-                && rows[0][0] == index.tokenizer
-                && serde_json::from_str::<query::SearchIndex>(&rows[0][1])? == index,
-            "search index activation mismatch"
-        );
-        Ok(())
+            .ok_or_else(|| anyhow::anyhow!("missing public visibility"))?;
+        params.push(visible.equals.as_str().into());
+        Ok(format!(
+            " AND {}=${}",
+            self.tx.field_expression(&visible.field)?,
+            params.len()
+        ))
     }
     fn query_keyset(
         &self,
@@ -115,8 +128,7 @@ impl Effects {
         let mut clause = self.visibility_clause(op, params)?;
         if let Some(scope) = &plan.scope {
             params.push(
-                self.request
-                    .target
+                self.target
                     .ok_or_else(|| anyhow::anyhow!("missing scope target"))?
                     .to_string()
                     .into(),
@@ -127,47 +139,18 @@ impl Effects {
                 params.len()
             ));
         }
-        clause.push_str(&plan.selection_sql(&self.tx, params, &self.request.params)?);
+        clause.push_str(&plan.selection_sql(&self.tx, params, self.params)?);
         if let Some(range) = op.query.as_ref().and_then(|q| q.range.as_ref()) {
             clause.push_str(&plan.scalar(&self.manifest)?.range_sql(
                 self.tx.query_provider()?,
                 range,
-                &self.request.params,
+                self.params,
                 params,
             )?);
         }
         Ok(clause)
     }
-    fn query_terms(&self, op: &Operation) -> Result<Option<(Vec<u8>, Vec<String>)>> {
-        let Some(search) = op.query.as_ref().and_then(|q| q.search.as_ref()) else {
-            return Ok(None);
-        };
-        let index = manifest::resource(&self.manifest, op.resource)?
-            .search
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("missing search index"))?;
-        let fields = search
-            .fields
-            .iter()
-            .map(|field| {
-                index
-                    .fields
-                    .iter()
-                    .position(|name| name == field)
-                    .map(|n| n as u8)
-                    .ok_or_else(|| anyhow::anyhow!("undeclared search field"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let raw = self
-            .request
-            .params
-            .get(&search.parameter)
-            .ok_or_else(|| anyhow::anyhow!("missing search text"))?;
-        let query = crate::search::canonical_query(raw, &mut RequestScope::checkpoint_current)?;
-        crate::search::require_tokenizer(query.tokenizer())?;
-        Ok(Some((fields, query.tokens().to_vec())))
-    }
-    async fn query_window(
+    pub(crate) async fn window(
         &mut self,
         op: &Operation,
         storage: i64,
@@ -200,13 +183,14 @@ impl Effects {
                     .keyset(after, &mut params)?
                     .replace("created_seq", "p.created_seq")
                     .replace(",id)", ",p.record_id)");
+                let upper = self.upper_clause("p.created_seq", &mut params)?;
                 // Posting index fixes resource/field/token before ordered LIMIT.
                 let sql = format!(
-                    "SELECT CAST(p.created_seq AS TEXT),CAST(p.record_id AS TEXT),p.incarnation,CAST(p.revision AS TEXT) FROM nx_search_postings p WHERE p.resource=$1 AND p.field=$2 AND p.token=$3{keyset} ORDER BY p.created_seq {},p.record_id {} LIMIT {per}",
+                    "SELECT CAST(p.created_seq AS TEXT),CAST(p.record_id AS TEXT),p.incarnation,CAST(p.revision AS TEXT) FROM nx_search_postings p WHERE p.resource=$1 AND p.field=$2 AND p.token=$3{keyset}{upper} ORDER BY p.created_seq {},p.record_id {} LIMIT {per}",
                     plan.direction(),
                     plan.direction()
                 );
-                self.charge_list_calls(1)?;
+                self.budget.spend(1)?;
                 let rows = self.tx.fetch::<4>(&sql, &params).await?;
                 streams.push(
                     rows.into_iter()
@@ -248,14 +232,15 @@ impl Effects {
                 crate::policy::sql(&self.tx, &policy, &self.principal, &mut params).join(" OR ");
             let restrictions = self.query_restrictions(op, plan, &mut params)?;
             let keyset = self.query_keyset(plan, after, &mut params)?;
+            let upper = self.upper_clause("created_seq", &mut params)?;
             let scalar = match &plan.order {
                 ListOrder::Field { field, .. } => self.tx.field_expression(field)?,
                 _ => "CAST(created_seq AS TEXT)".to_owned(),
             };
             let sql = format!(
-                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),incarnation,CAST(revision AS TEXT),{scalar} FROM nx_records WHERE resource=$1 AND resource={storage} AND ({policy}){restrictions}{keyset} ORDER BY {order} LIMIT {per}"
+                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),incarnation,CAST(revision AS TEXT),{scalar} FROM nx_records WHERE resource=$1 AND resource={storage} AND ({policy}){restrictions}{keyset}{upper} ORDER BY {order} LIMIT {per}"
             );
-            self.charge_list_calls(1)?;
+            self.budget.spend(1)?;
             let rows = self.tx.fetch::<5>(&sql, &params).await?;
             streams.push(
                 rows.into_iter()
@@ -280,6 +265,79 @@ impl Effects {
             );
         }
         seal_streams(streams, per, plan.descending())
+    }
+}
+
+impl Effects {
+    async fn search_ready(&mut self, op: &Operation, storage: i64) -> Result<()> {
+        if op.query.as_ref().is_none_or(|query| query.search.is_none()) {
+            return Ok(());
+        }
+        let index = manifest::resource(&self.manifest, op.resource)?
+            .search
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("search index missing"))?
+            .clone();
+        crate::search::require_tokenizer(&index.tokenizer)?;
+        self.charge_list_calls(1)?;
+        let rows = self.tx.fetch::<2>("SELECT tokenizer,declaration FROM nx_search_state WHERE resource=$1 AND version=1 AND state='ready'", &[storage.into()]).await?;
+        ensure!(
+            rows.len() == 1
+                && rows[0][0] == index.tokenizer
+                && serde_json::from_str::<query::SearchIndex>(&rows[0][1])? == index,
+            "search index activation mismatch"
+        );
+        Ok(())
+    }
+    fn query_terms(&self, op: &Operation) -> Result<Option<(Vec<u8>, Vec<String>)>> {
+        let Some(search) = op.query.as_ref().and_then(|q| q.search.as_ref()) else {
+            return Ok(None);
+        };
+        let index = manifest::resource(&self.manifest, op.resource)?
+            .search
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing search index"))?;
+        let fields = search
+            .fields
+            .iter()
+            .map(|field| {
+                index
+                    .fields
+                    .iter()
+                    .position(|name| name == field)
+                    .map(|n| n as u8)
+                    .ok_or_else(|| anyhow::anyhow!("undeclared search field"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let raw = self
+            .request
+            .params
+            .get(&search.parameter)
+            .ok_or_else(|| anyhow::anyhow!("missing search text"))?;
+        let query = crate::search::canonical_query(raw, &mut RequestScope::checkpoint_current)?;
+        crate::search::require_tokenizer(query.tokenizer())?;
+        Ok(Some((fields, query.tokens().to_vec())))
+    }
+    async fn query_window(
+        &mut self,
+        op: &Operation,
+        storage: i64,
+        plan: &ListPlan,
+        after: Option<&CursorKey>,
+        cap: usize,
+        terms: Option<&(Vec<u8>, Vec<String>)>,
+    ) -> Result<Window> {
+        FrontierContext {
+            tx: &mut self.tx,
+            manifest: &self.manifest,
+            principal: &self.principal,
+            budget: ReadBudget::Query(&mut self.list_calls),
+            params: &self.request.params,
+            target: self.request.target,
+            created_seq_upper: None,
+        }
+        .window(op, storage, plan, after, cap, terms)
+        .await
     }
     async fn search_matches(
         &mut self,
