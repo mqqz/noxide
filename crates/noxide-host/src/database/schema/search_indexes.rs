@@ -28,16 +28,24 @@ impl Transaction {
     }
 
     pub(super) async fn initialize_search_states(&mut self, manifest: &Manifest) -> Result<()> {
-        self.check_search_states(manifest, true).await
+        self.check_search_resources(&manifest.resources, true).await
     }
 
     pub(super) async fn validate_search_states(&mut self, manifest: &Manifest) -> Result<()> {
-        self.check_search_states(manifest, false).await
+        self.validate_search_resources(&manifest.resources).await
     }
 
-    async fn check_search_states(&mut self, manifest: &Manifest, create_empty: bool) -> Result<()> {
+    pub(super) async fn validate_search_resources(&mut self, resources: &[Resource]) -> Result<()> {
+        self.check_search_resources(resources, false).await
+    }
+
+    async fn check_search_resources(
+        &mut self,
+        resources: &[Resource],
+        create_empty: bool,
+    ) -> Result<()> {
         let mut states = self.search_states().await?;
-        for resource in &manifest.resources {
+        for resource in resources {
             let Some(index) = &resource.search else {
                 continue;
             };

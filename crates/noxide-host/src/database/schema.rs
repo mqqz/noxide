@@ -369,6 +369,30 @@ impl Transaction {
         schema::transition(&source, &target.resources, &migration.operations)?;
         // Validate source bytes before any transformation can erase ambiguity.
         self.validate_stored_resources(&source).await?;
+        self.validate_search_resources(&source).await?;
+        let mut indexed_source = std::collections::BTreeMap::new();
+        for resource in &source {
+            if let Some(index) = &resource.search {
+                let storage = self.storage_key(&resource.name).await?;
+                indexed_source.insert(
+                    storage,
+                    index
+                        .fields
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>(),
+                );
+            }
+        }
+        let mut changed_search = std::collections::BTreeSet::new();
+        let mut changed_field = |storage, field: &str| {
+            if indexed_source
+                .get(&storage)
+                .is_some_and(|fields| fields.contains(field))
+            {
+                changed_search.insert(storage);
+            }
+        };
         self.drop_membership_indexes().await?;
         for name in self.query_indexes().await? {
             ensure!(
@@ -452,6 +476,7 @@ impl Transaction {
                     value,
                 } => {
                     let id = self.storage_key(resource).await?;
+                    changed_field(id, field);
                     let declaration =
                         schema::field(schema::resource(&target.resources, resource)?, field)?;
                     let value = declaration.canonical(value).map_err(anyhow::Error::msg)?;
@@ -466,6 +491,7 @@ impl Transaction {
                 }
                 MigrationOp::DropField { resource, field } => {
                     let id = self.storage_key(resource).await?;
+                    changed_field(id, field);
                     self.transform_records(id, |fields| {
                         ensure!(fields.remove(field).is_some(), "stored field is missing");
                         Ok(())
@@ -474,6 +500,7 @@ impl Transaction {
                 }
                 MigrationOp::RenameField { resource, from, to } => {
                     let id = self.storage_key(resource).await?;
+                    changed_field(id, from);
                     self.transform_records(id, |fields| {
                         let value = fields.remove(from).context("stored field is missing")?;
                         ensure!(
@@ -490,6 +517,7 @@ impl Transaction {
                     conversion,
                 } => {
                     let id = self.storage_key(resource).await?;
+                    changed_field(id, field);
                     let destination =
                         schema::field(schema::resource(&target.resources, resource)?, field)?;
                     self.transform_records(id, |fields| {
@@ -517,6 +545,7 @@ impl Transaction {
                     mapping,
                 } => {
                     let id = self.storage_key(resource).await?;
+                    changed_field(id, field);
                     self.transform_records(id, |fields| {
                         let value = fields.get_mut(field).context("stored field is missing")?;
                         if let Some(mapped) = mapping.get(value) {
@@ -530,9 +559,15 @@ impl Transaction {
             }
         }
         self.validate_stored_resources(&target.resources).await?;
-        for resource in rebuild_search {
-            let declaration = schema::resource(&target.resources, &resource)?;
-            self.rebuild_search_index(declaration).await?;
+        for resource in target
+            .resources
+            .iter()
+            .filter(|resource| resource.search.is_some())
+        {
+            let storage = self.storage_key(&resource.name).await?;
+            if rebuild_search.contains(&resource.name) || changed_search.contains(&storage) {
+                self.rebuild_search_index(resource).await?;
+            }
         }
         self.initialize_search_states(target).await?;
         self.validate_references(&target.resources).await?;
