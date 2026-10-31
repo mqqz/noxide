@@ -243,6 +243,7 @@ impl QueueContext<'_> {
             due: batch.now,
             input,
             targets,
+            reconciled_from: None,
         };
         job.validate()?;
         batch.grant.permits(&job)?;

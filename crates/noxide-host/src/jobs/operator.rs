@@ -6,6 +6,23 @@ use anyhow::{Context, Result, ensure};
 use noxide_protocol::{jobs::JobContract, time::Timestamp};
 use serde::Serialize;
 
+pub enum JobOperatorCommand {
+    Inspect { after: String },
+    Cancel { id: String },
+    Revoke { tenant: String, worker: String },
+    Grant { tenant: String, worker: String },
+    Reconcile { id: String },
+    Fork,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobOperatorResult {
+    Jobs(Vec<JobSummary>),
+    Reconciled { id: String },
+    Done,
+}
+
 #[derive(Debug, Serialize)]
 pub struct JobSummary {
     pub id: String,
@@ -76,7 +93,7 @@ impl Transaction {
         effective: Option<&EffectiveJobDeployment>,
         declarations: Option<&JobContract>,
     ) -> Result<()> {
-        cpu_checkpoint(self)?;
+        self.maintenance_checkpoint()?;
         ensure!(
             opaque(generation) && opaque(contract),
             "invalid job runtime identity"
@@ -142,7 +159,7 @@ impl Transaction {
         let declarations = declarations.context("operator job approval has no declaration")?;
         effective.limits.validate()?;
         for configured in &effective.grants {
-            cpu_checkpoint(self)?;
+            self.maintenance_checkpoint()?;
             let scope = JobScope {
                 deployment: generation.into(),
                 tenant: configured.tenant.clone(),
@@ -334,7 +351,6 @@ impl super::QueueContext<'_> {
     pub(crate) async fn enqueue_reconciled(
         &mut self,
         previous: &CapturedJob,
-        declaration: &noxide_protocol::jobs::Schedule,
         current: &super::VerifiedScheduleGrant,
         action_version: u32,
         now: Timestamp,
@@ -348,17 +364,15 @@ impl super::QueueContext<'_> {
         ensure!(changed == 1, "reconciliation source changed");
         let job = CapturedJob::reconcile(
             previous,
-            declaration,
             current.grant(),
             action_version,
-            now,
             now,
             input,
             targets,
         )?;
         let id = job.id()?;
-        self.enqueue(&job, now, tenant_limit).await?;
         self.tx.execute("UPDATE nx_jobs SET state='rejected',reason='operator_reconciled',lease_until_ms=0 WHERE id=$1 AND deployment=$2", &[parent.into(), previous.scope.deployment.as_str().into()]).await?;
+        self.enqueue(&job, now, tenant_limit).await?;
         Ok(id)
     }
 }

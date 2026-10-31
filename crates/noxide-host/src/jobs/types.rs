@@ -274,10 +274,8 @@ impl CapturedJob {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn reconcile(
         previous: &Self,
-        declaration: &Schedule,
         grant: &Grant,
         action_version: u32,
-        due: Timestamp,
         now: Timestamp,
         input: Fields,
         targets: BTreeMap<String, SealedTarget>,
@@ -295,17 +293,23 @@ impl CapturedJob {
                 grant.version
             ))?
         );
-        let mut job = Self::capture(
-            declaration,
+        let job = Self {
+            scope: grant.scope.clone(),
             origin,
-            grant,
+            ordinal: 0,
+            source_action: previous.action,
+            worker: grant.worker.name.clone(),
+            action: previous.action,
             action_version,
-            due,
-            now,
+            contract: grant.contract.clone(),
+            grant_version: grant.version,
+            epoch: grant.epoch.clone(),
+            due: now,
             input,
             targets,
-        )?;
-        job.reconciled_from = Some(parent);
+            reconciled_from: Some(parent),
+        };
+        grant.permits(&job)?;
         job.validate()?;
         ensure!(
             job.id()? != previous.id()?,

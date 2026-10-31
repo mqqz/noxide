@@ -50,47 +50,49 @@ async fn setup(database: &Database) {
     tx.execute("INSERT INTO nx_deployment(singleton,contract,incarnation,generation) VALUES(1,'approval','incarnation','generation') ON CONFLICT(singleton) DO UPDATE SET contract='approval',incarnation='incarnation',generation='generation'", &[]).await.unwrap();
     tx.commit().await.unwrap();
 }
+async fn activate(
+    database: &Database,
+    contract: &str,
+    declaration: &JobContract,
+    effective: &EffectiveJobDeployment,
+) {
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let mut lease = crate::database::MaintenanceLease::new(
+        permits.try_acquire_owned().unwrap(),
+        Instant::now() + Duration::from_secs(5),
+        crate::lifecycle_clock::Freshness::default(),
+    );
+    lease.begin(database).await.unwrap();
+    lease
+        .tx()
+        .activate_jobs("generation", contract, Some(effective), Some(declaration))
+        .await
+        .unwrap();
+    lease.tx().commit().await.unwrap();
+    lease.finish().await.unwrap();
+}
 async fn operator_lifecycle(database: Database) {
     setup(&database).await;
     let (declaration, effective) = approved();
+    activate(&database, "approval", &declaration, &effective).await;
     let mut tx = database
         .begin(Instant::now() + Duration::from_secs(5))
         .await
         .unwrap();
-    tx.activate_jobs(
-        "generation",
-        "approval",
-        Some(&effective),
-        Some(&declaration),
-    )
-    .await
-    .unwrap();
     let original = tx
         .fetch::<1>("SELECT epoch FROM nx_job_runtime", &[])
         .await
         .unwrap()[0][0]
         .clone();
-    tx.commit().await.unwrap();
-    let mut tx = database
-        .begin(Instant::now() + Duration::from_secs(5))
-        .await
-        .unwrap();
     tx.revoke_job_grant("generation", "alpha", "repair")
         .await
         .unwrap();
     tx.commit().await.unwrap();
+    activate(&database, "approval", &declaration, &effective).await;
     let mut tx = database
         .begin(Instant::now() + Duration::from_secs(5))
         .await
         .unwrap();
-    tx.activate_jobs(
-        "generation",
-        "approval",
-        Some(&effective),
-        Some(&declaration),
-    )
-    .await
-    .unwrap();
     assert_eq!(
         tx.fetch::<2>("SELECT epoch,state FROM nx_job_runtime", &[])
             .await
@@ -112,18 +114,11 @@ async fn operator_lifecycle(database: Database) {
     assert_ne!(fork[0], original);
     assert_eq!(fork[1], "paused");
     tx.commit().await.unwrap();
+    activate(&database, "approval", &declaration, &effective).await;
     let mut tx = database
         .begin(Instant::now() + Duration::from_secs(5))
         .await
         .unwrap();
-    tx.activate_jobs(
-        "generation",
-        "approval",
-        Some(&effective),
-        Some(&declaration),
-    )
-    .await
-    .unwrap();
     assert_eq!(
         tx.fetch::<2>("SELECT epoch,state FROM nx_job_runtime", &[])
             .await
@@ -138,19 +133,18 @@ async fn operator_lifecycle(database: Database) {
     tx.grant_job_service("generation", "approval", &effective.grants[0])
         .await
         .unwrap();
-    let rows = tx
-        .fetch::<2>("SELECT CAST(version AS TEXT),state FROM nx_job_grants", &[])
+    assert_eq!(
+        tx.fetch::<2>("SELECT CAST(version AS TEXT),state FROM nx_job_grants", &[])
+            .await
+            .unwrap()[0],
+        ["2".into(), "active".into()]
+    );
+    tx.commit().await.unwrap();
+    activate(&database, "new_approval", &declaration, &effective).await;
+    let mut tx = database
+        .begin(Instant::now() + Duration::from_secs(5))
         .await
         .unwrap();
-    assert_eq!(rows[0], ["2".into(), "active".into()]);
-    tx.activate_jobs(
-        "generation",
-        "new_approval",
-        Some(&effective),
-        Some(&declaration),
-    )
-    .await
-    .unwrap();
     assert_ne!(
         tx.fetch::<1>("SELECT epoch FROM nx_job_runtime", &[])
             .await
