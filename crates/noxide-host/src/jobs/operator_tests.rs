@@ -166,6 +166,16 @@ async fn sqlite_operator_restart_revocation_and_restore_do_not_resume_authority(
         .unwrap()
         .keep();
     let path = directory.join("operator.db");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+    }
     // An idle fixture connection keeps the database open across setup and
     // startup. This prevents the last SQLite handle's asynchronous close and
     // WAL checkpoint from racing no-wait maintenance admission. Production

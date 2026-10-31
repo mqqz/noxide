@@ -28,6 +28,16 @@ async fn sqlite(label: &str) -> SqliteFixture {
         .unwrap()
         .keep();
     let path = directory.join("layout.db");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+    }
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(&path)
         .create_if_missing(true)
