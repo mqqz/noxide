@@ -721,3 +721,6 @@ async fn postgres_authority_sql_rows_expiry_and_mutations() {
         .unwrap();
     result.unwrap();
 }
+
+#[cfg(feature = "query-metrics")]
+mod work;
