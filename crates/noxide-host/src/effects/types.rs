@@ -74,23 +74,6 @@ impl EndpointGrant {
 pub(crate) struct VerifiedEndpointGrant {
     pub(super) grant: EndpointGrant,
 }
-impl VerifiedEndpointGrant {
-    pub(crate) fn scope(&self) -> &EffectScope {
-        &self.grant.scope
-    }
-    pub(crate) fn contract(&self) -> &str {
-        &self.grant.contract
-    }
-    pub(crate) fn endpoint(&self) -> &EffectiveEffectGrant {
-        &self.grant.binding
-    }
-    pub(crate) fn epoch(&self) -> &str {
-        &self.grant.epoch
-    }
-    pub(crate) fn version(&self) -> i64 {
-        self.grant.version
-    }
-}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -210,9 +193,6 @@ impl CapturedEffect {
     }
     pub(super) fn capture_digest(&self) -> Result<String> {
         digest(&("effect-capture-v1", self))
-    }
-    pub(crate) fn scope(&self) -> &EffectScope {
-        &self.scope
     }
     pub(crate) fn endpoint(&self) -> &str {
         &self.binding.endpoint.name
