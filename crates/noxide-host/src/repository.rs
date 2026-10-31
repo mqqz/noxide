@@ -11,6 +11,7 @@ pub(crate) use authority::{ReadBudget, ReadContext};
 #[cfg(test)]
 pub(crate) use authority::{test_authorize_page_resource, test_read_resource};
 pub(crate) use computation::CalculationUnavailable;
+use noxide_protocol::query::CursorKey;
 use noxide_protocol::*;
 use std::sync::Arc;
 
@@ -125,8 +126,8 @@ pub(crate) struct Effects {
     pub target_rows: std::collections::BTreeMap<(u32, u64), StoredRecord>,
     pub capability_grant: Option<RecordTarget>,
     pub calls: u32,
-    pub cursor: Option<u64>,
-    pub more: Option<u64>,
+    pub cursor: Option<CursorKey>,
+    pub more: Option<CursorKey>,
 }
 
 // Measure the exact cross-boundary representation, including array framing.
@@ -869,7 +870,11 @@ impl Effects {
     ) -> Result<Vec<u8>> {
         let size = plan.limit as usize;
         let direction = plan.direction();
-        let cursor = if plan.preview { None } else { self.cursor };
+        let cursor = if plan.preview {
+            None
+        } else {
+            self.cursor.clone()
+        };
         let mut params = vec![Param::Number(storage_resource)];
         let clauses = self.authority_sql(op, &mut params).await?;
         let visibility = self.visibility_clause(op, &mut params)?;
@@ -890,14 +895,14 @@ impl Effects {
         }
         let selection = plan.selection_sql(&self.tx, &mut params, &self.request.params)?;
         let mut records = Vec::new();
-        let mut last = cursor;
+        let mut last = cursor.clone();
         self.more = None;
         // At most three bounded stored rows per database transfer. The
         // approved page size bounds both iterations and total row work.
         'page: while records.len() < size {
             let batch = (size - records.len()).min(3);
             let mut page_params = params.clone();
-            let keyset = plan.keyset(last, &mut page_params);
+            let keyset = plan.keyset(last.as_ref(), &mut page_params)?;
             let sql = format!(
                 "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({}){visibility}{parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT {batch}",
                 self.tx.bounded_text("fields", 20_000),
@@ -933,10 +938,13 @@ impl Effects {
                 };
                 if !append_prefix(&mut records, record, self.result_limit, plan.preview)? {
                     self.truncated = true;
-                    self.more = last;
+                    self.more = last.clone();
                     break 'page;
                 }
-                last = Some(seq.parse()?);
+                last = Some(CursorKey::Created {
+                    sequence: seq.parse()?,
+                    record: id.parse()?,
+                });
             }
             if count < batch {
                 break;
@@ -944,12 +952,12 @@ impl Effects {
         }
         if self.more.is_none() && records.len() == size {
             let mut page_params = params.clone();
-            let keyset = plan.keyset(last, &mut page_params);
+            let keyset = plan.keyset(last.as_ref(), &mut page_params)?;
             self.charge_list_calls(1)?;
             let next=self.tx.fetch::<1>(&format!("SELECT CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({}){visibility}{parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT 1",clauses.join(" OR ")),&page_params).await?;
             if !next.is_empty() {
                 self.truncated = true;
-                self.more = last;
+                self.more = last.clone();
             }
         }
         Ok(serde_json::to_vec(&records)?)
@@ -963,7 +971,11 @@ impl Effects {
     ) -> Result<Vec<u8>> {
         let size = plan.limit as usize;
         let direction = plan.direction();
-        let cursor = if plan.preview { None } else { self.cursor };
+        let cursor = if plan.preview {
+            None
+        } else {
+            self.cursor.clone()
+        };
         let mut candidates = std::collections::BTreeMap::new();
         let mut boundary = if plan.descending() { 0 } else { u64::MAX };
         let mut bounded_more = false;
@@ -989,7 +1001,7 @@ impl Effects {
                 );
             }
             let visibility = self.visibility_clause(op, &mut scan_params)?;
-            let keyset = plan.keyset(cursor, &mut scan_params);
+            let keyset = plan.keyset(cursor.as_ref(), &mut scan_params)?;
             let limit = if exact {
                 size + 1
             } else {
@@ -1014,7 +1026,7 @@ impl Effects {
             }
         }
         let mut records = Vec::new();
-        let mut last = cursor;
+        let mut last = cursor.clone();
         self.more = None;
         let ordered: Vec<_> = if plan.descending() {
             candidates.into_iter().rev().collect()
@@ -1054,7 +1066,10 @@ impl Effects {
             let allowed = self.authorize_rows(op, &policy_rows).await?;
             for (((seq, _), stored), allowed) in group.iter().zip(stored).zip(allowed) {
                 if !allowed {
-                    last = Some(*seq);
+                    last = Some(CursorKey::Created {
+                        sequence: *seq,
+                        record: stored.record.id,
+                    });
                     continue;
                 }
                 if let Some(field) = &plan.scope
@@ -1065,7 +1080,10 @@ impl Effects {
                         .and_then(|value| value.parse::<u64>().ok())
                         != self.request.target
                 {
-                    last = Some(*seq);
+                    last = Some(CursorKey::Created {
+                        sequence: *seq,
+                        record: stored.record.id,
+                    });
                     continue;
                 }
                 plan.check_selection(&stored.record.fields, &self.request.params)?;
@@ -1075,15 +1093,24 @@ impl Effects {
                     || !append_prefix(&mut records, record, self.result_limit, plan.preview)?
                 {
                     self.truncated = true;
-                    self.more = last;
+                    self.more = last.clone();
                     break 'page;
                 }
-                last = Some(*seq);
+                last = Some(CursorKey::Created {
+                    sequence: *seq,
+                    record: stored.record.id,
+                });
             }
         }
         if self.more.is_none() && bounded_more {
             self.truncated = true;
-            self.more = Some(boundary);
+            self.more = ordered
+                .iter()
+                .find(|(seq, _)| *seq == boundary)
+                .map(|(seq, id)| CursorKey::Created {
+                    sequence: *seq,
+                    record: *id,
+                });
         }
         Ok(serde_json::to_vec(&records)?)
     }
@@ -1309,7 +1336,12 @@ impl Effects {
             anyhow::bail!("not a picker target")
         };
         let op = manifest::operation(&self.manifest, query)?.clone();
-        let previous = (self.cursor, self.more, self.result_limit, self.truncated);
+        let previous = (
+            self.cursor.clone(),
+            self.more.clone(),
+            self.result_limit,
+            self.truncated,
+        );
         // Route pagination is scoped to its own query; it cannot select a
         // different window of the host-owned picker query.
         self.cursor = None;
@@ -1401,7 +1433,7 @@ impl Effects {
             OperationKind::List => {
                 self.result_limit = self.list_result_limit(&op)?;
                 self.truncated = false;
-                let previous_more = self.more;
+                let previous_more = self.more.clone();
                 let plan = self
                     .plans
                     .get(&op.id)

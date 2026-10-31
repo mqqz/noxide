@@ -13,6 +13,7 @@ pub(crate) mod scalar;
 /// and visibility are always read from the operation itself.
 pub(crate) struct ListPlan {
     pub operation: u32,
+    pub resource: u32,
     pub preview: bool,
     pub scope: Option<String>,
     pub strategy: ListStrategy,
@@ -31,6 +32,7 @@ pub(crate) fn compile(m: &Manifest, op: &Operation) -> Result<ListPlan> {
     let scope = op.scope.clone();
     Ok(ListPlan {
         operation: op.id,
+        resource: op.resource,
         preview: op.list.as_ref().is_some_and(|s| s.preview.is_some()),
         strategy: if resource.expiry.is_some() {
             policy::residual_strategy(&op.policy)
@@ -75,19 +77,73 @@ impl ListPlan {
     pub(crate) fn direction(&self) -> &'static str {
         if self.descending() { "DESC" } else { "ASC" }
     }
+    pub(crate) fn validate_cursor(
+        &self,
+        manifest: &Manifest,
+        key: &noxide_protocol::query::CursorKey,
+    ) -> Result<()> {
+        use noxide_protocol::query::CursorKey;
+        match (&self.order, key) {
+            (
+                ListOrder::CreatedAsc | ListOrder::CreatedDesc,
+                CursorKey::Created { sequence, record },
+            ) => {
+                ensure!(
+                    *sequence > 0
+                        && *sequence <= i64::MAX as u64
+                        && *record > 0
+                        && *record <= i64::MAX as u64,
+                    "invalid created cursor"
+                );
+                Ok(())
+            }
+            (ListOrder::Field { .. }, _) => self.scalar(manifest)?.validate_key(key),
+            _ => anyhow::bail!("cursor/order mismatch"),
+        }
+    }
+    pub(crate) fn scalar(&self, manifest: &Manifest) -> Result<scalar::Scalar> {
+        let ListOrder::Field {
+            field, direction, ..
+        } = &self.order
+        else {
+            anyhow::bail!("expected scalar order")
+        };
+        let resource = manifest::resource(manifest, self.resource)?;
+        scalar::Scalar::new(
+            resource
+                .fields
+                .iter()
+                .find(|candidate| &candidate.name == field)
+                .ok_or_else(|| anyhow::anyhow!("unknown scalar field"))?,
+            *direction,
+        )
+    }
     pub(crate) fn keyset(
         &self,
-        after: Option<u64>,
+        after: Option<&noxide_protocol::query::CursorKey>,
         params: &mut Vec<crate::database::Param>,
-    ) -> String {
-        after.map_or_else(String::new, |after| {
-            params.push((after as i64).into());
-            format!(
-                " AND created_seq{}${}",
-                if self.descending() { "<" } else { ">" },
-                params.len()
-            )
-        })
+    ) -> Result<String> {
+        let Some(key) = after else {
+            return Ok(String::new());
+        };
+        let noxide_protocol::query::CursorKey::Created { sequence, record } = key else {
+            anyhow::bail!("created cursor required")
+        };
+        ensure!(
+            *sequence > 0
+                && *sequence <= i64::MAX as u64
+                && *record > 0
+                && *record <= i64::MAX as u64,
+            "invalid created cursor"
+        );
+        params.push((*sequence as i64).into());
+        let sequence = params.len();
+        params.push((*record as i64).into());
+        let record = params.len();
+        let cmp = if self.descending() { "<" } else { ">" };
+        Ok(format!(
+            " AND (created_seq{cmp}${sequence} OR (created_seq=${sequence} AND id{cmp}${record}))"
+        ))
     }
 }
 
