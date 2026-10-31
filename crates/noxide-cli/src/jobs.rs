@@ -26,7 +26,7 @@ pub async fn run(args: &[OsString]) -> Result<()> {
         "usage: noxide jobs inspect CONFIG [AFTER] | cancel CONFIG ID | reconcile CONFIG ID | grant CONFIG TENANT WORKER | revoke CONFIG TENANT WORKER | fork CONFIG | worker-once CONFIG"
     );
     let path = text(args, 1)?;
-    let app = load(Path::new(&path)).await?;
+    let app = load(Path::new(&path), command == "fork").await?;
     if command == "worker-once" {
         let status = match app.run_job_once().await? {
             None => "idle",
@@ -71,7 +71,7 @@ pub async fn run(args: &[OsString]) -> Result<()> {
     Ok(())
 }
 
-async fn load(path: &Path) -> Result<Application> {
+async fn load(path: &Path, restore_fork: bool) -> Result<Application> {
     let (config, base) = super::config(path)?;
     let approved: [u8; 32] = URL_SAFE_NO_PAD
         .decode(&config.approved_contract)?
@@ -121,6 +121,11 @@ async fn load(path: &Path) -> Result<Application> {
     .with_signed_in_reserve(config.signed_in_reserve)?
     .with_database_statement_limit(config.database_statement_limit)?
     .with_registration(config.registration);
+    let app = if restore_fork {
+        app.with_restore_fork()
+    } else {
+        app
+    };
     app.activate().await?;
     Ok(app)
 }

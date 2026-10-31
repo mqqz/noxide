@@ -47,6 +47,7 @@ impl Transaction {
         contract: &str,
         effective: Option<&EffectiveEffectDeployment>,
         owner_directory: Option<&str>,
+        restore_fork: bool,
     ) -> Result<()> {
         self.maintenance_checkpoint()?;
         ensure!(
@@ -82,10 +83,19 @@ impl Transaction {
                 self.execute("INSERT INTO nx_effect_queue(singleton,claim_seq,store_id,owner_directory,pending_limit,tenant_limit,concurrency) VALUES(1,0,$1,$2,$3,$4,$5)",&[store_id.into(),owner_directory.into(),i64::from(effective.limits.pending_per_app).into(),i64::from(effective.limits.pending_per_tenant).into(),i64::from(effective.limits.worker_concurrency).into()]).await?;
             }
             Some([store_id, stored_directory]) => {
-                ensure!(
-                    opaque(store_id) && stored_directory == owner_directory,
-                    "effect database belongs to another owner directory"
-                );
+                ensure!(opaque(store_id), "invalid effect store identity");
+                if stored_directory != owner_directory {
+                    // Only an explicit restore fork may adopt a copied queue. The
+                    // same transaction pauses every capture and revokes grants, so
+                    // nothing sends before explicit grants and per-capture resume.
+                    ensure!(
+                        restore_fork,
+                        "effect database belongs to another owner directory"
+                    );
+                    let store_id = crate::security::random_id()?;
+                    self.execute("UPDATE nx_effect_queue SET store_id=$1,owner_directory=$2 WHERE singleton=1",&[store_id.into(),owner_directory.into()]).await?;
+                    self.pause_effects_for_epoch().await?;
+                }
                 self.execute("UPDATE nx_effect_queue SET pending_limit=$1,tenant_limit=$2,concurrency=$3 WHERE singleton=1",&[i64::from(effective.limits.pending_per_app).into(),i64::from(effective.limits.pending_per_tenant).into(),i64::from(effective.limits.worker_concurrency).into()]).await?;
             }
         }

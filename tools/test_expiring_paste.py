@@ -14,6 +14,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import socket
 import sqlite3
@@ -150,8 +151,11 @@ def main():
     if args.postgres:
         assert urllib.parse.urlsplit(args.postgres).hostname in ("localhost", "127.0.0.1", "::1"), "loopback disposable fixture only"
 
-    def postgres(sql):
-        result = subprocess.run(["psql", args.postgres, "--no-psqlrc", "--csv", "--tuples-only", "--command", sql], capture_output=True, text=True, check=False, timeout=20)
+    # The restore exercise later switches every helper to the restored deployment.
+    active = {"postgres": args.postgres, "sqlite": output / "paste.db", "config": output / "runtime.json"}
+
+    def postgres(sql, url=None):
+        result = subprocess.run(["psql", url or active["postgres"], "--no-psqlrc", "--csv", "--tuples-only", "--command", sql], capture_output=True, text=True, check=False, timeout=20)
         assert result.returncode == 0, "fixture PostgreSQL read failed; database retained"
         return list(csv.reader(io.StringIO(result.stdout)))
 
@@ -168,21 +172,21 @@ def main():
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
     origin = f"http://127.0.0.1:{port}"
-    config_path = output / "runtime.json"
+    config_path = active["config"]
     command_count = 0
 
-    def command(*arguments):
+    def command(*arguments, success=True):
         nonlocal command_count
         command_count += 1
         result = subprocess.run([str(cli), *map(str, arguments)], capture_output=True, env=environment, check=False, timeout=35)
         (output / f"cli-{command_count:03d}-{arguments[0]}.log").write_bytes(result.stdout + result.stderr)
-        assert result.returncode == 0, f"fixture CLI {arguments[0]} failed; output retained"
+        assert (result.returncode == 0) == success, f"fixture CLI {arguments[0]} exit {result.returncode}; output retained"
         return result.stdout
 
     def rows(sql):
         if args.postgres:
             return postgres(sql)
-        with sqlite3.connect(output / "paste.db") as database:
+        with sqlite3.connect(active["sqlite"]) as database:
             return [[None if value is None else str(value) for value in row] for row in database.execute(sql)]
 
     def pastes():
@@ -248,7 +252,7 @@ def main():
     @contextlib.contextmanager
     def server(label):
         with (output / f"server-{label}.log").open("wb") as log:
-            process = subprocess.Popen([str(cli), "serve", str(config_path)], stdout=log, stderr=subprocess.STDOUT, env=environment)
+            process = subprocess.Popen([str(cli), "serve", str(active["config"])], stdout=log, stderr=subprocess.STDOUT, env=environment)
             try:
                 deadline = time.monotonic() + 25
                 while True:
@@ -403,6 +407,63 @@ def main():
                     time.sleep(.05)  # committed deletion/quota predicates, no assumed ordering
                 assert rows("SELECT used_bytes,reserved_bytes,objects FROM nx_blob_store") == [["0", "0", "0"]]
             report["expiry"] = "visibility_sealed_worker_once_repair_and_blob_gc_passed"
+        # Backup: with serving stopped and the store lease released, copy metadata,
+        # immutable objects and pairing markers as one unit, then restore it as a
+        # fork with fresh host keys. Old effects and jobs must stay paused.
+        restored = output / "restored"
+        restored.mkdir(mode=0o700)
+        restored_config = json.loads(config_path.read_text())
+        if args.postgres:
+            source = urllib.parse.urlsplit(args.postgres)
+            name = source.path.lstrip("/") + "_restored"
+            postgres(f'CREATE DATABASE "{name}" TEMPLATE "{source.path.lstrip("/")}"', source._replace(path="/postgres").geturl())
+            restored_url = source._replace(path="/" + name).geturl()
+            restored_config["database"] = {"postgres": restored_url}
+        else:
+            # The host requires a private database file; create it 0600 first.
+            os.close(os.open(restored / "paste.db", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            with sqlite3.connect(output / "paste.db") as original, sqlite3.connect(restored / "paste.db") as copy:
+                original.backup(copy)
+        shutil.copy2(output / "synthetic-token", restored / "synthetic-token")
+        command("keygen", restored / "keys.json")
+        shutil.copytree(output / "objects", restored / "objects", copy_function=shutil.copy2)
+        (restored / "runtime.json").write_text(json.dumps(restored_config, indent=2) + "\n")
+        # A copied effect queue is refused until the explicit restore fork adopts it.
+        command("effects", "inspect", restored / "runtime.json", success=False)
+        assert b"another owner directory" in sorted(output.glob("cli-*-effects.log"))[-1].read_bytes()
+        assert json.loads(command("deployment-hash", restored / "runtime.json"))["deployment_digest"] == restored_config["approved_contract"]
+        active.update(config=restored / "runtime.json", sqlite=restored / "paste.db", postgres=restored_url if args.postgres else None)
+        before_jobs, before_effects = rows("SELECT id,state FROM nx_jobs"), rows("SELECT id,state FROM nx_outbox")
+        command("jobs", "fork", active["config"])
+        # Metadata without its paired immutable object store is refused.
+        (restored / "objects-missing").mkdir(mode=0o700)
+        unpaired = {**restored_config, "blobs": {**restored_config["blobs"], "directory": "objects-missing"}}
+        (restored / "unpaired.json").write_text(json.dumps(unpaired, indent=2) + "\n")
+        command("effects", "inspect", restored / "unpaired.json", success=False)
+        refusal = sorted(output.glob("cli-*-effects.log"))[-1].read_bytes()
+        assert b"owner directory" not in refusal, refusal
+        (output / "unpaired-refusal.log").write_bytes(refusal)
+        assert rows("SELECT state FROM nx_jobs") == [["paused"]] and rows("SELECT state FROM nx_outbox") == [["paused"]]
+        assert [row[0] for row in rows("SELECT id,state FROM nx_jobs")] == [row[0] for row in before_jobs]
+        assert [row[0] for row in rows("SELECT id,state FROM nx_outbox")] == [row[0] for row in before_effects]
+        proxy_before = len(proxy.commands)
+        with server("restored"):
+            reader = Browser(origin)
+            _, page, public = read(reader, route, "restored-paste")
+            assert b"Public &lt;paste&gt;" in page
+            restored_download = next(link for link in public.links if link.startswith("/_noxide/download?ticket="))
+            status, _, body = reader.request(restored_download)
+            assert status == 200 and body == payload, "restored object did not match its metadata"
+            assert reader.request(download)[0] == 404, "a pre-backup download ticket survived host-key rotation"
+            time.sleep(2)  # paused rows must stay paused while the restored host runs
+            assert rows("SELECT state FROM nx_outbox") == [["paused"]] and len(proxy.commands) == proxy_before
+        effect = rows("SELECT id FROM nx_outbox")[0][0]
+        command("effects", "resume", active["config"], effect, success=False)  # grant is revoked by the fork
+        command("effects", "grant", active["config"], "", "synthetic_events")
+        command("effects", "grant-secret", active["config"], "synthetic_events_token")
+        command("effects", "resume", active["config"], effect)
+        assert rows("SELECT state FROM nx_outbox") == [["pending"]]
+        report["backup_restore"] = "paired_copy_fork_paused_download_verified_explicit_regrant"
         report["proxy_requests_rejected"] = len(proxy.commands)
     (output / "result.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, sort_keys=True))

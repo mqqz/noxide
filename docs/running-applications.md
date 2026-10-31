@@ -530,6 +530,46 @@ Never restore the old key alongside a database that has lost acknowledged histor
 New keys invalidate old authentication sessions and forms. The runtime cannot
 automatically distinguish an unannounced restored database from its original.
 
+### Back up and restore
+
+A backup is one consistent unit: the database, the blob object directory with
+its `identity` and `pair` markers, and the operator files the configuration names
+(effect secrets, asset pack). Take it with every `serve`, `worker-once` and
+operator command stopped, so admitted deliveries, blob GC and the store lease
+have drained. Copying only the database or only the objects is incomplete.
+
+1. SQLite: copy with the online backup API (`sqlite3 runtime.db ".backup copy.db"`)
+   into a new file created with mode 0600; the host refuses group- or
+   world-readable database files. PostgreSQL: `pg_dump --format=custom`, then
+   `pg_restore` into a new empty database. Copy the object directory with
+   permissions preserved (`cp -a`); it must stay mode 0700.
+2. Generate new host keys and point the restored configuration at them, the
+   restored database and the copied object directory. Keep the same approved
+   deployment digest; `noxide deployment-hash` must reproduce it.
+3. Fence the restored runtime before serving:
+
+   ```sh
+   noxide jobs fork /srv/restored/runtime.json
+   ```
+
+   The effect queue is bound to its original owner directory, so every other
+   command refuses the copy until `fork` adopts it. In one activation it re-binds
+   the queue, pauses every captured effect and revokes effect grants; the fork
+   itself rotates the job epoch, revokes service grants and pauses pending jobs and
+   recurring schedules. Restarting preserves these pauses.
+4. Serve and verify reads and downloads. An object store that does not match the
+   metadata is refused at startup (`pair store identity mismatch`).
+5. Re-approve authority explicitly: `noxide jobs grant`, `noxide effects grant`
+   and `grant-secret`, then reconcile or cancel each retained job and resume or
+   cancel each paused effect. Remote receivers may already have seen effects that
+   the restored database lost; old captures are never replayed automatically.
+
+`tools/test_expiring_paste.py` runs this procedure on both providers, including
+the unpaired-store and unforked-queue refusals. Its PostgreSQL copy uses
+`CREATE DATABASE ... TEMPLATE` on the stopped database instead of `pg_dump`.
+A database file with unsafe permissions is currently reported only as
+`maintenance cleanup is unconfirmed; capacity quarantined`; check modes first.
+
 Run `noxide maintain CONFIG.json` periodically. Each invocation removes at most
 256 expired receipts and 256 expired sessions, after a 60-second grace period.
 Expiry is authenticated, so deleting a receipt cannot authorize an old token.

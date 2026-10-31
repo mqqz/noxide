@@ -54,6 +54,7 @@ impl Application {
                     .as_ref()
                     .map(|effects| effects.owner_directory_digest())
                     .transpose()?,
+                self.restore_fork,
             )
             .await?;
             let outcome = lifecycle_clock::tick(tx, &self.clock).await;

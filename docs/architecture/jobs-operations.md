@@ -145,7 +145,9 @@ noxide jobs fork /srv/app/runtime.json
 `fork` rotates the runtime epoch, revokes grants and pauses unresolved current-runtime
 jobs and recurring schedules in one transaction. Restarting the same configuration
 preserves this pause. Explicitly grant the required services, then reconcile or
-cancel retained jobs. Full backup/restore acceptance remains a P13 gate.
+cancel retained jobs. `fork` is also the only command that adopts an effect queue
+copied from another owner directory. See the
+[backup and restore procedure](../running-applications.md#back-up-and-restore).
 
 Storage 14 requires an explicit reviewed migration or a new empty database when the
 existing format differs. Jobs commands do not silently migrate or delete operator

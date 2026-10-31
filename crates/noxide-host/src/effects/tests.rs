@@ -105,6 +105,7 @@ async fn setup(db: &Database, effective: &EffectiveEffectDeployment) {
             "contract",
             Some(effective),
             Some("prepared-directory-fixture-proof"),
+            false,
         )
         .await
         .unwrap();
@@ -595,6 +596,7 @@ async fn recovered_activation(
             "contract",
             Some(effective),
             Some("prepared-directory-fixture-proof"),
+            false,
         )
         .await
         .unwrap();
@@ -745,6 +747,63 @@ async fn actual_clock_recovery_contract(db: &Database) {
     .await
     .unwrap();
 }
+async fn restore_owner_contract(db: &Database) {
+    let effective = approval();
+    setup(db, &effective).await;
+    let capture = enqueue(db, "alpha", "restored-owner").await;
+    let activate = async |restore_fork: bool| {
+        let permits = Arc::new(Semaphore::new(1));
+        let mut lease = crate::database::MaintenanceLease::new(
+            permits.try_acquire_owned().unwrap(),
+            Instant::now() + Duration::from_secs(5),
+            crate::lifecycle_clock::Freshness::default(),
+        );
+        lease.begin(db).await.unwrap();
+        let result = lease
+            .tx()
+            .activate_effects(
+                "deployment",
+                "contract",
+                Some(&effective),
+                Some("restored-directory-fixture-proof"),
+                restore_fork,
+            )
+            .await;
+        if result.is_ok() {
+            lease.tx().commit().await.unwrap();
+        } else {
+            lease.tx().rollback().await.unwrap();
+        }
+        lease.finish().await.unwrap();
+        result
+    };
+    // A copied queue under another owner directory fails closed by default.
+    let refused = activate(false).await.unwrap_err();
+    assert!(refused.to_string().contains("another owner directory"));
+    assert_eq!(state(db, &capture.id().unwrap()).await, "pending");
+    // Explicit restore fencing adopts it and pauses captures atomically.
+    activate(true).await.unwrap();
+    assert_eq!(state(db, &capture.id().unwrap()).await, "paused");
+    let rows = phase(db, async |tx: &mut Transaction| {
+        tx.fetch::<2>(
+            "SELECT owner_directory,(SELECT CAST(COUNT(*) AS TEXT) FROM nx_effect_grants WHERE state='active') FROM nx_effect_queue",
+            &[],
+        )
+        .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![[
+            "restored-directory-fixture-proof".to_owned(),
+            "0".to_owned()
+        ]]
+    );
+    // Re-activating the adopted owner is an ordinary restart.
+    activate(false).await.unwrap();
+    assert_eq!(state(db, &capture.id().unwrap()).await, "paused");
+}
 async fn sqlite(label: &str) -> Database {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/capability-evidence/p11-store-fixtures");
@@ -801,6 +860,15 @@ async fn sqlite_secret_grant_rotation_pauses_before_explicit_resume() {
 #[tokio::test]
 async fn sqlite_actual_clock_recovery_preserves_pause_until_current_reconciliation() {
     actual_clock_recovery_contract(&sqlite("clock-recovery-").await).await;
+}
+#[tokio::test]
+async fn sqlite_restore_fork_alone_adopts_copied_effect_owner() {
+    restore_owner_contract(&sqlite("restore-owner-").await).await;
+}
+#[tokio::test]
+#[ignore = "requires disposable NOXIDE_TEST_POSTGRES with CREATE DATABASE"]
+async fn postgres_restore_fork_alone_adopts_copied_effect_owner() {
+    restore_owner_contract(&postgres("restoreowner").await).await;
 }
 #[tokio::test]
 #[ignore = "requires disposable NOXIDE_TEST_POSTGRES with CREATE DATABASE"]

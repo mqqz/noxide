@@ -327,6 +327,7 @@ pub struct Application {
     #[cfg(test)]
     pub(crate) postcommit_barrier:
         std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    restore_fork: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -412,6 +413,12 @@ impl Application {
         );
         self.database_statement_limit = limit;
         Ok(self)
+    }
+    /// Operator restore fencing only: activation may adopt an effect queue copied
+    /// from another owner directory, pausing every capture in the same transaction.
+    pub fn with_restore_fork(mut self) -> Self {
+        self.restore_fork = true;
+        self
     }
     pub fn with_registration(mut self, registration: auth::Registration) -> Self {
         self.registration = registration;
@@ -785,6 +792,7 @@ impl Application {
             admission_limits,
             request_lifecycle: Arc::new(Registry::default()),
             database_statement_limit: 256,
+            restore_fork: false,
             #[cfg(test)]
             postcommit_barrier: std::sync::Mutex::new(None),
         })

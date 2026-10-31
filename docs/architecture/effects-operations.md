@@ -163,4 +163,7 @@ transaction rotates or retires the required epoch, pauses captured effects and
 revokes grants. Unchanged-approval restart preserves that pause. Explicit current
 grants plus per-capture reconciliation are required before further sends; old
 effects are never automatically replayed from a restored database. Remote effects
-survive database rollback. Complete backup/restore procedures remain P13 work.
+survive database rollback. A restored copy refuses to activate under another
+owner directory until `noxide jobs fork` adopts it, pausing every capture and
+revoking grants in the same transaction; see the
+[backup and restore procedure](../running-applications.md#back-up-and-restore).
