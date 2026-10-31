@@ -113,13 +113,19 @@ async fn inherited_worker_slot_cannot_bypass_another_application_capacity() {
         permit: Arc::new(first_runtime.workers.clone().try_acquire_owned().unwrap()),
     };
     WORKER_SLOT
-        .scope(slot, async {
-            let admission = second.app.admit_job_invocation_work().await.unwrap();
-            assert_eq!(first_runtime.workers.available_permits(), 1);
-            assert_eq!(second_runtime.workers.available_permits(), 1);
-            drop(admission);
-            assert_eq!(second_runtime.workers.available_permits(), 2);
-        })
+        .scope(
+            slot,
+            second
+                .app
+                .request_scope(second.app.runtime.limits().wall_time)
+                .run(async {
+                    let admission = second.app.admit_job_invocation_work().await.unwrap();
+                    assert_eq!(first_runtime.workers.available_permits(), 1);
+                    assert_eq!(second_runtime.workers.available_permits(), 1);
+                    drop(admission);
+                    assert_eq!(second_runtime.workers.available_permits(), 2);
+                }),
+        )
         .await;
     assert_eq!(first_runtime.workers.available_permits(), 2);
     first.close().await;

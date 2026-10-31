@@ -200,10 +200,13 @@ impl Application {
                 },
                 Ok,
             )?;
-        let database = jobs
-            .database
-            .clone()
-            .try_acquire_owned()
+        let deadline = RequestScope::current_work_deadline().ok_or(RequestError::Busy)?;
+        // A committed short claim may still be closing its provider. At most
+        // two held worker slots bound this wait; neither cleanup nor waiting
+        // creates a new request deadline or releases capacity optimistically.
+        let database = timeout_at(deadline, jobs.database.clone().acquire_owned())
+            .await
+            .map_err(|_| RequestError::Busy)?
             .map_err(|_| RequestError::Busy)?;
         Ok(action::InvocationAdmission {
             owner: self.owned_request(
