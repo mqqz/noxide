@@ -36,9 +36,6 @@ pub(crate) struct ServiceIdentity {
     worker: String,
 }
 impl ServiceIdentity {
-    pub(crate) fn deployment(&self) -> &str {
-        &self.deployment
-    }
     pub(crate) fn tenant(&self) -> &str {
         &self.tenant
     }
@@ -73,13 +70,6 @@ impl Principal {
                 tenant: service.tenant.clone(),
                 worker: service.worker.clone(),
             },
-        }
-    }
-    pub(crate) fn tenant_scope(&self) -> Option<&str> {
-        match self {
-            Self::Anonymous => None,
-            Self::User(user) => Some(&user.tenant),
-            Self::Service(service) => Some(service.tenant()),
         }
     }
     pub(crate) fn from_locked_job_grant(proof: &crate::jobs::VerifiedScheduleGrant) -> Self {

@@ -82,12 +82,8 @@ impl Application {
         self.publish_clock(outcome?)
     }
 
-    /// Future temporal callers retain this value for their complete transaction
+    /// Temporal callers retain this value for their complete transaction
     /// attempt. No wall sample or freshness renewal occurs on the request path.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "P07 temporal consumers are not enabled yet")
-    )]
     pub(crate) async fn temporal_attempt(
         &self,
         tx: &mut Transaction,

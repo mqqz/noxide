@@ -2,7 +2,9 @@ mod action;
 mod authority;
 pub(crate) mod blobs;
 use crate::database::lifecycle::{AdmissionOwner, Registry, RequestScope};
-pub(crate) use action::{ActionCore, MAX_ACTION_REJECTION_BYTES};
+pub(crate) use action::ActionCore;
+#[cfg(test)]
+pub(crate) use action::MAX_ACTION_REJECTION_BYTES;
 pub use action::{ActionRejection, ValidatedActionRejection};
 use action::{CanonicalActionInput, ExecutionBudget};
 mod capabilities;
@@ -27,7 +29,6 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-pub(crate) use job_worker::JobService;
 use noxide_protocol::*;
 use sha2::{Digest, Sha256};
 use std::{

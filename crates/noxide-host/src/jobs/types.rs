@@ -85,12 +85,6 @@ impl Grant {
         }
         Ok(())
     }
-    pub(crate) fn identity(&self) -> Result<String> {
-        Ok(format!(
-            "s1_{}",
-            digest(&(1, "service", &self.scope, &self.worker.name))?
-        ))
-    }
     pub(crate) fn permits(&self, job: &CapturedJob) -> Result<()> {
         self.validate()?;
         ensure!(
@@ -244,6 +238,7 @@ impl CapturedJob {
             digest(&(1, "service", &self.scope, &self.worker))?
         ))
     }
+    #[cfg(test)]
     pub(crate) fn input_digest(&self) -> Result<String> {
         digest(&(1, "job-input", &self.input))
     }
@@ -350,9 +345,6 @@ impl VerifiedJob {
     pub(crate) fn grant(&self) -> &Grant {
         &self.grant
     }
-    pub(crate) fn claim(&self) -> &Claim {
-        &self.claim
-    }
     pub(crate) fn deployment(&self) -> &str {
         &self.job.scope.deployment
     }
@@ -361,9 +353,6 @@ impl VerifiedJob {
     }
     pub(crate) fn worker(&self) -> &str {
         &self.job.worker
-    }
-    pub(crate) fn grant_version(&self) -> i64 {
-        self.job.grant_version
     }
     pub(crate) fn action(&self) -> (u32, u32) {
         self.job.action()
@@ -383,14 +372,8 @@ impl VerifiedJob {
     pub(crate) fn invocation_digest(&self) -> Result<String> {
         self.job.invocation_digest()
     }
-    pub(crate) fn runtime_epoch(&self) -> &str {
-        &self.job.epoch
-    }
     pub(crate) fn fence(&self) -> i64 {
         self.claim.fence
-    }
-    pub(crate) fn lease_until(&self) -> Timestamp {
-        self.claim.lease_until
     }
 }
 
