@@ -194,7 +194,8 @@ def main():
             "records": rows("SELECT resource,id,fields,revision FROM nx_records ORDER BY resource,id"),
             "receipts": rows("SELECT COUNT(*) FROM nx_receipts"),
             "blobs": rows("SELECT state FROM nx_blobs ORDER BY blob_ref"),
-            "quota": rows("SELECT reserved_bytes,used_bytes,objects FROM nx_blob_store"),
+            # The host creates its zero quota row lazily after startup.
+            "quota": rows("SELECT reserved_bytes,used_bytes,objects FROM nx_blob_store") or [["0", "0", "0"]],
             "jobs": rows("SELECT id,due_ms FROM nx_jobs ORDER BY id"),
             "effects": rows("SELECT id,payload_digest FROM nx_outbox ORDER BY id"),
         }
@@ -340,7 +341,9 @@ def main():
             assert "default-src 'none'" in headers["Content-Security-Policy"]
             assert foreign.request(download, extra={"Range": "bytes=0-1"})[0] == 404
             assert foreign.request("/_noxide/download?ticket=" + stored["file"])[0] == 404
-            status, _, _ = creator.request(f'/actions/{cleanup["id"]}', b"", "application/x-www-form-urlencoded")
+            # Valid page credentials must still reach no browser binding for the service action.
+            credentials = [(name, value) for name, value, _ in upload_form(fresh_home)["controls"] if name in ("_csrf", "_submission")]
+            status, _, _ = creator.request(f'/actions/{cleanup["id"]}', urllib.parse.urlencode(credentials).encode(), "application/x-www-form-urlencoded")
             assert status == 404, "service cleanup acquired a browser binding"
             assert proxy.attempted.wait(timeout=15), "outbox did not reach the isolated rejecting proxy"
             deadline = time.monotonic() + 10
