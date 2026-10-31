@@ -64,6 +64,7 @@ pub enum Instruction {
     BeginLink { destination: RouteRef },
     EndLink,
     Form { action: u32 },
+    QueryForm(query::QueryForm),
     Stylesheet { asset: String },
     Download(blobs::DocumentDownload),
     Rich(document::PresentationNode),

@@ -119,6 +119,16 @@ pub enum CursorKey {
     Scalar { value: CursorValue, record: u64 },
 }
 
+/// A host-derived native GET form for one declared route. Search prefills in
+/// destination.params may be absent; every nonsearch parameter is required.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QueryForm {
+    pub destination: crate::RouteRef,
+    pub search_label: String,
+    pub submit: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

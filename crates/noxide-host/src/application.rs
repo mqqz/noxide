@@ -114,6 +114,74 @@ mod query_compatibility_tests {
     }
 
     #[test]
+    fn p09_cursor_scopes_bind_canonical_search_and_every_identity() {
+        let canonical = |raw| {
+            crate::search::canonical_query(raw, &mut || Ok(()))
+                .unwrap()
+                .tokens()
+                .join(" ")
+        };
+        let params = Fields::from([("terms".into(), canonical("BETA alpha ALPHA"))]);
+        let same = Fields::from([("terms".into(), canonical("alpha beta"))]);
+        let different = Fields::from([("terms".into(), canonical("alpha gamma"))]);
+        let scope = |identity, route, target, incarnation: &str, subject, params: &Fields| {
+            cursor_scope(
+                identity,
+                route,
+                target,
+                Some(incarnation.into()),
+                None,
+                subject,
+                params,
+            )
+            .unwrap()
+        };
+        let expected = scope(
+            ("contract", "deployment"),
+            1,
+            Some(9),
+            "one",
+            "alice",
+            &params,
+        );
+        assert_eq!(
+            expected,
+            scope(
+                ("contract", "deployment"),
+                1,
+                Some(9),
+                "one",
+                "alice",
+                &same
+            )
+        );
+        assert_ne!(
+            expected,
+            scope(
+                ("contract", "deployment"),
+                1,
+                Some(9),
+                "one",
+                "alice",
+                &different
+            )
+        );
+        for (identity, route, target, incarnation, subject) in [
+            (("new-contract", "deployment"), 1, Some(9), "one", "alice"),
+            (("contract", "new-deployment"), 1, Some(9), "one", "alice"),
+            (("contract", "deployment"), 2, Some(9), "one", "alice"),
+            (("contract", "deployment"), 1, Some(10), "one", "alice"),
+            (("contract", "deployment"), 1, Some(9), "two", "alice"),
+            (("contract", "deployment"), 1, Some(9), "one", "bob"),
+        ] {
+            assert_ne!(
+                expected,
+                scope(identity, route, target, incarnation, subject, &params)
+            );
+        }
+    }
+
+    #[test]
     fn cursor_scope_strings_match_recorded_fixtures() {
         let root =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/queries");
@@ -1411,6 +1479,20 @@ impl Application {
         if cursor.is_some_and(|c| c.len() > 4096) {
             return Err(RequestError::InvalidCursor);
         }
+        let mut params = params;
+        let route_definition = manifest::route(&self.manifest, route)
+            .map_err(|_| RequestError::InvalidRequest)?;
+        manifest::validate_params(&self.manifest, route_definition, &params)
+            .map_err(|_| RequestError::InvalidRequest)?;
+        for (name, field) in manifest::parameter_fields(&self.manifest, route_definition)
+            .map_err(|_| RequestError::InvalidRequest)? {
+            if matches!(field, manifest::ParameterField::Search) {
+                let raw = params.get(&name).ok_or(RequestError::InvalidRequest)?;
+                let tokens = crate::search::canonical_query(raw, &mut RequestScope::checkpoint_current)
+                    .map_err(|_| RequestError::InvalidRequest)?;
+                params.insert(name, tokens.tokens().join(" "));
+            }
+        }
         let reference = RouteRef {
             params: params.clone(),
             route,
@@ -1467,9 +1549,15 @@ impl Application {
             // A fixed-size digest binds every approved setting without exposing it in URLs.
             let scope=URL_SAFE_NO_PAD.encode(Sha256::digest(scope.as_bytes()));
             let preview_only = list.is_none() && manifest::route(&self.manifest, route).map_err(|_| RequestError::InvalidRequest)?.operations.iter().any(|id| manifest::operation(&self.manifest,*id).is_ok_and(manifest::is_preview));
-            let cursor = cursor.filter(|_| !preview_only).map(|encoded| {
-                let token=self.keys.verify_cursor(encoded,now).map_err(|_|RequestError::InvalidCursor)?;
-                match token.kind { TokenKind::Cursor { scope: bound,after } if list.is_some() && bound==scope && after>0 && after<=i64::MAX as u64 => Ok(after), _=>Err(RequestError::InvalidCursor) }
+            if preview_only && cursor.is_some() { return Err(RequestError::InvalidCursor); }
+            let cursor = cursor.map(|encoded| {
+                let token = self.keys.verify_cursor(encoded, now).map_err(|_| RequestError::InvalidCursor)?;
+                let TokenKind::Cursor { scope: bound, after } = token.kind else { return Err(RequestError::InvalidCursor); };
+                let op = list.ok_or(RequestError::InvalidCursor)?;
+                if bound != scope { return Err(RequestError::InvalidCursor); }
+                self.plans.get(&op.id).ok_or(RequestError::InvalidCursor)?
+                    .validate_cursor(&self.manifest, &after).map_err(|_| RequestError::InvalidCursor)?;
+                Ok(after)
             }).transpose()?;
             let needs_anonymous = manifest::route(&self.manifest, route).map_err(|_| RequestError::InvalidRequest)?.forms.iter().any(|id| manifest::web_action(&self.manifest,*id).ok().and_then(|a| ActionCore::of(a.core).ok()).and_then(|a| manifest::operation(&self.manifest,a.first_operation()).ok()).is_some_and(manifest::anonymous_action));
             let (anonymous, new_cookie) = if needs_anonymous {
@@ -1537,7 +1625,7 @@ impl Application {
             ) {
                 return Err(RequestError::Rejected);
             }
-            let next_page = effects.more.map(|after| {
+            let next_page = effects.more.take().map(|after| {
                 let (_,encoded)=self.keys.issue(TokenKind::Cursor {scope:scope.clone(),after},"",now,900).map_err(|_|RequestError::Rejected)?;
                 let path = crate::routing::resolve(&self.manifest,&reference).expect("validated route");
                 Ok(format!("{path}{}cursor={encoded}", if params.is_empty() { "?" } else { "&" }))

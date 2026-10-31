@@ -222,3 +222,37 @@ impl super::resource::FieldValue for SearchText {
     }
 }
 impl super::resource::ParamValue for SearchText {}
+
+/// Native GET controls derived and validated by the host from a declared route.
+/// Include canonical filter/range values; search prefill is optional.
+#[derive(Clone, Debug)]
+pub struct QueryForm(noxide_protocol::query::QueryForm);
+impl QueryForm {
+    pub fn new(destination: crate::RouteRef) -> Self {
+        Self(noxide_protocol::query::QueryForm {
+            destination,
+            search_label: "Search".into(),
+            submit: "Apply".into(),
+        })
+    }
+    pub fn search_label(mut self, label: impl Into<String>) -> Self {
+        self.0.search_label = label.into();
+        self
+    }
+    pub fn submit(mut self, label: impl Into<String>) -> Self {
+        self.0.submit = label.into();
+        self
+    }
+}
+impl super::page::Render for QueryForm {
+    fn render(self, fragment: &mut super::page::Fragment) {
+        fragment.nodes.push(crate::Instruction::QueryForm(self.0));
+    }
+}
+impl super::page::Render for &QueryForm {
+    fn render(self, fragment: &mut super::page::Fragment) {
+        fragment
+            .nodes
+            .push(crate::Instruction::QueryForm(self.0.clone()));
+    }
+}

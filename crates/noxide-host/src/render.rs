@@ -339,6 +339,20 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
                 out.text(text)?;
                 out.push("</a>")?;
             }
+            Instruction::QueryForm(form) => {
+                ensure!(
+                    link_depth.is_none() && flow(&stack) && forms < 8,
+                    "form structure or limit"
+                );
+                forms += 1;
+                forms::query_form(
+                    &mut out,
+                    context
+                        .manifest
+                        .ok_or_else(|| anyhow::anyhow!("no routes"))?,
+                    form,
+                )?;
+            }
             Instruction::Form { action } => {
                 ensure!(
                     link_depth.is_none() && flow(&stack) && forms < 8,

@@ -385,3 +385,226 @@ fn option(out: &mut Buffer, value: &str, label: &str, selected: bool) -> Result<
     out.text(label)?;
     out.push("</option>")
 }
+
+/// Query controls convey input only. Their next GET passes normal route and
+/// current read authorization; the form itself contains no grant or cursor.
+pub(super) fn query_form(
+    out: &mut Buffer,
+    m: &Manifest,
+    form: &noxide_protocol::query::QueryForm,
+) -> Result<()> {
+    use crate::manifest::ParameterField;
+    ensure!(
+        !form.search_label.is_empty()
+            && form.search_label.len() <= 128
+            && !form.submit.is_empty()
+            && form.submit.len() <= 128,
+        "query form label limit"
+    );
+    let route = crate::manifest::route(m, form.destination.route)?;
+    ensure!(
+        !route.params.is_empty()
+            && route
+                .operations
+                .iter()
+                .any(
+                    |id| crate::manifest::operation(m, *id).is_ok_and(|op| matches!(
+                        op.kind,
+                        OperationKind::List | OperationKind::Aggregate
+                    ))
+                ),
+        "query form requires declared query"
+    );
+    let fields = crate::manifest::parameter_fields(m, route)?;
+    ensure!(
+        form.destination
+            .params
+            .keys()
+            .all(|name| fields.contains_key(name)),
+        "unknown query form parameter"
+    );
+    let path = crate::routing::resolve_path(m, &form.destination)?;
+    // Validate every control before emitting any form markup. Search can be blank
+    // only in a form prefill; a submitted query still requires meaningful terms.
+    let mut values = Fields::new();
+    for (name, field) in &fields {
+        let value = form.destination.params.get(name);
+        match field {
+            ParameterField::Search => {
+                if let Some(value) = value {
+                    field.validate(value)?;
+                    let canonical = crate::search::canonical_query(
+                        value,
+                        &mut crate::database::lifecycle::RequestScope::checkpoint_current,
+                    )?;
+                    values.insert(name.clone(), canonical.tokens().join(" "));
+                }
+            }
+            ParameterField::Field(_) => {
+                let value = value.ok_or_else(|| anyhow::anyhow!("missing query form parameter"))?;
+                field.validate(value)?;
+                values.insert(name.clone(), value.clone());
+            }
+        }
+    }
+    out.push("<form method=\"get\" action=\"")?;
+    out.text(&path)?;
+    out.push("\" accept-charset=\"utf-8\">")?;
+    for (name, field) in &fields {
+        let value = values.get(name).map(String::as_str).unwrap_or("");
+        out.push("<label>")?;
+        match field {
+            ParameterField::Search => out.text(&form.search_label)?,
+            ParameterField::Field(field) => {
+                out.text(&field.label)?;
+                out.push(" (")?;
+                out.text(name)?;
+                out.push(")")?;
+            }
+        }
+        let choices = match field {
+            ParameterField::Field(TextField {
+                kind: FieldKind::Boolean,
+                optional,
+                ..
+            }) => Some((
+                vec![
+                    ChoiceVariant {
+                        key: "false".into(),
+                        label: "False".into(),
+                    },
+                    ChoiceVariant {
+                        key: "true".into(),
+                        label: "True".into(),
+                    },
+                ],
+                *optional,
+            )),
+            ParameterField::Field(TextField {
+                kind: FieldKind::Choice { variants },
+                optional,
+                ..
+            }) => Some((variants.clone(), *optional)),
+            _ => None,
+        };
+        if let Some((choices, optional)) = choices {
+            out.push("<select name=\"")?;
+            out.text(name)?;
+            out.push("\">")?;
+            if optional {
+                option(out, "", "Not set", value.is_empty())?;
+            }
+            for choice in choices {
+                option(out, &choice.key, &choice.label, choice.key == value)?;
+            }
+            out.push("</select>")?;
+        } else {
+            out.push("<input type=\"")?;
+            out.push(if matches!(field, ParameterField::Search) {
+                "search"
+            } else {
+                "text"
+            })?;
+            out.push("\" name=\"")?;
+            out.text(name)?;
+            out.push("\" value=\"")?;
+            out.text(value)?;
+            out.push("\" maxlength=\"")?;
+            let max = match field {
+                ParameterField::Search => 1024,
+                ParameterField::Field(field) => field.max_bytes.min(1024),
+            };
+            out.text(&max.to_string())?;
+            out.push("\" required>")?;
+        }
+        out.push("</label>")?;
+    }
+    out.push("<button type=\"submit\">")?;
+    out.text(&form.submit)?;
+    out.push("</button></form>")
+}
+
+#[cfg(test)]
+mod query_form_tests {
+    use super::*;
+    fn fixture() -> (Manifest, noxide_protocol::query::QueryForm) {
+        let mut m = crate::test_support::manifest();
+        m.resources[0].fields.push(TextField {
+            immutable: false,
+            name: "visible".into(),
+            label: "Public <visibility>".into(),
+            kind: FieldKind::Boolean,
+            optional: false,
+            max_bytes: 5,
+            initial: None,
+        });
+        m.operations[0].filter.push(Condition {
+            field: "visible".into(),
+            equals: Operand::Param("public".into()),
+        });
+        m.operations[0].query = Some(noxide_protocol::query::Query {
+            search: Some(noxide_protocol::query::Search {
+                fields: vec!["body".into()],
+                parameter: "terms".into(),
+            }),
+            ..Default::default()
+        });
+        m.routes[0].path = "/search".into();
+        m.routes[0].params = vec!["terms".into(), "public".into()];
+        let form = noxide_protocol::query::QueryForm {
+            destination: RouteRef {
+                route: 1,
+                target: None,
+                params: Fields::from([("public".into(), "true".into())]),
+            },
+            search_label: "Find <terms>".into(),
+            submit: "Apply <filters>".into(),
+        };
+        (m, form)
+    }
+    #[test]
+    fn p09_query_form_uses_escaped_native_get_controls_without_cursor() {
+        let (m, form) = fixture();
+        let mut out = Buffer(String::new());
+        query_form(&mut out, &m, &form).unwrap();
+        assert!(out.0.starts_with("<form method=\"get\" action=\"/search\""));
+        assert!(
+            out.0
+                .contains("Find &lt;terms&gt;<input type=\"search\" name=\"terms\" value=\"\"")
+        );
+        assert!(out.0.contains("Public &lt;visibility&gt;"));
+        assert!(
+            out.0
+                .contains("<option value=\"true\" selected>True</option>")
+        );
+        assert!(out.0.contains("Apply &lt;filters&gt;"));
+        assert!(!out.0.contains("cursor"));
+        assert!(!out.0.contains("<script"));
+    }
+    #[test]
+    fn p09_query_form_rejects_forged_controls_paths_and_labels() {
+        let (m, form) = fixture();
+        let mut bad = form.clone();
+        bad.destination
+            .params
+            .insert("cursor".into(), "forged".into());
+        assert!(query_form(&mut Buffer(String::new()), &m, &bad).is_err());
+        bad = form.clone();
+        bad.destination.params.clear();
+        assert!(query_form(&mut Buffer(String::new()), &m, &bad).is_err());
+        bad = form.clone();
+        bad.destination.target = Some(1);
+        assert!(query_form(&mut Buffer(String::new()), &m, &bad).is_err());
+        bad = form.clone();
+        bad.search_label = "x".repeat(129);
+        assert!(query_form(&mut Buffer(String::new()), &m, &bad).is_err());
+        bad = form.clone();
+        bad.destination
+            .params
+            .insert("public".into(), "TRUE".into());
+        assert!(query_form(&mut Buffer(String::new()), &m, &bad).is_err());
+        let mut bad_manifest = m.clone();
+        bad_manifest.routes[0].path = "//foreign.example".into();
+        assert!(query_form(&mut Buffer(String::new()), &bad_manifest, &form).is_err());
+    }
+}

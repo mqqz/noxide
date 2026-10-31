@@ -113,30 +113,100 @@ fn validate_selection(m: &Manifest, op: &Operation) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn parameter_fields<'a>(
-    m: &'a Manifest,
+/// Route parameter metadata is descriptive; aggregate sources grant no invocation.
+#[derive(Clone, Debug)]
+pub(crate) enum ParameterField {
+    Field(TextField),
+    Search,
+}
+impl ParameterField {
+    fn compatible_destination(&self, target: &Self) -> bool {
+        match (self, target) {
+            (Self::Search, Self::Search) => true,
+            (Self::Field(source), Self::Field(target)) => {
+                source.kind == target.kind && (!source.optional || target.optional)
+            }
+            _ => false,
+        }
+    }
+    pub(crate) fn validate(&self, value: &str) -> Result<()> {
+        // Preserve the web transport's existing stricter bound for every path,
+        // including direct Application calls and guest destination references.
+        ensure!(value.len() <= 1024, "route parameter limit");
+        match self {
+            Self::Search => ensure!(!value.is_empty(), "empty search parameter"),
+            Self::Field(field) => ensure!(
+                field.canonical(value).is_ok_and(|v| v == value),
+                "invalid route parameter"
+            ),
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn parameter_fields(
+    m: &Manifest,
     route: &Route,
-) -> Result<std::collections::BTreeMap<&'a str, &'a TextField>> {
-    let mut fields: std::collections::BTreeMap<&str, &TextField> =
-        std::collections::BTreeMap::new();
+) -> Result<std::collections::BTreeMap<String, ParameterField>> {
+    let mut fields = std::collections::BTreeMap::<String, ParameterField>::new();
+    let mut add = |name: &str, value: ParameterField| -> Result<()> {
+        ensure!(
+            route.params.iter().any(|p| p == name),
+            "undeclared route parameter"
+        );
+        if let Some(previous) = fields.get_mut(name) {
+            match (previous, value) {
+                (ParameterField::Search, ParameterField::Search) => {}
+                (ParameterField::Field(previous), ParameterField::Field(field)) => {
+                    ensure!(previous.kind == field.kind, "inconsistent parameter kind");
+                    previous.optional &= field.optional;
+                    previous.max_bytes = previous.max_bytes.min(field.max_bytes);
+                }
+                _ => anyhow::bail!("inconsistent parameter kind"),
+            }
+        } else {
+            fields.insert(name.into(), value);
+        }
+        Ok(())
+    };
     for id in &route.operations {
-        let op = operation(m, *id)?;
+        let declared = operation(m, *id)?;
+        let op = if let Some(aggregate) = declared.query.as_ref().and_then(|q| q.aggregate.as_ref())
+        {
+            let source = operation(m, aggregate.source)?;
+            ensure!(
+                source.kind == OperationKind::List
+                    && source.query.as_ref().is_none_or(|q| q.aggregate.is_none()),
+                "invalid aggregate source"
+            );
+            source
+        } else {
+            declared
+        };
         let resource = resource(m, op.resource)?;
+        let field = |name: &str| -> Result<&TextField> {
+            resource
+                .fields
+                .iter()
+                .find(|f| f.name == name)
+                .ok_or_else(|| anyhow::anyhow!("unknown query field"))
+        };
         for condition in &op.filter {
             if let Operand::Param(name) = &condition.equals {
-                ensure!(route.params.contains(name), "undeclared route parameter");
-                let field = resource
-                    .fields
-                    .iter()
-                    .find(|f| f.name == condition.field)
-                    .ok_or_else(|| anyhow::anyhow!("unknown filter field"))?;
-                if let Some(previous) = fields.get(name.as_str()) {
-                    ensure!(previous.kind == field.kind, "inconsistent parameter kind");
-                    if !previous.optional {
-                        continue;
-                    }
+                add(
+                    name,
+                    ParameterField::Field(field(&condition.field)?.clone()),
+                )?;
+            }
+        }
+        if let Some(search) = op.query.as_ref().and_then(|q| q.search.as_ref()) {
+            add(&search.parameter, ParameterField::Search)?;
+        }
+        if let Some(range) = op.query.as_ref().and_then(|q| q.range.as_ref()) {
+            for bound in [&range.lower, &range.upper].into_iter().flatten() {
+                if let Operand::Param(name) = &bound.value {
+                    add(name, ParameterField::Field(field(&range.field)?.clone()))?;
                 }
-                fields.insert(name.as_str(), field);
             }
         }
     }
@@ -156,35 +226,25 @@ fn validate_route_params(m: &Manifest, route: &Route) -> Result<()> {
                 .all(|name| identifier(name) && name.as_str() != "cursor"),
         "invalid route parameters"
     );
-    let fields = parameter_fields(m, route)?;
-    ensure!(fields.len() == route.params.len(), "unused route parameter");
+    ensure!(
+        parameter_fields(m, route)?.len() == route.params.len(),
+        "unused route parameter"
+    );
     Ok(())
 }
 pub(crate) fn validate_params(m: &Manifest, route: &Route, values: &Fields) -> Result<()> {
+    let fields = parameter_fields(m, route)?;
     ensure!(
         values.len() == route.params.len()
             && route.params.iter().all(|name| values.contains_key(name)),
         "invalid route parameters"
     );
-    for id in &route.operations {
-        let op = operation(m, *id)?;
-        let resource = resource(m, op.resource)?;
-        for condition in &op.filter {
-            if let Operand::Param(name) = &condition.equals {
-                let field = resource
-                    .fields
-                    .iter()
-                    .find(|f| f.name == condition.field)
-                    .ok_or_else(|| anyhow::anyhow!("unknown filter field"))?;
-                let value = values
-                    .get(name)
-                    .ok_or_else(|| anyhow::anyhow!("missing route parameter"))?;
-                ensure!(
-                    field.canonical(value).is_ok_and(|v| v == *value),
-                    "invalid route parameter"
-                );
-            }
-        }
+    for (name, field) in fields {
+        field.validate(
+            values
+                .get(&name)
+                .ok_or_else(|| anyhow::anyhow!("missing route parameter"))?,
+        )?;
     }
     Ok(())
 }
@@ -621,10 +681,10 @@ pub fn validate(m: &Manifest) -> Result<()> {
                 let source_fields = parameter_fields(m, r)?;
                 for (name, target) in parameter_fields(m, destination)? {
                     let source = source_fields
-                        .get(name)
+                        .get(&name)
                         .ok_or_else(|| anyhow::anyhow!("preview destination parameters"))?;
                     ensure!(
-                        source.kind == target.kind && (!source.optional || target.optional),
+                        source.compatible_destination(&target),
                         "incompatible preview destination parameter"
                     );
                 }
@@ -651,10 +711,21 @@ pub fn validate(m: &Manifest) -> Result<()> {
                     r.operations.contains(&via.source),
                     "follow route requires source"
                 );
-            } else if op.kind == OperationKind::List {
-                let target = if op.scope.is_some() {
-                    reference_resource(m, op.resource, op.scope.as_deref().expect("scoped list"))?
-                        .map(|p| p.id)
+            } else if matches!(op.kind, OperationKind::List | OperationKind::Aggregate) {
+                let metadata = op
+                    .query
+                    .as_ref()
+                    .and_then(|q| q.aggregate.as_ref())
+                    .map(|a| operation(m, a.source))
+                    .transpose()?
+                    .unwrap_or(op);
+                let target = if metadata.scope.is_some() {
+                    reference_resource(
+                        m,
+                        metadata.resource,
+                        metadata.scope.as_deref().expect("scoped query"),
+                    )?
+                    .map(|p| p.id)
                 } else {
                     None
                 };
@@ -2641,5 +2712,111 @@ mod transaction_tests {
             source: RedirectSource::Target("target".into()),
         };
         changed(bad);
+    }
+}
+
+#[cfg(test)]
+mod p09_parameter_tests {
+    use super::*;
+    fn fixture() -> Manifest {
+        let mut m = crate::test_support::manifest();
+        m.resources[0].fields.push(TextField {
+            immutable: true,
+            name: "rank".into(),
+            label: "Rank".into(),
+            kind: FieldKind::Integer {
+                min: Some(-10),
+                max: Some(100),
+            },
+            optional: false,
+            max_bytes: 4,
+            initial: None,
+        });
+        m.operations[0].query = Some(noxide_protocol::query::Query {
+            search: Some(noxide_protocol::query::Search {
+                fields: vec!["body".into()],
+                parameter: "terms".into(),
+            }),
+            range: Some(noxide_protocol::query::Range {
+                field: "rank".into(),
+                lower: Some(noxide_protocol::query::Bound {
+                    value: Operand::Param("minimum".into()),
+                    inclusive: true,
+                }),
+                upper: None,
+            }),
+            ..Default::default()
+        });
+        m.routes[0].path = "/search".into();
+        m.routes[0].params = vec!["terms".into(), "minimum".into()];
+        m
+    }
+    #[test]
+    fn p09_aggregate_parameters_use_metadata_without_base_list_grant() {
+        let mut m = fixture();
+        let mut aggregate = m.operations[0].clone();
+        aggregate.id = 99;
+        aggregate.kind = OperationKind::Aggregate;
+        aggregate.query = Some(noxide_protocol::query::Query {
+            aggregate: Some(noxide_protocol::query::Aggregate {
+                source: 1,
+                function: noxide_protocol::query::AggregateFunction::Count,
+            }),
+            ..Default::default()
+        });
+        m.operations.push(aggregate);
+        m.routes[0].operations = vec![99];
+        validate_route_params(&m, &m.routes[0]).unwrap();
+        validate_params(
+            &m,
+            &m.routes[0],
+            &Fields::from([
+                ("terms".into(), "Arabic عربي".into()),
+                ("minimum".into(), "-10".into()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(m.routes[0].operations, vec![99]);
+        for bad in ["-11", "101", "01", "1e2", "9223372036854775808"] {
+            assert!(
+                validate_params(
+                    &m,
+                    &m.routes[0],
+                    &Fields::from([
+                        ("terms".into(), "valid".into()),
+                        ("minimum".into(), bad.into()),
+                    ])
+                )
+                .is_err(),
+                "{bad}"
+            );
+        }
+        for bad in ["".to_owned(), "a".repeat(1025)] {
+            assert!(
+                validate_params(
+                    &m,
+                    &m.routes[0],
+                    &Fields::from([("terms".into(), bad), ("minimum".into(), "0".into()),])
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn p09_rejects_parameter_kind_collisions_across_source_operations() {
+        let mut m = fixture();
+        let mut other = m.operations[0].clone();
+        other.id = 98;
+        other
+            .query
+            .as_mut()
+            .unwrap()
+            .search
+            .as_mut()
+            .unwrap()
+            .parameter = "minimum".into();
+        m.operations.push(other);
+        m.routes[0].operations.push(98);
+        assert!(parameter_fields(&m, &m.routes[0]).is_err());
     }
 }

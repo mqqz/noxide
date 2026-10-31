@@ -35,7 +35,7 @@ pub(crate) const ANONYMOUS_TTL: i64 = 900;
 pub(crate) enum TokenKind {
     Cursor {
         scope: String,
-        after: u64,
+        after: noxide_protocol::query::CursorKey,
     },
     Download {
         contract: String,
@@ -574,11 +574,40 @@ mod edit_tests {
 mod cursor_tests {
     use super::*;
     #[test]
+    fn typed_cursor_wire_rejects_legacy_and_unknown_key_shapes() {
+        for after in [
+            serde_json::json!(42),
+            serde_json::json!({"created":{"sequence":42,"record":7,"unchecked":true}}),
+            serde_json::json!({"created":{"sequence":-1,"record":7}}),
+            serde_json::json!({"scalar":{"value":{"integer":"42"},"record":7}}),
+        ] {
+            assert!(
+                serde_json::from_value::<TokenKind>(serde_json::json!({
+                    "cursor":{"scope":"approved-context", "after":after}
+                }))
+                .is_err()
+            );
+        }
+        let keys = HostKeys::generate().unwrap();
+        let kind = TokenKind::Cursor {
+            scope: "scalar-context".into(),
+            after: noxide_protocol::query::CursorKey::Scalar {
+                value: noxide_protocol::query::CursorValue::Binary("عربي".into()),
+                record: 9,
+            },
+        };
+        let (_, encoded) = keys.issue(kind.clone(), "", 100, 900).unwrap();
+        assert_eq!(keys.verify_cursor(&encoded, 100).unwrap().kind, kind);
+    }
+    #[test]
     fn cursor_tokens_are_opaque_expiring_and_domain_separated() {
         let keys = HostKeys::generate().unwrap();
         let kind = TokenKind::Cursor {
             scope: "approved-context".into(),
-            after: 42,
+            after: noxide_protocol::query::CursorKey::Created {
+                sequence: 42,
+                record: 7,
+            },
         };
         let (_, encoded) = keys.issue(kind.clone(), "", 100, 900).unwrap();
         assert!(!encoded.contains("approved-context"));
