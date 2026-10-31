@@ -22,6 +22,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--component", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -35,6 +36,7 @@ def main():
     config.write_text(json.dumps({
         "database": {"sqlite": "articles.db"}, "keys": "host-keys.json",
         "component": str(args.component.resolve()), "manifest": str(args.manifest.resolve()),
+        "assets": str(args.assets.resolve()),
         "approved_contract": digest, "origin": f"http://localhost:{port}",
         "listen": {"tcp": f"127.0.0.1:{port}"},
     }))
