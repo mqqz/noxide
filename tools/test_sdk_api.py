@@ -43,7 +43,22 @@ def replace_first_of_two(source, old, new):
 
 def fixtures(source):
     """Every case must fail for its intended type or template diagnostic."""
+    account_source = r'''
+use noxide::prelude::*;
+use noxide::AccountId;
+#[derive(Resource)] #[resource(key = "assignments")]
+struct Assignment { #[id] id: Id<Self>, #[field(scope = same_tenant)] recipient: AccountId }
+mod show { pub fn id() -> u32 { 1 } }
+#[action(inputs(recipient: ACCOUNT_INPUT), transaction(create(Assignment, set(recipient = recipient))), allow = owner, redirect = show(target))]
+struct Invite;
+'''
     return [
+        ("account-input-missing-scope", account_source.replace("ACCOUNT_INPUT", "AccountId"),
+         "AccountId inputs require a nonoptional AccountId = same_tenant"),
+        ("account-input-wrong-scope", account_source.replace("ACCOUNT_INPUT", "AccountId = other_tenant"),
+         "AccountId inputs require a nonoptional AccountId = same_tenant"),
+        ("account-input-optional", account_source.replace("ACCOUNT_INPUT", "Option<AccountId> = same_tenant"),
+         "AccountId inputs require a nonoptional AccountId = same_tenant"),
         ("numeric-route-id", replace_once(
             source, "routes::show_task(task.id)", "routes::show_task(1_u64)"),
          "mismatched types"),

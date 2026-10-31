@@ -98,6 +98,63 @@ struct ExtendDocumentStep;
     allow = owner, redirect = show(workspace))]
 struct BootstrapWorkspace;
 
+#[action(inputs(recipient: AccountId = same_tenant), transaction(
+    create(Membership, set(workspace = target, account = recipient, role = "member",
+        active = true, expires_at = transaction_time() + seconds(60)), eligible = OwnedWorkspace)),
+    allow = owner, redirect = show(target))]
+struct InviteMember;
+
+#[test]
+fn scoped_account_input_matches_explicit_input_and_operation() {
+    use noxide::__private::{
+        AccountScope, Change, FieldKind, Input, Operation, OperationKind, Value,
+    };
+    let definition = InviteMember::definition();
+    assert_eq!(
+        definition.inputs,
+        vec![Input {
+            name: "recipient".into(),
+            label: "Recipient".into(),
+            kind: FieldKind::Account {
+                scope: AccountScope::SameTenant
+            },
+            optional: false,
+            max_bytes: 43,
+        }]
+    );
+    assert_eq!(
+        InviteMember::operations(),
+        vec![
+            Operation {
+                id: noxide::stable_id(concat!("mutation:", module_path!(), "::InviteMember:0u8")),
+                resource: Membership::definition().id,
+                kind: OperationKind::Create,
+                policy: Policy {
+                    any: vec![vec![Predicate::Owner]]
+                },
+                bind: BTreeMap::from([("workspace_ref".into(), OwnedWorkspace::operation().id)]),
+                scope: None,
+                via: None,
+                filter: vec![],
+                disclose: vec![],
+                list: None,
+                visibility: None,
+                fields: None,
+            },
+            OwnedWorkspace::operation()
+        ]
+    );
+    assert_eq!(
+        definition.steps[0]
+            .assign
+            .iter()
+            .find(|a| a.field == "account")
+            .unwrap()
+            .change,
+        Change::Set(Value::Input("recipient".into()))
+    );
+}
+
 #[test]
 fn membership_and_lifecycle_lower_to_explicit_canonical_contract() {
     let membership = Membership::definition();

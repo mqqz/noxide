@@ -706,6 +706,16 @@ fn expand_transaction(
             .map(|(_, ty)| ty)
             .unwrap_or(ty);
         let is_duration = matches!(scalar_ty,syn::Type::Path(path) if path.path.segments.last().is_some_and(|segment|segment.ident=="Duration"));
+        let is_account = matches!(scalar_ty,syn::Type::Path(path) if path.path.segments.last().is_some_and(|segment|segment.ident=="AccountId"));
+        if is_account
+            && (scalar_ty != ty
+                || !matches!(&input.bound, Some(syn::Expr::Path(path)) if path.path.is_ident("same_tenant")))
+        {
+            return Err(syn::Error::new(
+                ty.span(),
+                "AccountId inputs require a nonoptional AccountId = same_tenant",
+            ));
+        }
         if is_duration
             && !matches!(&input.bound,Some(syn::Expr::Call(call)) if matches!(&*call.func,syn::Expr::Path(path) if path.path.is_ident("seconds")))
         {
@@ -724,6 +734,12 @@ fn expand_transaction(
         });
         if let Some(bound) = &input.bound {
             match bound {
+                syn::Expr::Path(path) if is_account && path.path.is_ident("same_tenant") => {
+                    kind = quote!(::noxide::__private::FieldKind::Account {
+                        scope: ::noxide::__private::AccountScope::SameTenant
+                    });
+                    max_bytes = quote!(43u32);
+                }
                 syn::Expr::Call(call)
                     if matches!(&*call.func,syn::Expr::Path(path) if path.path.is_ident("seconds"))
                         && call.args.len() == 1 =>
@@ -1221,6 +1237,34 @@ fn value_expression(
 #[cfg(test)]
 mod transaction_tests {
     use super::*;
+
+    #[test]
+    fn account_inputs_require_explicit_supported_scope_at_expansion() {
+        for input in [
+            "AccountId",
+            "AccountId = other_tenant",
+            "AccountId = 43",
+            "Option<AccountId> = same_tenant",
+        ] {
+            let source = format!(
+                "inputs(recipient: {input}), transaction(create(Member, set(account = recipient))), allow = owner, redirect = show(target)"
+            );
+            let declaration = syn::parse_str::<ActionDeclaration>(&source).unwrap();
+            let error = expand_declared_action(
+                declaration,
+                syn::parse_quote!(
+                    struct Invite;
+                ),
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("AccountId inputs require a nonoptional AccountId = same_tenant"),
+                "{source}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn transaction_syntax_rejects_create_adjustments_and_extra_authority() {
