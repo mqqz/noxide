@@ -62,6 +62,57 @@ fn contract() -> Manifest {
     });
     m
 }
+
+#[test]
+fn deployment_approval_binds_service_scope_limits_and_canonical_grants() {
+    use crate::job_deployment::{JobDeployment, JobGrant, JobLimits};
+    let manifest = contract();
+    let mut configured = JobDeployment {
+        grants: ["alpha", "beta"]
+            .into_iter()
+            .map(|tenant| JobGrant {
+                tenant: tenant.into(),
+                worker: "repair".into(),
+                actions: BTreeSet::from([2]),
+            })
+            .collect(),
+        limits: JobLimits::default(),
+    };
+    let digest = |configuration: &JobDeployment| {
+        crate::deployment::approval_digest(&manifest, None, Some(configuration)).unwrap()
+    };
+    let approved = digest(&configured);
+    assert_ne!(approved, super::super::digest(&manifest).unwrap());
+    configured.grants.reverse();
+    assert_eq!(approved, digest(&configured));
+    for limits in [
+        JobLimits {
+            pending_per_app: 999,
+            pending_per_tenant: 999,
+            ..JobLimits::default()
+        },
+        JobLimits {
+            pending_per_tenant: 999,
+            ..JobLimits::default()
+        },
+        JobLimits {
+            worker_concurrency: 1,
+            ..JobLimits::default()
+        },
+    ] {
+        configured.limits = limits;
+        assert_ne!(approved, digest(&configured));
+    }
+    configured.limits = JobLimits::default();
+    configured.grants[0].tenant = "gamma".into();
+    assert_ne!(approved, digest(&configured));
+    assert!(crate::deployment::approval_digest(&manifest, None, None).is_err());
+    let mut ordinary = manifest.clone();
+    ordinary.jobs = None;
+    ordinary.actions.truncate(1);
+    ordinary.operations.truncate(3);
+    assert!(crate::deployment::approval_digest(&ordinary, None, Some(&configured)).is_err());
+}
 fn sum(leaves: usize) -> Value {
     if leaves == 1 {
         Value::Input("number".into())
