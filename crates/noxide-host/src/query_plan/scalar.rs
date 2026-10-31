@@ -117,7 +117,7 @@ impl Scalar {
         params.push((*record as i64).into());
         let id = params.len();
         Ok(format!(
-            " AND (({expression}){comparison}${scalar} OR (({expression})=${scalar} AND id{comparison}${id}))"
+            " AND ({expression},id){comparison}(${scalar},${id})"
         ))
     }
     pub(crate) fn range_sql(
@@ -225,7 +225,7 @@ mod tests {
             scalar
                 .keyset_sql(NativeProvider::Postgres, &key, &mut params)
                 .unwrap(),
-            " AND ((CAST((fields::jsonb ->> 'rank') AS BIGINT))>$2 OR ((CAST((fields::jsonb ->> 'rank') AS BIGINT))=$2 AND id>$3))"
+            " AND (CAST((fields::jsonb ->> 'rank') AS BIGINT),id)>($2,$3)"
         );
         assert!(matches!(
             params.as_slice(),
@@ -240,7 +240,7 @@ mod tests {
             descending
                 .keyset_sql(NativeProvider::Sqlite, &key, &mut vec![])
                 .unwrap()
-                .contains("id<$2")
+                .contains(",id)<($1,$2)")
         );
         let binary = Scalar::new(&field(FieldKind::Text), Direction::Ascending).unwrap();
         assert_eq!(

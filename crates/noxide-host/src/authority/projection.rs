@@ -31,6 +31,14 @@ pub(crate) struct InternalFacts {
     native: NativeFacts,
     fields: Fields,
 }
+impl InternalFacts {
+    pub(crate) fn native(&self) -> &NativeFacts {
+        &self.native
+    }
+    pub(crate) fn selected(&self) -> &Fields {
+        &self.fields
+    }
+}
 impl Spec {
     pub(crate) fn aggregate(
         manifest: &Manifest,
@@ -55,6 +63,7 @@ impl Spec {
         };
         Self::build(manifest, consumer, source, contract, operand)
     }
+    #[cfg(test)]
     pub(crate) fn candidates(
         manifest: &Manifest,
         source: &Operation,

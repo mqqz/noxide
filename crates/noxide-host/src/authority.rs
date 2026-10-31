@@ -74,6 +74,13 @@ impl Authority {
             ..Self::default()
         }
     }
+    pub(crate) fn contract(&self) -> Result<&str> {
+        Ok(&self
+            .deployment
+            .as_ref()
+            .context("query deployment missing")?
+            .contract)
+    }
     pub(crate) fn time(&self) -> Option<AttemptTime> {
         self.time
     }

@@ -141,9 +141,7 @@ impl ListPlan {
         params.push((*record as i64).into());
         let record = params.len();
         let cmp = if self.descending() { "<" } else { ">" };
-        Ok(format!(
-            " AND (created_seq{cmp}${sequence} OR (created_seq=${sequence} AND id{cmp}${record}))"
-        ))
+        Ok(format!(" AND (created_seq,id){cmp}(${sequence},${record})"))
     }
 }
 
@@ -183,9 +181,11 @@ impl ListPlan {
 }
 
 pub(crate) use indexes::{
-    IndexOrder, IndexRequirement, IndexTable, NativeProvider, ScalarRepresentation,
+    IndexOrder, IndexRequirement, NativeProvider, ScalarRepresentation,
     required_indexes,
 };
+#[cfg(test)]
+pub(crate) use indexes::IndexTable;
 mod indexes;
 
 fn operand_value<'a>(

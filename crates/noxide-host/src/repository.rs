@@ -1,5 +1,6 @@
 mod authority;
 mod computation;
+mod queries;
 pub(crate) mod search;
 use crate::{
     auth::Principal,
@@ -1391,7 +1392,10 @@ impl Effects {
                     ensure!(
                         route.operations.contains(&operation)
                             && target
-                                == if op.kind == OperationKind::List {
+                                == if matches!(
+                                    op.kind,
+                                    OperationKind::List | OperationKind::Aggregate
+                                ) {
                                     0
                                 } else {
                                     self.request.target.unwrap_or(0)
@@ -1399,7 +1403,10 @@ impl Effects {
                         "operation outside request grant"
                     );
                     ensure!(
-                        matches!(op.kind, OperationKind::List | OperationKind::Read),
+                        matches!(
+                            op.kind,
+                            OperationKind::List | OperationKind::Read | OperationKind::Aggregate
+                        ),
                         "read route mutation"
                     );
                     ensure!(self.invoked.insert(operation), "operation already invoked");
@@ -1407,7 +1414,7 @@ impl Effects {
                 RequestKind::Action(_) => anyhow::bail!("storage import during action"),
             }
         }
-        if op.kind == OperationKind::List {
+        if matches!(op.kind, OperationKind::List | OperationKind::Aggregate) {
             self.charge_list_calls(1)?;
         }
         let storage_resource = self
@@ -1415,7 +1422,7 @@ impl Effects {
             .storage_resource(&self.manifest, op.resource)
             .await?;
         let value = match op.kind {
-            OperationKind::Aggregate => anyhow::bail!("aggregate runtime is not available"),
+            OperationKind::Aggregate => self.aggregate_query(&op, storage_resource).await?,
             OperationKind::Create | OperationKind::Update | OperationKind::Delete => {
                 anyhow::bail!("mutation outside declared transaction")
             }
@@ -1507,12 +1514,21 @@ impl Effects {
                         return Ok(bytes);
                     }
                 }
-                let bytes = match &plan.strategy {
-                    crate::policy::ListStrategy::Single => {
-                        self.list_single(&op, storage_resource, &plan).await?
-                    }
-                    crate::policy::ListStrategy::Merge(scans) => {
-                        self.list_merge(&op, storage_resource, &plan, scans).await?
+                let bytes = if op
+                    .query
+                    .as_ref()
+                    .is_some_and(|query| query.search.is_some() || query.range.is_some())
+                    || matches!(plan.order, ListOrder::Field { .. })
+                {
+                    self.list_extended(&op, storage_resource, &plan).await?
+                } else {
+                    match &plan.strategy {
+                        crate::policy::ListStrategy::Single => {
+                            self.list_single(&op, storage_resource, &plan).await?
+                        }
+                        crate::policy::ListStrategy::Merge(scans) => {
+                            self.list_merge(&op, storage_resource, &plan, scans).await?
+                        }
                     }
                 };
                 let bytes = if plan.preview {
