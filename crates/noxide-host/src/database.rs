@@ -213,44 +213,56 @@ impl Database {
                     );
                 }
                 let options = if maintenance.is_some() {
-                    options
-                        .clone()
+                    // Bootstrap alone establishes WAL. Reapplying journal_mode
+                    // during no-wait maintenance can require an exclusive lock
+                    // while a previous request is closing its SQLite handle.
+                    SqliteConnectOptions::new()
+                        .filename(options.get_filename())
+                        .create_if_missing(false)
+                        .foreign_keys(true)
+                        .synchronous(SqliteSynchronous::Full)
+                        .pragma("trusted_schema", "OFF")
                         .busy_timeout(Duration::ZERO)
                         .optimize_on_close(false, None)
                 } else {
                     options.clone()
                 };
                 let mut cx = sqlx::SqliteConnection::connect_with(&options).await?;
-                let flag = cancelled.clone();
-                cx.lock_handle().await?.set_progress_handler(1000, move || {
-                    !flag.load(Ordering::Relaxed) && Instant::now() < deadline
-                });
-                let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
-                    .fetch_one(&mut cx)
-                    .await?;
-                let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
-                    .fetch_one(&mut cx)
-                    .await?;
-                ensure!(
-                    synchronous == 2 && mode == "wal",
-                    "unsafe SQLite durability"
-                );
-                if read_only {
-                    sqlx::query("PRAGMA query_only = ON")
-                        .execute(&mut cx)
+                let setup: Result<()> = async {
+                    let flag = cancelled.clone();
+                    cx.lock_handle().await?.set_progress_handler(1000, move || {
+                        !flag.load(Ordering::Relaxed) && Instant::now() < deadline
+                    });
+                    let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
+                        .fetch_one(&mut cx)
                         .await?;
+                    let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+                        .fetch_one(&mut cx)
+                        .await?;
+                    ensure!(
+                        synchronous == 2 && mode == "wal",
+                        "unsafe SQLite durability"
+                    );
+                    if read_only {
+                        sqlx::query("PRAGMA query_only = ON")
+                            .execute(&mut cx)
+                            .await?;
+                    }
+                    sqlx::query(if read_only {
+                        "BEGIN DEFERRED"
+                    } else {
+                        "BEGIN IMMEDIATE"
+                    })
+                    .execute(&mut cx)
+                    .await?;
+                    Ok(())
                 }
-                let begin = sqlx::query(if read_only {
-                    "BEGIN DEFERRED"
-                } else {
-                    "BEGIN IMMEDIATE"
-                })
-                .execute(&mut cx)
                 .await;
-                if let Err(error) = begin {
+                if let Err(error) = setup {
                     if maintenance.is_some() {
-                        // Await the SQLx worker's shutdown acknowledgement before
-                        // returning a failed lock attempt. No busy query remains.
+                        // Every post-open setup rejection owns its connection.
+                        // Release capacity only after the worker acknowledges
+                        // closure; failed/unknown closure remains quarantined.
                         cx.close().await?;
                         #[cfg(test)]
                         let _ = MAINTENANCE_CLOSE_PROBE.try_with(|probe| {
@@ -258,9 +270,9 @@ impl Database {
                         });
                     }
                     return Err(if maintenance.is_some() {
-                        maintenance::ConnectStopped(error.into()).into()
+                        maintenance::ConnectStopped(error).into()
                     } else {
-                        error.into()
+                        error
                     });
                 }
                 Backend::Sqlite(cx)

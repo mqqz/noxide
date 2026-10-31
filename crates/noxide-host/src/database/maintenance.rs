@@ -298,6 +298,64 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn sqlite_maintenance_preserves_journal_and_confirms_failed_setup_stop() {
+        let root = tempfile::tempdir().unwrap().keep();
+        eprintln!("retained maintenance journal fixture: {}", root.display());
+        let database = Database::sqlite(root.join("maintenance-journal.db"));
+        database.initialize().await.unwrap();
+        let DatabaseOptions::Sqlite { path, .. } = &database.options else {
+            unreachable!()
+        };
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false);
+        let mut fixture = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode=DELETE")
+            .fetch_one(&mut fixture)
+            .await
+            .unwrap();
+        assert_eq!(mode, "delete");
+        fixture.close().await.unwrap();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let attempt = MAINTENANCE_CLOSE_PROBE
+            .scope(
+                stopped.clone(),
+                database.begin_maintenance(Instant::now() + Duration::from_secs(2)),
+            )
+            .await;
+        match attempt {
+            Ok(mut transaction) => {
+                let persisted = transaction
+                    .fetch::<1>("PRAGMA journal_mode", &[])
+                    .await
+                    .unwrap();
+                eprintln!("unexpected maintenance journal: {}", persisted[0][0]);
+                transaction.rollback().await.unwrap();
+                panic!("maintenance must refuse existing non-WAL storage");
+            }
+            Err(error) => assert!(error.is::<ConnectStopped>(), "{error}"),
+        }
+        assert!(
+            stopped.load(Ordering::Acquire),
+            "setup rejection must await worker shutdown"
+        );
+        let mut fixture = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&mut fixture)
+            .await
+            .unwrap();
+        assert_eq!(
+            mode, "delete",
+            "maintenance must not repair persisted durability"
+        );
+        fixture.close().await.unwrap();
+    }
+
+    #[tokio::test]
     #[ignore = "requires NOXIDE_TEST_POSTGRES disposable local server"]
     async fn postgres_control_does_not_cancel_a_different_backend_identity() {
         let root = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
