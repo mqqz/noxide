@@ -386,3 +386,6 @@ impl Drop for JobService {
         // They retain their AdmissionOwner and provider capacity until stopped.
     }
 }
+
+#[cfg(test)]
+mod tests;
