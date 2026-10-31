@@ -276,10 +276,21 @@ noxide::application! {
 }
 ```
 
-`application!` also accepts `blobs: [policy_function]`, naming one function
-that returns the explicit `BlobPolicy` for the registered upload actions; see
-[team documents](../examples/team-documents/src/lib.rs). Without it the
-application declares no upload authority.
+`application!` also registers explicit capability contracts. Each section names
+the declaration the operator reviews; none is inferred from fields or actions:
+
+- `blobs: [policy]`: one function returning the `BlobPolicy` for upload actions
+  ([team documents](../examples/team-documents/src/lib.rs)).
+- `services: [Action, ...]`: actions with no web binding. They are dispatched
+  only when the host invokes them for an approved job worker.
+- `operations: [function, ...]`: extra operations such as a recurring
+  selection query.
+- `jobs: [contract]` and `effects: [contract]`: one function each returning the
+  `JobContract` or `EffectContract`.
+
+[Reservations](../examples/reservations/src/lib.rs) and
+[expiring paste](../examples/expiring-paste/src/lib.rs) use these sections; their
+explicit fixtures in `tools/fixtures/sdk` lower to byte-identical contracts.
 
 The host filters rows in SQL, validates their complete stored fields, and returns
 only `title` and `body`. The SDK generates `PublishedArticlesRecord`, which has

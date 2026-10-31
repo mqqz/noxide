@@ -12,6 +12,19 @@ pub(crate) struct Registration {
     pub(crate) actions: Vec<(Type, Option<syn::Path>)>,
     pub(crate) forms: Vec<(Type, syn::Path)>,
     pub(crate) blobs: Option<syn::Path>,
+    pub(crate) services: Vec<Type>,
+    pub(crate) operations: Vec<syn::Path>,
+    pub(crate) jobs: Option<syn::Path>,
+    pub(crate) effects: Option<syn::Path>,
+}
+
+/// One explicit contract function; the section never infers authority.
+fn single_function(content: ParseStream<'_>, section: &str) -> syn::Result<syn::Path> {
+    let function: syn::Path = content.parse()?;
+    if !content.is_empty() {
+        return Err(content.error(format!("register exactly one {section} function")));
+    }
+    Ok(function)
 }
 impl Parse for Registration {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
@@ -21,6 +34,10 @@ impl Parse for Registration {
             actions: Vec::new(),
             forms: Vec::new(),
             blobs: None,
+            services: Vec::new(),
+            operations: Vec::new(),
+            jobs: None,
+            effects: None,
         };
         let mut sections = BTreeSet::new();
         while !input.is_empty() {
@@ -73,18 +90,27 @@ impl Parse for Registration {
                         }
                     }
                 }
-                "blobs" => {
-                    // One explicit policy function; no authority is inferred from fields.
-                    let policy: syn::Path = content.parse()?;
-                    if !content.is_empty() {
-                        return Err(content.error("register exactly one blob policy function"));
-                    }
-                    result.blobs = Some(policy);
+                // No authority is inferred from fields or action shapes; each
+                // section names the explicit contract the operator approves.
+                "blobs" => result.blobs = Some(single_function(&content, "blob policy")?),
+                "jobs" => result.jobs = Some(single_function(&content, "job contract")?),
+                "effects" => result.effects = Some(single_function(&content, "effect contract")?),
+                "services" => {
+                    result.services = content
+                        .parse_terminated(Type::parse, Token![,])?
+                        .into_iter()
+                        .collect();
+                }
+                "operations" => {
+                    result.operations = content
+                        .parse_terminated(syn::Path::parse, Token![,])?
+                        .into_iter()
+                        .collect();
                 }
                 _ => {
                     return Err(syn::Error::new(
                         section.span(),
-                        "expected assets, pages, actions, forms, or blobs",
+                        "expected assets, pages, actions, forms, services, operations, blobs, jobs, or effects",
                     ));
                 }
             }
@@ -192,6 +218,16 @@ pub(crate) fn expand_application(registration: Registration) -> syn::Result<Toke
         .blobs
         .as_ref()
         .map(|policy| quote!(builder.blobs(#policy());));
+    let jobs = registration
+        .jobs
+        .as_ref()
+        .map(|contract| quote!(builder.jobs(#contract());));
+    let effects = registration
+        .effects
+        .as_ref()
+        .map(|contract| quote!(builder.effects(#contract());));
+    let services = &registration.services;
+    let operations = &registration.operations;
     let form_types: Vec<_> = registration
         .forms
         .iter()
@@ -231,7 +267,15 @@ pub(crate) fn expand_application(registration: Registration) -> syn::Result<Toke
                 builder.web_binding(<#actions as ::noxide::WebActionType>::web_binding());
             )*
             #(builder.layout(<#form_types as ::noxide::WebActionType>::web_binding().id, #form_functions(::noxide::FormFields::<#form_types>::new()).instructions);)*
+            #(
+                for resource in <#services as ::noxide::ActionType>::resources() { builder.resource(resource); }
+                for operation in <#services as ::noxide::ActionType>::operations() { builder.operation(operation); }
+                builder.action(<#services as ::noxide::ActionType>::definition());
+            )*
+            #(builder.operation(#operations());)*
             #blobs
+            #jobs
+            #effects
             builder.json()
         }
         struct __NoxideApplication;
@@ -244,6 +288,9 @@ pub(crate) fn expand_application(registration: Registration) -> syn::Result<Toke
                     },
                     ::noxide::RequestKind::Action(id) => match id {
                         #(#dispatch)*
+                        // Services have no web binding; only host job invocation reaches them.
+                        #(id if id == <#services as ::noxide::ActionType>::definition().id =>
+                            ::noxide::IntoActionResponse::into_response(::noxide::Submission::<#services>::new(&request).execute()),)*
                         _ => ::noxide::ResponseIntent::NotFound(::noxide::Document::new("Not found", vec![])),
                     },
                 }

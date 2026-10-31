@@ -255,6 +255,10 @@ pub(crate) fn expand_app(mut module: syn::ItemMod) -> syn::Result<Tokens> {
         actions: actions.into_values().collect(),
         forms,
         blobs: None,
+        services: Vec::new(),
+        operations: Vec::new(),
+        jobs: None,
+        effects: None,
     };
     if registration.pages.is_empty() {
         return Err(syn::Error::new(

@@ -417,83 +417,13 @@ pub mod reservations {
         }
     }
 
-    pub mod routes {
-        pub use super::index::link as index;
-        pub use super::order::link as order;
-        pub use super::product::link as product;
+    noxide::application! {
+        pages: [index, product, order],
+        actions: [CreateProduct, EditProduct, Reserve, Cancel],
+        services: [Expire],
+        operations: [expiry_candidates],
+        jobs: [jobs],
     }
-    fn register_web<A: noxide::WebActionType>(builder: &mut noxide::ApplicationDefinition) {
-        for resource in A::resources() {
-            builder.resource(resource);
-        }
-        for operation in A::operations() {
-            builder.operation(operation);
-        }
-        if let Some(operation) = A::inspection() {
-            builder.operation(operation);
-        }
-        builder.action(A::definition());
-        builder.web_binding(A::web_binding());
-    }
-    pub fn noxide_manifest() -> String {
-        use noxide::ActionType;
-        let mut builder = noxide::ApplicationDefinition::new();
-        index::register(&mut builder);
-        product::register(&mut builder);
-        order::register(&mut builder);
-        register_web::<CreateProduct>(&mut builder);
-        register_web::<EditProduct>(&mut builder);
-        register_web::<Reserve>(&mut builder);
-        register_web::<Cancel>(&mut builder);
-        for resource in Expire::resources() {
-            builder.resource(resource);
-        }
-        for operation in Expire::operations() {
-            builder.operation(operation);
-        }
-        builder.operation(expiry_candidates());
-        builder.action(Expire::definition());
-        builder.jobs(jobs());
-        builder.json()
-    }
-    struct Reservations;
-    impl noxide::Handler for Reservations {
-        fn handle(request: noxide::RequestView, _: &mut noxide::Context) -> noxide::ResponseIntent {
-            use noxide::{ActionType, IntoActionResponse, RequestKind, ResponseIntent, Submission};
-            match request.kind {
-                RequestKind::Route(id) if id == index::id() => index::dispatch(&request),
-                RequestKind::Route(id) if id == product::id() => product::dispatch(&request),
-                RequestKind::Route(id) if id == order::id() => order::dispatch(&request),
-                RequestKind::Action(id) if id == CreateProduct::definition().id => {
-                    Submission::<CreateProduct>::new(&request)
-                        .execute()
-                        .into_response()
-                }
-                RequestKind::Action(id) if id == EditProduct::definition().id => {
-                    Submission::<EditProduct>::new(&request)
-                        .execute()
-                        .into_response()
-                }
-                RequestKind::Action(id) if id == Reserve::definition().id => {
-                    Submission::<Reserve>::new(&request)
-                        .execute()
-                        .into_response()
-                }
-                RequestKind::Action(id) if id == Cancel::definition().id => {
-                    Submission::<Cancel>::new(&request)
-                        .execute()
-                        .into_response()
-                }
-                RequestKind::Action(id) if id == Expire::definition().id => {
-                    Submission::<Expire>::new(&request)
-                        .execute()
-                        .into_response()
-                }
-                _ => ResponseIntent::NotFound(noxide::Document::new("Not found", vec![])),
-            }
-        }
-    }
-    noxide::export!(Reservations);
 }
 
 pub use reservations::noxide_manifest;

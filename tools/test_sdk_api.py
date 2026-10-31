@@ -20,7 +20,7 @@ from build_vm import (ROOT, DEFAULT_VM_SECONDS, MAX_OUTPUT, MAX_CONTRACT, Image,
                       check_build_status)
 
 
-EQUIVALENT_APPS = ("private-notes", "task-board", "public-articles", "policy-board", "repeated", "forum", "reservations")
+EQUIVALENT_APPS = ("private-notes", "task-board", "public-articles", "policy-board", "repeated", "forum", "reservations", "expiring-paste")
 ADMISSION_FAILURES = {
     "notes-added-field": b"creation requires every writable field",
     "notes-renamed-field": b"creation requires every writable field",

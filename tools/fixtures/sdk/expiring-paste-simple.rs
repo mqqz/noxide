@@ -2,8 +2,8 @@
 pub mod expiring_paste {
     use noxide::prelude::*;
     use noxide::{
-        ActionType, ApplicationDefinition, BlobLimits, BlobPolicy, BlobRef, Duration, Timestamp,
-        UploadHandle, WebActionType, guards, values,
+        ActionType, BlobLimits, BlobPolicy, BlobRef, Duration, Timestamp, UploadHandle,
+        WebActionType, guards, values,
     };
 
     #[derive(Resource)]
@@ -315,70 +315,15 @@ pub mod expiring_paste {
         }
     }
 
-    pub mod routes {
-        pub use super::index::link as index;
-        pub use super::show::link as show;
+    noxide::application! {
+        pages: [index, show],
+        actions: [CreatePaste => publish, DeletePaste],
+        forms: [CreatePaste => create_layout],
+        services: [CleanupPaste],
+        operations: [cleanup_candidates],
+        blobs: [blobs],
+        jobs: [jobs],
+        effects: [effects],
     }
-    fn register_web<A: WebActionType>(builder: &mut ApplicationDefinition) {
-        for resource in A::resources() {
-            builder.resource(resource);
-        }
-        for operation in A::operations() {
-            builder.operation(operation);
-        }
-        if let Some(operation) = A::inspection() {
-            builder.operation(operation);
-        }
-        builder.action(A::definition());
-        builder.web_binding(A::web_binding());
-    }
-    pub fn noxide_manifest() -> String {
-        let mut builder = ApplicationDefinition::new();
-        index::register(&mut builder);
-        show::register(&mut builder);
-        register_web::<CreatePaste>(&mut builder);
-        register_web::<DeletePaste>(&mut builder);
-        builder.layout(
-            CreatePaste::web_binding().id,
-            create_layout(FormFields::new()).instructions,
-        );
-        for resource in CleanupPaste::resources() {
-            builder.resource(resource);
-        }
-        for operation in CleanupPaste::operations() {
-            builder.operation(operation);
-        }
-        builder.action(CleanupPaste::definition());
-        builder.operation(cleanup_candidates());
-        builder.blobs(blobs());
-        builder.jobs(jobs());
-        builder.effects(effects());
-        builder.json()
-    }
-    struct Application;
-    impl noxide::Handler for Application {
-        fn handle(request: noxide::RequestView, _: &mut noxide::Context) -> noxide::ResponseIntent {
-            use noxide::{IntoActionResponse, RequestKind, ResponseIntent};
-            match request.kind {
-                RequestKind::Route(id) if id == index::id() => index::dispatch(&request),
-                RequestKind::Route(id) if id == show::id() => show::dispatch(&request),
-                RequestKind::Action(id) if id == CreatePaste::definition().id => {
-                    publish(Submission::<CreatePaste>::new(&request)).into_response()
-                }
-                RequestKind::Action(id) if id == DeletePaste::definition().id => {
-                    Submission::<DeletePaste>::new(&request)
-                        .execute()
-                        .into_response()
-                }
-                RequestKind::Action(id) if id == CleanupPaste::definition().id => {
-                    Submission::<CleanupPaste>::new(&request)
-                        .execute()
-                        .into_response()
-                }
-                _ => ResponseIntent::NotFound(noxide::Document::new("Not found", vec![])),
-            }
-        }
-    }
-    noxide::export!(Application);
 }
 pub use expiring_paste::noxide_manifest;
