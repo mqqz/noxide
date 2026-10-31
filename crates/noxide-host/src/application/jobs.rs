@@ -49,12 +49,24 @@ impl Application {
         Ok(receipt)
     }
 
-    /// A claim is not authority. Each attempt obtains the current queue proof in
-    /// its mutation transaction, then enters exactly the same guest/core path as web.
+    #[cfg(test)]
     pub(crate) async fn invoke_job(
         &self,
         claim: &Claim,
     ) -> std::result::Result<JobRunOutcome, RequestError> {
+        self.invoke_job_with_calls(claim, 16).await
+    }
+
+    /// A claim is not authority. Each attempt obtains the current queue proof in
+    /// its mutation transaction, then enters exactly the same guest/core path as web.
+    pub(crate) async fn invoke_job_with_calls(
+        &self,
+        claim: &Claim,
+        remaining: u32,
+    ) -> std::result::Result<JobRunOutcome, RequestError> {
+        if remaining > 16 {
+            return Err(RequestError::InvalidRequest);
+        }
         let entry = self.request_scope(self.runtime.limits().wall_time);
         entry
             .run(async {
@@ -64,6 +76,7 @@ impl Application {
                     .run(async {
                         let deadline = owner.work_deadline();
                         let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
+                        budget.database_calls = remaining;
                         let result =
                             timeout_at(deadline, self.invoke_job_owned(claim, &mut budget)).await;
                         match result {

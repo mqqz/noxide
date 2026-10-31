@@ -1085,6 +1085,12 @@ async fn sqlite_service_malformed_receipt_never_reexecutes() {
 }
 
 async fn maximum_effects(database: Option<Database>) {
+    maximum_effects_mode(database, false).await;
+}
+async fn maximum_effects_worker(database: Option<Database>) {
+    maximum_effects_mode(database, true).await;
+}
+async fn maximum_effects_mode(database: Option<Database>, via_worker: bool) {
     let mut m = declarations(false);
     let mut followup = m.actions[1].clone();
     followup.id = 3;
@@ -1133,9 +1139,27 @@ async fn maximum_effects(database: Option<Database>) {
     }
     let case = Case::new_manifest(database, m).await;
     let job = case.create("ready").await;
-    let claim = case.claim(0).await.unwrap();
-    let (result, roots) =
-        crate::database::lifecycle::observe_roots(case.app.invoke_job(&claim)).await;
+    let claim = if via_worker {
+        None
+    } else {
+        Some(case.claim(0).await.unwrap())
+    };
+    let (result, roots) = crate::database::lifecycle::observe_roots(async {
+        if let Some(claim) = &claim {
+            case.app.invoke_job(claim).await
+        } else {
+            case.app
+                .run_job_once()
+                .await
+                .map(|result| result.expect("scheduled job must be claimed"))
+        }
+    })
+    .await;
+    eprintln!(
+        "four mutations/two enqueues via_worker={via_worker}: statement meter={:?}, error={:?}",
+        roots[0].statement_snapshot(),
+        result.as_ref().err()
+    );
     assert!(
         matches!(result.unwrap(), JobRunOutcome::Completed { ref outcomes, .. } if outcomes.len() == 4)
     );
@@ -1178,13 +1202,20 @@ async fn maximum_effects(database: Option<Database>) {
         .unwrap();
     assert_eq!(stored.revision, 5);
     tx.commit().await.unwrap();
-    assert!(matches!(
-        case.app.invoke_job(&claim).await.unwrap(),
-        JobRunOutcome::Completed {
-            recovered: true,
-            ..
-        }
-    ));
+    if let Some(claim) = &claim {
+        assert!(matches!(
+            case.app.invoke_job(claim).await.unwrap(),
+            JobRunOutcome::Completed {
+                recovered: true,
+                ..
+            }
+        ));
+    } else {
+        assert_eq!(
+            case.stored(&job).await,
+            ("succeeded".into(), "finished".into(), 1)
+        );
+    }
     let mut tx = case
         .db
         .begin_read(std::time::Instant::now() + std::time::Duration::from_secs(2))
@@ -1212,6 +1243,11 @@ async fn sqlite_service_authoritative_downward_limits() {
 #[tokio::test]
 async fn sqlite_service_four_mutations_two_enqueues_original_budget() {
     maximum_effects(None).await;
+}
+
+#[tokio::test]
+async fn sqlite_worker_four_mutations_two_enqueues_original_budget() {
+    maximum_effects_worker(None).await;
 }
 
 #[tokio::test]
@@ -1273,6 +1309,7 @@ async fn postgres_service_action_integration() {
         "derived_relation",
         "trap_backoff",
         "abort_budget",
+        "worker_maximum",
     ] {
         let name = format!(
             "nx_p10_action_{case}_{}",
@@ -1309,6 +1346,7 @@ async fn postgres_service_action_integration() {
             "derived_relation" => derived_targets(db, Some("relation")).await,
             "trap_backoff" => acknowledged_trap_backoff(db).await,
             "abort_budget" => exhausted_abort_budget(db).await,
+            "worker_maximum" => maximum_effects_worker(db).await,
             _ => unreachable!(),
         }
     }
