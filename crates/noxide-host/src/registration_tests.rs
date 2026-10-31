@@ -25,6 +25,7 @@ async fn app(db: Database, mode: Registration) -> Arc<Application> {
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
             },
@@ -600,6 +601,7 @@ async fn clock_recovery_invites_contract(db: Database) {
         keys,
         Limits::default(),
         crate::DeploymentResources {
+            jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
         },

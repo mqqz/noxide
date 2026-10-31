@@ -791,6 +791,7 @@ async fn four_step_receipts_case(db: Database) {
         HostKeys::generate().unwrap(),
         Limits::default(),
         crate::DeploymentResources {
+            jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
         },

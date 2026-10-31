@@ -121,6 +121,7 @@ async fn application() -> (tempfile::TempDir, Arc<Application>) {
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
             },
@@ -765,6 +766,7 @@ async fn runtime_concurrency_below_global_cap_returns_busy_at_admission() {
                 ..Limits::default()
             },
             crate::DeploymentResources {
+                jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
             },
@@ -820,6 +822,7 @@ async fn identity_provider_checks(db: Database) {
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
             },
@@ -945,6 +948,7 @@ async fn verified_http_pages_work_with_small_reserves_and_one_runtime_slot() {
                     ..Limits::default()
                 },
                 crate::DeploymentResources {
+                    jobs: None,
                     assets: crate::assets::AssetBundle::default(),
                     blobs: None,
                 },

@@ -56,6 +56,15 @@ pub(crate) fn scan_policy(policy: &Policy, scan: &ScanRule) -> Policy {
     let atoms = &policy.any[scan.rule];
     let rule = if scan.exact {
         atoms.clone()
+    } else if atoms
+        .iter()
+        .any(|atom| matches!(atom, Predicate::Service { .. }))
+    {
+        atoms
+            .iter()
+            .filter(|atom| matches!(atom, Predicate::Service { .. } | Predicate::SameTenant))
+            .cloned()
+            .collect()
     } else {
         atoms
             .iter()
@@ -411,6 +420,7 @@ pub(crate) fn index_prefix(policy: &Policy, scan: Option<&ScanRule>) -> Vec<Inde
         matches!(
             atom,
             Predicate::SameTenant
+                | Predicate::Service { .. }
                 | Predicate::Role {
                     tenant_scoped: true,
                     ..
@@ -418,7 +428,13 @@ pub(crate) fn index_prefix(policy: &Policy, scan: Option<&ScanRule>) -> Vec<Inde
         )
     });
     let mut columns: Vec<_> = identity.into_iter().collect();
-    if tenant && scan.is_none_or(|scan| scan.exact) && (scan.is_some() || columns.is_empty()) {
+    let service = atoms
+        .iter()
+        .any(|atom| matches!(atom, Predicate::Service { .. }));
+    if tenant
+        && (service || scan.is_none_or(|scan| scan.exact))
+        && (scan.is_some() || columns.is_empty())
+    {
         columns.push(IndexColumn::Tenant);
     }
     columns

@@ -177,6 +177,7 @@ impl Case {
                 HostKeys::generate().unwrap(),
                 Limits::default(),
                 crate::DeploymentResources {
+                    jobs: None,
                     assets: crate::assets::AssetBundle::default(),
                     blobs: None,
                 },

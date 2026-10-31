@@ -236,6 +236,13 @@ pub async fn serve(
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()> {
     let checkpoint = app.start_clock_service()?;
+    let jobs = match app.start_job_service() {
+        Ok(jobs) => jobs,
+        Err(error) => {
+            checkpoint.shutdown().await?;
+            return Err(error);
+        }
+    };
     let ordinary = app.request_lifecycle();
     let router = router(app, origin);
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
@@ -281,8 +288,14 @@ pub async fn serve(
     .await;
     connections.abort_all();
     while connections.join_next().await.is_some() {}
+    let jobs_stopped = if let Some(jobs) = jobs {
+        jobs.shutdown().await
+    } else {
+        Ok(())
+    };
     let ordinary_stopped = ordinary.shutdown().await;
     let clock_stopped = checkpoint.shutdown().await;
+    jobs_stopped?;
     ordinary_stopped?;
     clock_stopped?;
     Ok(())

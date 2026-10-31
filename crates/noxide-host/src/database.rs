@@ -1,5 +1,6 @@
 mod blob_layout;
 mod commit;
+mod jobs_layout;
 pub(crate) mod lifecycle;
 mod maintenance;
 mod schema;
@@ -63,6 +64,7 @@ pub(crate) struct Transaction {
     operator_ended: Arc<AtomicBool>,
     deadline: tokio::time::Instant,
     maintenance: Option<maintenance::Control>,
+    maintenance_work: bool,
     ordinary: Option<lifecycle::Ordinary>,
 }
 
@@ -372,6 +374,7 @@ impl Database {
             operator_ended: Arc::new(AtomicBool::new(maintenance.is_some())),
             deadline: deadline.into(),
             maintenance: control,
+            maintenance_work: maintenance.is_some(),
             ordinary: None,
         };
         if maintenance.is_none() {
@@ -392,8 +395,10 @@ impl Database {
                 .iter()
                 .chain(blob_layout::TABLE_SQL)
                 .chain(search_layout::table_sql(&tx)?)
+                .chain(jobs_layout::table_sql(&tx)?)
                 .chain(blob_layout::INDEXES.iter().map(|(_, sql)| sql))
                 .chain(search_layout::INDEXES.iter().map(|(_, sql)| sql))
+                .chain(jobs_layout::INDEXES.iter().map(|(_, sql)| sql))
             {
                 tx.execute(sql, &[]).await?;
             }
@@ -409,6 +414,7 @@ impl Database {
             }
             tx.check_blob_layout().await?;
             tx.check_search_layout().await?;
+            tx.check_job_layout().await?;
         } else {
             tx.check_storage().await?;
             tx.check_layout().await?;
@@ -444,6 +450,21 @@ impl Database {
             old[0] != keys.incarnation(),
             "clock recovery requires a fresh host key"
         );
+        if matches!(tx.backend, Backend::Postgres(_)) {
+            tx.fetch::<1>(
+                "SELECT CAST(singleton AS TEXT) FROM nx_clock WHERE singleton=1 FOR UPDATE",
+                &[],
+            )
+            .await?;
+        }
+        let epoch = crate::security::random_id()?;
+        tx.execute(
+            "UPDATE nx_job_runtime SET epoch=$1,state='paused' WHERE singleton=1",
+            &[epoch.into()],
+        )
+        .await?;
+        tx.execute("UPDATE nx_job_grants SET state='revoked',version=CASE WHEN version<9223372036854775807 THEN version+1 ELSE version END WHERE deployment=(SELECT deployment FROM nx_job_runtime WHERE singleton=1) AND state='active'", &[]).await?;
+        tx.execute("UPDATE nx_jobs SET state='paused',reason='clock_recovery',lease_until_ms=0 WHERE state IN ('pending','running')", &[]).await?;
         let now = crate::security::now()?;
         let generation = crate::security::random_id()?;
         tx.execute(
@@ -478,6 +499,18 @@ impl Database {
 }
 
 impl Transaction {
+    /// Liveness guard for bounded startup work owned by MaintenanceLease.
+    /// This grants no operator CPU authority and is not a fallback request scope.
+    pub(crate) fn maintenance_checkpoint(&self) -> Result<()> {
+        ensure!(
+            self.maintenance_work
+                && self.active
+                && !self.cancelled.load(Ordering::Acquire)
+                && tokio::time::Instant::now() < self.deadline,
+            "startup maintenance is unavailable"
+        );
+        Ok(())
+    }
     #[cfg(test)]
     pub(crate) async fn snapshot(&mut self) -> Result<Vec<(String, Vec<[String; 1]>)>> {
         let mut tables = Vec::new();
@@ -485,6 +518,7 @@ impl Transaction {
             .iter()
             .chain(blob_layout::TABLES)
             .chain(search_layout::TABLES)
+            .chain(jobs_layout::TABLES)
         {
             let columns = columns
                 .iter()
@@ -622,7 +656,7 @@ impl Transaction {
         ).await?;
         ensure!(
             rows.as_slice() == [["1".to_owned(), STORAGE_VERSION.to_string()]],
-            "unsupported framework storage version; storage 13 requires an explicit reviewed migration or a new empty database; existing data is unchanged"
+            "unsupported framework storage version; storage 14 requires an explicit reviewed migration or a new empty database; existing data is unchanged"
         );
         Ok(())
     }
@@ -663,6 +697,7 @@ impl Transaction {
             .iter()
             .chain(blob_layout::TABLES)
             .chain(search_layout::TABLES)
+            .chain(jobs_layout::TABLES)
             .map(|(name, _)| (*name).to_owned())
             .collect();
         expected.sort();
@@ -674,6 +709,7 @@ impl Transaction {
             .iter()
             .chain(blob_layout::TABLES)
             .chain(search_layout::TABLES)
+            .chain(jobs_layout::TABLES)
         {
             let sql = match self.backend {
                 Backend::Closed => unreachable!("closed maintenance transaction"),
@@ -706,6 +742,7 @@ impl Transaction {
                     || (table == "nx_records" && matches!(expected_name, "owner" | "cap_version"))
                     || (table == "nx_invites"
                         && matches!(expected_name, "redeemed_at" | "redeemed_by"))
+                    || (table == "nx_jobs" && expected_name == "reconciled_from")
                 {
                     "0"
                 } else {
@@ -721,7 +758,8 @@ impl Transaction {
             }
         }
         self.check_blob_layout().await?;
-        self.check_search_layout().await
+        self.check_search_layout().await?;
+        self.check_job_layout().await
     }
 
     pub(crate) async fn deployment(
@@ -1000,7 +1038,7 @@ pub(crate) fn retryable(error: &anyhow::Error) -> bool {
     )
 }
 
-const STORAGE_VERSION: i64 = 13;
+const STORAGE_VERSION: i64 = 14;
 const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
     (
         "nx_resource_catalog",

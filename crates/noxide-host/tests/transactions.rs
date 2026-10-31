@@ -317,6 +317,7 @@ impl Case {
                 serde_json::from_slice(keys).unwrap(),
                 limits,
                 noxide_host::DeploymentResources {
+                    jobs: None,
                     assets: noxide_host::assets::AssetBundle::default(),
                     blobs: None,
                 },
@@ -820,6 +821,7 @@ async fn contract_changes_invalidate_tokens(mut case: Case) {
             serde_json::from_slice(&case.keys).unwrap(),
             Limits::default(),
             noxide_host::DeploymentResources {
+                jobs: None,
                 assets: noxide_host::assets::AssetBundle::default(),
                 blobs: None,
             },

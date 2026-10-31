@@ -124,6 +124,7 @@ async fn application(db: Database, keys: HostKeys) -> Application {
         keys,
         Limits::default(),
         crate::DeploymentResources {
+            jobs: None,
             assets: crate::assets::AssetBundle::default(),
             blobs: None,
         },
@@ -337,6 +338,7 @@ async fn revocation(db: &Database) {
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
             },
@@ -592,6 +594,7 @@ async fn record_application(db: &Database, keys: &[u8]) -> Arc<Application> {
             serde_json::from_slice(keys).unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
             },

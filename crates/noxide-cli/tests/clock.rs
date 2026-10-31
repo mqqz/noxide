@@ -34,6 +34,7 @@ async fn clock_recovery_requires_a_private_new_key() {
         old_keys,
         Limits::default(),
         noxide_host::DeploymentResources {
+            jobs: None,
             assets: noxide_host::assets::AssetBundle::default(),
             blobs: None,
         },
@@ -99,6 +100,7 @@ async fn clock_recovery_requires_a_private_new_key() {
         fresh,
         Limits::default(),
         noxide_host::DeploymentResources {
+            jobs: None,
             assets: noxide_host::assets::AssetBundle::default(),
             blobs: None,
         },

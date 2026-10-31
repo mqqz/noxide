@@ -37,6 +37,13 @@ impl Application {
                 self.generation.get().is_none_or(|g| g == &generation),
                 "application generation retired"
             );
+            tx.activate_jobs(
+                &generation,
+                &self.contract,
+                self.jobs.as_ref().map(|jobs| jobs.effective()),
+                self.manifest.jobs.as_ref(),
+            )
+            .await?;
             let outcome = lifecycle_clock::tick(tx, &self.clock).await;
             lease.finish().await?;
             let tick = outcome?;

@@ -32,6 +32,7 @@ async fn conformance(
             keys,
             Limits::default(),
             noxide_host::DeploymentResources {
+                jobs: None,
                 assets: noxide_host::assets::AssetBundle::default(),
                 blobs: None,
             },
@@ -104,6 +105,7 @@ async fn conformance(
         serde_json::from_slice(&saved_keys).unwrap(),
         Limits::default(),
         noxide_host::DeploymentResources {
+            jobs: None,
             assets: noxide_host::assets::AssetBundle::default(),
             blobs: None,
         },
@@ -145,6 +147,7 @@ async fn conformance(
             serde_json::from_slice(&saved_keys).unwrap(),
             Limits::default(),
             noxide_host::DeploymentResources {
+                jobs: None,
                 assets: noxide_host::assets::AssetBundle::default(),
                 blobs: None,
             },
@@ -199,6 +202,7 @@ async fn conformance(
         serde_json::from_slice(&saved_keys).unwrap(),
         Limits::default(),
         noxide_host::DeploymentResources {
+            jobs: None,
             assets: noxide_host::assets::AssetBundle::default(),
             blobs: None,
         },
@@ -223,6 +227,7 @@ async fn conformance(
         serde_json::from_slice(&saved_keys).unwrap(),
         Limits::default(),
         noxide_host::DeploymentResources {
+            jobs: None,
             assets: noxide_host::assets::AssetBundle::default(),
             blobs: None,
         },
@@ -238,6 +243,7 @@ async fn conformance(
         serde_json::from_slice(&saved_keys).unwrap(),
         Limits::default(),
         noxide_host::DeploymentResources {
+            jobs: None,
             assets: noxide_host::assets::AssetBundle::default(),
             blobs: None,
         },
@@ -254,6 +260,7 @@ async fn conformance(
         HostKeys::generate().unwrap(),
         Limits::default(),
         noxide_host::DeploymentResources {
+            jobs: None,
             assets: noxide_host::assets::AssetBundle::default(),
             blobs: None,
         },
@@ -279,6 +286,7 @@ async fn application_again(
         serde_json::from_slice(keys).unwrap(),
         Limits::default(),
         noxide_host::DeploymentResources {
+            jobs: None,
             assets: noxide_host::assets::AssetBundle::default(),
             blobs: None,
         },

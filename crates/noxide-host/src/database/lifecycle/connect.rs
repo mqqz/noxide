@@ -27,6 +27,7 @@ async fn open_inner(
         operator_ended: Arc::new(AtomicBool::new(true)),
         deadline: deadline.into(),
         maintenance: None,
+        maintenance_work: false,
         ordinary: Some(Ordinary {
             lease,
             control: None,

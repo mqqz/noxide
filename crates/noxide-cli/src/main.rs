@@ -1,4 +1,5 @@
 mod deps;
+mod jobs;
 mod lifecycle;
 mod project;
 mod roles;
@@ -29,6 +30,8 @@ struct Config {
     assets: Option<PathBuf>,
     #[serde(default)]
     blobs: Option<noxide_host::BlobDeployment>,
+    #[serde(default)]
+    jobs: Option<noxide_host::JobDeployment>,
     approved_contract: String,
     origin: String,
     listen: ListenConfig,
@@ -51,10 +54,11 @@ impl Config {
     fn approval(
         &self,
         manifest: &noxide::__private::Manifest,
-    ) -> Result<noxide_host::blob_deployment::DeploymentApproval> {
-        noxide_host::blob_deployment::approval(
+    ) -> Result<noxide_host::deployment::DeploymentApproval> {
+        noxide_host::deployment::approval(
             manifest,
             self.blobs.as_ref().map(|blobs| &blobs.ceilings),
+            self.jobs.as_ref(),
         )
     }
 }
@@ -224,6 +228,8 @@ async fn main() -> Result<()> {
                     "manifest_digest": URL_SAFE_NO_PAD.encode(approval.manifest_digest),
                     "requested_blobs": manifest.blobs,
                     "effective_blobs": approval.effective,
+                    "requested_jobs": manifest.jobs,
+                    "effective_jobs": approval.effective_jobs,
                     "deployment_digest": URL_SAFE_NO_PAD.encode(approval.digest),
                 }))?
             );
@@ -252,6 +258,7 @@ async fn main() -> Result<()> {
             .sync_all()?;
             println!("Added a signing edit key. Previous edit keys remain verify-only.");
         }
+        "jobs" => jobs::run(&args[1..]).await?,
         "recover-clock" => {
             ensure!(
                 args.len() == 2,
@@ -400,6 +407,7 @@ async fn main() -> Result<()> {
                     keys,
                     Limits::default(),
                     noxide_host::DeploymentResources {
+                        jobs: config.jobs.clone(),
                         assets,
                         blobs: config.blobs.as_ref().map(|deployment| {
                             noxide_host::BlobDeployment {

@@ -263,6 +263,12 @@ impl RequestScope {
             .try_with(Self::checkpoint)
             .map_err(|_| Unavailable::Closed)?
     }
+    pub(crate) fn statements_remaining() -> Result<u16> {
+        Self::checkpoint_current()?;
+        REQUEST
+            .try_with(|scope| scope.root.meter.remaining_work())
+            .map_err(|_| Unavailable::Closed.into())
+    }
     pub(crate) fn search_candidates_remaining() -> Result<usize> {
         Self::checkpoint_current()?;
         REQUEST

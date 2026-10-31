@@ -2,14 +2,16 @@ mod action;
 mod authority;
 pub(crate) mod blobs;
 use crate::database::lifecycle::{AdmissionOwner, Registry, RequestScope};
-pub(crate) use action::{
-    ActionCore, ActionRejection, MAX_ACTION_REJECTION_BYTES, ValidatedActionRejection,
-};
+pub(crate) use action::{ActionCore, MAX_ACTION_REJECTION_BYTES};
+pub use action::{ActionRejection, ValidatedActionRejection};
 use action::{CanonicalActionInput, ExecutionBudget};
 mod capabilities;
 mod clock;
+mod jobs;
 mod navigation;
 mod submission;
+pub use jobs::JobRunOutcome;
+mod job_worker;
 use crate::{
     Database, HostKeys, auth,
     database::{Transaction, retryable},
@@ -24,6 +26,7 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+pub(crate) use job_worker::JobService;
 use noxide_protocol::*;
 use sha2::{Digest, Sha256};
 use std::{
@@ -302,6 +305,7 @@ pub struct Application {
     pub(crate) plans: BTreeMap<u32, Arc<crate::query_plan::ListPlan>>,
     pub(crate) keys: Arc<HostKeys>,
     database: Database,
+    jobs: Option<job_worker::JobRuntime>,
     runtime: Runtime,
     contract: String,
     deployment: String,
@@ -715,8 +719,11 @@ impl Application {
         resources: crate::DeploymentResources,
     ) -> Result<Self> {
         let m = manifest::parse(declarations)?;
-        let approval =
-            crate::blob_deployment::approval(&m, resources.blobs.as_ref().map(|b| &b.ceilings))?;
+        let approval = crate::deployment::approval(
+            &m,
+            resources.blobs.as_ref().map(|b| &b.ceilings),
+            resources.jobs.as_ref(),
+        )?;
         let digest = approval.digest;
         ensure!(
             digest == approved,
@@ -749,6 +756,7 @@ impl Application {
             presentation: crate::Presentation::default(),
             assets: Arc::new(resources.assets),
             blobs,
+            jobs: approval.effective_jobs.map(job_worker::JobRuntime::new),
             asset_responses: Arc::new(tokio::sync::Semaphore::new(8)),
             registration: auth::Registration::Closed,
             plans: crate::query_plan::compile_all(&m)?,
@@ -1690,6 +1698,7 @@ mod clock_tests {
                 HostKeys::generate().unwrap(),
                 Limits::default(),
                 crate::DeploymentResources {
+                    jobs: None,
                     assets: crate::assets::AssetBundle::default(),
                     blobs: None,
                 },
@@ -1805,6 +1814,7 @@ mod clock_tests {
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
             },
@@ -1976,6 +1986,7 @@ mod clock_tests {
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
             },
@@ -2065,6 +2076,7 @@ mod identity_time_tests {
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                jobs: None,
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
             },

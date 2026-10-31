@@ -34,6 +34,7 @@ async fn schema_drafts_require_backfills_and_apply_the_approved_target() {
         serde_json::from_slice(&keys).unwrap(),
         Limits::default(),
         noxide_host::DeploymentResources {
+            jobs: None,
             assets: noxide_host::assets::AssetBundle::default(),
             blobs: None,
         },
@@ -107,6 +108,7 @@ async fn schema_drafts_require_backfills_and_apply_the_approved_target() {
         serde_json::from_slice(&keys).unwrap(),
         Limits::default(),
         noxide_host::DeploymentResources {
+            jobs: None,
             assets: noxide_host::assets::AssetBundle::default(),
             blobs: None,
         },

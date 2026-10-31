@@ -212,11 +212,12 @@ async fn flow(db: Database) {
         Application::new(
             &component(),
             &serde_json::to_vec(&m).unwrap(),
-            crate::blob_deployment::approval_digest(&m, Some(&ceilings)).unwrap(),
+            crate::deployment::approval_digest(&m, Some(&ceilings), None).unwrap(),
             db.clone(),
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                jobs: None,
                 assets: Default::default(),
                 blobs: Some(crate::BlobDeployment {
                     directory: temporary.path().join("objects"),
@@ -441,11 +442,12 @@ impl Case {
             Application::new(
                 &bytes,
                 &serde_json::to_vec(&manifest).unwrap(),
-                crate::blob_deployment::approval_digest(&manifest, Some(&ceilings)).unwrap(),
+                crate::deployment::approval_digest(&manifest, Some(&ceilings), None).unwrap(),
                 db.clone(),
                 HostKeys::generate().unwrap(),
                 Limits::default(),
                 crate::DeploymentResources {
+                    jobs: None,
                     assets: Default::default(),
                     blobs: Some(crate::BlobDeployment {
                         directory: temp.path().join("store"),
@@ -997,11 +999,12 @@ async fn restart_after_finalize(db: Option<Database>, finalized: bool) {
     let app = Application::new(
         &component(),
         &serde_json::to_vec(&m).unwrap(),
-        crate::blob_deployment::approval_digest(&m, Some(&ceilings)).unwrap(),
+        crate::deployment::approval_digest(&m, Some(&ceilings), None).unwrap(),
         db.clone(),
         keys,
         Limits::default(),
         crate::DeploymentResources {
+            jobs: None,
             assets: Default::default(),
             blobs: Some(crate::BlobDeployment {
                 directory: _temp.path().join("store"),
@@ -1142,7 +1145,7 @@ async fn anonymous_handover(absent: bool) {
     };
     m.blobs.as_mut().unwrap().anonymous = Some(deployment);
     m.blobs.as_mut().unwrap().uploads[0].anonymous = Some(capability);
-    assert!(crate::blob_deployment::approval(&m, Some(&BlobCeilings::default())).is_err());
+    assert!(crate::deployment::approval(&m, Some(&BlobCeilings::default()), None).is_err());
     let ceilings = BlobCeilings {
         limits: BlobLimits::default(),
         anonymous: Some(AnonymousCeilings {
@@ -1157,11 +1160,12 @@ async fn anonymous_handover(absent: bool) {
         Application::new(
             &component(),
             &serde_json::to_vec(&m).unwrap(),
-            crate::blob_deployment::approval_digest(&m, Some(&ceilings)).unwrap(),
+            crate::deployment::approval_digest(&m, Some(&ceilings), None).unwrap(),
             db.clone(),
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::DeploymentResources {
+                jobs: None,
                 assets: Default::default(),
                 blobs: Some(crate::BlobDeployment {
                     directory: temp.path().join("store"),

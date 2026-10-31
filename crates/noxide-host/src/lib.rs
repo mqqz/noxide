@@ -1,9 +1,12 @@
 //! Trusted execution, rendering, and persistence for Noxide applications.
 pub mod assets;
-pub mod blob_deployment;
 mod blob_inspect;
 mod blob_io;
-pub use blob_deployment::{BlobDeployment, DeploymentResources};
+pub mod deployment;
+pub mod job_deployment;
+pub use deployment::{BlobDeployment, DeploymentResources};
+pub use job_deployment::{JobDeployment, JobGrant, JobLimits};
+pub use jobs::{JobOperatorCommand, JobOperatorResult, JobSummary};
 mod blob_metadata;
 mod blob_multipart;
 mod blob_state;
@@ -25,7 +28,10 @@ mod security;
 pub use security::HostKeys;
 mod application;
 mod repository;
-pub use application::{Application, LoginChallenge, RequestError};
+pub use application::{
+    ActionRejection, Application, JobRunOutcome, LoginChallenge, RequestError,
+    ValidatedActionRejection,
+};
 pub mod http;
 
 #[cfg(test)]

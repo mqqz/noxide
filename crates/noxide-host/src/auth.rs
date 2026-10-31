@@ -75,6 +75,21 @@ impl Principal {
             },
         }
     }
+    pub(crate) fn tenant_scope(&self) -> Option<&str> {
+        match self {
+            Self::Anonymous => None,
+            Self::User(user) => Some(&user.tenant),
+            Self::Service(service) => Some(service.tenant()),
+        }
+    }
+    pub(crate) fn from_locked_job_grant(proof: &crate::jobs::VerifiedScheduleGrant) -> Self {
+        let grant = proof.grant();
+        Self::Service(ServiceIdentity {
+            deployment: grant.scope.deployment.clone(),
+            tenant: grant.scope.tenant.clone(),
+            worker: grant.worker.name.clone(),
+        })
+    }
     pub(crate) fn from_verified_job(job: &crate::jobs::VerifiedJob) -> Self {
         Self::Service(ServiceIdentity {
             deployment: job.deployment().to_owned(),

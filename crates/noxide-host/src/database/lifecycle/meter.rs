@@ -54,6 +54,12 @@ impl Meter {
             remaining: Mutex::new(statements),
         }))
     }
+    pub(super) fn remaining_work(&self) -> u16 {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .free
+    }
     #[cfg(test)]
     pub(super) fn cleanup_charged(&self) -> u16 {
         self.0
