@@ -29,7 +29,12 @@ pub(crate) struct PreparedEffect {
 }
 pub(crate) enum Preflight {
     Send(Box<PreparedEffect>),
-    Settled,
+    Settled(Finalized),
+}
+impl EffectClaim {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
 }
 pub(crate) enum DeliveryResult {
     Delivered,
@@ -389,19 +394,24 @@ impl OutboxContext<'_> {
         let runtime = self.runtime(&claim.scope).await?;
         // Preview does not lock; runtime lock prevents operator envelope changes.
         let Some(preview) = self.row(claim, false).await? else {
-            return Ok(Preflight::Settled);
+            return Ok(Preflight::Settled(Finalized::Superseded));
         };
         let allowed = self.authority(claim, &preview, &runtime).await?;
         let Some(row) = self.row(claim, true).await? else {
-            return Ok(Preflight::Settled);
+            return Ok(Preflight::Settled(Finalized::Superseded));
         };
         if row.state != "running" {
-            return Ok(Preflight::Settled);
+            return Ok(Preflight::Settled(match row.state.as_str() {
+                "delivered" => Finalized::Delivered,
+                "dead" => Finalized::Dead,
+                "paused" => Finalized::Paused,
+                _ => Finalized::Superseded,
+            }));
         }
         if !allowed {
             self.transition(claim, "paused", "authority_changed", now.max(row.eligible))
                 .await?;
-            return Ok(Preflight::Settled);
+            return Ok(Preflight::Settled(Finalized::Paused));
         }
         let window = row
             .first
@@ -411,7 +421,7 @@ impl OutboxContext<'_> {
         if now >= window || now >= row.lease || claim.exhausted {
             self.transition(claim, "dead", "retry_window", now.max(row.eligible))
                 .await?;
-            return Ok(Preflight::Settled);
+            return Ok(Preflight::Settled(Finalized::Dead));
         }
         Ok(Preflight::Send(Box::new(PreparedEffect {
             captured: row.capture,

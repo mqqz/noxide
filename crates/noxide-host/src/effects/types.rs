@@ -217,6 +217,15 @@ impl CapturedEffect {
     pub(crate) fn endpoint(&self) -> &str {
         &self.binding.endpoint.name
     }
+    pub(crate) fn binding(&self) -> &EffectiveEffectGrant {
+        &self.binding
+    }
+    pub(crate) fn body(&self) -> &[u8] {
+        self.body.as_bytes()
+    }
+    pub(crate) fn source_action(&self) -> (u32, u32) {
+        (self.source_action, self.source_action_version)
+    }
 }
 fn validate_body(declaration: &EmitEffect, bytes: &[u8]) -> Result<()> {
     ensure!(
