@@ -37,9 +37,11 @@ async fn stop(
                     ordinary.in_flight = true;
                     let unlocked = tokio::time::timeout_at(ordinary.lease.work, async {
                         let remaining = maintenance::remaining_ms(ordinary.lease.work.into_std())?;
+                        ordinary.lease.cleanup.charge(1)?;
                         sqlx::query(&format!("SET statement_timeout = '{remaining}ms'"))
                             .execute(&mut *connection)
                             .await?;
+                        ordinary.lease.cleanup.charge(1)?;
                         sqlx::query("SELECT pg_advisory_unlock_all()")
                             .execute(&mut *connection)
                             .await?;
@@ -51,6 +53,7 @@ async fn stop(
                 if active || ordinary.in_flight || ordinary.setup {
                     control.cancel(deadline.into_std()).await?;
                     // This is physical cleanup, NEVER evidence of COMMIT abort.
+                    ordinary.lease.cleanup.charge(1)?;
                     let _ = sqlx::query("ROLLBACK").execute(connection).await;
                 }
                 if let Backend::Postgres(connection) =
@@ -112,8 +115,10 @@ impl Transaction {
         let Some(ordinary) = &mut self.ordinary else {
             return Ok(());
         };
+        RequestScope::checkpoint_current()?;
         let remaining = maintenance::remaining_ms(ordinary.lease.work.into_std())?.min(1500);
         if let Backend::Postgres(connection) = &mut self.backend {
+            ordinary.lease.meter.charge(1)?;
             ordinary.in_flight = true;
             tokio::time::timeout_at(
                 ordinary.lease.work,
@@ -122,6 +127,12 @@ impl Transaction {
             )
             .await??;
             ordinary.in_flight = false;
+        }
+        Ok(())
+    }
+    pub(in crate::database) fn ordinary_charge(&self) -> Result<()> {
+        if let Some(ordinary) = &self.ordinary {
+            ordinary.lease.meter.charge(1)?;
         }
         Ok(())
     }

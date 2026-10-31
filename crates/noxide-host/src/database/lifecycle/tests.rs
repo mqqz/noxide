@@ -6,7 +6,7 @@ fn owner(
 ) -> (AdmissionOwner, Arc<Semaphore>, Arc<Semaphore>) {
     let request = Arc::new(Semaphore::new(1));
     let database = Arc::new(Semaphore::new(1));
-    let scope = RequestScope::new(registry, tokio::time::Instant::now() + cap, cap);
+    let scope = RequestScope::new(registry, tokio::time::Instant::now() + cap, cap, 256);
     (
         AdmissionOwner::new(
             scope,
@@ -120,10 +120,11 @@ async fn committed_lost_ack_keeps_unknown_frontier_after_confirmed_stop() {
 async fn original_scope_and_closed_registry_never_mint_new_admission() {
     let registry = Arc::new(Registry::default());
     let outer = tokio::time::Instant::now() + Duration::from_secs(1);
-    let scope = RequestScope::new(registry.clone(), outer, Duration::from_secs(2));
+    let scope = RequestScope::new(registry.clone(), outer, Duration::from_secs(2), 256);
     scope
         .run(async {
-            let nested = RequestScope::current_or_new(registry.clone(), Duration::from_secs(3));
+            let nested =
+                RequestScope::current_or_new(registry.clone(), Duration::from_secs(3), 256);
             assert_eq!(nested.deadline(), outer);
             assert_eq!(nested.phase(Duration::from_secs(60)).deadline(), outer);
             assert!(Arc::ptr_eq(&nested.root.provider, &scope.root.provider));

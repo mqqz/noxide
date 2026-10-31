@@ -90,6 +90,12 @@ pub(crate) async fn after_effect(tx: &mut Transaction) -> anyhow::Result<()> {
     }
     Ok(())
 }
+pub(crate) async fn known_conflict_once<T>(future: impl std::future::Future<Output = T>) -> T {
+    FAULT
+        .scope(plan(Point::Effect, Mode::Abort, 1), future)
+        .await
+}
+
 pub(crate) async fn lose_commit_ack<T>(future: impl std::future::Future<Output = T>) -> T {
     FAULT
         .scope(plan(Point::Commit, Mode::LoseAck, 1), future)

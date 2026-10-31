@@ -4,8 +4,19 @@ use std::{collections::BTreeMap, sync::Mutex};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 #[cfg(test)]
+mod action_meter_tests;
+#[cfg(test)]
+mod auth_meter_tests;
+#[cfg(test)]
 mod auth_tests;
+mod checkpoint;
+#[cfg(test)]
+mod checkpoint_tests;
 mod connect;
+pub(crate) use checkpoint::OperatorCheckpoint;
+pub(crate) mod meter;
+#[cfg(test)]
+mod meter_tests;
 mod provider;
 #[cfg(test)]
 mod receipt_tests;
@@ -117,6 +128,8 @@ struct Root {
     registry: Arc<Registry>,
     outer: tokio::time::Instant,
     provider: Arc<Semaphore>,
+    meter: Arc<meter::Meter>,
+    cancelled: AtomicBool,
 }
 /// One phase of a host-created request. Clones preserve the same root lifetime.
 #[derive(Clone)]
@@ -126,27 +139,57 @@ pub(crate) struct RequestScope {
 }
 tokio::task_local! { static REQUEST: RequestScope; }
 tokio::task_local! { static ADMISSION: AdmissionOwner; }
+#[cfg(test)]
+tokio::task_local! { static OBSERVED_ROOTS: Arc<Mutex<Vec<RequestScope>>>; }
+#[cfg(test)]
+async fn observe_roots<T>(future: impl std::future::Future<Output = T>) -> (T, Vec<RequestScope>) {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let result = OBSERVED_ROOTS.scope(observed.clone(), future).await;
+    let roots = std::mem::take(&mut *observed.lock().unwrap());
+    (result, roots)
+}
 
 impl RequestScope {
-    pub(crate) fn new(registry: Arc<Registry>, outer: tokio::time::Instant, cap: Duration) -> Self {
+    pub(crate) fn new(
+        registry: Arc<Registry>,
+        outer: tokio::time::Instant,
+        cap: Duration,
+        statement_limit: u16,
+    ) -> Self {
         let scope = Self {
             root: Arc::new(Root {
                 registry,
                 outer,
                 provider: Arc::new(Semaphore::new(1)),
+                meter: meter::Meter::new(statement_limit),
+                cancelled: AtomicBool::new(false),
             }),
             deadline: outer,
         };
-        scope.phase(cap)
+        let scope = scope.phase(cap);
+        #[cfg(test)]
+        let _ = OBSERVED_ROOTS.try_with(|observed| observed.lock().unwrap().push(scope.clone()));
+        scope
     }
-    pub(crate) fn current_or_new(registry: Arc<Registry>, cap: Duration) -> Self {
+    pub(crate) fn current_or_new(
+        registry: Arc<Registry>,
+        cap: Duration,
+        statement_limit: u16,
+    ) -> Self {
         REQUEST
             .try_with(|scope| {
                 Arc::ptr_eq(&scope.root.registry, &registry).then(|| scope.narrow(cap))
             })
             .ok()
             .flatten()
-            .unwrap_or_else(|| Self::new(registry, tokio::time::Instant::now() + cap, cap))
+            .unwrap_or_else(|| {
+                Self::new(
+                    registry,
+                    tokio::time::Instant::now() + cap,
+                    cap,
+                    statement_limit,
+                )
+            })
     }
     /// Explicit host phase transition, for approved multipart stages only.
     /// The immutable outer deadline remains the maximum across all phases.
@@ -170,6 +213,27 @@ impl RequestScope {
             .checked_sub(CLEANUP_RESERVE)
             .unwrap_or(self.deadline)
     }
+    fn checkpoint(&self) -> Result<()> {
+        ensure!(
+            !self.root.cancelled.load(Ordering::Acquire),
+            Unavailable::Closed
+        );
+        ensure!(
+            tokio::time::Instant::now() < self.work_deadline(),
+            Unavailable::Deadline
+        );
+        Ok(())
+    }
+    /// CPU work must already belong to an admitted host scope. No fallback scope,
+    /// new timer or authority is constructed by this checkpoint.
+    pub(crate) fn checkpoint_current() -> Result<()> {
+        REQUEST
+            .try_with(Self::checkpoint)
+            .map_err(|_| Unavailable::Closed)?
+    }
+    pub(crate) fn active() -> bool {
+        REQUEST.try_with(|_| ()).is_ok()
+    }
     pub(crate) fn commit_pending() -> bool {
         ADMISSION
             .try_with(|owner| owner.0.commit_pending.load(Ordering::Acquire))
@@ -183,7 +247,27 @@ impl RequestScope {
         future: F,
     ) -> std::pin::Pin<Box<impl std::future::Future<Output = T> + use<T, F>>> {
         let scope = self.clone();
-        Box::pin(async move { REQUEST.scope(scope, future).await })
+        Box::pin(async move {
+            let mut cancellation = ScopeCancellation {
+                root: scope.root.clone(),
+                completed: false,
+            };
+            let result = REQUEST.scope(scope, future).await;
+            cancellation.completed = true;
+            result
+        })
+    }
+}
+
+struct ScopeCancellation {
+    root: Arc<Root>,
+    completed: bool,
+}
+impl Drop for ScopeCancellation {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.root.cancelled.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -256,15 +340,22 @@ impl AdmissionOwner {
         requested: Instant,
         read_only: bool,
     ) -> Result<Transaction> {
+        self.0.scope.checkpoint()?;
         let total = self.deadline();
         let work = self.work_deadline().min(requested.into());
         ensure!(tokio::time::Instant::now() < work, Unavailable::Deadline);
         let gate =
             tokio::time::timeout_at(work, self.0.scope.root.provider.clone().acquire_owned())
                 .await??;
+        let cleanup = self.0.scope.root.meter.reserve(match database.options {
+            DatabaseOptions::Postgres(_) => meter::POSTGRES_CLEANUP,
+            DatabaseOptions::Sqlite { .. } => 0,
+        })?;
         let registration = self.0.scope.root.registry.register(total)?;
         let lease = ProviderLease {
             owner: self.clone(),
+            meter: self.0.scope.root.meter.clone(),
+            cleanup,
             gate: Some(gate),
             registration: Some(registration),
             total,
@@ -303,6 +394,8 @@ pub(super) async fn begin(
 
 pub(super) struct ProviderLease {
     owner: AdmissionOwner,
+    meter: Arc<meter::Meter>,
+    cleanup: Arc<meter::Cleanup>,
     gate: Option<OwnedSemaphorePermit>,
     registration: Option<Registration>,
     total: tokio::time::Instant,
@@ -321,6 +414,7 @@ impl ProviderLease {
             .store(pending, Ordering::Release);
     }
     fn confirmed(&mut self) {
+        self.cleanup.confirmed();
         self.stopped = true;
         if let Some(registration) = &mut self.registration {
             registration.stopped = true;

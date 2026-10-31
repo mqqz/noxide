@@ -24,6 +24,7 @@ async fn open_inner(
         commit_state: CommitState::NotAttempted,
         read_only,
         cancelled,
+        operator_ended: Arc::new(AtomicBool::new(true)),
         deadline: deadline.into(),
         maintenance: None,
         ordinary: Some(Ordinary {
@@ -59,6 +60,12 @@ async fn open_inner(
                 .optimize_on_close(false, None);
             // Bootstrap establishes WAL. An ordinary request never changes the
             // persisted journal mode to make uninitialized storage appear valid.
+            tx.ordinary
+                .as_ref()
+                .unwrap()
+                .lease
+                .meter
+                .charge(meter::ORDINARY_SQLITE_STARTUP)?;
             tx.ordinary.as_mut().unwrap().lease.started = true;
             let connection = sqlx::SqliteConnection::connect_with(&options).await?;
             tx.backend = Backend::Sqlite(connection);
@@ -72,9 +79,11 @@ async fn open_inner(
                 .set_progress_handler(1000, move || {
                     !cancel.load(Ordering::Relaxed) && Instant::now() < deadline
                 });
+            tx.ordinary.as_ref().unwrap().lease.meter.charge(1)?;
             let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
                 .fetch_one(&mut *connection)
                 .await?;
+            tx.ordinary.as_ref().unwrap().lease.meter.charge(1)?;
             let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
                 .fetch_one(&mut *connection)
                 .await?;
@@ -85,14 +94,17 @@ async fn open_inner(
             let timeout = busy
                 .as_millis()
                 .min(maintenance::remaining_ms(deadline)? as u128);
+            tx.ordinary.as_ref().unwrap().lease.meter.charge(1)?;
             sqlx::query(&format!("PRAGMA busy_timeout={timeout}"))
                 .execute(&mut *connection)
                 .await?;
             if read_only {
+                tx.ordinary.as_ref().unwrap().lease.meter.charge(1)?;
                 sqlx::query("PRAGMA query_only = ON")
                     .execute(&mut *connection)
                     .await?;
             }
+            tx.ordinary.as_ref().unwrap().lease.meter.charge(1)?;
             sqlx::query(if read_only {
                 "BEGIN DEFERRED"
             } else {
@@ -117,23 +129,35 @@ async fn open_inner(
             let Backend::Postgres(connection) = &mut tx.backend else {
                 unreachable!()
             };
-            let control =
-                maintenance::Control::connect(&options, connection, &scope, deadline).await?;
+            let lease = &tx.ordinary.as_ref().unwrap().lease;
+            let control = maintenance::Control::connect_metered(
+                &options,
+                connection,
+                &scope,
+                deadline,
+                lease.meter.clone(),
+                lease.cleanup.clone(),
+            )
+            .await?;
             tx.ordinary.as_mut().unwrap().control = Some(control);
             for setting in ["SHOW fsync", "SHOW full_page_writes"] {
+                tx.ordinary.as_ref().unwrap().lease.meter.charge(1)?;
                 let value: String = sqlx::query_scalar(setting)
                     .fetch_one(&mut *connection)
                     .await?;
                 ensure!(value == "on", "unsafe PostgreSQL durability");
             }
+            tx.ordinary.as_ref().unwrap().lease.meter.charge(1)?;
             sqlx::query("SET synchronous_commit = on")
                 .execute(&mut *connection)
                 .await?;
+            tx.ordinary.as_ref().unwrap().lease.meter.charge(1)?;
             let acquired: bool =
                 sqlx::query_scalar("SELECT pg_try_advisory_lock_shared(5642817467268123)")
                     .fetch_one(&mut *connection)
                     .await?;
             ensure!(acquired, "application database is busy with maintenance");
+            tx.ordinary.as_ref().unwrap().lease.meter.charge(1)?;
             sqlx::query(if read_only {
                 "BEGIN ISOLATION LEVEL SERIALIZABLE, READ ONLY"
             } else {

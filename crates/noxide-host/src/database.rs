@@ -58,6 +58,7 @@ pub(crate) struct Transaction {
     commit_state: CommitState,
     read_only: bool,
     cancelled: Arc<AtomicBool>,
+    operator_ended: Arc<AtomicBool>,
     deadline: tokio::time::Instant,
     maintenance: Option<maintenance::Control>,
     ordinary: Option<lifecycle::Ordinary>,
@@ -182,6 +183,10 @@ impl Database {
         read_only: bool,
         maintenance: Option<Instant>,
     ) -> Result<Transaction> {
+        ensure!(
+            !lifecycle::RequestScope::active(),
+            lifecycle::Unavailable::Closed
+        );
         let cancelled = Arc::new(AtomicBool::new(false));
         let mut control = None;
         let backend = match &self.options {
@@ -330,7 +335,7 @@ impl Database {
                 Backend::Postgres(cx)
             }
         };
-        Ok(Transaction {
+        let tx = Transaction {
             #[cfg(test)]
             creation_acquired: None,
             backend,
@@ -338,13 +343,25 @@ impl Database {
             commit_state: CommitState::NotAttempted,
             read_only,
             cancelled,
+            // A clock connection never acquires operator CPU authority, even
+            // on SQLite where no PostgreSQL Control object is needed.
+            operator_ended: Arc::new(AtomicBool::new(maintenance.is_some())),
             deadline: deadline.into(),
             maintenance: control,
             ordinary: None,
-        })
+        };
+        if maintenance.is_none() {
+            let checkpoint: lifecycle::OperatorCheckpoint = tx.operator_checkpoint()?;
+            checkpoint.checkpoint()?;
+        }
+        Ok(tx)
     }
 
     pub async fn initialize(&self) -> Result<()> {
+        ensure!(
+            !lifecycle::RequestScope::active(),
+            lifecycle::Unavailable::Closed
+        );
         let mut tx = self.begin(Instant::now() + Duration::from_secs(10)).await?;
         if tx.storage_tables().await?.is_empty() {
             for sql in SCHEMA {
@@ -721,9 +738,17 @@ impl Transaction {
         ensure!(!self.read_only, "read-only transaction");
         self.execute_internal(sql, params).await
     }
-    async fn execute_internal(&mut self, sql: &str, params: &[Param]) -> Result<u64> {
+    async fn prepare_statement(&mut self) -> Result<()> {
         self.maintenance_timeout().await?;
         self.ordinary_timeout().await?;
+        self.ordinary_charge()?;
+        Ok(())
+    }
+    async fn execute_internal(&mut self, sql: &str, params: &[Param]) -> Result<u64> {
+        self.prepare_statement().await?;
+        self.execute_prepared(sql, params).await
+    }
+    async fn execute_prepared(&mut self, sql: &str, params: &[Param]) -> Result<u64> {
         self.ordinary_in_flight(true);
         let result = tokio::time::timeout_at(self.deadline, async {
             Ok(match &mut self.backend {
@@ -749,6 +774,7 @@ impl Transaction {
     ) -> Result<Vec<[String; N]>> {
         self.maintenance_timeout().await?;
         self.ordinary_timeout().await?;
+        self.ordinary_charge()?;
         self.ordinary_in_flight(true);
         macro_rules! rows {
             ($cx:expr) => {{
@@ -789,6 +815,7 @@ impl Transaction {
     async fn release_gate(&mut self) -> Result<()> {
         self.maintenance_timeout().await?;
         self.ordinary_timeout().await?;
+        self.ordinary_charge()?;
         self.ordinary_in_flight(true);
         let result = if let Backend::Postgres(connection) = &mut self.backend {
             tokio::time::timeout_at(
@@ -808,15 +835,19 @@ impl Transaction {
     }
 
     pub(crate) async fn commit(&mut self) -> Result<()> {
+        self.operator_ended.store(true, Ordering::Release);
         ensure!(
             !self.commit_may_have_succeeded(),
             "COMMIT already attempted"
         );
+        // Setup/quota refusal is known pre-send. Reserve the actual COMMIT unit
+        // synchronously before entering the uncertain transmission frontier.
+        self.prepare_statement().await?;
         // Set before polling the provider future: cancellation must conservatively
         // retain this state even if it interrupts transmission or acknowledgement.
         self.commit_state = CommitState::Sent;
         self.ordinary_commit_pending(true);
-        if let Err(error) = self.execute_internal("COMMIT", &[]).await {
+        if let Err(error) = self.execute_prepared("COMMIT", &[]).await {
             if commit::refused(&self.backend, &error) {
                 self.commit_state = CommitState::Refused;
                 self.ordinary_commit_pending(false);
@@ -856,6 +887,7 @@ impl Transaction {
         self.commit_state.may_have_committed()
     }
     pub(crate) async fn rollback(&mut self) -> Result<()> {
+        self.operator_ended.store(true, Ordering::Release);
         let cleanup = if self.ordinary.is_some() {
             lifecycle::finish_transaction(self).await
         } else {
@@ -894,6 +926,7 @@ impl Transaction {
 
 impl Drop for Transaction {
     fn drop(&mut self) {
+        self.operator_ended.store(true, Ordering::Release);
         lifecycle::drop_transaction(self);
         // Connections are never returned to a pool with unresolved state.
         // SQLite's worker closes its connection; PostgreSQL disconnect rolls back.

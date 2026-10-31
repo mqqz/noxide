@@ -173,6 +173,12 @@ pub enum RequestError {
     OutcomeUnknown,
 }
 impl RequestError {
+    fn authentication(error: auth::AuthError) -> Self {
+        match error {
+            auth::AuthError::Invalid => Self::Authentication,
+            auth::AuthError::Unavailable => Self::Busy,
+        }
+    }
     fn deadline() -> Self {
         if RequestScope::commit_pending() {
             Self::OutcomeUnknown
@@ -184,7 +190,9 @@ impl RequestError {
         if error.is::<crate::database::CommitFailure>() {
             return Self::OutcomeUnknown;
         }
-        if error.is::<crate::database::lifecycle::Unavailable>() {
+        if error.is::<crate::database::lifecycle::Unavailable>()
+            || error.is::<crate::database::lifecycle::meter::StatementLimit>()
+        {
             return Self::Busy;
         }
         if retryable(&error) {
@@ -233,6 +241,7 @@ pub struct Application {
     maintenance_running: std::sync::atomic::AtomicBool,
     pub(crate) admission_limits: AdmissionLimits,
     pub(crate) request_lifecycle: Arc<Registry>,
+    database_statement_limit: u16,
     #[cfg(test)]
     pub(crate) postcommit_barrier:
         std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
@@ -258,7 +267,11 @@ impl Application {
         self.request_lifecycle.clone()
     }
     fn request_scope(&self, cap: std::time::Duration) -> RequestScope {
-        RequestScope::current_or_new(self.request_lifecycle.clone(), cap)
+        RequestScope::current_or_new(
+            self.request_lifecycle.clone(),
+            cap,
+            self.database_statement_limit,
+        )
     }
     fn owned_request(
         &self,
@@ -287,7 +300,12 @@ impl Application {
             self.runtime.limits().wall_time
         };
         let outer = outer.map_or_else(|| Instant::now() + cap, |outer| outer.0);
-        RequestScope::new(self.request_lifecycle.clone(), outer, cap)
+        RequestScope::new(
+            self.request_lifecycle.clone(),
+            outer,
+            cap,
+            self.database_statement_limit,
+        )
     }
     async fn finish_commit<T>(
         tx: &mut Transaction,
@@ -301,6 +319,17 @@ impl Application {
             return Err(RequestError::OutcomeUnknown);
         }
         result.map(|_| prepared).map_err(RequestError::database)
+    }
+    /// Lower the total actual provider-statement ceiling for an ordinary request.
+    /// This supplements all existing action/list/query budgets.
+    pub fn with_database_statement_limit(mut self, limit: u16) -> Result<Self> {
+        self.request_lifecycle.ensure_idle()?;
+        ensure!(
+            (1..=256).contains(&limit),
+            "database statement limit must be between 1 and 256"
+        );
+        self.database_statement_limit = limit;
+        Ok(self)
     }
     pub fn with_registration(mut self, registration: auth::Registration) -> Self {
         self.registration = registration;
@@ -394,7 +423,13 @@ impl Application {
                                 permits,
                             )
                             .await
-                            .map_err(|_| RequestError::Rejected)?;
+                            .map_err(|error| {
+                                if error.is::<crate::database::lifecycle::meter::StatementLimit>() {
+                                    RequestError::Busy
+                                } else {
+                                    RequestError::Rejected
+                                }
+                            })?;
                             Self::finish_commit(&mut tx, ()).await
                         })
                         .await
@@ -647,6 +682,7 @@ impl Application {
             maintenance_running: std::sync::atomic::AtomicBool::new(false),
             admission_limits,
             request_lifecycle: Arc::new(Registry::default()),
+            database_statement_limit: 256,
             #[cfg(test)]
             postcommit_barrier: std::sync::Mutex::new(None),
         })
@@ -789,10 +825,17 @@ impl Application {
                                 #[cfg(test)]
                                 gate: self.admission_limits.hash_gate.lock().unwrap().clone(),
                             };
-                            let signed =
-                                auth::login(&mut tx, &self.keys, username, password, now, permits)
-                                    .await
-                                    .map_err(|_| RequestError::Authentication)?;
+                            let signed = auth::login(
+                                &mut tx, &self.keys, username, password, now, permits,
+                            )
+                            .await
+                            .map_err(|error| {
+                                if error.is::<crate::database::lifecycle::meter::StatementLimit>() {
+                                    RequestError::Busy
+                                } else {
+                                    RequestError::Authentication
+                                }
+                            })?;
                             Self::finish_commit(&mut tx, signed).await
                         })
                         .await
@@ -843,7 +886,7 @@ impl Application {
                             .map_err(RequestError::database)?;
                         let (session, _) = auth::authenticate(&mut tx, &self.keys, cookie, now)
                             .await
-                            .map_err(|_| RequestError::Authentication)?;
+                            .map_err(RequestError::authentication)?;
 
                         self.keys
                             .verify_csrf(&session.nonce, csrf)
@@ -917,7 +960,7 @@ impl Application {
             );
             let (session, principal) = auth::authenticate(tx, &self.keys, cookie, now)
                 .await
-                .map_err(|_| RequestError::Authentication)?;
+                .map_err(RequestError::authentication)?;
             ensure!(token.subject == session.nonce, RequestError::InvalidRequest);
             self.keys
                 .verify_csrf(&session.nonce, csrf)
@@ -1928,7 +1971,7 @@ impl Application {
                     now,
                 )
                 .await
-                .map_err(|_| RequestError::Authentication)?,
+                .map_err(RequestError::authentication)?,
             ),
             Access::PublicOptional => match cookie {
                 None => None,

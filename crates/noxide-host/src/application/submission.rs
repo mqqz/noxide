@@ -95,6 +95,12 @@ impl Application {
                                     // fresh navigation cannot undo it.
                                     return Ok(response.fallback);
                                 }
+                                Ok(Err(error)) if !tx.commit_may_have_succeeded() && error.is::<crate::database::lifecycle::meter::StatementLimit>() => {
+                                    // The actual COMMIT unit was refused before issue.
+                                    // Cleanup remains owned; this is not a sent commit.
+                                    if tx.rollback().await.is_err() {return Err(RequestError::OutcomeUnknown);}
+                                    return Err(RequestError::Busy);
+                                }
                                 Ok(Err(error))
                                     if !tx.commit_may_have_succeeded() && retryable(&error) =>
                                 {

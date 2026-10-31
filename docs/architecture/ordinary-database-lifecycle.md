@@ -67,7 +67,53 @@ ROLLBACK response as proof of COMMIT abort.
 Trusted operator initialization, schema operations and standalone Database account
 administration are outside Application request admission and this registry. Their
 typed commit frontier remains authoritative; this checkpoint does not certify
-request-permit ownership for operator commands. Ordinary SQL accounting is a
-separate pending change: this lifecycle checkpoint does not claim that the existing
-logical action-call allowance counts all physical provider statements. Jobs,
-outbox execution and Blob runtime admission remain unavailable.
+request-permit ownership for operator commands. Jobs, outbox execution and Blob
+runtime admission remain unavailable.
+
+## Actual statement accounting
+
+One root owns the ordinary request's supplemental maximum of256 charged provider
+statements. Application::with_database_statement_limit(u16) may lower it to1..=256
+before active/quarantined work; every created request keeps its own immutable
+allowance. Existing logical16 action calls,4096 list calls, rows, bytes, candidates,
+queues and phase deadlines remain enforced. Classification, endpoint work, retries,
+postcommit navigation, setup and cleanup share this root without a new allowance.
+
+Every issued host statement is charged before issue, including PostgreSQL timeout
+SETs, connection identity, durability/advisory setup, COMMIT, ROLLBACK, unlock and
+bounded stop polling. SQLx0.8.6 is pinned: ordinary SQLite's fixed startup batch is
+precharged3 units before connect; bootstrap's4 statements belong to the separate
+operator path. PostgreSQL startup GUCs use startup protocol parameters, not SQL.
+The isolated observer records only synthetic statement metadata and fingerprints,
+never parameters, application JSON, credentials, URLs or a production subscriber.
+Precharging is conservative when transmission/startup fails; actual issued work
+cannot exceed charged units. This is an upper bound, not a promise that every
+charged unit reached the provider after cancellation.
+
+Each admitted PostgreSQL work connection reserves40 units from the SAME total.
+Identity capture uses1 protected unit so exhausted application work cannot prevent
+cancellation setup. Worst-case identity/unlock/cancel/rollback and16 stop polls use
+at most38. Ordinary application work cannot spend protected units. Confirmed stop
+releases only unused reserve; consumed work is never refunded. Unconfirmed cleanup
+retains both its allowance and physical capacity. SQLite closes without SQL because
+optimization on close is disabled. A refused COMMIT unit remains NotAttempted;
+a sent unacknowledged COMMIT stays Unknown. Original receipt/acknowledged-success
+evidence takes precedence over later quota or delivery failure. Database-unavailable
+authentication is Busy; invalid credentials retain Authentication denial.
+
+Bootstrap/exclusive operator connections are denied inside an ordinary request,
+including an admitted owner calling initialize. CPU loops use required
+RequestScope::checkpoint_current: missing, cancelled or expired scope fails closed,
+with no fallback owner/timer. Normal nested success or error completion does not
+cancel the root; dropping an owning future does. Offline rebuild obtains an explicit
+OperatorCheckpoint only from a bounded active nonordinary/nonmaintenance transaction.
+The token carries that transaction's original deadline/cancellation lifetime, rejects
+request-context reuse and ends on commit/rollback attempt or drop. It cannot turn
+clock maintenance into operator authority. Future guarded tokenizer integration is
+separate and remains unavailable until its own schema/runtime acceptance.
+
+Author provider evidence measures the default8 work+8 control plateau in one
+Application using real host authentication/classification, with a ninth queued
+request opening no provider. This local result does not certify arbitrary provider,
+crash, multiple-process or future job cancellation behavior. Independent actual-meter
+and combined integration review remain required.

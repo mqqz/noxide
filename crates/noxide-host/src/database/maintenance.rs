@@ -38,6 +38,7 @@ pub(super) struct Control {
     pid: i32,
     scope: String,
     started: String,
+    meter: Option<Arc<lifecycle::meter::Cleanup>>,
 }
 impl Control {
     pub(super) async fn connect(
@@ -45,6 +46,32 @@ impl Control {
         work: &mut sqlx::PgConnection,
         scope: &str,
         deadline: Instant,
+    ) -> Result<Self> {
+        Self::connect_inner(options, work, scope, deadline, None).await
+    }
+    pub(super) async fn connect_metered(
+        options: &PgConnectOptions,
+        work: &mut sqlx::PgConnection,
+        scope: &str,
+        deadline: Instant,
+        meter: Arc<lifecycle::meter::Meter>,
+        cleanup: Arc<lifecycle::meter::Cleanup>,
+    ) -> Result<Self> {
+        ensure!(
+            cleanup.belongs_to(&meter),
+            "control meter must belong to request root"
+        );
+        // Capturing identity is required to stop the just-created work socket.
+        // It uses the SAME protected total, even when work units are exhausted.
+        cleanup.charge(1)?;
+        Self::connect_inner(options, work, scope, deadline, Some(cleanup)).await
+    }
+    async fn connect_inner(
+        options: &PgConnectOptions,
+        work: &mut sqlx::PgConnection,
+        scope: &str,
+        deadline: Instant,
+        meter: Option<Arc<lifecycle::meter::Cleanup>>,
     ) -> Result<Self> {
         let row = sqlx::query("SELECT pg_catalog.pg_backend_pid(),CAST(backend_start AS TEXT) FROM pg_catalog.pg_stat_activity WHERE pid=pg_catalog.pg_backend_pid() AND application_name=$1")
             .bind(scope).fetch_one(work).await?;
@@ -64,13 +91,21 @@ impl Control {
             pid,
             scope: scope.into(),
             started,
+            meter,
         })
     }
     pub(super) async fn close(self) -> Result<()> {
         self.connection.close().await.map_err(Into::into)
     }
+    fn charge(&self) -> Result<()> {
+        if let Some(meter) = &self.meter {
+            meter.charge(1)?;
+        }
+        Ok(())
+    }
     async fn configure(&mut self, deadline: Instant) -> Result<()> {
         let timeout = remaining_ms(deadline)?;
+        self.charge()?;
         sqlx::query(&format!("SET statement_timeout = '{timeout}ms'"))
             .execute(&mut self.connection)
             .await?;
@@ -80,6 +115,7 @@ impl Control {
         self.configure(deadline).await?;
         // Only a host-created work connection is eligible. Its socket remains
         // owned until this check/cancel completes. Guest input supplies no ID.
+        self.charge()?;
         sqlx::query("SELECT pg_catalog.pg_cancel_backend(pid) FROM pg_catalog.pg_stat_activity WHERE pid=$1 AND application_name=$2 AND CAST(backend_start AS TEXT)=$3 AND datname=pg_catalog.current_database() AND usename=current_user")
             .bind(self.pid).bind(&self.scope).bind(&self.started)
             .fetch_all(&mut self.connection).await?;
@@ -88,6 +124,7 @@ impl Control {
     pub(super) async fn stopped(&mut self, deadline: Instant) -> Result<()> {
         for _ in 0..16 {
             self.configure(deadline).await?;
+            self.charge()?;
             let present: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid=$1 AND application_name=$2 AND CAST(backend_start AS TEXT)=$3 AND datname=pg_catalog.current_database() AND usename=current_user)")
                 .bind(self.pid).bind(&self.scope).bind(&self.started).fetch_one(&mut self.connection).await?;
             if !present {

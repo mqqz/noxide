@@ -218,6 +218,10 @@ impl Application {
                             match timeout_at(deadline, tx.commit()).await {
                                 Ok(Ok(())) => return Ok(page),
                                 _ if tx.commit_acknowledged() || receipt_commit => return Ok(page),
+                                Ok(Err(error)) if !tx.commit_may_have_succeeded() && error.is::<crate::database::lifecycle::meter::StatementLimit>() => {
+                                    if tx.rollback().await.is_err() {return Err(RequestError::OutcomeUnknown);}
+                                    return Err(RequestError::Busy);
+                                }
                                 Ok(Err(error))
                                     if !tx.commit_may_have_succeeded() && retryable(&error) =>
                                 {
