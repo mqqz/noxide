@@ -67,3 +67,12 @@ transaction work guards, application/cursor transport and actual statement meter
 Cursor authentication must bind canonical normalized search tokens, range/order/
 mode and every existing principal/scope/contract/incarnation parameter. No SQL,
 HTTP, native-store or provider proof is claimed by this checkpoint.
+
+The subsequent unregistered postings leaf serializes compact `[field,"token"]`
+pairs, with common metadata bound separately. Its worst-case JSON payload is
+47,105 bytes: seven framing/separator bytes per2,048 pairs,32,768 token bytes,
+and one final byte. It requires a supplied work checkpoint before work, every64
+pairs and after serialization. This payload bound does not establish physical
+storage/write bytes, provider plan visits or runtime budget fit. The independent
+leaf harness preserves root-locked registry identities and exercises all2,048
+pairs without truncation, cancellation failure and handwritten Unicode payloads.
