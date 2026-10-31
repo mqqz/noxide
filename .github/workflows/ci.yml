@@ -445,6 +445,22 @@ jobs:
             --output "$RUNNER_TEMP/noxide-ci/reservations-postgres" \
             --host-cli target/debug/noxide \
             --postgres "${NOXIDE_TEST_POSTGRES%/*}/noxide_reservations"
+      - name: Build and test record membership
+        if: matrix.suite == 'examples'
+        run: |
+          target/debug/noxide build --framework "$PWD" \
+            --app examples/team-documents --name team_documents \
+            --output "$RUNNER_TEMP/noxide-ci/team-documents"
+          python3 tools/test_team_documents.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/team-documents" \
+            --output "$RUNNER_TEMP/noxide-ci/team-documents-sqlite" \
+            --host-cli target/debug/noxide
+          psql "$NOXIDE_TEST_POSTGRES" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE noxide_team_documents'
+          python3 tools/test_team_documents.py \
+            --bundle "$RUNNER_TEMP/noxide-ci/team-documents" \
+            --output "$RUNNER_TEMP/noxide-ci/team-documents-postgres" \
+            --host-cli target/debug/noxide \
+            --postgres "${NOXIDE_TEST_POSTGRES%/*}/noxide_team_documents"
       - name: Test NoJS browser flow with SQLite
         if: matrix.suite == 'sdk'
         run: |
