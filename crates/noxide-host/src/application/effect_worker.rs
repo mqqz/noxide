@@ -649,3 +649,5 @@ impl Drop for EffectService {
         }
     }
 }
+#[cfg(test)]
+mod tests;

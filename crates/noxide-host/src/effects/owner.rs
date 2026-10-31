@@ -358,3 +358,5 @@ fn check(deadline: Instant) -> Result<()> {
     ensure!(Instant::now() < deadline, "effect host I/O deadline");
     Ok(())
 }
+#[cfg(test)]
+mod tests;
