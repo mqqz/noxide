@@ -19,6 +19,7 @@ rustls.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true
 httparse.workspace = true
+rustix.workspace = true
 tokio.workspace = true
 wasmtime = { version = "=48.0.2", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "async"] }
 wasmparser = "0.245"

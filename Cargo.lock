@@ -1381,6 +1381,7 @@ dependencies = [
  "libsqlite3-sys",
  "noxide-protocol",
  "rand",
+ "rustix",
  "rustls",
  "serde",
  "serde_json",
