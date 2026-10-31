@@ -361,7 +361,10 @@ def main():
                 # transaction; all of them and the receipt roll back together.
                 _, _, home = read(creator, "/", "quota-create-form")
                 before = snapshot()
-                upload(creator, upload_form(home), "Second paste", "Second body", "second.bin", b"second bytes", "outbox-quota-rollback", (409, 422, 503))
+                _, rejected, _ = upload(creator, upload_form(home), "Second paste", "Second body", "second.bin", b"second bytes", "outbox-quota-rollback", 422)
+                # The generic retry page with the staged file reused shows the action
+                # ran and rolled back, unlike a field or admission rejection.
+                assert b"No change is confirmed" in rejected and b"File already uploaded" in rejected
                 after = snapshot()
                 assert {key: after[key] for key in ("records", "receipts", "jobs", "effects")} == {key: before[key] for key in ("records", "receipts", "jobs", "effects")}, "quota failure committed part of the action"
                 assert sorted(row[0] for row in rows("SELECT state FROM nx_blobs")) == ["attached", "staged"], "the rejected upload was attached or discarded"
@@ -419,63 +422,65 @@ def main():
                     time.sleep(.05)  # committed deletion/quota predicates, no assumed ordering
                 assert rows("SELECT used_bytes,reserved_bytes,objects FROM nx_blob_store") == [["0", "0", "0"]]
             report["expiry"] = "visibility_sealed_worker_once_repair_and_blob_gc_passed"
-        # Backup: with serving stopped and the store lease released, copy metadata,
-        # immutable objects and pairing markers as one unit, then restore it as a
-        # fork with fresh host keys. Old effects and jobs must stay paused.
-        restored = output / "restored"
-        restored.mkdir(mode=0o700)
-        restored_config = json.loads(config_path.read_text())
-        if args.postgres:
-            source = urllib.parse.urlsplit(args.postgres)
-            name = source.path.lstrip("/") + "_restored"
-            postgres(f'CREATE DATABASE "{name}" TEMPLATE "{source.path.lstrip("/")}"', source._replace(path="/postgres").geturl())
-            restored_url = source._replace(path="/" + name).geturl()
-            restored_config["database"] = {"postgres": restored_url}
-        else:
-            # The host requires a private database file; create it 0600 first.
-            os.close(os.open(restored / "paste.db", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
-            with sqlite3.connect(output / "paste.db") as original, sqlite3.connect(restored / "paste.db") as copy:
-                original.backup(copy)
-        shutil.copy2(output / "synthetic-token", restored / "synthetic-token")
-        command("keygen", restored / "keys.json")
-        shutil.copytree(output / "objects", restored / "objects", copy_function=shutil.copy2)
-        (restored / "runtime.json").write_text(json.dumps(restored_config, indent=2) + "\n")
-        # A copied effect queue is refused until the explicit restore fork adopts it.
-        command("effects", "inspect", restored / "runtime.json", success=False)
-        assert b"another owner directory" in sorted(output.glob("cli-*-effects.log"))[-1].read_bytes()
-        assert json.loads(command("deployment-hash", restored / "runtime.json"))["deployment_digest"] == restored_config["approved_contract"]
-        active.update(config=restored / "runtime.json", sqlite=restored / "paste.db", postgres=restored_url if args.postgres else None)
-        before_jobs, before_effects = rows("SELECT id,state FROM nx_jobs"), rows("SELECT id,state FROM nx_outbox")
-        command("jobs", "fork", active["config"])
-        # Metadata without its paired immutable object store is refused.
-        (restored / "objects-missing").mkdir(mode=0o700)
-        unpaired = {**restored_config, "blobs": {**restored_config["blobs"], "directory": "objects-missing"}}
-        (restored / "unpaired.json").write_text(json.dumps(unpaired, indent=2) + "\n")
-        command("effects", "inspect", restored / "unpaired.json", success=False)
-        refusal = sorted(output.glob("cli-*-effects.log"))[-1].read_bytes()
-        assert b"owner directory" not in refusal, refusal
-        (output / "unpaired-refusal.log").write_bytes(refusal)
-        assert rows("SELECT state FROM nx_jobs") == [["paused"]] and rows("SELECT state FROM nx_outbox") == [["paused"]]
-        assert [row[0] for row in rows("SELECT id,state FROM nx_jobs")] == [row[0] for row in before_jobs]
-        assert [row[0] for row in rows("SELECT id,state FROM nx_outbox")] == [row[0] for row in before_effects]
-        proxy_before = len(proxy.commands)
-        with server("restored"):
-            reader = Browser(origin)
-            _, page, public = read(reader, route, "restored-paste")
-            assert b"Public &lt;paste&gt;" in page
-            restored_download = next(link for link in public.links if link.startswith("/_noxide/download?ticket="))
-            status, _, body = reader.request(restored_download)
-            assert status == 200 and body == payload, "restored object did not match its metadata"
-            assert reader.request(download)[0] == 404, "a pre-backup download ticket survived host-key rotation"
-            time.sleep(2)  # paused rows must stay paused while the restored host runs
-            assert rows("SELECT state FROM nx_outbox") == [["paused"]] and len(proxy.commands) == proxy_before
-        effect = rows("SELECT id FROM nx_outbox")[0][0]
-        command("effects", "resume", active["config"], effect, success=False)  # grant is revoked by the fork
-        command("effects", "grant", active["config"], "", "synthetic_events")
-        command("effects", "grant-secret", active["config"], "synthetic_events_token")
-        command("effects", "resume", active["config"], effect)
-        assert rows("SELECT state FROM nx_outbox") == [["pending"]]
-        report["backup_restore"] = "paired_copy_fork_paused_download_verified_explicit_regrant"
+        # The expiry lane deletes the paste this exercise restores.
+        if not args.await_expiry:
+            # Backup: with serving stopped and the store lease released, copy metadata,
+            # immutable objects and pairing markers as one unit, then restore it as a
+            # fork with fresh host keys. Old effects and jobs must stay paused.
+            restored = output / "restored"
+            restored.mkdir(mode=0o700)
+            restored_config = json.loads(config_path.read_text())
+            if args.postgres:
+                source = urllib.parse.urlsplit(args.postgres)
+                name = source.path.lstrip("/") + "_restored"
+                postgres(f'CREATE DATABASE "{name}" TEMPLATE "{source.path.lstrip("/")}"', source._replace(path="/postgres").geturl())
+                restored_url = source._replace(path="/" + name).geturl()
+                restored_config["database"] = {"postgres": restored_url}
+            else:
+                # The host requires a private database file; create it 0600 first.
+                os.close(os.open(restored / "paste.db", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+                with sqlite3.connect(output / "paste.db") as original, sqlite3.connect(restored / "paste.db") as copy:
+                    original.backup(copy)
+            shutil.copy2(output / "synthetic-token", restored / "synthetic-token")
+            command("keygen", restored / "keys.json")
+            shutil.copytree(output / "objects", restored / "objects", copy_function=shutil.copy2)
+            (restored / "runtime.json").write_text(json.dumps(restored_config, indent=2) + "\n")
+            # A copied effect queue is refused until the explicit restore fork adopts it.
+            command("effects", "inspect", restored / "runtime.json", success=False)
+            assert b"another owner directory" in sorted(output.glob("cli-*-effects.log"))[-1].read_bytes()
+            assert json.loads(command("deployment-hash", restored / "runtime.json"))["deployment_digest"] == restored_config["approved_contract"]
+            active.update(config=restored / "runtime.json", sqlite=restored / "paste.db", postgres=restored_url if args.postgres else None)
+            before_jobs, before_effects = rows("SELECT id,state FROM nx_jobs"), rows("SELECT id,state FROM nx_outbox")
+            command("jobs", "fork", active["config"])
+            # Metadata without its paired immutable object store is refused.
+            (restored / "objects-missing").mkdir(mode=0o700)
+            unpaired = {**restored_config, "blobs": {**restored_config["blobs"], "directory": "objects-missing"}}
+            (restored / "unpaired.json").write_text(json.dumps(unpaired, indent=2) + "\n")
+            command("effects", "inspect", restored / "unpaired.json", success=False)
+            refusal = sorted(output.glob("cli-*-effects.log"))[-1].read_bytes()
+            assert b"pair store identity mismatch" in refusal, refusal
+            (output / "unpaired-refusal.log").write_bytes(refusal)
+            assert rows("SELECT state FROM nx_jobs") == [["paused"]] and rows("SELECT state FROM nx_outbox") == [["paused"]]
+            assert [row[0] for row in rows("SELECT id,state FROM nx_jobs")] == [row[0] for row in before_jobs]
+            assert [row[0] for row in rows("SELECT id,state FROM nx_outbox")] == [row[0] for row in before_effects]
+            proxy_before = len(proxy.commands)
+            with server("restored"):
+                reader = Browser(origin)
+                _, page, public = read(reader, route, "restored-paste")
+                assert b"Public &lt;paste&gt;" in page
+                restored_download = next(link for link in public.links if link.startswith("/_noxide/download?ticket="))
+                status, _, body = reader.request(restored_download)
+                assert status == 200 and body == payload, "restored object did not match its metadata"
+                assert reader.request(download)[0] == 404, "a pre-backup download ticket survived host-key rotation"
+                time.sleep(2)  # paused rows must stay paused while the restored host runs
+                assert rows("SELECT state FROM nx_outbox") == [["paused"]] and len(proxy.commands) == proxy_before
+            effect = rows("SELECT id FROM nx_outbox")[0][0]
+            command("effects", "resume", active["config"], effect, success=False)  # grant is revoked by the fork
+            command("effects", "grant", active["config"], "", "synthetic_events")
+            command("effects", "grant-secret", active["config"], "synthetic_events_token")
+            command("effects", "resume", active["config"], effect)
+            assert rows("SELECT state FROM nx_outbox") == [["pending"]]
+            report["backup_restore"] = "paired_copy_fork_paused_download_verified_explicit_regrant"
         report["proxy_requests_rejected"] = len(proxy.commands)
     (output / "result.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, sort_keys=True))

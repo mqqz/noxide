@@ -151,7 +151,13 @@ async fn claim(db: &Database, now: i64) -> EffectClaim {
             tx,
             calls: &mut calls,
         }
-        .claim("deployment", "contract", at(now), &[])
+        .claim(
+            "deployment",
+            "contract",
+            "prepared-directory-fixture-proof",
+            at(now),
+            &[],
+        )
         .await?
         .unwrap())
     })
@@ -438,7 +444,13 @@ async fn retry_and_atomicity_contract(db: &Database) {
                 tx,
                 calls: &mut calls
             }
-            .claim("deployment", "contract", at(now + 86400000), &[])
+            .claim(
+                "deployment",
+                "contract",
+                "prepared-directory-fixture-proof",
+                at(now + 86400000),
+                &[]
+            )
             .await?
             .is_none()
         );
@@ -730,7 +742,7 @@ async fn actual_clock_recovery_contract(db: &Database) {
             tx,
             calls: &mut calls,
         }
-        .claim(generation, "contract", now, &[])
+        .claim(generation, "contract", "prepared-directory-fixture-proof", now, &[])
         .await?
         .unwrap();
         assert!(matches!(
@@ -799,6 +811,30 @@ async fn restore_owner_contract(db: &Database) {
             "restored-directory-fixture-proof".to_owned(),
             "0".to_owned()
         ]]
+    );
+    // A host still bound to the original owner directory cannot claim.
+    let stale = phase(db, async |tx: &mut Transaction| {
+        let mut calls = 16;
+        OutboxContext {
+            tx,
+            calls: &mut calls,
+        }
+        .claim(
+            "deployment",
+            "contract",
+            "prepared-directory-fixture-proof",
+            at(1000),
+            &[],
+        )
+        .await
+    })
+    .await;
+    assert!(
+        stale
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("another directory")
     );
     // Re-activating the adopted owner is an ordinary restart.
     activate(false).await.unwrap();

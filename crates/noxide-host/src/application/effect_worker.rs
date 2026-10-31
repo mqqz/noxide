@@ -388,8 +388,20 @@ impl Application {
                 *calls = calls.checked_sub(1).ok_or(RequestError::Rejected)?;
                 let now = self.temporal_attempt(&mut tx).await?.timestamp();
                 let generation = self.generation.get().ok_or(RequestError::Busy)?;
+                let owner_directory = self
+                    .effects
+                    .as_ref()
+                    .ok_or(RequestError::Rejected)?
+                    .owner_directory_digest()
+                    .map_err(RequestError::database)?;
                 let claim = OutboxContext { tx: &mut tx, calls }
-                    .claim(generation, &self.contract, now, &owner.active_claims())
+                    .claim(
+                        generation,
+                        &self.contract,
+                        owner_directory,
+                        now,
+                        &owner.active_claims(),
+                    )
                     .await
                     .map_err(RequestError::database)?;
                 if let Some(claim) = &claim {

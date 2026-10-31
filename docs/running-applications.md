@@ -552,11 +552,18 @@ have drained. Copying only the database or only the objects is incomplete.
    noxide jobs fork /srv/restored/runtime.json
    ```
 
-   The effect queue is bound to its original owner directory, so every other
-   command refuses the copy until `fork` adopts it. In one activation it re-binds
-   the queue, pauses every captured effect and revokes effect grants; the fork
-   itself rotates the job epoch, revokes service grants and pauses pending jobs and
-   recurring schedules. Restarting preserves these pauses.
+   `fork` is mandatory for every restore, including in place on the original
+   host. In one transaction it rotates the job epoch, revokes job and effect
+   grants, and pauses pending jobs, recurring schedules and captured effects.
+   If it is interrupted, nothing is applied; run it again before serving.
+   Restarting preserves these pauses.
+
+   The effect queue is also bound to its owner directory (the keys directory's
+   path and inode). When a copy is restored under a different directory, every
+   other command refuses it until `fork` re-binds the queue, and a host still
+   running on the old directory can no longer claim effects. Restoring into the
+   same directory, or an app without effects, gets no such refusal, so the
+   operator must not skip `fork`.
 4. Serve and verify reads and downloads. An object store that does not match the
    metadata is refused at startup (`pair store identity mismatch`).
 5. Re-approve authority explicitly: `noxide jobs grant`, `noxide effects grant`

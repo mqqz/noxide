@@ -232,6 +232,7 @@ impl OutboxContext<'_> {
         &mut self,
         generation: &str,
         expected_contract: &str,
+        owner_directory: &str,
         now: Timestamp,
         active: &[String],
     ) -> Result<Option<EffectClaim>> {
@@ -247,8 +248,12 @@ impl OutboxContext<'_> {
             state == "active" && contract == expected_contract,
             "effect runtime paused or approval changed"
         );
-        let changed=self.tx.execute("UPDATE nx_effect_queue SET claim_seq=claim_seq+1 WHERE singleton=1 AND claim_seq<9223372036854775807",&[]).await?;
-        ensure!(changed == 1, "effect queue unavailable");
+        // A restore fork re-binds the queue; a host on the old owner stops here.
+        let changed=self.tx.execute("UPDATE nx_effect_queue SET claim_seq=claim_seq+1 WHERE singleton=1 AND owner_directory=$1 AND claim_seq<9223372036854775807",&[owner_directory.into()]).await?;
+        ensure!(
+            changed == 1,
+            "effect queue unavailable or owned by another directory"
+        );
         let suffix = if matches!(self.tx.query_provider()?, NativeProvider::Postgres) {
             " FOR UPDATE OF o SKIP LOCKED"
         } else {

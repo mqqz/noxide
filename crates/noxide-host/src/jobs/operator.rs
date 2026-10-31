@@ -315,6 +315,11 @@ impl Transaction {
     /// copied storage. It preserves every receipt and never resumes old captures.
     pub(crate) async fn fork_job_runtime(&mut self, generation: &str) -> Result<()> {
         self.lock_job_operator_runtime(generation).await?;
+        self.apply_job_fork(generation).await
+    }
+    /// Fork updates for a caller that already holds exclusive runtime authority:
+    /// the operator lock above, or startup's clock-locked restore activation.
+    pub(crate) async fn apply_job_fork(&mut self, generation: &str) -> Result<()> {
         let epoch = crate::security::random_id()?;
         self.execute(
             "UPDATE nx_job_runtime SET epoch=$1,state='paused' WHERE singleton=1",

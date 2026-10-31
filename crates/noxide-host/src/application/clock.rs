@@ -57,6 +57,12 @@ impl Application {
                 self.restore_fork,
             )
             .await?;
+            // The queue re-bind above and the job fork commit together, so an
+            // interrupted fork never leaves an adopted but unfenced copy.
+            if self.restore_fork {
+                tx.maintenance_checkpoint()?;
+                tx.apply_job_fork(&generation).await?;
+            }
             let outcome = lifecycle_clock::tick(tx, &self.clock).await;
             lease.finish().await?;
             let tick = outcome?;
