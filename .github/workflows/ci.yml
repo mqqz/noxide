@@ -40,7 +40,7 @@ jobs:
       - name: Check formatting
         run: |
           cargo fmt --all --check
-          rustfmt --edition 2024 --check examples/private-notes/src/lib.rs examples/task-board/src/lib.rs examples/public-articles/src/lib.rs examples/forum/src/lib.rs examples/private-inbox/src/lib.rs examples/shop/src/lib.rs
+          rustfmt --edition 2024 --check examples/*/src/lib.rs
       - name: Cache Rust dependencies and workspace builds
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
