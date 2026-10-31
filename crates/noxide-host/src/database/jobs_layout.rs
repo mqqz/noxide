@@ -499,25 +499,30 @@ impl Transaction {
             }
         }
         for (name, expected) in INDEXES {
-            let rows=match self.backend {
-    Backend::Sqlite(_)=>self.fetch::<2>("SELECT tbl_name,CASE WHEN length(CAST(sql AS BLOB))<=4096 THEN sql ELSE NULL END FROM sqlite_schema WHERE type='index' AND name=$1",&[(*name).into()]).await?,
-    Backend::Postgres(_)=>self.fetch::<2>("SELECT t.relname,CASE WHEN octet_length(pg_catalog.pg_get_indexdef(i.indexrelid))<=4096 THEN pg_catalog.pg_get_indexdef(i.indexrelid) ELSE NULL END FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class n ON n.oid=i.indexrelid JOIN pg_catalog.pg_class t ON t.oid=i.indrelid JOIN pg_catalog.pg_namespace s ON s.oid=n.relnamespace WHERE s.nspname=current_schema() AND n.relname=$1 AND i.indisvalid AND i.indisready AND i.indislive AND NOT i.indisunique AND i.indpred IS NULL",&[(*name).into()]).await?,
-    Backend::Closed=>anyhow::bail!("closed job metadata transaction")};
+            let rows = match self.backend {
+                Backend::Sqlite(_) => self.fetch::<4>("SELECT tbl_name,CASE WHEN length(CAST(sql AS BLOB))<=4096 THEN sql ELSE NULL END,'','1' FROM sqlite_schema WHERE type='index' AND name=$1", &[(*name).into()]).await?,
+                Backend::Postgres(_) => self.fetch::<4>("SELECT t.relname,CASE WHEN octet_length(pg_catalog.pg_get_indexdef(i.indexrelid))<=4096 THEN pg_catalog.pg_get_indexdef(i.indexrelid) ELSE NULL END,pg_catalog.quote_ident(ts.nspname),CASE WHEN i.indisvalid AND i.indisready AND i.indislive AND NOT i.indisunique AND NOT i.indisexclusion AND i.indpred IS NULL THEN '1' ELSE '0' END FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class n ON n.oid=i.indexrelid JOIN pg_catalog.pg_class t ON t.oid=i.indrelid JOIN pg_catalog.pg_namespace s ON s.oid=n.relnamespace JOIN pg_catalog.pg_namespace ts ON ts.oid=t.relnamespace WHERE s.nspname=current_schema() AND ts.oid=s.oid AND n.relname=$1", &[(*name).into()]).await?,
+                Backend::Closed => anyhow::bail!("closed job metadata transaction"),
+            };
+            let [[table, definition, namespace, usable]] = rows.as_slice() else {
+                anyhow::bail!("missing job metadata index");
+            };
+            let expected = if namespace.is_empty() {
+                (*expected).to_owned()
+            } else {
+                expected.replace(
+                    " ON nx_jobs(",
+                    &format!(" ON {namespace}.nx_jobs USING btree ("),
+                )
+            };
             ensure!(
-                rows.len() == 1 && rows[0][0] == "nx_jobs",
-                "missing job metadata index"
-            );
-            let definition = rows[0][1].replace(" USING btree", "");
-            let table = definition.find("nx_jobs").map(|at| &definition[at..]);
-            let expected_table = expected.find("nx_jobs").map(|at| &expected[at..]);
-            // Provider namespace formatting is checked above; compare the fixed column suffix.
-            let columns = definition.find('(').map(|at| ddl_key(&definition[at..]));
-            let wanted = expected.find('(').map(|at| ddl_key(&expected[at..]));
-            ensure!(
-                table.is_some() && expected_table.is_some() && columns == wanted,
-                "wrong job metadata index shape"
+                table == "nx_jobs" && usable == "1" && ddl_key(definition) == ddl_key(&expected),
+                "wrong job metadata index shape {name}"
             );
         }
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;
