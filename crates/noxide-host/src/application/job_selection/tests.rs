@@ -729,6 +729,13 @@ fn derived_declarations() -> Manifest {
     read.resource = 2;
     read.maintenance = false;
     m.operations.push(read);
+    // Derivation follows only a reference the source projection approves.
+    m.actions[0].targets[0]
+        .projection
+        .as_mut()
+        .unwrap()
+        .fields
+        .push("product".into());
     m.actions[0].targets.push(ActionTarget {
         name: "product".into(),
         resource: 2,
@@ -862,9 +869,7 @@ async fn derived_provider(database: Database) {
     // Each call has its normal worker request root, database meter and logical
     // budget. Short pages retain the frontier across denied related targets.
     for _ in 0..6 {
-        if !app.run_recurrence_once().await.unwrap() {
-            break;
-        }
+        app.run_recurrence_once().await.unwrap();
     }
     let mut tx = database
         .begin_read(std::time::Instant::now() + Duration::from_secs(2))
