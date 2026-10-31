@@ -77,7 +77,13 @@ impl Application {
                         )
                         .await);
                 }
-                Ok(Err(error)) if retryable(&error) => {
+                _ if tx.commit_acknowledged() => {
+                    // A confirmed commit remains committed even if gate cleanup
+                    // failed or was canceled. Deliver the prepared success;
+                    // fresh navigation cannot undo it.
+                    return Ok(response.fallback);
+                }
+                Ok(Err(error)) if !tx.commit_may_have_succeeded() && retryable(&error) => {
                     // SQLite busy can leave COMMIT's transaction active. A new
                     // attempt is legal only after this rollback succeeds.
                     if tx.rollback().await.is_err() {

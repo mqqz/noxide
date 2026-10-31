@@ -1,6 +1,8 @@
+mod commit;
 mod maintenance;
 mod schema;
 use anyhow::{Context, Result, ensure};
+use commit::CommitState;
 pub(crate) use maintenance::{MaintenanceLease, MaintenanceUncertain};
 use sqlx::{
     Connection, Row,
@@ -41,6 +43,9 @@ pub(crate) struct Transaction {
     creation_acquired: Option<Instant>,
     backend: Backend,
     active: bool,
+    // This frontier survives physical rollback/close. An acknowledgement of
+    // cleanup never establishes whether a previously sent COMMIT committed.
+    commit_state: CommitState,
     read_only: bool,
     cancelled: Arc<AtomicBool>,
     deadline: tokio::time::Instant,
@@ -291,6 +296,7 @@ impl Database {
             creation_acquired: None,
             backend,
             active: true,
+            commit_state: CommitState::NotAttempted,
             read_only,
             cancelled,
             deadline: deadline.into(),
@@ -757,7 +763,20 @@ impl Transaction {
     }
 
     pub(crate) async fn commit(&mut self) -> Result<()> {
-        self.execute_internal("COMMIT", &[]).await?;
+        ensure!(
+            !self.commit_may_have_succeeded(),
+            "COMMIT already attempted"
+        );
+        // Set before polling the provider future: cancellation must conservatively
+        // retain this state even if it interrupts transmission or acknowledgement.
+        self.commit_state = CommitState::Sent;
+        if let Err(error) = self.execute_internal("COMMIT", &[]).await {
+            if commit::refused(&self.backend, &error) {
+                self.commit_state = CommitState::Refused;
+                return Err(error);
+            }
+            return Err(commit::CommitFailure::uncertain(error));
+        }
         #[cfg(test)]
         if let Some(started) = self.creation_acquired.take() {
             CREATION_HOLD_MAX.fetch_max(
@@ -766,13 +785,24 @@ impl Transaction {
             );
         }
         self.active = false;
-        self.release_gate().await?;
         #[cfg(test)]
-        crate::failure_tests::after_commit().await?;
+        crate::failure_tests::after_commit()
+            .await
+            .map_err(commit::CommitFailure::uncertain)?;
+        self.commit_state = CommitState::Acknowledged;
+        self.release_gate()
+            .await
+            .map_err(commit::CommitFailure::cleanup)?;
         Ok(())
     }
+    pub(crate) fn commit_acknowledged(&self) -> bool {
+        self.commit_state == CommitState::Acknowledged
+    }
+    pub(crate) fn commit_may_have_succeeded(&self) -> bool {
+        self.commit_state.may_have_committed()
+    }
     pub(crate) async fn rollback(&mut self) -> Result<()> {
-        tokio::time::timeout(Duration::from_millis(500), async {
+        let cleanup = tokio::time::timeout(Duration::from_millis(500), async {
             if self.active {
                 if let Backend::Sqlite(cx) = &mut self.backend {
                     cx.lock_handle().await?.remove_progress_handler();
@@ -781,9 +811,26 @@ impl Transaction {
                 self.active = false;
             }
             self.release_gate().await?;
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         })
-        .await?
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|result| result);
+        // Preserve the semantic frontier on BOTH successful and failed cleanup.
+        // The physical stop result is not evidence that COMMIT did not happen.
+        match self.commit_state {
+            CommitState::Sent => Err(commit::CommitFailure::uncertain(
+                cleanup.err().unwrap_or_else(|| {
+                    anyhow::anyhow!("cleanup cannot prove a previously sent COMMIT aborted")
+                }),
+            )),
+            CommitState::Acknowledged => Err(commit::CommitFailure::cleanup(
+                cleanup.err().unwrap_or_else(|| {
+                    anyhow::anyhow!("ROLLBACK cannot undo an acknowledged COMMIT")
+                }),
+            )),
+            _ => cleanup,
+        }
     }
 }
 
@@ -796,6 +843,9 @@ impl Drop for Transaction {
 }
 
 pub(crate) fn retryable(error: &anyhow::Error) -> bool {
+    if error.is::<commit::CommitFailure>() {
+        return false;
+    }
     if error.is::<crate::repository::ConditionalConflict>() {
         return true;
     }
