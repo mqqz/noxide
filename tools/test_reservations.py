@@ -52,7 +52,6 @@ def main():
     manifest = json.loads(manifest_path.read_text())
     actions = {action["name"]: action for action in manifest["actions"]}
     operations = {operation["id"]: operation for operation in manifest["operations"]}
-    resources = {resource["name"]: resource["id"] for resource in manifest["resources"]}
     reserve, cancel, expire = (actions[name] for name in ("Reserve", "Cancel", "Expire reservation"))
     create = next(action for action in actions.values() if len(action["steps"]) == 1 and operations[action["steps"][0]["operation"]]["kind"] == "create")
     edit = next(action for action in actions.values() if len(action["steps"]) == 1 and operations[action["steps"][0]["operation"]]["kind"] == "update")
@@ -104,18 +103,19 @@ def main():
             return [[None if item is None else str(item) for item in row] for row in database.execute(sql)]
 
     def records():
-        return [{"resource": int(resource), "id": int(identity), "fields": json.loads(fields), "revision": int(revision)}
-                for resource, identity, fields, revision in rows("SELECT resource,id,fields,revision FROM nx_records ORDER BY resource,id")]
+        # Records store host storage IDs; the catalog maps them to resource keys.
+        return [{"resource": resource, "id": int(identity), "fields": json.loads(fields), "revision": int(revision)}
+                for resource, identity, fields, revision in rows("SELECT c.resource_key,r.id,r.fields,r.revision FROM nx_records r JOIN nx_resource_catalog c ON c.storage_id=r.resource ORDER BY r.resource,r.id")]
 
     def snapshot():
         # Clock heartbeats and recurring scan progress are deliberately excluded.
         return {"records": records(), "receipts": rows("SELECT COUNT(*) FROM nx_receipts")}
 
     def product_stock():
-        return next(row["fields"]["stock"] for row in records() if row["resource"] == resources["products"])
+        return next(row["fields"]["stock"] for row in records() if row["resource"] == "products")
 
     def orders():
-        return {row["id"]: row["fields"] for row in records() if row["resource"] == resources["orders"]}
+        return {row["id"]: row["fields"] for row in records() if row["resource"] == "orders"}
 
     def jobs():
         result = json.loads(command("jobs", "inspect", config_path))
@@ -228,7 +228,9 @@ def main():
         assert not any(form["action"] == path(cancel) for form in document.forms)
         # A service action cannot be reached as an independent web binding.
         before = snapshot()
-        submit(bob, expire, {}, "service-web-denial", 404)
+        # Valid page credentials must still reach no browser binding.
+        credentials = {name: value for name, value in reserve_fields.items() if name in ("_csrf", "_submission")}
+        submit(bob, expire, credentials, "service-web-denial", 404)
         assert snapshot() == before
         report["normal_forms"] = True
 
