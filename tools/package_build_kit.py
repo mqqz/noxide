@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def entries():
     paths = [ROOT / name for name in ('Cargo.toml', 'Cargo.lock', 'README.md',
-             'tools/build_vm.py', 'tools/build_local.py', 'tools/build_recipe.py', 'tools/build_catalog.py')]
+             'tools/build_vm.py', 'tools/build_local.py', 'tools/build_recipe.py', 'tools/build_assets.py', 'tools/build_catalog.py')]
     for name in ('noxide', 'noxide-macros', 'noxide-protocol'):
         crate = ROOT / 'crates' / name
         paths.append(crate / 'Cargo.toml')
