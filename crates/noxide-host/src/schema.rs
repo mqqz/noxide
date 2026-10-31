@@ -172,10 +172,23 @@ pub(crate) fn transition(
                 current.push(resource(&target, key)?.clone());
             }
             MigrationOp::DropResource { resource: key } => {
-                resource(&current, key)?;
+                ensure!(
+                    !resource(&current, key)?
+                        .fields
+                        .iter()
+                        .any(|f| matches!(f.kind, FieldKind::Blob { .. })),
+                    "blob resource removal requires atomic attachment maintenance"
+                );
                 current.retain(|r| &r.name != key);
             }
             MigrationOp::RenameResource { from, to } => {
+                ensure!(
+                    !resource(&current, from)?
+                        .fields
+                        .iter()
+                        .any(|f| matches!(f.kind, FieldKind::Blob { .. })),
+                    "blob resource renaming requires attachment migration proof"
+                );
                 ensure!(
                     !current.iter().any(|r| &r.name == to),
                     "resource destination already exists"
@@ -196,9 +209,12 @@ pub(crate) fn transition(
                 ensure!(
                     !matches!(
                         destination.kind,
-                        FieldKind::Account { .. } | FieldKind::Reference { .. }
+                        FieldKind::Account { .. }
+                            | FieldKind::Reference { .. }
+                            | FieldKind::Blob { .. }
+                            | FieldKind::UploadHandle { .. }
                     ),
-                    "account bindings require creation of a new record"
+                    "identity and attachment bindings require creation of a new record"
                 );
                 destination.canonical(value).map_err(anyhow::Error::msg)?;
                 let r = current
@@ -219,7 +235,10 @@ pub(crate) fn transition(
                     .iter_mut()
                     .find(|r| &r.name == key)
                     .context("unknown migration resource")?;
-                field(r, name)?;
+                ensure!(
+                    !matches!(field(r, name)?.kind, FieldKind::Blob { .. }),
+                    "blob field removal requires atomic attachment maintenance"
+                );
                 r.fields.retain(|f| &f.name != name);
             }
             MigrationOp::RenameField {
@@ -241,6 +260,10 @@ pub(crate) fn transition(
                     .iter_mut()
                     .find(|f| &f.name == from)
                     .context("unknown migration field")?;
+                ensure!(
+                    !matches!(f.kind, FieldKind::Blob { .. }),
+                    "blob field renaming requires atomic attachment maintenance"
+                );
                 f.name = to.clone();
                 f.label = to.clone();
                 if let Some(gate) = &mut r.gate
@@ -383,6 +406,117 @@ mod tests {
 
     fn source() -> Vec<Resource> {
         crate::test_support::manifest().resources
+    }
+
+    #[test]
+    fn blob_associations_cannot_be_reinterpreted_by_schema_migrations() {
+        let mut before = source();
+        let key = before[0].name.clone();
+        let name = before[0].fields[0].name.clone();
+        before[0].fields[0].kind = FieldKind::Blob { max_bytes: 1024 };
+        before[0].fields[0].max_bytes = 67;
+        let mut target = before.clone();
+        target.remove(0);
+        assert!(
+            transition(
+                &before,
+                &target,
+                &[MigrationOp::DropResource {
+                    resource: key.clone()
+                }]
+            )
+            .is_err()
+        );
+        let mut target = before.clone();
+        target[0].name = "renamed".into();
+        assert!(
+            transition(
+                &before,
+                &target,
+                &[MigrationOp::RenameResource {
+                    from: key.clone(),
+                    to: "renamed".into()
+                }]
+            )
+            .is_err()
+        );
+        let mut target = before.clone();
+        target[0].fields.remove(0);
+        assert!(
+            transition(
+                &before,
+                &target,
+                &[MigrationOp::DropField {
+                    resource: key.clone(),
+                    field: name.clone()
+                }]
+            )
+            .is_err()
+        );
+        let mut target = before.clone();
+        target[0].fields[0].name = "attachment".into();
+        target[0].fields[0].label = "attachment".into();
+        assert!(
+            transition(
+                &before,
+                &target,
+                &[MigrationOp::RenameField {
+                    resource: key.clone(),
+                    from: name.clone(),
+                    to: "attachment".into()
+                }]
+            )
+            .is_err()
+        );
+        let mut target = before.clone();
+        target[0].fields[0].kind = FieldKind::Text;
+        assert!(
+            transition(
+                &before,
+                &target,
+                &[MigrationOp::ChangeField {
+                    resource: key.clone(),
+                    field: name.clone()
+                }]
+            )
+            .is_err()
+        );
+        assert!(
+            transition(
+                &before,
+                &target,
+                &[MigrationOp::ConvertField {
+                    resource: key.clone(),
+                    field: name.clone(),
+                    conversion: Conversion::IntegerToText
+                }]
+            )
+            .is_err()
+        );
+        let mut empty = before.clone();
+        empty[0].fields.remove(0);
+        assert!(
+            transition(
+                &empty,
+                &before,
+                &[MigrationOp::AddField {
+                    resource: key,
+                    field: name,
+                    value: format!("b1_{}", "a".repeat(64))
+                }]
+            )
+            .is_err()
+        );
+        assert!(
+            transition(
+                &[],
+                &before,
+                &[MigrationOp::AddResource {
+                    resource: before[0].name.clone()
+                }]
+            )
+            .is_ok()
+        );
     }
 
     fn authority_source() -> Vec<Resource> {

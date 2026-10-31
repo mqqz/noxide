@@ -1,3 +1,4 @@
+mod blob_layout;
 mod maintenance;
 mod schema;
 use anyhow::{Context, Result, ensure};
@@ -301,7 +302,11 @@ impl Database {
     pub async fn initialize(&self) -> Result<()> {
         let mut tx = self.begin(Instant::now() + Duration::from_secs(10)).await?;
         if tx.storage_tables().await?.is_empty() {
-            for sql in SCHEMA {
+            for sql in SCHEMA
+                .iter()
+                .chain(blob_layout::TABLE_SQL)
+                .chain(blob_layout::INDEXES.iter().map(|(_, sql)| sql))
+            {
                 tx.execute(sql, &[]).await?;
             }
             match tx.backend {
@@ -314,6 +319,7 @@ impl Database {
                     tx.execute("CREATE TRIGGER nx_accounts_no_delete BEFORE DELETE ON nx_accounts FOR EACH ROW EXECUTE FUNCTION nx_reject_identity_delete()", &[]).await?;
                 }
             }
+            tx.check_blob_layout().await?;
         } else {
             tx.check_storage().await?;
             tx.check_layout().await?;
@@ -386,7 +392,7 @@ impl Transaction {
     #[cfg(test)]
     pub(crate) async fn snapshot(&mut self) -> Result<Vec<(String, Vec<[String; 1]>)>> {
         let mut tables = Vec::new();
-        for &(table, columns) in TABLE_COLUMNS {
+        for &(table, columns) in TABLE_COLUMNS.iter().chain(blob_layout::TABLES) {
             let columns = columns
                 .iter()
                 .map(|(name, _)| format!("CAST({name} AS TEXT)"))
@@ -523,7 +529,7 @@ impl Transaction {
         ).await?;
         ensure!(
             rows.as_slice() == [["1".to_owned(), STORAGE_VERSION.to_string()]],
-            "unsupported framework storage version; storage 11 requires an explicit reviewed migration or a new empty database; existing data is unchanged"
+            "unsupported framework storage version; storage 12 requires an explicit reviewed migration or a new empty database; existing data is unchanged"
         );
         Ok(())
     }
@@ -562,6 +568,7 @@ impl Transaction {
         );
         let mut expected: Vec<_> = TABLE_COLUMNS
             .iter()
+            .chain(blob_layout::TABLES)
             .map(|(name, _)| (*name).to_owned())
             .collect();
         expected.sort();
@@ -569,7 +576,7 @@ impl Transaction {
             self.storage_tables().await? == expected,
             "unsupported or incomplete framework storage schema"
         );
-        for &(table, columns) in TABLE_COLUMNS {
+        for &(table, columns) in TABLE_COLUMNS.iter().chain(blob_layout::TABLES) {
             let sql = match self.backend {
                 Backend::Closed => unreachable!("closed maintenance transaction"),
                 Backend::Sqlite(_) => {
@@ -615,7 +622,7 @@ impl Transaction {
                 );
             }
         }
-        Ok(())
+        self.check_blob_layout().await
     }
 
     pub(crate) async fn deployment(
@@ -815,7 +822,7 @@ pub(crate) fn retryable(error: &anyhow::Error) -> bool {
     )
 }
 
-const STORAGE_VERSION: i64 = 11;
+const STORAGE_VERSION: i64 = 12;
 const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
     (
         "nx_resource_catalog",
@@ -919,7 +926,7 @@ const TABLE_COLUMNS: &[(&str, &[(&str, &str)])] = &[
 
 const SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS nx_storage (singleton BIGINT PRIMARY KEY CHECK(singleton=1), version BIGINT NOT NULL)",
-    "INSERT INTO nx_storage(singleton,version) VALUES(1,11)",
+    "INSERT INTO nx_storage(singleton,version) VALUES(1,12)",
     "CREATE TABLE IF NOT EXISTS nx_resource_catalog (storage_id BIGINT PRIMARY KEY, resource_key TEXT NOT NULL UNIQUE)",
     "CREATE TABLE IF NOT EXISTS nx_schema_definition (singleton BIGINT PRIMARY KEY CHECK(singleton=1), definition TEXT NOT NULL, history TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS nx_accounts (id TEXT PRIMARY KEY, login_name TEXT UNIQUE, password TEXT, tenant TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('active','disabled','deleted')), epoch BIGINT NOT NULL)",

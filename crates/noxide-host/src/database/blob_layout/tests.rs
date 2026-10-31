@@ -1,0 +1,184 @@
+use super::*;
+use crate::database::{Database, Param};
+use sqlx::Connection;
+use std::time::{Duration, Instant};
+
+async fn insert(
+    tx: &mut Transaction,
+    suffix: &str,
+    duplicate: Option<&str>,
+    attached: bool,
+) -> Result<u64> {
+    let choose = |column| {
+        if duplicate == Some(column) {
+            "a"
+        } else {
+            suffix
+        }
+    };
+    let key = |column| choose(column).repeat(64);
+    let values: Vec<Param> = vec![
+        suffix.repeat(64).into(),
+        format!("b1_{}", key("blob_ref")).into(),
+        format!("u1_{}", key("upload_handle")).into(),
+        key("object_key").into(),
+        "b".repeat(64).into(),
+        "c".repeat(64).into(),
+        "d".repeat(64).into(),
+        if attached { "attached" } else { "uploading" }.into(),
+        if attached {
+            "e".repeat(64)
+        } else {
+            String::new()
+        }
+        .into(),
+        "f".repeat(64).into(),
+    ];
+    tx.execute("INSERT INTO nx_blobs(slot,blob_ref,upload_handle,object_key,subject,context,input,anonymous,state,generation,reserved_bytes,actual_bytes,sha256,filename,created_ms,expires_ms,owner_resource,owner_id,owner_incarnation,owner_field,claimed_ms,owner_process) VALUES($1,$2,$3,$4,$5,$6,$7,0,$8,1,0,0,$9,'file.bin',1,900001,1,1,'record','file',0,$10)", &values).await
+}
+
+async fn contract(db: Database) {
+    db.initialize().await.unwrap();
+    db.initialize().await.unwrap();
+    let begin = || db.begin(Instant::now() + Duration::from_secs(5));
+    for (index, replacement) in [
+        ("nx_blobs_handle", None),
+        (
+            "nx_blobs_handle",
+            Some("CREATE INDEX nx_blobs_handle ON nx_blobs(upload_handle)"),
+        ),
+        (
+            "nx_blobs_handle",
+            Some("CREATE UNIQUE INDEX nx_blobs_handle ON nx_blobs(blob_ref)"),
+        ),
+        (
+            "nx_blobs_attached_field",
+            Some(
+                "CREATE UNIQUE INDEX nx_blobs_attached_field ON nx_blobs(owner_resource,owner_id,owner_incarnation,owner_field) WHERE state='staged'",
+            ),
+        ),
+        (
+            "nx_blobs_expiry",
+            Some("CREATE INDEX nx_blobs_expiry ON nx_blobs(state,slot,expires_ms)"),
+        ),
+        (
+            "nx_blobs_subject_live",
+            Some(
+                "CREATE INDEX nx_blobs_subject_live ON nx_blobs(subject,slot) WHERE state='uploading' AND state='staged'",
+            ),
+        ),
+    ] {
+        let mut tx = begin().await.unwrap();
+        tx.execute(&format!("DROP INDEX {index}"), &[])
+            .await
+            .unwrap();
+        if let Some(sql) = replacement {
+            tx.execute(sql, &[]).await.unwrap();
+        }
+        assert!(
+            tx.check_blob_layout().await.is_err(),
+            "{index}: {replacement:?}"
+        );
+        tx.rollback().await.unwrap();
+    }
+    let mut tx = begin().await.unwrap();
+    tx.execute("DROP TABLE nx_blob_subjects", &[])
+        .await
+        .unwrap();
+    let create = TABLE_SQL
+        .iter()
+        .find(|s| s.starts_with("CREATE TABLE nx_blob_subjects "))
+        .unwrap();
+    tx.execute(
+        &create.replace("subject TEXT PRIMARY KEY NOT NULL", "subject TEXT NOT NULL"),
+        &[],
+    )
+    .await
+    .unwrap();
+    assert!(tx.check_blob_layout().await.is_err());
+    tx.rollback().await.unwrap();
+    db.initialize().await.unwrap();
+
+    // Native constraints, independently of metadata loader/canonicalization.
+    let mut tx = begin().await.unwrap();
+    insert(&mut tx, "a", None, true).await.unwrap();
+    tx.commit().await.unwrap();
+    for duplicate in ["blob_ref", "upload_handle", "object_key", "attachment"] {
+        let mut tx = begin().await.unwrap();
+        assert!(
+            insert(&mut tx, "b", Some(duplicate), duplicate == "attachment")
+                .await
+                .is_err(),
+            "{duplicate}"
+        );
+        tx.rollback().await.unwrap();
+        let mut tx = begin().await.unwrap();
+        assert_eq!(
+            tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_blobs", &[])
+                .await
+                .unwrap(),
+            [["1".to_owned()]]
+        );
+        tx.rollback().await.unwrap();
+    }
+    // An explicit old version is never silently upgraded or erased.
+    let mut tx = begin().await.unwrap();
+    tx.execute("UPDATE nx_storage SET version=11", &[])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        db.initialize()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("storage 12 requires")
+    );
+    let mut tx = begin().await.unwrap();
+    assert_eq!(
+        tx.fetch::<1>("SELECT CAST(version AS TEXT) FROM nx_storage", &[])
+            .await
+            .unwrap(),
+        [["11".to_owned()]]
+    );
+    assert_eq!(
+        tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_blobs", &[])
+            .await
+            .unwrap(),
+        [["1".to_owned()]]
+    );
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn sqlite_blob_layout_and_native_constraints() {
+    let temp = tempfile::tempdir().unwrap();
+    contract(Database::sqlite(temp.path().join("blobs.db"))).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable NOXIDE_TEST_POSTGRES with CREATE DATABASE"]
+async fn postgres_blob_layout_and_native_constraints() {
+    let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+    let name = format!(
+        "nx_p08_layout_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    eprintln!("P08 owned layout fixture: {name}");
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let mut case = url::Url::parse(&url).unwrap();
+    case.set_path(&name);
+    contract(Database::postgres(case.as_str()).unwrap()).await;
+    sqlx::query(&format!("DROP DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+}
