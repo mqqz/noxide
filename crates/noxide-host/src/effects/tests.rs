@@ -494,6 +494,25 @@ async fn retry_and_atomicity_contract(db: &Database) {
     .await
     .unwrap();
     assert_eq!(state(db, &lost.id().unwrap()).await, "dead");
+    // A clock jump past the lease before any send requeues; it is not dead.
+    let jumped = enqueue(db, "alpha", "lease-expired-before-send").await;
+    let stale = claim(db, 1000).await;
+    phase(db, async |tx: &mut Transaction| {
+        let mut calls = 16;
+        assert!(matches!(
+            OutboxContext {
+                tx,
+                calls: &mut calls
+            }
+            .preflight(&stale, stale.lease_until)
+            .await?,
+            Preflight::Settled(Finalized::Retrying(at)) if at == stale.lease_until
+        ));
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(state(db, &jumped.id().unwrap()).await, "pending");
 }
 async fn secret_grant_change_contract(db: &Database) {
     let mut effective = approval();

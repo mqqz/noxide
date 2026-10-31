@@ -418,10 +418,18 @@ impl OutboxContext<'_> {
             .checked_add(Duration::from_millis(EFFECT_RETRY_WINDOW_MILLIS)?)?;
         // Claim at attempts==5 is the fifth attempt unless it reclaimed an
         // already exhausted row. The durable eligible time marks its window.
-        if now >= window || now >= row.lease || claim.exhausted {
+        if now >= window || claim.exhausted {
             self.transition(claim, "dead", "retry_window", now.max(row.eligible))
                 .await?;
             return Ok(Preflight::Settled(Finalized::Dead));
+        }
+        // Nothing was sent under this expired lease; requeue under the
+        // already-charged attempt instead of spending the retry window.
+        if now >= row.lease {
+            let eligible = now.max(row.eligible);
+            self.transition(claim, "pending", "lease_expired", eligible)
+                .await?;
+            return Ok(Preflight::Settled(Finalized::Retrying(eligible)));
         }
         Ok(Preflight::Send(Box::new(PreparedEffect {
             captured: row.capture,

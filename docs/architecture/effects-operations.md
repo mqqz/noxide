@@ -132,7 +132,12 @@ old socket or native file worker stopped.
 Pending, Running and Paused rows count against app and tenant quotas, each at
 most 1,000; concurrency is one or two. Omitted limits default to 1,000/1,000/two.
 Tenant scheduling is fair. A 60-second durable lease fences row updates, while
-the exclusive owner and retained physical slots bound actual live work.
+the exclusive owner and retained physical slots bound actual live work. A lease
+that expires before preflight admits a send returns the row to Pending
+(`lease_expired`) under its already-charged attempt; after admission, expiry
+pauses the row because the send may have left. Each idle claim poll still
+writes the queue sequence row, so an idle server performs about one database
+write per worker per second.
 
 Automatic retries allow five attempts within 24 hours of first eligibility.
 The window check uses the fixed durable lifecycle timestamp of the preflight
