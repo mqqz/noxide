@@ -370,6 +370,9 @@ jobs:
             --cli target/debug/noxide \
             --geckodriver "$NOXIDE_GECKODRIVER" \
             --output "$RUNNER_TEMP/noxide-ci/public-assets-browser"
+          python3 tools/test_asset_lifecycle.py \
+            --cli target/debug/noxide \
+            --output "$RUNNER_TEMP/noxide-ci/public-assets-lifecycle"
       - name: Build and test the private inbox
         if: matrix.suite == 'examples'
         run: |
