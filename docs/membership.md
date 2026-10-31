@@ -32,8 +32,10 @@ rows cannot combine. Historical duplicates do not multiply an existence result.
 One request attempt owns its authority context and fixed typed `AttemptTime`.
 Witnesses are prepared for at most 64 candidate rows and two predicates at once,
 with at most 128 retained witnesses. A single provider query resolves all distinct
-keys for one predicate batch. The context discards witnesses after each batch and
-mutation step; a retry constructs a new context. A temporary anonymous picker
+keys for one predicate batch. The context reuses unchanged witnesses within the
+transaction and clears them after every mutation or principal switch. Before a
+batch it clears the map if the worst-case incoming keys would exceed 128. A retry
+constructs a new context. A temporary anonymous picker
 principal cannot inherit an authenticated witness. No cross-request/transaction
 cache exists. Catalog reads and witness queries debit the existing shared DB-call
 allowance and use the transaction's existing monotonic deadline.

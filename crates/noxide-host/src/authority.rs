@@ -35,6 +35,7 @@ pub(crate) struct Authority {
     deployment: Option<DeploymentScope>,
     storage: BTreeMap<String, i64>,
     witnesses: Option<Witnesses>,
+    witness_principal: Option<(String, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -75,6 +76,7 @@ impl Authority {
             witnesses.invalidate();
         }
         self.witnesses = None;
+        self.witness_principal = None;
     }
 
     async fn storage(
@@ -97,8 +99,9 @@ impl Authority {
     }
 
     /// This method is the only row policy evaluator for enabled runtime paths.
-    /// Each batch owns at most 64x2 witnesses and discards them before another
-    /// batch. Principal changes (including anonymous picker evaluation) cannot
+    /// Each batch owns at most 64x2 witnesses. Unchanged facts can be reused in
+    /// this transaction until mutation, principal change or bounded eviction.
+    /// Principal changes (including anonymous picker evaluation) cannot
     /// inherit witnesses prepared for an authenticated principal.
     pub(crate) async fn authorize(
         &mut self,
@@ -110,7 +113,14 @@ impl Authority {
         calls: &mut usize,
     ) -> Result<Vec<bool>> {
         ensure!(rows.len() <= membership::MAX_BATCH, "authority batch limit");
-        self.invalidate();
+        let principal_key = principal
+            .user()
+            .ok()
+            .map(|user| (user.id.clone(), user.tenant.clone()));
+        if self.witness_principal != principal_key {
+            self.invalidate();
+        }
+        self.witness_principal = principal_key.clone();
         let resource = manifest::resource(manifest, operation.resource)?;
         for row in rows {
             manifest::validate_fields(resource, row.fields)?;
@@ -156,7 +166,6 @@ impl Authority {
                 .deployment
                 .clone()
                 .context("membership deployment unavailable")?;
-            self.witnesses = Some(Witnesses::new(principal, time)?);
             let selected: Vec<_> = rows
                 .iter()
                 .zip(&visible)
@@ -173,6 +182,26 @@ impl Authority {
                     ))
                 })
                 .collect::<Result<_>>()?;
+            let incoming = selected
+                .len()
+                .checked_mul(plans.len())
+                .context("membership witness bound overflow")?;
+            ensure!(
+                incoming <= membership::MAX_WITNESSES,
+                "membership witness batch limit"
+            );
+            if self.witnesses.as_ref().is_some_and(|witnesses| {
+                witnesses
+                    .len()
+                    .checked_add(incoming)
+                    .is_none_or(|count| count > membership::MAX_WITNESSES)
+            }) {
+                self.invalidate();
+                self.witness_principal = principal_key;
+            }
+            if self.witnesses.is_none() {
+                self.witnesses = Some(Witnesses::new(principal, time)?);
+            }
             for plan in &plans {
                 let storage = self.storage(tx, manifest, plan, calls).await?;
                 let protected: Vec<_> = selected
@@ -213,7 +242,6 @@ impl Authority {
                     )
             })
             .collect();
-        self.invalidate();
         Ok(result)
     }
 

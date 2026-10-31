@@ -361,6 +361,9 @@ pub(crate) struct Witnesses {
 }
 
 impl Witnesses {
+    pub(crate) fn len(&self) -> usize {
+        self.values.len()
+    }
     /// Requiring typed attempt time fails closed when temporal freshness cannot
     /// be established. This alone does not implement resource expiry.
     pub(crate) fn new(principal: &Principal, attempt_time: AttemptTime) -> Result<Self> {

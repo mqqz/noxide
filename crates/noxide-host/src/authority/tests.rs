@@ -380,11 +380,45 @@ async fn provider(database: Database) {
         .unwrap();
     let before = tx.fetch::<2>("SELECT CAST(lifecycle_ms AS TEXT),CAST(lifecycle_version AS TEXT) FROM nx_clock WHERE singleton=1", &[]).await.unwrap();
     let mut authority = Authority::new(Some(time), scope());
+    let mut read_calls = 2;
     let direct = authority
-        .authorize(&mut tx, &m, &user(), &m.operations[0], &rows, &mut 16)
+        .authorize(
+            &mut tx,
+            &m,
+            &user(),
+            &m.operations[0],
+            &rows,
+            &mut read_calls,
+        )
         .await
         .unwrap();
     assert_eq!(direct, expected);
+    assert_eq!(read_calls, 0, "one catalog query and one witness batch");
+    for _ in 0..3 {
+        assert_eq!(
+            authority
+                .authorize(
+                    &mut tx,
+                    &m,
+                    &user(),
+                    &m.operations[0],
+                    &rows,
+                    &mut read_calls
+                )
+                .await
+                .unwrap(),
+            expected,
+            "read/projection/inspection/preflight reuse unchanged facts"
+        );
+    }
+    let mut next_attempt = Authority::new(Some(time), scope());
+    assert!(
+        next_attempt
+            .authorize(&mut tx, &m, &user(), &m.operations[0], &rows, &mut 0)
+            .await
+            .is_err(),
+        "new attempt cannot reuse a prior context's witnesses"
+    );
     let mut params = vec![workspaces.into()];
     let sql = authority
         .sql(&mut tx, &m, &user(), &m.operations[0], &mut params, &mut 16)
@@ -419,12 +453,24 @@ async fn provider(database: Database) {
         vec![false; 11],
         "anonymous picker cannot inherit authenticated membership"
     );
+    let mut after_swap_calls = 1;
     assert_eq!(
         authority
-            .authorize(&mut tx, &m, &user(), &m.operations[0], &rows, &mut 16)
+            .authorize(
+                &mut tx,
+                &m,
+                &user(),
+                &m.operations[0],
+                &rows,
+                &mut after_swap_calls
+            )
             .await
             .unwrap(),
         expected
+    );
+    assert_eq!(
+        after_swap_calls, 0,
+        "principal restoration requires a fresh witness query"
     );
     let after = tx.fetch::<2>("SELECT CAST(lifecycle_ms AS TEXT),CAST(lifecycle_version AS TEXT) FROM nx_clock WHERE singleton=1", &[]).await.unwrap();
     assert_eq!(
@@ -434,6 +480,7 @@ async fn provider(database: Database) {
     tx.commit().await.unwrap();
 
     let mut tx = transaction(&database).await;
+    let mut authority = Authority::new(Some(time), scope());
     tx.execute(
         "UPDATE nx_accounts SET state='disabled' WHERE id=$1",
         &[ALICE.into()],
@@ -468,6 +515,7 @@ async fn provider(database: Database) {
     )
     .await
     .unwrap();
+    authority.invalidate();
     let owned_member = member(11, ALICE, "member", true, "current", future);
     assert_eq!(
         authority
@@ -513,6 +561,7 @@ async fn provider(database: Database) {
     // Canonical candidate policy sees resolved Principal/reference/literal values.
     // Full Created(0)/receipt/executor proof is supplied after runtime integration.
     let mut tx = transaction(&database).await;
+    let mut authority = Authority::new(Some(time), scope());
     let proposed = workspace(future);
     assert_eq!(
         authority
