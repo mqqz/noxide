@@ -217,7 +217,10 @@ fn declarations() -> Manifest {
             resource: 1,
             source: TargetSource::Service { eligible: 8 },
             revision: Revision::Exact,
-            projection: None,
+            projection: Some(Inspection {
+                operation: 8,
+                fields: Vec::new(),
+            }),
             inspect: None,
         }],
         inputs: vec![],
@@ -442,19 +445,17 @@ async fn provider(database: Database) {
                     .unwrap()
                 );
             }
+            let cutoff = batch.cutoff();
+            let cutoff_seq = batch.cutoff_seq();
             QueueContext {
                 tx: &mut tx,
                 calls: &mut calls,
             }
-            .finish_recurrence(&batch, Some(&cursor))
+            .finish_recurrence(batch, Some(&cursor))
             .await
             .unwrap();
             assert!(calls <= 16);
-            let result = (
-                batch.cutoff(),
-                u64::try_from(batch.cutoff_seq()).unwrap(),
-                cursor,
-            );
+            let result = (cutoff, u64::try_from(cutoff_seq).unwrap(), cursor);
             tx.commit().await.unwrap();
             result
         })
