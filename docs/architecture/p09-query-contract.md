@@ -96,3 +96,11 @@ provider-specific DDL and verify actual table/namespace/column/expression/order/
 collation/predicate/validity. The temporary old consumer bridge is removed when
 C switches atomically; it cannot render binary P09 shapes. String-generation tests
 do not prove native index correctness or provider plan efficiency.
+
+Scalar keysets validate the signed storage ID domain, exact scalar representation
+and canonical field domain before binding. SQL compares scalar then ID in the same
+direction, with numeric casts or explicit C/BINARY ordering. Dynamic range bounds
+are validated together before parameters are appended; no endpoint arithmetic is
+used. Mutable LiveView ordering can omit or repeat a row when another request
+moves its sort key across a cursor. That behavior is explicitly chosen by the
+declaration; immutable ordering prevents those key moves.

@@ -23,6 +23,21 @@ pub(crate) enum NativeProvider {
     Sqlite,
     Postgres,
 }
+impl NativeProvider {
+    pub(crate) fn field_expression(self, field: &str) -> Result<String> {
+        ensure!(manifest::identifier(field), "invalid field");
+        Ok(match self {
+            Self::Sqlite => format!("json_extract(fields, '$.\"{field}\"')"),
+            Self::Postgres => format!("(fields::jsonb ->> '{field}')"),
+        })
+    }
+    pub(crate) fn binary_collation(self) -> &'static str {
+        match self {
+            Self::Sqlite => "BINARY",
+            Self::Postgres => "\"C\"",
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub(crate) enum ScalarRepresentation {
     Numeric,
@@ -80,17 +95,8 @@ impl IndexRequirement {
     pub(crate) fn native_sql(&self, provider: NativeProvider, storage: i64) -> Result<String> {
         self.sql_with(
             storage,
-            |field| {
-                ensure!(manifest::identifier(field), "invalid field");
-                Ok(match provider {
-                    NativeProvider::Sqlite => format!("json_extract(fields, '$.\"{field}\"')"),
-                    NativeProvider::Postgres => format!("(fields::jsonb ->> '{field}')"),
-                })
-            },
-            Some(match provider {
-                NativeProvider::Sqlite => "BINARY",
-                NativeProvider::Postgres => "\"C\"",
-            }),
+            |field| provider.field_expression(field),
+            Some(provider.binary_collation()),
         )
     }
     /// Temporary pre-P09 consumer bridge. C removes this when native verification
