@@ -1,9 +1,10 @@
 # Durable jobs
 
-This is the P10 leaf integration contract. The protocol module and host queue
-remain unregistered on the dependency SHA. No production worker, scheduling
-capability, migration, SDK integration or acceptance is claimed by this packet.
-Native compilation and provider execution are unrun while P09 owns the gate.
+This documents the P10 integration branch. The protocol, audited storage14,
+operator approval, existing action executor adapter, recurring selector and
+worker are wired together. P10 remains unaccepted until its final integrated
+runtime, operator, provider and independent review gates pass. The accepted
+capability-expansion branch currently ends at P09.
 
 ## Authority and identity
 
