@@ -76,7 +76,7 @@ impl OutboxContext<'_> {
     ) -> Result<(String, String, String)> {
         scope.validate()?;
         self.checkpoint()?;
-        let suffix = if self.tx.query_provider()? == NativeProvider::Postgres {
+        let suffix = if matches!(self.tx.query_provider()?, NativeProvider::Postgres) {
             " FOR SHARE"
         } else {
             ""
@@ -104,7 +104,7 @@ impl OutboxContext<'_> {
         endpoint: &str,
     ) -> Result<Option<(EndpointGrant, String)>> {
         self.checkpoint()?;
-        let suffix = if self.tx.query_provider()? == NativeProvider::Postgres {
+        let suffix = if matches!(self.tx.query_provider()?, NativeProvider::Postgres) {
             " FOR SHARE"
         } else {
             ""
@@ -249,7 +249,7 @@ impl OutboxContext<'_> {
         );
         let changed=self.tx.execute("UPDATE nx_effect_queue SET claim_seq=claim_seq+1 WHERE singleton=1 AND claim_seq<9223372036854775807",&[]).await?;
         ensure!(changed == 1, "effect queue unavailable");
-        let suffix = if self.tx.query_provider()? == NativeProvider::Postgres {
+        let suffix = if matches!(self.tx.query_provider()?, NativeProvider::Postgres) {
             " FOR UPDATE OF o SKIP LOCKED"
         } else {
             ""
