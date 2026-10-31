@@ -1,6 +1,6 @@
 //! One DB-bound delivery owner. Wall leases never release physical capacity.
 use super::{
-    transport::{BearerSecret, TorProxy, Transport},
+    transport::{BearerSecret, Transport},
     types::{digest, opaque},
 };
 use anyhow::{Context, Result, ensure};
@@ -108,14 +108,14 @@ impl DeliveryOwner {
     pub(crate) fn claim(
         lease: Arc<OwnerLease>,
         concurrency: u8,
-        proxy: TorProxy,
+        transport: Transport,
     ) -> Result<Arc<Self>> {
         ensure!((1..=2).contains(&concurrency), "invalid effect concurrency");
         fs::flock(&lease.file, FlockOperation::NonBlockingLockExclusive)
             .context("effect delivery already owned")?;
         Ok(Arc::new(Self {
             lease,
-            transport: Transport::new(proxy),
+            transport,
             slots: Arc::new(Semaphore::new(usize::from(concurrency))),
             concurrency,
             active: Mutex::new(BTreeMap::new()),

@@ -31,6 +31,8 @@ pub(crate) struct EffectRuntime {
     pub(super) lifecycle: Arc<Registry>,
     owner: Mutex<Option<Arc<DeliveryOwner>>>,
     running: AtomicBool,
+    #[cfg(test)]
+    test_roots: Mutex<Option<rustls::RootCertStore>>,
 }
 impl EffectRuntime {
     pub(crate) fn new(effective: EffectiveEffectDeployment) -> Self {
@@ -51,6 +53,8 @@ impl EffectRuntime {
             lifecycle: Arc::new(Registry::default()),
             owner: Mutex::new(None),
             running: AtomicBool::new(false),
+            #[cfg(test)]
+            test_roots: Mutex::new(None),
         }
     }
     pub(crate) fn effective(&self) -> &EffectiveEffectDeployment {
@@ -81,7 +85,19 @@ impl EffectRuntime {
             .clone();
         let proxy = effects::transport::TorProxy::loopback(self.effective.tor_proxy)
             .map_err(|_| anyhow::anyhow!("invalid effect Tor proxy"))?;
-        let owner = DeliveryOwner::claim(lease, self.effective.limits.worker_concurrency, proxy)?;
+        let transport = effects::transport::Transport::new(proxy);
+        #[cfg(test)]
+        let transport = match self
+            .test_roots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            Some(roots) => effects::transport::Transport::with_test_roots(proxy, roots.clone()),
+            None => transport,
+        };
+        let owner =
+            DeliveryOwner::claim(lease, self.effective.limits.worker_concurrency, transport)?;
         *current = Some(owner.clone());
         Ok(owner)
     }

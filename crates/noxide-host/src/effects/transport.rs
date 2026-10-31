@@ -86,6 +86,10 @@ impl Transport {
             rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         Self::with_roots(proxy, roots)
     }
+    #[cfg(test)]
+    pub(crate) fn with_test_roots(proxy: TorProxy, roots: rustls::RootCertStore) -> Self {
+        Self::with_roots(proxy, roots)
+    }
     fn with_roots(proxy: TorProxy, roots: rustls::RootCertStore) -> Self {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut tls = rustls::ClientConfig::builder_with_provider(provider)
