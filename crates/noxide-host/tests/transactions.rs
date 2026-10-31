@@ -119,8 +119,8 @@ fn component(mode: &str) -> Vec<u8> {
         ],
     )))
     .unwrap();
-    let route = br#"{"version":1,"kind":{"route":"#.len();
-    let kind = br#"{"version":1,"kind":{"#.len() + 1;
+    let route = format!(r#"{{"version":{VERSION},"kind":{{"route":"#).len();
+    let kind = format!(r#"{{"version":{VERSION},"kind":{{"#).len() + 1;
     wat::parse_str(format!(r#"(component
       (import "noxide:application/host@0.1.0" (instance $h
         (export "emit" (func (param "word" u64) (param "length" u32)))
@@ -316,7 +316,10 @@ impl Case {
                 db.clone(),
                 serde_json::from_slice(keys).unwrap(),
                 limits,
-                noxide_host::assets::AssetBundle::default(),
+                noxide_host::DeploymentResources {
+                    assets: noxide_host::assets::AssetBundle::default(),
+                    blobs: None,
+                },
             )
             .unwrap(),
         );
@@ -816,7 +819,10 @@ async fn contract_changes_invalidate_tokens(mut case: Case) {
             case.db.clone(),
             serde_json::from_slice(&case.keys).unwrap(),
             Limits::default(),
-            noxide_host::assets::AssetBundle::default(),
+            noxide_host::DeploymentResources {
+                assets: noxide_host::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap();
         changed.activate().await.unwrap();

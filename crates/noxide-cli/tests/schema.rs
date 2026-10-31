@@ -33,7 +33,10 @@ async fn schema_drafts_require_backfills_and_apply_the_approved_target() {
         database.clone(),
         serde_json::from_slice(&keys).unwrap(),
         Limits::default(),
-        noxide_host::assets::AssetBundle::default(),
+        noxide_host::DeploymentResources {
+            assets: noxide_host::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     app.activate().await.unwrap();
@@ -102,7 +105,10 @@ async fn schema_drafts_require_backfills_and_apply_the_approved_target() {
         database,
         serde_json::from_slice(&keys).unwrap(),
         Limits::default(),
-        noxide_host::assets::AssetBundle::default(),
+        noxide_host::DeploymentResources {
+            assets: noxide_host::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     new_app.activate().await.unwrap();

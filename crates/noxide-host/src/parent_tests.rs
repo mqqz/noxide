@@ -140,6 +140,8 @@ pub(crate) async fn seed(db: &Database, m: &Manifest) {
 async fn effects(db: &Database, m: &Manifest, route: u32, target: u64) -> Effects {
     Effects {
         authority: Default::default(),
+        upload: None,
+        blob_reads: Default::default(),
         provenance: Default::default(),
         follow_sources: Vec::new(),
         invoked: Default::default(),
@@ -524,7 +526,10 @@ async fn forms_case(db: Database, _sqlite: bool) {
         db.clone(),
         HostKeys::generate().unwrap(),
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     app.activate().await.unwrap();
@@ -829,7 +834,10 @@ async fn optional_auth_pages_omit_declared_owner_forms_for_anonymous_visitors() 
         db.clone(),
         HostKeys::generate().unwrap(),
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     app.activate().await.unwrap();
@@ -1204,7 +1212,10 @@ async fn opaque_cursors_bind_parent_contract_deployment_and_identity() {
         db.clone(),
         serde_json::from_slice(&serde_json::to_vec(&keys).unwrap()).unwrap(),
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     app.activate().await.unwrap();
@@ -1290,7 +1301,10 @@ async fn opaque_cursors_bind_parent_contract_deployment_and_identity() {
         db.clone(),
         serde_json::from_slice(&serde_json::to_vec(&keys).unwrap()).unwrap(),
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     redeployed.activate().await.unwrap();
@@ -1309,7 +1323,10 @@ async fn opaque_cursors_bind_parent_contract_deployment_and_identity() {
         db.clone(),
         keys,
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     redeployed.activate().await.unwrap();
@@ -1336,7 +1353,10 @@ async fn full_creation_benchmark(db: Database) {
             db.clone(),
             HostKeys::generate().unwrap(),
             Limits::default(),
-            crate::assets::AssetBundle::default(),
+            crate::DeploymentResources {
+                assets: crate::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap(),
     );
@@ -1476,7 +1496,10 @@ pub(crate) async fn redirect_app(db: Database) -> (Application, Manifest) {
         db.clone(),
         HostKeys::generate().unwrap(),
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     app.activate().await.unwrap();

@@ -207,7 +207,10 @@ pub async fn build(command: &str, args: &[OsString]) -> Result<()> {
             database,
             noxide_host::HostKeys::generate()?,
             Default::default(),
-            assets,
+            noxide_host::DeploymentResources {
+                assets,
+                blobs: None,
+            },
         )?;
         app.activate().await?;
         println!("Runtime admission and activation passed with disposable test storage.");

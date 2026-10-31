@@ -3,11 +3,14 @@
 //! commit, authorize a principal, or recover an uncertain semantic receipt.
 use crate::blob_store::{DurableObject, ObjectKey};
 use anyhow::{Context, Result, ensure};
+#[cfg(test)]
 use noxide_protocol::{
-    blobs::{
-        BlobLimits, BlobRef, MAX_LIVE_STAGES, MAX_UPLOAD_BYTES, STAGE_LIFETIME_MILLIS, UploadHandle,
-    },
-    time::{Duration, Timestamp},
+    blobs::{BlobLimits, MAX_LIVE_STAGES, STAGE_LIFETIME_MILLIS},
+    time::Duration,
+};
+use noxide_protocol::{
+    blobs::{BlobRef, MAX_UPLOAD_BYTES, UploadHandle},
+    time::Timestamp,
 };
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -120,6 +123,7 @@ pub(crate) struct Metadata {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct Quota {
     pub(crate) reserved: u64,
     pub(crate) used: u64,
@@ -131,6 +135,7 @@ pub(crate) struct QuotaDelta {
     used: i64,
     objects: i64,
 }
+#[cfg(test)]
 impl Quota {
     pub(crate) fn apply(self, delta: QuotaDelta, limits: BlobLimits) -> Result<Self> {
         limits.validate().map_err(anyhow::Error::msg)?;
@@ -175,6 +180,7 @@ impl Quota {
 
 /// Read while the app counter is write-locked. An anonymous capability supplies
 /// explicitly lower per-cap limits; accounts retain the default 4 live stages.
+#[cfg(test)]
 pub(crate) struct SubjectUsage {
     pub(crate) live_stages: u64,
     pub(crate) held_bytes: u64,
@@ -207,6 +213,7 @@ impl GcClaim {
 }
 
 impl Metadata {
+    #[cfg(test)]
     pub(crate) fn reserve(
         blob: BlobRef,
         pending_handle: UploadHandle,
@@ -372,6 +379,7 @@ impl Metadata {
         Ok(transition)
     }
     /// The owning resource deletion and this transition share the receipt tx.
+    #[cfg(test)]
     pub(crate) fn unreference(
         &self,
         expected: Generation,
@@ -476,3 +484,49 @@ impl Metadata {
 #[cfg(test)]
 #[path = "blob_state_tests.rs"]
 mod tests;
+
+impl Metadata {
+    pub(crate) fn recover_prior_upload(&self) -> Result<(Transition, GcClaim)> {
+        ensure!(
+            self.state == State::Uploading,
+            "not an uploading reservation"
+        );
+        let transition = self.candidate(
+            self.generation,
+            State::Deleting,
+            QuotaDelta {
+                reserved: 0,
+                used: 0,
+                objects: 0,
+            },
+        )?;
+        let claim = GcClaim {
+            key: self.key.clone(),
+            generation: transition.next.generation,
+        };
+        Ok((transition, claim))
+    }
+    pub(crate) fn resume_deletion(&self) -> Result<(Transition, GcClaim)> {
+        ensure!(self.state == State::Deleting, "not a deletion claim");
+        let transition = self.candidate(
+            self.generation,
+            State::Deleting,
+            QuotaDelta {
+                reserved: 0,
+                used: 0,
+                objects: 0,
+            },
+        )?;
+        let claim = GcClaim {
+            key: self.key.clone(),
+            generation: transition.next.generation,
+        };
+        Ok((transition, claim))
+    }
+}
+
+impl Transition {
+    pub(crate) fn quota_delta(&self) -> (i64, i64, i64) {
+        (self.quota.reserved, self.quota.used, self.quota.objects)
+    }
+}

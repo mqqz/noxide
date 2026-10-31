@@ -62,8 +62,8 @@ fn echo_request() -> String {
 pub fn component(mode: &str) -> Vec<u8> {
     let page =
         emit(br#"{"page":{"title":"Note","nodes":[{"form":{"action":2}},{"form":{"action":3}}]}}"#);
-    let kind = br#"{"version":1,"kind":{"#.len() + 1;
-    let action = br#"{"version":1,"kind":{"action":"#.len();
+    let kind = format!(r#"{{"version":{VERSION},"kind":{{"#).len() + 1;
+    let action = format!(r#"{{"version":{VERSION},"kind":{{"action":"#).len();
     let before = match mode {
         "target" => "local.get $op i64.const 43 call $invoke drop".into(),
         "read" => "i32.const 2 i64.const 42 call $invoke drop".into(),
@@ -83,7 +83,7 @@ pub fn component(mode: &str) -> Vec<u8> {
         "snapshot_after" => echo_request(),
         "correctable" => format!(
             "i32.const {} call $request i32.wrap_i64 i32.const 255 i32.and i32.const 99 i32.eq if {copy_outcome} else {} end",
-            br#"{"version":1,"kind":{"action":2},"target":42,"input":{"body":""#.len(),
+            format!(r#"{{"version":{VERSION},"kind":{{"action":2}},"target":42,"input":{{"body":""#).len(),
             emit(br#"{"rejected":{"field_errors":{"body":"Correct this body <script>"},"message":"Nothing saved"}}"#),
         ),
         _ => copy_outcome.clone(),

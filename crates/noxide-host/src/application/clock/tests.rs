@@ -11,7 +11,10 @@ async fn build(database: Database, keys: HostKeys) -> Application {
         database,
         keys,
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap()
 }

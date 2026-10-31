@@ -367,7 +367,10 @@ async fn invalid_parameters_are_not_found_before_database_or_session_lookup() {
         Database::sqlite(tmp.path().join("missing/db")),
         keys,
         Default::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     let router = crate::http::router(

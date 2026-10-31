@@ -40,12 +40,14 @@ impl Application {
             let outcome = lifecycle_clock::tick(tx, &self.clock).await;
             lease.finish().await?;
             let tick = outcome?;
+            self.activate_blobs(deadline).await?;
             // No process readiness on a failed/unknown commit acknowledgement.
             ensure!(
                 self.generation.get_or_init(|| generation.clone()) == &generation,
                 "concurrent activation differs"
             );
-            self.publish_clock(tick)
+            self.publish_clock(tick)?;
+            self.reconcile_blobs(deadline).await
         })
         .await?
     }
@@ -136,6 +138,10 @@ impl Application {
                 {
                     return Err(error);
                 }
+                let _ = owner
+                    .app
+                    .reconcile_blobs(Instant::now() + owner.app.runtime.limits().wall_time)
+                    .await;
             }
         });
         Ok(ClockService {

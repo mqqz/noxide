@@ -310,6 +310,7 @@ impl Application {
                                 Err(error) => return Err(error),
                             }
                             let credentials = FormCredentials {
+                                upload_ticket: self.bound_upload_ticket(action, submission),
                                 selections: Default::default(),
                                 selected: Default::default(),
                                 csrf: csrf.into(),
@@ -464,6 +465,7 @@ impl Application {
             &self.manifest,
             a.id,
             &FormCredentials {
+                upload_ticket: self.bound_upload_ticket(a.id, submission),
                 selections: Default::default(),
                 selected: Default::default(),
                 csrf: csrf.into(),

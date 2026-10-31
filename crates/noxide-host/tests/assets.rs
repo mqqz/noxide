@@ -79,7 +79,10 @@ fn constructor_cannot_substitute_empty_bundle_for_approved_assets() {
             Database::sqlite(temporary.path().join("db")),
             HostKeys::generate().unwrap(),
             Default::default(),
-            AssetBundle::default()
+            noxide_host::DeploymentResources {
+                assets: AssetBundle::default(),
+                blobs: None
+            }
         )
         .is_err()
     );
@@ -157,7 +160,10 @@ async fn public_assets_are_exact_no_store_typed_and_bounded_until_body_drop() {
             Database::sqlite(temp.path().join("db")),
             HostKeys::generate().unwrap(),
             Default::default(),
-            bundle,
+            noxide_host::DeploymentResources {
+                assets: bundle,
+                blobs: None,
+            },
         )
         .unwrap(),
     );

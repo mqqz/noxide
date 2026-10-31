@@ -50,7 +50,10 @@ async fn case(database: Database) {
         database.clone(),
         HostKeys::generate().unwrap(),
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap()
     .with_registration(Registration::Open);

@@ -24,7 +24,10 @@ async fn app(db: Database, mode: Registration) -> Arc<Application> {
             db,
             HostKeys::generate().unwrap(),
             Limits::default(),
-            crate::assets::AssetBundle::default(),
+            crate::DeploymentResources {
+                assets: crate::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap()
         .with_registration(mode)
@@ -596,7 +599,10 @@ async fn clock_recovery_invites_contract(db: Database) {
         db.clone(),
         keys,
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap()
     .with_registration(Registration::Invite);

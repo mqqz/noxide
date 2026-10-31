@@ -1,3 +1,4 @@
+mod blobs;
 mod transport;
 use crate::{
     Application, RequestError,
@@ -160,10 +161,9 @@ fn set_cookie(name: &str, value: &str, secure: bool, age: u32) -> HeaderValue {
 
 fn finish(mut response: Response) -> Response {
     let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CSP),
-    );
+    headers
+        .entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert(HeaderValue::from_static(CSP));
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     // Fetch makes navigation POST Origin opaque under no-referrer. same-origin
     // preserves strict Origin checks and still suppresses cross-origin referrers.
@@ -438,6 +438,9 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
         return StatusCode::BAD_REQUEST.into_response();
     }
     let path = request.uri().path().to_owned();
+    if path == "/_noxide/download" {
+        return blobs::download(gateway, request).await;
+    }
     if path.starts_with(noxide_protocol::assets::ASSET_PATH_PREFIX) {
         if headers.contains_key(header::TRANSFER_ENCODING)
             || headers
@@ -647,6 +650,14 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
             != Some(&gateway.origin.serialized)
     {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    if headers.get_all(header::CONTENT_TYPE).iter().count() == 1
+        && headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|v| v.starts_with("multipart/form-data"))
+    {
+        return blobs::upload(gateway, request).await;
     }
     if headers.get_all(header::CONTENT_TYPE).iter().count() != 1
         || headers
@@ -911,7 +922,10 @@ mod tests {
                     db,
                     HostKeys::generate().unwrap(),
                     Limits::default(),
-                    crate::assets::AssetBundle::default(),
+                    crate::DeploymentResources {
+                        assets: crate::assets::AssetBundle::default(),
+                        blobs: None,
+                    },
                 )
                 .unwrap(),
             );
@@ -1084,7 +1098,10 @@ mod tests {
                     db,
                     HostKeys::generate().unwrap(),
                     Limits::default(),
-                    crate::assets::AssetBundle::default(),
+                    crate::DeploymentResources {
+                        assets: crate::assets::AssetBundle::default(),
+                        blobs: None,
+                    },
                 )
                 .unwrap()
                 .with_presentation(p.clone())

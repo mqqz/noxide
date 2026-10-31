@@ -107,6 +107,7 @@ pub(super) struct InvocationContext<'a> {
     subject: String,
     expires: i64,
     navigation: Option<NavigationPlan<'a>>,
+    upload: Option<super::blobs::UploadContext>,
 }
 
 #[derive(Clone, Copy)]
@@ -185,6 +186,7 @@ impl Application {
             subject,
             expires,
             navigation,
+            upload,
         } = context;
         let sealed: std::collections::BTreeMap<_, _> = grants
             .iter()
@@ -301,6 +303,8 @@ impl Application {
         };
         let effects = Effects {
             authority,
+            upload,
+            blob_reads: Default::default(),
             provenance: Default::default(),
             follow_sources: Vec::new(),
             invoked: Default::default(),
@@ -470,6 +474,7 @@ impl Application {
         let identity = self
             .web_invocation_identity(binding, &token, &session, &principal, input_hash, &sealed)?;
         let context = InvocationContext {
+            upload: self.upload_context(binding.id, &token.nonce, &session, &principal, now)?,
             action: core,
             input,
             principal,
@@ -698,7 +703,10 @@ mod tests {
             crate::Database::sqlite(":memory:"),
             crate::HostKeys::generate().unwrap(),
             crate::runtime::Limits::default(),
-            crate::assets::AssetBundle::default(),
+            crate::DeploymentResources {
+                assets: crate::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap();
         assert!(matches!(
@@ -730,7 +738,10 @@ mod tests {
                 db.clone(),
                 HostKeys::generate().unwrap(),
                 Limits::default(),
-                crate::assets::AssetBundle::default(),
+                crate::DeploymentResources {
+                    assets: crate::assets::AssetBundle::default(),
+                    blobs: None,
+                },
             )
             .unwrap(),
         );
@@ -899,7 +910,10 @@ mod tests {
             database,
             HostKeys::generate().unwrap(),
             Limits::default(),
-            crate::assets::AssetBundle::default(),
+            crate::DeploymentResources {
+                assets: crate::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap();
         let principal = auth::Principal::User(auth::User {
@@ -990,7 +1004,10 @@ mod tests {
                 db.clone(),
                 HostKeys::generate().unwrap(),
                 Limits::default(),
-                crate::assets::AssetBundle::default(),
+                crate::DeploymentResources {
+                    assets: crate::assets::AssetBundle::default(),
+                    blobs: None,
+                },
             )
             .unwrap(),
         );

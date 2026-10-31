@@ -22,8 +22,14 @@ pub(super) fn form(
         "unexpected form field"
     );
     out.push(&format!(
-        "<form method=\"post\" action=\"{}/{}\" accept-charset=\"utf-8\">",
-        presentation.action_path, action.id
+        "<form method=\"post\" action=\"{}/{}\" accept-charset=\"utf-8\"{}>",
+        presentation.action_path,
+        action.id,
+        if credentials.upload_ticket.is_some() {
+            " enctype=\"multipart/form-data\""
+        } else {
+            ""
+        }
     ))?;
     for (name, value) in [
         (presentation.csrf_field.as_str(), &credentials.csrf),
@@ -33,6 +39,9 @@ pub(super) fn form(
         ),
     ] {
         hidden(out, name, value)?;
+    }
+    if let Some(ticket) = &credentials.upload_ticket {
+        hidden(out, "_upload", ticket)?;
     }
     for target in action
         .targets
@@ -108,6 +117,9 @@ pub(super) fn form(
                     .iter()
                     .find(|field| &field.name == name)
                     .expect("validated field");
+                if matches!(field.kind, FieldKind::UploadHandle { .. }) {
+                    continue;
+                }
                 render_field(
                     out,
                     action,
@@ -126,6 +138,26 @@ pub(super) fn form(
                 out.push("</button>")?;
             }
         }
+    }
+    for field in fields
+        .iter()
+        .filter(|f| matches!(f.kind, FieldKind::UploadHandle { .. }))
+    {
+        let staged = input
+            .get(&field.name)
+            .is_some_and(|value| !value.is_empty());
+        if staged {
+            out.push("<p>File already uploaded. This submission reuses that file.</p>")?;
+        }
+        out.push("<label>")?;
+        out.text(&field.label)?;
+        out.push("<input type=\"file\" name=\"")?;
+        out.text(&field.name)?;
+        out.push("\"")?;
+        if !field.optional && !staged {
+            out.push(" required")?;
+        }
+        out.push("></label>")?;
     }
     out.push("</form>")
 }

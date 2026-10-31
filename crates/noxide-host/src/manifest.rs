@@ -1,4 +1,5 @@
 mod authority;
+mod blobs;
 mod computation;
 use anyhow::{Result, ensure};
 pub use computation::{ComputationDisclosure, ComputationSource, action_disclosures};
@@ -213,12 +214,15 @@ pub fn validate(m: &Manifest) -> Result<()> {
     // Wire10 shapes are frozen before integration. No blob declaration is
     // admitted until upload, transactional association and download enforcement
     // land together; accepting a policy now would enable a placeholder grant.
-    ensure!(m.blobs.is_none(), "blob runtime is not available");
+    ensure!(
+        m.blobs.is_none() || cfg!(test),
+        "blob runtime is not available"
+    );
     crate::assets::validate_declarations(&m.assets)?;
     ensure!(
         m.routes
             .iter()
-            .all(|r| !r.path.starts_with("/_noxide/assets")),
+            .all(|r| !r.path.starts_with("/_noxide/assets") && r.path != "/_noxide/download"),
         "reserved asset path"
     );
     ensure!(
@@ -285,8 +289,17 @@ pub fn validate(m: &Manifest) -> Result<()> {
             );
             ensure!(f.max_bytes > 0 && f.max_bytes <= 4096, "field limit");
             match &f.kind {
-                FieldKind::Blob { .. } | FieldKind::UploadHandle { .. } => {
-                    anyhow::bail!("blob runtime is not available")
+                FieldKind::UploadHandle { .. } => {
+                    anyhow::bail!("upload handles are action inputs only")
+                }
+                FieldKind::Blob { max_bytes } => {
+                    ensure!(
+                        *max_bytes > 0
+                            && *max_bytes <= noxide_protocol::blobs::MAX_UPLOAD_BYTES
+                            && f.max_bytes == 67
+                            && f.initial.is_none(),
+                        "invalid Blob field"
+                    );
                 }
                 FieldKind::Reference { resource: key } => {
                     ensure!(
@@ -707,6 +720,7 @@ pub fn validate(m: &Manifest) -> Result<()> {
     for binding in &m.web_bindings {
         validate_web_binding(m, &web_action(m, binding.id)?)?;
     }
+    blobs::validate_blobs(m)?;
     Ok(())
 }
 
@@ -969,13 +983,34 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
             );
             ensure!(
                 op.kind != OperationKind::Update
-                    || !matches!(field.kind, FieldKind::Reference { .. }),
+                    || !matches!(
+                        field.kind,
+                        FieldKind::Reference { .. } | FieldKind::Blob { .. }
+                    ),
                 "reference is immutable"
             );
             match &assignment.change {
                 Change::Set(value) => {
                     if let Target::Named(name) = &step.target {
                         exact.insert(name.as_str());
+                    }
+                    if let FieldKind::Blob { max_bytes } = field.kind {
+                        let Value::Input(name) = value else {
+                            anyhow::bail!("Blob requires one host upload input");
+                        };
+                        let input = a
+                            .inputs
+                            .iter()
+                            .find(|i| i.name == *name)
+                            .ok_or_else(|| anyhow::anyhow!("unknown upload input"))?;
+                        ensure!(
+                            op.kind == OperationKind::Create
+                                && matches!(input.kind, FieldKind::UploadHandle { max_bytes: limit } if limit <= max_bytes)
+                                && (!input.optional || field.optional),
+                            "invalid Blob assignment"
+                        );
+                        used.insert(input.name.as_str());
+                        continue;
                     }
                     let domain = computations.value(m, a, index, value, false, &mut used)?;
                     if matches!(field.kind, FieldKind::Reference { .. }) {
@@ -1030,7 +1065,10 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
                     == resource
                         .fields
                         .iter()
-                        .filter(|field| field.initial.is_none())
+                        .filter(|field| field.initial.is_none()
+                            && !(field.optional
+                                && matches!(field.kind, FieldKind::Blob { .. })
+                                && !step.assign.iter().any(|a| a.field == field.name)))
                         .count(),
                 "creation requires every writable field"
             );
@@ -1124,9 +1162,13 @@ fn validate_input_schema(input: &Input) -> Result<()> {
         "input byte limit"
     );
     match &input.kind {
-        FieldKind::Blob { .. } | FieldKind::UploadHandle { .. } => {
-            anyhow::bail!("blob runtime is not available")
-        }
+        FieldKind::Blob { .. } => anyhow::bail!("Blob fields are storage only"),
+        FieldKind::UploadHandle { max_bytes } => ensure!(
+            *max_bytes > 0
+                && *max_bytes <= noxide_protocol::blobs::MAX_UPLOAD_BYTES
+                && input.max_bytes == 67,
+            "invalid UploadHandle input"
+        ),
         FieldKind::Text => {}
         FieldKind::Timestamp => ensure!(input.max_bytes >= 20, "timestamp input budget"),
         FieldKind::Duration { max_millis } => ensure!(

@@ -151,7 +151,10 @@ async fn app(db: Database) -> Arc<Application> {
             db,
             HostKeys::generate().unwrap(),
             Limits::default(),
-            crate::assets::AssetBundle::default(),
+            crate::DeploymentResources {
+                assets: crate::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap(),
     );
@@ -246,7 +249,10 @@ async fn lifecycle(db: Database) {
         db.clone(),
         rotated_keys,
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     retained.activate().await.unwrap();
@@ -268,7 +274,10 @@ async fn lifecycle(db: Database) {
         db.clone(),
         removed,
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     retired_key.activate().await.unwrap();
@@ -569,7 +578,10 @@ async fn public_create_rejects_guest_outcomes_and_requires_an_edit_signing_key()
         db.clone(),
         HostKeys::generate().unwrap(),
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     app.activate().await.unwrap();
@@ -603,7 +615,10 @@ async fn public_create_rejects_guest_outcomes_and_requires_an_edit_signing_key()
         unbound.clone(),
         keys,
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     let before = rows(&unbound).await;
@@ -899,7 +914,10 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
             db.clone(),
             keys,
             Limits::default(),
-            crate::assets::AssetBundle::default(),
+            crate::DeploymentResources {
+                assets: crate::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap();
         app.activate().await.unwrap();
@@ -981,6 +999,8 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
         };
         let mut effects = crate::repository::Effects {
             authority: Default::default(),
+            upload: None,
+            blob_reads: Default::default(),
             provenance: Default::default(),
             follow_sources: Vec::new(),
             invoked: Default::default(),
@@ -1057,7 +1077,10 @@ async fn persistent_resource_secret_contract(db: Database) {
         db.clone(),
         keys,
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     changed.activate().await.unwrap();
@@ -1132,7 +1155,10 @@ async fn persistent_resource_secret_contract(db: Database) {
         db,
         keys,
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     changed.activate().await.unwrap();
@@ -1697,7 +1723,10 @@ async fn sqlite_initial_fields_reject_clients_and_stale_contracts() {
                     db.clone(),
                     serde_json::from_slice(&keys).unwrap(),
                     Limits::default(),
-                    crate::assets::AssetBundle::default(),
+                    crate::DeploymentResources {
+                        assets: crate::assets::AssetBundle::default(),
+                        blobs: None,
+                    },
                 )
                 .unwrap(),
             )

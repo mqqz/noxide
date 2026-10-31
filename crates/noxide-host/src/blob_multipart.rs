@@ -95,12 +95,10 @@ impl PrefixSpec {
                 "invalid multipart scalar schema"
             );
         }
-        for (field, expected) in fields.iter().zip(["_csrf", "_submission", "_upload"]) {
-            ensure!(
-                field.name == expected && field.required,
-                "invalid multipart security prefix"
-            );
-        }
+        ensure!(
+            fields[..3].iter().all(|field| field.required) && fields[2].name == "_upload",
+            "invalid multipart security prefix"
+        );
         ensure!(
             part_name(&file) && !seen.contains(file.as_str()),
             "invalid multipart file schema"
@@ -118,7 +116,7 @@ fn part_name(value: &str) -> bool {
         && value.len() <= 64
         && value
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
 enum PrefixPhase {

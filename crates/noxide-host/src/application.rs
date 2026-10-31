@@ -1,5 +1,6 @@
 mod action;
 mod authority;
+pub(crate) mod blobs;
 use crate::database::lifecycle::{AdmissionOwner, Registry, RequestScope};
 pub(crate) use action::ActionCore;
 use action::{CanonicalActionInput, ExecutionBudget};
@@ -224,6 +225,7 @@ impl std::error::Error for RequestError {}
 pub struct Application {
     pub(crate) presentation: crate::Presentation,
     pub(crate) assets: Arc<crate::assets::AssetBundle>,
+    pub(crate) blobs: Option<blobs::BlobRuntime>,
     pub(crate) asset_responses: Arc<tokio::sync::Semaphore>,
     pub(crate) registration: auth::Registration,
     pub(crate) manifest: Arc<Manifest>,
@@ -640,15 +642,26 @@ impl Application {
         database: Database,
         keys: HostKeys,
         limits: Limits,
-        assets: crate::assets::AssetBundle,
+        resources: crate::DeploymentResources,
     ) -> Result<Self> {
         let m = manifest::parse(declarations)?;
-        assets.verify_declarations(&m.assets)?;
-        let digest = manifest::digest(&m)?;
+        let approval =
+            crate::blob_deployment::approval(&m, resources.blobs.as_ref().map(|b| &b.ceilings))?;
+        let digest = approval.digest;
         ensure!(
             digest == approved,
             "deployment did not approve this contract"
         );
+        resources.assets.verify_declarations(&m.assets)?;
+        let blobs = resources
+            .blobs
+            .map(|deployment| {
+                blobs::BlobRuntime::open(
+                    deployment,
+                    approval.effective.expect("validated blob deployment"),
+                )
+            })
+            .transpose()?;
         let mut identity = Sha256::new();
         identity.update(digest);
         identity.update(Sha256::digest(component));
@@ -664,7 +677,8 @@ impl Application {
         .with_wasm_capacity(concurrency);
         Ok(Self {
             presentation: crate::Presentation::default(),
-            assets: Arc::new(assets),
+            assets: Arc::new(resources.assets),
+            blobs,
             asset_responses: Arc::new(tokio::sync::Semaphore::new(8)),
             registration: auth::Registration::Closed,
             plans: crate::query_plan::compile_all(&m)?,
@@ -691,6 +705,30 @@ impl Application {
     /// Configure trusted HTTP presentation before sharing or activating the application.
     pub fn with_presentation(mut self, presentation: crate::Presentation) -> Result<Self> {
         presentation.validate(&self.manifest)?;
+        ensure!(
+            [
+                &presentation.csrf_field,
+                &presentation.submission_field,
+                &presentation.capability_field
+            ]
+            .iter()
+            .all(|name| name.as_str() != "_upload"),
+            "reserved upload field"
+        );
+        ensure!(
+            [
+                &presentation.login_path,
+                &presentation.account_path,
+                &presentation.logout_path,
+                &presentation.action_path,
+                &presentation.stylesheet_path,
+                &presentation.registration_path,
+                &presentation.capability_path
+            ]
+            .iter()
+            .all(|path| path.as_str() != "/_noxide/download"),
+            "reserved download path"
+        );
         self.presentation = presentation;
         Ok(self)
     }
@@ -1035,7 +1073,19 @@ impl Application {
             }
         };
         let (_, submission) = self.keys.issue(kind, &session.nonce, now, 900)?;
+        let upload_ticket = self
+            .blobs
+            .as_ref()
+            .filter(|blobs| {
+                blobs
+                    .policy
+                    .uploads
+                    .iter()
+                    .any(|u| u.web_binding == action.id)
+            })
+            .map(|_| self.upload_ticket(action.id, &submission));
         Ok(FormCredentials {
+            upload_ticket,
             selections: Default::default(),
             selected: Default::default(),
             csrf: self.keys.csrf(&session.nonce),
@@ -1441,6 +1491,8 @@ impl Application {
             };
             let effects = Effects {
                 authority,
+                upload: None,
+                blob_reads: Default::default(),
                 provenance: Default::default(),
                 follow_sources: Vec::new(),
                 invoked: Default::default(),
@@ -1503,6 +1555,7 @@ impl Application {
                         .map(|session| self.keys.csrf(&session.nonce)),
                     next_page,
                     preview_links: effects.see_all.clone(),
+                    downloads: self.download_links(&effects, session.as_ref(), now).map_err(RequestError::database)?,
                 },
             )
             .map_err(|_| RequestError::Rejected)?;
@@ -1546,7 +1599,10 @@ mod clock_tests {
                 db.clone(),
                 HostKeys::generate().unwrap(),
                 Limits::default(),
-                crate::assets::AssetBundle::default(),
+                crate::DeploymentResources {
+                    assets: crate::assets::AssetBundle::default(),
+                    blobs: None,
+                },
             )
             .unwrap(),
         );
@@ -1658,7 +1714,10 @@ mod clock_tests {
             db.clone(),
             HostKeys::generate().unwrap(),
             Limits::default(),
-            crate::assets::AssetBundle::default(),
+            crate::DeploymentResources {
+                assets: crate::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap();
         app.activate().await.unwrap();
@@ -1826,7 +1885,10 @@ mod clock_tests {
             db.clone(),
             HostKeys::generate().unwrap(),
             Limits::default(),
-            crate::assets::AssetBundle::default(),
+            crate::DeploymentResources {
+                assets: crate::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap();
         app.activate().await.unwrap();
@@ -1912,7 +1974,10 @@ mod identity_time_tests {
             Database::sqlite(temp.path().join("absent.db")),
             HostKeys::generate().unwrap(),
             Limits::default(),
-            crate::assets::AssetBundle::default(),
+            crate::DeploymentResources {
+                assets: crate::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap();
         let now = security::now().unwrap();

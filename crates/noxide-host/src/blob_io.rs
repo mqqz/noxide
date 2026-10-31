@@ -30,6 +30,16 @@ impl sealed::Sealed for crate::blob_store::DurableObject {}
 impl IoOutput for crate::blob_store::DurableObject {}
 impl sealed::Sealed for () {}
 impl IoOutput for () {}
+impl sealed::Sealed for crate::application::blobs::InventoryBatch {}
+impl IoOutput for crate::application::blobs::InventoryBatch {}
+impl sealed::Sealed for crate::application::blobs::Snapshot {}
+impl IoOutput for crate::application::blobs::Snapshot {}
+impl sealed::Sealed for crate::blob_store::OpenedObject {}
+impl IoOutput for crate::blob_store::OpenedObject {}
+impl sealed::Sealed for crate::blob_store::PairObservation {}
+impl IoOutput for crate::blob_store::PairObservation {}
+impl sealed::Sealed for crate::blob_store::DurablePairMarker {}
+impl IoOutput for crate::blob_store::DurablePairMarker {}
 
 pub(crate) struct IoPool {
     permits: Arc<Semaphore>,
@@ -70,6 +80,7 @@ impl IoPool {
             cancelled: cancelled.clone(),
             stopped: AtomicBool::new(false),
             outcome: AtomicU8::new(RUNNING),
+            changed: tokio::sync::Notify::new(),
         }));
         let worker = witness.clone();
         let handle = tokio::task::spawn_blocking(move || {
@@ -103,6 +114,7 @@ struct Completion {
     cancelled: Arc<AtomicBool>,
     stopped: AtomicBool,
     outcome: AtomicU8,
+    changed: tokio::sync::Notify,
 }
 #[derive(Clone)]
 pub(crate) struct IoWitness(Arc<Completion>);
@@ -133,6 +145,7 @@ struct StopGuard(IoWitness);
 impl Drop for StopGuard {
     fn drop(&mut self) {
         self.0.0.stopped.store(true, Ordering::Release);
+        self.0.0.changed.notify_waiters();
     }
 }
 
@@ -170,3 +183,38 @@ impl<T> Drop for IoJob<T> {
 #[cfg(test)]
 #[path = "blob_io_tests.rs"]
 mod tests;
+
+impl IoWitness {
+    /// A host reservation exists but its owner has not dispatched native I/O.
+    /// The reservation lease must remain live until dispatch or mark this stopped.
+    pub(crate) fn pending(key: ObjectKey, generation: Generation) -> Self {
+        Self(Arc::new(Completion {
+            key,
+            generation,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            stopped: AtomicBool::new(false),
+            outcome: AtomicU8::new(FAILED),
+            changed: tokio::sync::Notify::new(),
+        }))
+    }
+    pub(crate) fn stop_unstarted(&self) {
+        self.0.cancelled.store(true, Ordering::Release);
+        self.0.stopped.store(true, Ordering::Release);
+        self.0.changed.notify_waiters();
+    }
+    pub(crate) fn cancel(&self) {
+        self.0.cancelled.store(true, Ordering::Release);
+    }
+    #[cfg(test)]
+    pub(crate) async fn wait_stopped(&self) {
+        loop {
+            let changed = self.0.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.stopped().is_some() {
+                return;
+            }
+            changed.await;
+        }
+    }
+}

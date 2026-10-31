@@ -399,7 +399,15 @@ async fn main() -> Result<()> {
                     database(&config.database, &base)?,
                     keys,
                     Limits::default(),
-                    assets,
+                    noxide_host::DeploymentResources {
+                        assets,
+                        blobs: config.blobs.as_ref().map(|deployment| {
+                            noxide_host::BlobDeployment {
+                                directory: base.join(&deployment.directory),
+                                ceilings: deployment.ceilings.clone(),
+                            }
+                        }),
+                    },
                 )?
                 .with_presentation(config.presentation)?
                 .with_signed_in_reserve(config.signed_in_reserve)?

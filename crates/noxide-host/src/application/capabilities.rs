@@ -124,6 +124,7 @@ impl Application {
                             let mut page = render::capability_rotation(
                                 &self.presentation,
                                 &FormCredentials {
+                                    upload_ticket: None,
                                     selections: Default::default(),
                                     selected: Default::default(),
                                     csrf: self.keys.csrf(&anonymous.nonce),

@@ -141,7 +141,10 @@ impl Case {
                 db.clone(),
                 HostKeys::generate().unwrap(),
                 Limits::default(),
-                crate::assets::AssetBundle::default(),
+                crate::DeploymentResources {
+                    assets: crate::assets::AssetBundle::default(),
+                    blobs: None,
+                },
             )
             .unwrap(),
         );
@@ -1228,6 +1231,8 @@ async fn follow_provenance_keeps_each_reference_field_separate() {
     .unwrap();
     let mut effects = Effects {
         authority: Default::default(),
+        upload: None,
+        blob_reads: Default::default(),
         provenance: Default::default(),
         follow_sources: vec![],
         invoked: Default::default(),
@@ -1341,6 +1346,8 @@ async fn picker_query_ignores_and_preserves_unrelated_route_pagination() {
     .unwrap();
     let mut effects = Effects {
         authority: Default::default(),
+        upload: None,
+        blob_reads: Default::default(),
         provenance: Default::default(),
         follow_sources: vec![],
         invoked: Default::default(),

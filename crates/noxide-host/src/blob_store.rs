@@ -215,8 +215,8 @@ impl BlobStore {
             FILE_FLAGS | OFlags::RDONLY,
             Mode::empty(),
         )
-        .context("blob object unavailable")?;
-        regular(&fd, 0o400, Some(expected))?;
+        .map_err(|_| PhysicalMismatch)?;
+        regular(&fd, 0o400, Some(expected)).map_err(|_| PhysicalMismatch)?;
         guard.check()?;
         Ok(OpenedObject {
             file: fd.into(),
@@ -516,3 +516,95 @@ pub(crate) use pairing::{
 #[cfg(test)]
 #[path = "blob_store_tests.rs"]
 mod tests;
+
+impl BlobStore {
+    pub(crate) fn snapshot(
+        &self,
+        key: &ObjectKey,
+        guard: &IoGuard,
+    ) -> Result<Option<crate::blob_inspect::PhysicalSnapshot>> {
+        let mut sizes = [None, None];
+        for (index, directory) in [&self.0.partial, &self.0.objects].iter().enumerate() {
+            guard.check()?;
+            let fd = match fs::openat(
+                *directory,
+                key.as_str(),
+                FILE_FLAGS | OFlags::RDONLY,
+                Mode::empty(),
+            ) {
+                Ok(fd) => fd,
+                Err(rustix::io::Errno::NOENT) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let stat = fs::fstat(&fd)?;
+            ensure!(
+                FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+                    && stat.st_uid == rustix::process::geteuid().as_raw()
+                    && stat.st_nlink == 1
+                    && stat.st_size >= 0,
+                PhysicalMismatch
+            );
+            sizes[index] = Some(stat.st_size as u64);
+        }
+        guard.check()?;
+        if sizes.iter().all(Option::is_none) {
+            return Ok(None);
+        }
+        Ok(Some(crate::blob_inspect::PhysicalSnapshot {
+            key: key.clone(),
+            partial: sizes[0],
+            finalized: sizes[1],
+        }))
+    }
+}
+impl OpenedObject {
+    pub(crate) fn verify_digest(&mut self, expected: [u8; 32]) -> Result<()> {
+        use std::io::{Seek, SeekFrom};
+        let length = self.remaining;
+        let mut digest = Sha256::new();
+        let mut buffer = Box::new([0; TRANSFER_BUFFER_BYTES]);
+        while self.remaining != 0 {
+            let count = self.read_chunk(&mut *buffer)?;
+            ensure!(count > 0, "truncated immutable object");
+            digest.update(&buffer[..count]);
+        }
+        ensure!(
+            <[u8; 32]>::from(digest.finalize()) == expected,
+            PhysicalMismatch
+        );
+        self.guard.check()?;
+        self.file.seek(SeekFrom::Start(0))?;
+        self.remaining = length;
+        self.guard.check()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PhysicalMismatch;
+impl std::fmt::Display for PhysicalMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("blob store needs operator reconciliation")
+    }
+}
+impl std::error::Error for PhysicalMismatch {}
+/// Retains the exclusive flock; identity is generated here, never caller-picked.
+pub(crate) struct ProcessFence {
+    store: BlobStore,
+    process: ObjectKey,
+}
+impl BlobStore {
+    pub(crate) fn claim_process(&self) -> Result<ProcessFence> {
+        Ok(ProcessFence {
+            store: self.clone(),
+            process: ObjectKey::random()?,
+        })
+    }
+}
+impl ProcessFence {
+    pub(crate) fn process(&self) -> &ObjectKey {
+        &self.process
+    }
+    pub(crate) fn store(&self) -> &ObjectKey {
+        self.store.identity()
+    }
+}

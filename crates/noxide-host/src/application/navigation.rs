@@ -59,6 +59,7 @@ impl Application {
             &self.manifest,
             action.id,
             &FormCredentials {
+                upload_ticket: self.bound_upload_ticket(action.id, submission),
                 selections: Default::default(),
                 selected: Default::default(),
                 csrf: csrf.into(),
@@ -446,7 +447,10 @@ mod tests {
             db.clone(),
             HostKeys::generate().unwrap(),
             Limits::default(),
-            crate::assets::AssetBundle::default(),
+            crate::DeploymentResources {
+                assets: crate::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap();
         app.activate().await.unwrap();
@@ -576,7 +580,10 @@ mod tests {
             db.clone(),
             HostKeys::generate().unwrap(),
             Limits::default(),
-            crate::assets::AssetBundle::default(),
+            crate::DeploymentResources {
+                assets: crate::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap();
         app.activate().await.unwrap();

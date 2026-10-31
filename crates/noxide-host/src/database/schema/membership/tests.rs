@@ -692,7 +692,10 @@ async fn contract(db: Database) {
         db.clone(),
         crate::HostKeys::generate().unwrap(),
         crate::runtime::Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     let started = Instant::now();

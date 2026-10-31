@@ -42,6 +42,8 @@ fn declarations() -> Manifest {
 fn effects(tx: Transaction, m: &Manifest, id: &str, action: bool, recipient: &str) -> Effects {
     Effects {
         authority: Default::default(),
+        upload: None,
+        blob_reads: Default::default(),
         provenance: Default::default(),
         follow_sources: Vec::new(),
         invoked: Default::default(),

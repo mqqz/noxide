@@ -31,7 +31,10 @@ async fn conformance(
             database.clone(),
             keys,
             Limits::default(),
-            noxide_host::assets::AssetBundle::default(),
+            noxide_host::DeploymentResources {
+                assets: noxide_host::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap(),
     );
@@ -100,7 +103,10 @@ async fn conformance(
         database.clone(),
         serde_json::from_slice(&saved_keys).unwrap(),
         Limits::default(),
-        noxide_host::assets::AssetBundle::default(),
+        noxide_host::DeploymentResources {
+            assets: noxide_host::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     restarted.activate().await.unwrap();
@@ -138,7 +144,10 @@ async fn conformance(
             database.clone(),
             serde_json::from_slice(&saved_keys).unwrap(),
             Limits::default(),
-            noxide_host::assets::AssetBundle::default(),
+            noxide_host::DeploymentResources {
+                assets: noxide_host::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap();
         hostile.activate().await.unwrap();
@@ -189,7 +198,10 @@ async fn conformance(
         database.clone(),
         serde_json::from_slice(&saved_keys).unwrap(),
         Limits::default(),
-        noxide_host::assets::AssetBundle::default(),
+        noxide_host::DeploymentResources {
+            assets: noxide_host::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     assert!(replacement.activate().await.is_err());
@@ -210,7 +222,10 @@ async fn conformance(
         database.clone(),
         serde_json::from_slice(&saved_keys).unwrap(),
         Limits::default(),
-        noxide_host::assets::AssetBundle::default(),
+        noxide_host::DeploymentResources {
+            assets: noxide_host::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     replacement.activate().await.unwrap();
@@ -222,7 +237,10 @@ async fn conformance(
         database.clone(),
         serde_json::from_slice(&saved_keys).unwrap(),
         Limits::default(),
-        noxide_host::assets::AssetBundle::default(),
+        noxide_host::DeploymentResources {
+            assets: noxide_host::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     rollback.activate().await.unwrap();
@@ -235,7 +253,10 @@ async fn conformance(
         database.clone(),
         HostKeys::generate().unwrap(),
         Limits::default(),
-        noxide_host::assets::AssetBundle::default(),
+        noxide_host::DeploymentResources {
+            assets: noxide_host::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     restored.activate().await.unwrap();
@@ -257,7 +278,10 @@ async fn application_again(
         db,
         serde_json::from_slice(keys).unwrap(),
         Limits::default(),
-        noxide_host::assets::AssetBundle::default(),
+        noxide_host::DeploymentResources {
+            assets: noxide_host::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     app.activate().await.unwrap();

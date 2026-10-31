@@ -33,7 +33,10 @@ async fn clock_recovery_requires_a_private_new_key() {
         db.clone(),
         old_keys,
         Limits::default(),
-        noxide_host::assets::AssetBundle::default(),
+        noxide_host::DeploymentResources {
+            assets: noxide_host::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     old.activate().await.unwrap();
@@ -91,7 +94,10 @@ async fn clock_recovery_requires_a_private_new_key() {
         db,
         fresh,
         Limits::default(),
-        noxide_host::assets::AssetBundle::default(),
+        noxide_host::DeploymentResources {
+            assets: noxide_host::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     new.activate().await.unwrap();

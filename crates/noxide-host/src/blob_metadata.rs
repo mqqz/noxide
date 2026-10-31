@@ -1,7 +1,5 @@
-//! Disabled provider-portable blob metadata preparation. Every statement charges
-//! the explicit caller counter; runtime integration must replace that prototype
-//! with the shared transaction-owned actual-statement meter, never a new upload
-//! allowance. Caller owns commit/rollback/unknown-outcome recovery. These methods
+//! Provider-portable blob metadata. Every statement uses the existing
+//! transaction-owned root statement meter; no independent upload allowance. Caller owns commit/rollback/unknown-outcome recovery. These methods
 //! perform no filesystem work and mint no acknowledged-commit proof.
 use crate::{
     blob_state::{
@@ -25,18 +23,9 @@ use noxide_protocol::{
 
 pub(crate) struct MetadataContext<'a> {
     pub(crate) tx: &'a mut Transaction,
-    pub(crate) calls: &'a mut u32,
 }
 impl MetadataContext<'_> {
-    fn spend(&mut self) -> Result<()> {
-        *self.calls = self
-            .calls
-            .checked_sub(1)
-            .context("blob database call budget")?;
-        Ok(())
-    }
     async fn execute(&mut self, sql: &str, params: &[Param]) -> Result<u64> {
-        self.spend()?;
         self.tx.execute(sql, params).await
     }
     async fn fetch<const N: usize>(
@@ -44,7 +33,6 @@ impl MetadataContext<'_> {
         sql: &str,
         params: &[Param],
     ) -> Result<Vec<[String; N]>> {
-        self.spend()?;
         self.tx.fetch(sql, params).await
     }
     /// Startup only, after check_blob_layout. Observation was captured outside
@@ -182,9 +170,23 @@ impl MetadataContext<'_> {
     pub(crate) async fn reference(&mut self, reference: &BlobRef) -> Result<Option<BlobRow>> {
         self.load("blob_ref", reference.as_str()).await
     }
+    pub(crate) async fn object(&mut self, key: &ObjectKey) -> Result<Option<BlobRow>> {
+        self.load("object_key", key.as_str()).await
+    }
+    pub(crate) async fn page(&mut self, after: &str) -> Result<Vec<BlobRow>> {
+        let columns = self.row_columns();
+        self.fetch::<22>(
+            &format!("SELECT {columns} FROM nx_blobs WHERE slot>$1 ORDER BY slot LIMIT 16"),
+            &[after.into()],
+        )
+        .await?
+        .into_iter()
+        .map(BlobRow::parse)
+        .collect()
+    }
     async fn load(&mut self, column: &str, value: &str) -> Result<Option<BlobRow>> {
         ensure!(
-            matches!(column, "slot" | "blob_ref"),
+            matches!(column, "slot" | "blob_ref" | "object_key"),
             "invalid metadata lookup"
         );
         let select = self.row_columns();
@@ -287,7 +289,7 @@ impl MetadataContext<'_> {
             None => (1, 1, request.policy.limits.live_stages, u64::MAX),
         };
         let stages = cap_stages.min(request.policy.limits.live_stages);
-        let changed=self.fetch::<1>(&format!("UPDATE nx_blob_store SET reserved_bytes=reserved_bytes+$2,objects=objects+1,anonymous_reserved_bytes=anonymous_reserved_bytes+$3,serial=serial+1 WHERE singleton=1 AND identity=$1 AND pair_state='paired' AND serial<9223372036854775807 AND reserved_bytes<=$4-used_bytes-$2 AND objects<$5 AND ($6=0 OR anonymous_reserved_bytes<=$7-anonymous_used_bytes-$2) AND (SELECT COUNT(*) FROM (SELECT slot FROM nx_blobs WHERE subject=$8 AND state IN ('uploading','staged') LIMIT 5) subject_stages)<$9 AND ($6=0 OR (SELECT COUNT(*) FROM (SELECT slot FROM nx_blobs WHERE anonymous=1 AND state IN ('uploading','staged') LIMIT 17) deployment_stages)<$10) AND {} RETURNING CAST(serial AS TEXT)", counter_predicate(CounterTable::Store)),&[
+        let changed=self.fetch::<1>(&format!("UPDATE nx_blob_store SET reserved_bytes=reserved_bytes+$2,objects=objects+1,anonymous_reserved_bytes=anonymous_reserved_bytes+$3,serial=serial+1 WHERE singleton=1 AND identity=$1 AND pair_state='paired' AND NOT EXISTS(SELECT 1 FROM nx_blob_orphans) AND serial<9223372036854775807 AND reserved_bytes<=$4-used_bytes-$2 AND objects<$5 AND ($6=0 OR anonymous_reserved_bytes<=$7-anonymous_used_bytes-$2) AND (SELECT COUNT(*) FROM (SELECT slot FROM nx_blobs WHERE subject=$8 AND state IN ('uploading','staged') LIMIT 5) subject_stages)<$9 AND ($6=0 OR (SELECT COUNT(*) FROM (SELECT slot FROM nx_blobs WHERE anonymous=1 AND state IN ('uploading','staged') LIMIT 17) deployment_stages)<$10) AND {} RETURNING CAST(serial AS TEXT)", counter_predicate(CounterTable::Store)),&[
             request.store.as_str().into(),number(request.limit)?,number(anon_bytes)?,number(request.policy.limits.app_bytes)?,i64::from(request.policy.limits.objects).into(),i64::from(anonymous).into(),number(deployment_bytes)?,request.binding.subject.as_str().into(),i64::from(stages).into(),i64::from(deployment_stages).into()]).await?;
         ensure!(changed.len() == 1, "blob app quota unavailable");
         let changed=self.fetch::<1>(&format!("INSERT INTO nx_blob_subjects(subject,anonymous,reserved_bytes,used_bytes,objects) VALUES($1,$2,$3,0,1) ON CONFLICT(subject) DO UPDATE SET reserved_bytes=nx_blob_subjects.reserved_bytes+$3,objects=nx_blob_subjects.objects+1 WHERE nx_blob_subjects.anonymous=$2 AND nx_blob_subjects.objects<65536 AND ($2=0 OR nx_blob_subjects.reserved_bytes<=$4-nx_blob_subjects.used_bytes-$3) AND {} RETURNING subject", counter_predicate(CounterTable::Subject)),&[
@@ -346,6 +348,15 @@ impl MetadataContext<'_> {
             row.metadata
                 .stage(row.metadata.generation, object, now, &row.metadata.binding)?;
         let next = &transition.next;
+        ensure!(
+            transition.quota_delta()
+                == (
+                    -i64::try_from(row.metadata.reserved)?,
+                    i64::try_from(next.bytes)?,
+                    0
+                ),
+            "upload quota transition mismatch"
+        );
         let anonymous = i64::from(row.anonymous);
         let changed=self.execute(&format!("UPDATE nx_blob_store SET reserved_bytes=reserved_bytes-$2,used_bytes=used_bytes+$3,anonymous_reserved_bytes=anonymous_reserved_bytes-$2*$4,anonymous_used_bytes=anonymous_used_bytes+$3*$4,serial=serial+1 WHERE singleton=1 AND identity=$1 AND pair_state='paired' AND reserved_bytes>=$2 AND anonymous_reserved_bytes>=$2*$4 AND objects>0 AND serial<9223372036854775807 AND used_bytes<=9223372036854775807-$3 AND anonymous_used_bytes<=9223372036854775807-$3*$4 AND {}", counter_predicate(CounterTable::Store)),&[store.as_str().into(),number(row.metadata.reserved)?,number(next.bytes)?,anonymous.into()]).await?;
         ensure!(changed == 1, "blob app reservation mismatch");
@@ -523,6 +534,15 @@ impl MetadataContext<'_> {
         now: Timestamp,
     ) -> Result<BlobRow> {
         let transition = row.metadata.deleted(claim)?;
+        ensure!(
+            transition.quota_delta()
+                == (
+                    -i64::try_from(row.metadata.reserved)?,
+                    -i64::try_from(row.metadata.bytes)?,
+                    -1
+                ),
+            "deletion quota transition mismatch"
+        );
         let r = number(row.metadata.reserved)?;
         let u = number(row.metadata.bytes)?;
         let anonymous = i64::from(row.anonymous);
@@ -939,5 +959,71 @@ mod tests {
         ] {
             assert!(hash(&bad).is_err());
         }
+    }
+}
+
+impl MetadataContext<'_> {
+    /// Caller retains this process's exclusive store lease. A prior process can
+    /// no longer have a file descriptor or native worker on that store.
+    pub(crate) async fn recover_prior_upload(
+        &mut self,
+        row: &BlobRow,
+        fence: &crate::blob_store::ProcessFence,
+        now: Timestamp,
+    ) -> Result<(BlobRow, GcClaim)> {
+        let process = fence.process();
+        let paired = self.fetch::<1>("SELECT identity FROM nx_blob_store WHERE singleton=1 AND identity=$1 AND pair_state='paired'", &[fence.store().as_str().into()]).await?;
+        ensure!(
+            paired.len() == 1,
+            "blob process fence belongs to another store"
+        );
+        ensure!(
+            &row.process != process,
+            "live process upload cannot be abandoned"
+        );
+        let (transition, claim) = row.metadata.recover_prior_upload()?;
+        let next = self.persist_claim(row, &transition, process, now).await?;
+        Ok((next, claim))
+    }
+    pub(crate) async fn resume_deletion(
+        &mut self,
+        row: &BlobRow,
+        fence: &crate::blob_store::ProcessFence,
+        now: Timestamp,
+        stopped: Option<&crate::blob_io::StoppedIo>,
+    ) -> Result<(BlobRow, GcClaim)> {
+        let process = fence.process();
+        let paired = self.fetch::<1>("SELECT identity FROM nx_blob_store WHERE singleton=1 AND identity=$1 AND pair_state='paired'", &[fence.store().as_str().into()]).await?;
+        ensure!(
+            paired.len() == 1,
+            "blob process fence belongs to another store"
+        );
+        ensure!(
+            &row.process != process
+                || stopped
+                    .is_some_and(|s| s.key() == &row.metadata.key
+                        && s.generation() == row.metadata.generation),
+            "deletion worker may still be running"
+        );
+        let (transition, claim) = row.metadata.resume_deletion()?;
+        let next = self.persist_claim(row, &transition, process, now).await?;
+        Ok((next, claim))
+    }
+    pub(crate) async fn quarantine_unknown(
+        &mut self,
+        key: &ObjectKey,
+        bytes: u64,
+        paths: u8,
+        store: &ObjectKey,
+        process: &ObjectKey,
+        now: Timestamp,
+    ) -> Result<()> {
+        ensure!((1..=2).contains(&paths), "invalid orphan evidence");
+        let inserted = self.execute("INSERT INTO nx_blob_orphans(object_key,generation,state,first_seen_ms,claimed_ms,charged_bytes,charged_objects,owner_process) SELECT $1,1,'observed',$2,0,$3,$4,$5 WHERE NOT EXISTS(SELECT 1 FROM nx_blobs WHERE object_key=$1) ON CONFLICT(object_key) DO NOTHING", &[key.as_str().into(), now.unix_millis().into(), number(bytes)?, i64::from(paths).into(), process.as_str().into()]).await?;
+        if inserted == 1 {
+            let changed = self.execute("UPDATE nx_blob_store SET used_bytes=used_bytes+$2,objects=objects+$3,serial=serial+1 WHERE singleton=1 AND identity=$1 AND pair_state='paired' AND used_bytes<=9223372036854775807-$2 AND objects<=9223372036854775807-$3 AND serial<9223372036854775807", &[store.as_str().into(), number(bytes)?, i64::from(paths).into()]).await?;
+            ensure!(changed == 1, "orphan quota accounting overflow");
+        }
+        Ok(())
     }
 }

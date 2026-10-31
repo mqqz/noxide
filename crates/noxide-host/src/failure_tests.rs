@@ -123,7 +123,10 @@ async fn application(db: Database, keys: HostKeys) -> Application {
         db,
         keys,
         Limits::default(),
-        crate::assets::AssetBundle::default(),
+        crate::DeploymentResources {
+            assets: crate::assets::AssetBundle::default(),
+            blobs: None,
+        },
     )
     .unwrap();
     app.activate().await.unwrap();
@@ -184,6 +187,8 @@ async fn stored_bounds(db: &Database) {
     }
     let mut effects = Effects {
         authority: Default::default(),
+        upload: None,
+        blob_reads: Default::default(),
         provenance: Default::default(),
         follow_sources: Vec::new(),
         invoked: Default::default(),
@@ -324,7 +329,10 @@ async fn revocation(db: &Database) {
             db.clone(),
             HostKeys::generate().unwrap(),
             Limits::default(),
-            crate::assets::AssetBundle::default(),
+            crate::DeploymentResources {
+                assets: crate::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap(),
     );
@@ -576,7 +584,10 @@ async fn record_application(db: &Database, keys: &[u8]) -> Arc<Application> {
             db.clone(),
             serde_json::from_slice(keys).unwrap(),
             Limits::default(),
-            crate::assets::AssetBundle::default(),
+            crate::DeploymentResources {
+                assets: crate::assets::AssetBundle::default(),
+                blobs: None,
+            },
         )
         .unwrap(),
     );

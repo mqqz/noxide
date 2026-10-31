@@ -83,6 +83,8 @@ fn visible_workspace(expires: i64) -> Fields {
 fn effects(tx: Transaction, m: &Manifest, time: AttemptTime) -> Effects {
     Effects {
         authority: Authority::new(Some(time), scope()),
+        upload: None,
+        blob_reads: Default::default(),
         provenance: Default::default(),
         follow_sources: Vec::new(),
         invoked: Default::default(),

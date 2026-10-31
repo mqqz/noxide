@@ -8,6 +8,7 @@ pub const CSP: &str = "default-src 'none'; style-src 'self'; img-src 'self'; fon
 
 #[derive(Clone)]
 pub struct FormCredentials {
+    pub upload_ticket: Option<String>,
     pub csrf: String,
     pub submission: String,
     pub values: Fields,
@@ -24,6 +25,7 @@ pub struct RenderContext<'a> {
     pub logout_csrf: Option<String>,
     pub next_page: Option<String>,
     pub preview_links: Vec<RouteRef>,
+    pub downloads: BTreeMap<(u32, u64, String), String>,
 }
 
 impl RenderContext<'_> {
@@ -36,6 +38,7 @@ impl RenderContext<'_> {
             logout_csrf: None,
             next_page: None,
             preview_links: Vec::new(),
+            downloads: BTreeMap::new(),
         }
     }
 }
@@ -215,7 +218,29 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
         }
         match node {
             Instruction::Stylesheet { .. } => {}
-            Instruction::Download(_) => anyhow::bail!("blob downloads are not available"),
+            Instruction::Download(download) => {
+                ensure!(
+                    link_depth.is_none() && (flow(&stack) || stack.last().is_some_and(phrasing)),
+                    "download placement"
+                );
+                ensure!(
+                    !download.text.is_empty()
+                        && download.text.len() <= 256
+                        && identifier(&download.field),
+                    "invalid download link"
+                );
+                let href = context
+                    .downloads
+                    .get(&(download.read, download.target, download.field.clone()))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("download lacks successful direct Read provenance")
+                    })?;
+                out.push("<a href=\"")?;
+                out.text(href)?;
+                out.push("\">")?;
+                out.text(&download.text)?;
+                out.push("</a>")?;
+            }
             Instruction::Rich(node) => {
                 ensure!(
                     link_depth.is_none()
@@ -604,6 +629,7 @@ mod tests {
             &manifest,
             &crate::manifest::web_action(&manifest, 1).unwrap(),
             &FormCredentials {
+                upload_ticket: None,
                 selections: Default::default(),
                 selected: Default::default(),
                 csrf: "csrf".into(),
@@ -646,6 +672,7 @@ mod tests {
                     &manifest,
                     &action,
                     &FormCredentials {
+                        upload_ticket: None,
                         selections: Default::default(),
                         selected: Default::default(),
                         csrf: "csrf".into(),
@@ -1075,6 +1102,7 @@ mod asset_credential_style_tests {
             media_type: noxide_protocol::assets::AssetMediaType::Css,
         });
         let credentials = FormCredentials {
+            upload_ticket: None,
             csrf: "csrf".into(),
             submission: "submission".into(),
             values: Fields::new(),

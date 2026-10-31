@@ -160,7 +160,7 @@ pub fn component(failure: Option<&str>) -> Vec<u8> {
         Some("twice") => "i32.const 3 i64.const 0 call $invoke drop".into(),
         _ => emit(br#""execute""#),
     };
-    let kind_offset = br#"{"version":1,"kind":{"#.len() + 1;
+    let kind_offset = format!(r#"{{"version":{VERSION},"kind":{{"#).len() + 1;
     wat::parse_str(format!(r#"(component
       (import "noxide:application/host@0.1.0" (instance $h
         (export "emit" (func (param "word" u64) (param "length" u32)))

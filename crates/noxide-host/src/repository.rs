@@ -104,6 +104,9 @@ pub(crate) const MAX_LIST_DATABASE_CALLS: usize = 4096;
 
 pub(crate) struct Effects {
     pub authority: crate::authority::Authority,
+    pub upload: Option<crate::application::blobs::UploadContext>,
+    pub blob_reads:
+        std::collections::BTreeMap<(u32, u64, String), (String, noxide_protocol::blobs::BlobRef)>,
     pub provenance:
         std::collections::BTreeMap<(u32, u32, u64), std::collections::BTreeMap<String, u64>>,
     pub follow_sources: Vec<(u32, u64)>,
@@ -209,11 +212,11 @@ pub(crate) async fn load(
 pub(crate) use crate::policy::allowed;
 
 /// Common host read authorization and projection; no guest code is executed.
-pub(crate) async fn read_resource(
+async fn read_projected_resource(
     context: &mut ReadContext<'_>,
     op: &Operation,
     target: u64,
-) -> Result<Option<Record>> {
+) -> Result<Option<(Record, String)>> {
     let Some(stored) = context.load(op.resource, target).await? else {
         return Ok(None);
     };
@@ -228,7 +231,18 @@ pub(crate) async fn read_resource(
             .ok_or_else(|| anyhow::anyhow!("missing read projection"))?;
         record.fields.retain(|name, _| projection.contains(name));
     }
-    Ok(Some(record))
+    Ok(Some((record, stored.incarnation)))
+}
+
+#[cfg(test)]
+pub(crate) async fn read_resource(
+    context: &mut ReadContext<'_>,
+    op: &Operation,
+    target: u64,
+) -> Result<Option<Record>> {
+    Ok(read_projected_resource(context, op, target)
+        .await?
+        .map(|(record, _)| record))
 }
 
 pub(crate) async fn authorize_stored_read(
@@ -385,9 +399,43 @@ impl Effects {
                     .guards(step, action)?;
             }
             let mut values = Fields::new();
+            let mut attachments = Vec::new();
             let mut assignments: Vec<_> = step.assign.iter().collect();
             assignments.sort_by(|a, b| a.field.cmp(&b.field));
             for assignment in assignments {
+                let destination = manifest::resource(&self.manifest, op.resource)?
+                    .fields
+                    .iter()
+                    .find(|f| f.name == assignment.field)
+                    .ok_or(ReferenceUnavailable)?;
+                if let FieldKind::Blob { max_bytes } = destination.kind {
+                    ensure!(op.kind == OperationKind::Create, ReferenceUnavailable);
+                    let Change::Set(Value::Input(name)) = &assignment.change else {
+                        anyhow::bail!(ReferenceUnavailable);
+                    };
+                    let raw = self.request.input.get(name).ok_or(ReferenceUnavailable)?;
+                    if raw.is_empty() && destination.optional {
+                        values.insert(assignment.field.clone(), String::new());
+                        continue;
+                    }
+                    let handle = noxide_protocol::blobs::UploadHandle::parse(raw.clone())
+                        .map_err(anyhow::Error::msg)?;
+                    let upload = self.upload.as_ref().ok_or(ReferenceUnavailable)?;
+                    let locked = crate::blob_metadata::MetadataContext { tx: &mut self.tx }
+                        .lock_stage(&handle, &upload.binding, upload.now)
+                        .await?;
+                    ensure!(
+                        locked.row().metadata.bytes <= max_bytes,
+                        ReferenceUnavailable
+                    );
+                    let row = locked.row();
+                    // The stage lock excludes GC. Only a checked immutable descriptor
+                    // proves bytes exist before canonical proposed-row authorization.
+                    upload.verify(row).await?;
+                    values.insert(assignment.field.clone(), locked.blob().as_str().to_owned());
+                    attachments.push((assignment.field.clone(), locked));
+                    continue;
+                }
                 let value = match &assignment.change {
                     Change::Set(value) => self
                         .computation_values(&context, &outcomes, step, stored.as_ref())
@@ -454,6 +502,25 @@ impl Effects {
                 }
                 _ => anyhow::bail!("transaction requires mutation"),
             };
+            for (field, locked) in attachments {
+                let now = self.upload.as_ref().ok_or(ReferenceUnavailable)?.now;
+                let storage_resource = self
+                    .tx
+                    .storage_resource(&self.manifest, outcome.resource)
+                    .await?;
+                crate::blob_metadata::MetadataContext { tx: &mut self.tx }
+                    .associate(
+                        locked,
+                        crate::blob_state::Association {
+                            resource: storage_resource,
+                            id: i64::try_from(outcome.id)?,
+                            incarnation: outcome.incarnation.clone(),
+                            field,
+                        },
+                        now,
+                    )
+                    .await?;
+            }
             self.authority.invalidate();
             self.target_rows.remove(&(outcome.resource, outcome.id));
             outcomes.push(outcome);
@@ -581,6 +648,14 @@ impl Effects {
                 );
             }
         }
+        for field in &resource.fields {
+            if matches!(field.kind, FieldKind::Blob { .. })
+                && field.optional
+                && !fields.contains_key(&field.name)
+            {
+                fields.insert(field.name.clone(), String::new());
+            }
+        }
         manifest::validate_fields(resource, &fields)?;
         for unique in &resource.unique {
             crate::membership::canonical_tuple(resource, unique, &fields)?;
@@ -689,6 +764,32 @@ impl Effects {
             .tx
             .storage_resource(&self.manifest, op.resource)
             .await?;
+        let mut expected = std::collections::BTreeMap::new();
+        for field in &manifest::resource(&self.manifest, op.resource)?.fields {
+            if matches!(field.kind, FieldKind::Blob { .. })
+                && let Some(value) = stored
+                    .record
+                    .fields
+                    .get(&field.name)
+                    .filter(|v| !v.is_empty())
+            {
+                expected.insert(
+                    field.name.clone(),
+                    noxide_protocol::blobs::BlobRef::parse(value.clone())
+                        .map_err(anyhow::Error::msg)?,
+                );
+            }
+        }
+        if self.manifest.blobs.is_some() {
+            crate::blob_metadata::MetadataContext { tx: &mut self.tx }
+                .detach_resource(
+                    storage_resource,
+                    i64::try_from(stored.record.id)?,
+                    &stored.incarnation,
+                    &expected,
+                )
+                .await?;
+        }
         let changed = self.tx.execute("DELETE FROM nx_records WHERE resource=$1 AND id=$2 AND incarnation=$3 AND revision=$4", &[storage_resource.into(), (stored.record.id as i64).into(), stored.incarnation.as_str().into(), stored.revision.into()]).await?;
         ensure!(changed == 1, ConditionalConflict);
         Ok(MutationOutcome {
@@ -703,6 +804,7 @@ impl Effects {
     pub(crate) fn next_request(&mut self) {
         self.invoked.clear();
         self.provenance.clear();
+        self.blob_reads.clear();
         self.follow_sources.clear();
         self.list_bytes = 0;
         self.list_calls = MAX_LIST_DATABASE_CALLS;
@@ -1259,7 +1361,27 @@ impl Effects {
                 anyhow::bail!("mutation outside declared transaction")
             }
             OperationKind::Read => {
-                serde_json::to_vec(&read_resource(&mut self.read_context(), &op, target).await?)?
+                let found = read_projected_resource(&mut self.read_context(), &op, target).await?;
+                if let Some((record, incarnation)) = &found {
+                    for field in &manifest::resource(&self.manifest, op.resource)?.fields {
+                        if matches!(field.kind, FieldKind::Blob { .. })
+                            && op
+                                .fields
+                                .as_ref()
+                                .is_none_or(|fields| fields.contains(&field.name))
+                            && let Some(raw) =
+                                record.fields.get(&field.name).filter(|v| !v.is_empty())
+                        {
+                            let blob = noxide_protocol::blobs::BlobRef::parse(raw.clone())
+                                .map_err(anyhow::Error::msg)?;
+                            self.blob_reads.insert(
+                                (op.id, record.id, field.name.clone()),
+                                (incarnation.clone(), blob),
+                            );
+                        }
+                    }
+                }
+                serde_json::to_vec(&found.map(|(record, _)| record))?
             }
             OperationKind::List => {
                 self.result_limit = self.list_result_limit(&op)?;

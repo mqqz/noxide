@@ -25,6 +25,7 @@ fn textarea_preserves_browser_normalized_newlines() {
             forms: BTreeMap::from([(
                 2,
                 Some(FormCredentials {
+                    upload_ticket: None,
                     selections: Default::default(),
                     selected: Default::default(),
                     csrf: "fixture".into(),

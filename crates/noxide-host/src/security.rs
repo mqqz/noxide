@@ -37,6 +37,13 @@ pub(crate) enum TokenKind {
         scope: String,
         after: u64,
     },
+    Download {
+        contract: String,
+        read: u32,
+        target: RecordTarget,
+        field: String,
+        blob: noxide_protocol::blobs::BlobRef,
+    },
     Login,
     Session,
     Anonymous,
