@@ -38,6 +38,54 @@ async fn background_worker_executes_real_action_and_drains() {
 }
 
 #[tokio::test]
+async fn shutdown_waits_for_in_flight_effect_and_actual_provider_drain() {
+    use std::{future::Future, task::Poll};
+    let case = Case::new(None, false).await;
+    let job = case.create("ready").await;
+    let gate = crate::failure_tests::EffectWait::new();
+    let service = gate
+        .scope(async { case.app.start_job_service().unwrap().unwrap() })
+        .await;
+    // The acknowledgment comes from the existing post-mutation boundary of the
+    // actual action transaction, not from a timer or a synthetic queue executor.
+    tokio::time::timeout(case.app.runtime.limits().wall_time, gate.wait_reached())
+        .await
+        .unwrap();
+    let runtime = case.app.jobs.as_ref().unwrap();
+    let capacity = usize::from(runtime.effective.limits.worker_concurrency);
+    assert!(runtime.workers.available_permits() < capacity);
+    assert!(runtime.database.available_permits() < capacity);
+    assert!(case.app.request_lifecycle.ensure_idle().is_err());
+    assert_eq!(
+        case.stored(&job).await,
+        (String::from("running"), String::from("ready"), 0)
+    );
+    let mut shutdown = Box::pin(service.shutdown());
+    let first_poll =
+        std::future::poll_fn(|cx| Poll::Ready(Future::poll(shutdown.as_mut(), cx))).await;
+    assert!(
+        first_poll.is_pending(),
+        "shutdown returned while the action transaction was held"
+    );
+    assert!(runtime.workers.available_permits() < capacity);
+    assert!(runtime.database.available_permits() < capacity);
+    assert!(case.app.request_lifecycle.ensure_idle().is_err());
+    gate.resume();
+    shutdown.await.unwrap();
+    // Assert immediately after shutdown, before any extra await could mask an
+    // early return while registered provider cleanup still owns capacity.
+    assert!(case.app.request_lifecycle.ensure_idle().is_ok());
+    assert_eq!(runtime.workers.available_permits(), capacity);
+    assert_eq!(runtime.database.available_permits(), capacity);
+    assert!(!runtime.running.load(Ordering::Acquire));
+    assert_eq!(
+        case.stored(&job).await,
+        (String::from("succeeded"), String::from("finished"), 1)
+    );
+    case.close().await;
+}
+
+#[tokio::test]
 async fn operator_regrant_requires_linked_reconciliation_and_current_authority() {
     let case = Case::new(None, false).await;
     let job = case.create("ready").await;

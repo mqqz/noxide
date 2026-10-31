@@ -42,6 +42,7 @@ struct Plan {
     remaining: AtomicUsize,
     hits: AtomicUsize,
     marker: Option<std::path::PathBuf>,
+    reached: tokio::sync::Notify,
     resume: tokio::sync::Notify,
 }
 tokio::task_local! {static FAULT:Arc<Plan>;}
@@ -52,6 +53,7 @@ fn plan(point: Point, mode: Mode, remaining: usize) -> Arc<Plan> {
         remaining: AtomicUsize::new(remaining),
         hits: AtomicUsize::new(0),
         marker: None,
+        reached: tokio::sync::Notify::new(),
         resume: tokio::sync::Notify::new(),
     })
 }
@@ -84,11 +86,49 @@ pub(crate) async fn after_effect(tx: &mut Transaction) -> anyhow::Result<()> {
                 return Err(Aborted.into());
             }
             Mode::Pause => pause(&plan).await,
-            Mode::Wait => plan.resume.notified().await,
+            Mode::Wait => {
+                plan.reached.notify_one();
+                plan.resume.notified().await;
+            }
             Mode::LoseAck => unreachable!(),
         }
     }
     Ok(())
+}
+
+/// Opaque test fault context explicitly propagated into spawned worker tasks.
+/// This module is absent from production artifacts; it conveys no authority.
+#[derive(Clone)]
+pub(crate) struct FaultContext(Option<Arc<Plan>>);
+pub(crate) fn capture_context() -> FaultContext {
+    FaultContext(FAULT.try_with(Clone::clone).ok())
+}
+pub(crate) async fn with_context<T>(
+    context: FaultContext,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    match context.0 {
+        Some(plan) => FAULT.scope(plan, future).await,
+        None => future.await,
+    }
+}
+
+/// Acknowledges the existing after-effect boundary while its real transaction
+/// remains open, then waits for explicit release by the test.
+pub(crate) struct EffectWait(Arc<Plan>);
+impl EffectWait {
+    pub(crate) fn new() -> Self {
+        Self(plan(Point::Effect, Mode::Wait, 1))
+    }
+    pub(crate) async fn scope<T>(&self, future: impl std::future::Future<Output = T>) -> T {
+        FAULT.scope(self.0.clone(), future).await
+    }
+    pub(crate) async fn wait_reached(&self) {
+        self.0.reached.notified().await;
+    }
+    pub(crate) fn resume(&self) {
+        self.0.resume.notify_one();
+    }
 }
 pub(crate) async fn known_conflict_once<T>(future: impl std::future::Future<Output = T>) -> T {
     FAULT
@@ -941,6 +981,7 @@ fn crash_worker() {
             remaining: AtomicUsize::new(1),
             hits: AtomicUsize::new(0),
             marker: Some(data["marker"].as_str().unwrap().into()),
+            reached: tokio::sync::Notify::new(),
             resume: tokio::sync::Notify::new(),
         });
         FAULT
