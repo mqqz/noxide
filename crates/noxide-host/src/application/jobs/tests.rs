@@ -132,6 +132,9 @@ impl Case {
         database: Option<Database>,
         m: Manifest,
     ) -> Self {
+        Self::new_component(database, m, fixture::component(None)).await
+    }
+    async fn new_component(database: Option<Database>, m: Manifest, component: Vec<u8>) -> Self {
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/capability-evidence/p10-action-fixtures");
         std::fs::create_dir_all(&directory).unwrap();
@@ -160,7 +163,7 @@ impl Case {
         let approved = crate::deployment::approval_digest(&m, None, Some(&job_deployment)).unwrap();
         let app = Arc::new(
             Application::new(
-                &fixture::component(None),
+                &component,
                 &serde_json::to_vec(&m).unwrap(),
                 approved,
                 db.clone(),
@@ -601,6 +604,132 @@ async fn enqueue_rollback(database: Option<Database>) {
     }
     tx.commit().await.unwrap();
     case.close().await;
+}
+
+fn worker_trap_component() -> Vec<u8> {
+    fn emit(bytes: &[u8]) -> String {
+        bytes
+            .chunks(8)
+            .map(|chunk| {
+                let mut word = [0; 8];
+                word[..chunk.len()].copy_from_slice(chunk);
+                format!(
+                    "i64.const {} i32.const {} call $emit\n",
+                    i64::from_le_bytes(word),
+                    chunk.len()
+                )
+            })
+            .collect()
+    }
+    let page = emit(
+        &serde_json::to_vec(&ResponseIntent::Page(Document::new(
+            "Worker fixture",
+            vec![Instruction::Form { action: 1 }],
+        )))
+        .unwrap(),
+    );
+    let execute = emit(&serde_json::to_vec(&ResponseIntent::Execute).unwrap());
+    let kind = format!(r#"{{"version":{VERSION},"kind":{{"#).len() + 1;
+    let action = format!(r#"{{"version":{VERSION},"kind":{{"action":"#).len();
+    wat::parse_str(format!(r#"(component
+      (import "noxide:application/host@0.1.0" (instance $h
+        (export "emit" (func (param "word" u64) (param "length" u32)))
+        (export "request-chunk" (func (param "offset" u32) (result u64)))))
+      (alias export $h "emit" (func $emit)) (core func $emit (canon lower (func $emit)))
+      (alias export $h "request-chunk" (func $request)) (core func $request (canon lower (func $request)))
+      (core module $m (import "h" "emit" (func $emit (param i64 i32)))
+        (import "h" "request" (func $request (param i32) (result i64)))
+        (func (export "handle")
+          i32.const {kind} call $request i32.wrap_i64 i32.const 255 i32.and i32.const 97 i32.eq
+          if i32.const {action} call $request i32.wrap_i64 i32.const 255 i32.and i32.const 50 i32.eq
+            if unreachable else {execute} end
+          else {page} end))
+      (core instance $i (instantiate $m (with "h" (instance (export "emit" (func $emit)) (export "request" (func $request))))))
+      (func (export "handle") (canon lift (core func $i "handle"))))"#)).unwrap()
+}
+async fn lifecycle_millis(database: &Database) -> i64 {
+    let mut tx = database
+        .begin_read(std::time::Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    let rows = tx
+        .fetch::<1>(
+            "SELECT CAST(lifecycle_ms AS TEXT) FROM nx_clock WHERE singleton=1",
+            &[],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    rows[0][0].parse().unwrap()
+}
+async fn acknowledged_trap_backoff(database: Option<Database>) {
+    let case = Case::new_component(database, declarations(false), worker_trap_component()).await;
+    let job = case.create("ready").await;
+    let claim = case.claim(0).await.unwrap();
+    let before = lifecycle_millis(&case.db).await;
+    let JobRunOutcome::Retrying(next) = case.app.invoke_job(&claim).await.unwrap() else {
+        panic!("acknowledged trap rollback must enter durable backoff")
+    };
+    let after = lifecycle_millis(&case.db).await;
+    assert!((before + 60_000..=after + 66_000).contains(&next.unix_millis()));
+    assert_eq!(
+        case.stored(&job).await,
+        ("pending".into(), "ready".into(), 0)
+    );
+    let mut tx = case
+        .db
+        .begin_read(std::time::Instant::now() + std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    let rows = tx.fetch::<4>("SELECT reason,CAST(eligible_ms AS TEXT),CAST(lease_until_ms AS TEXT),CAST(attempts AS TEXT) FROM nx_jobs WHERE id=$1", &[job.id().unwrap().into()]).await.unwrap();
+    assert_eq!(
+        rows[0],
+        [
+            "transient".to_owned(),
+            next.unix_millis().to_string(),
+            "0".into(),
+            "1".into()
+        ]
+    );
+    tx.commit().await.unwrap();
+    assert!(
+        case.claim(0).await.is_none(),
+        "transient abort cannot be immediately reclaimed"
+    );
+    case.close().await;
+}
+async fn exhausted_abort_budget(database: Option<Database>) {
+    let case = Case::new(database, false).await;
+    let job = case.create("ready").await;
+    let claim = case.claim(0).await.unwrap();
+    let (result, roots) = crate::database::lifecycle::observe_roots(
+        crate::failure_tests::known_conflicts(3, case.app.invoke_job(&claim)),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "three full target attempts leave no call for a fenced backoff under the original16"
+    );
+    assert_eq!(roots.len(), 1);
+    case.app
+        .request_lifecycle
+        .wait_idle_for_test()
+        .await
+        .unwrap();
+    assert_eq!(
+        case.stored(&job).await,
+        ("running".into(), "ready".into(), 0),
+        "unrecorded finalization must retain the claim for authoritative recovery"
+    );
+    case.close().await;
+}
+#[tokio::test]
+async fn sqlite_service_acknowledged_trap_uses_retry_backoff() {
+    acknowledged_trap_backoff(None).await;
+}
+#[tokio::test]
+async fn sqlite_service_exhausted_retry_budget_retains_running() {
+    exhausted_abort_budget(None).await;
 }
 
 async fn known_retry(database: Option<Database>) {
@@ -1142,6 +1271,8 @@ async fn postgres_service_action_integration() {
         "derived",
         "derived_authority",
         "derived_relation",
+        "trap_backoff",
+        "abort_budget",
     ] {
         let name = format!(
             "nx_p10_action_{case}_{}",
@@ -1176,6 +1307,8 @@ async fn postgres_service_action_integration() {
             "derived" => derived_targets(db, None).await,
             "derived_authority" => derived_targets(db, Some("authority")).await,
             "derived_relation" => derived_targets(db, Some("relation")).await,
+            "trap_backoff" => acknowledged_trap_backoff(db).await,
+            "abort_budget" => exhausted_abort_budget(db).await,
             _ => unreachable!(),
         }
     }

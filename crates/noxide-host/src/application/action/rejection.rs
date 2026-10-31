@@ -88,8 +88,9 @@ impl ValidatedActionRejection {
         })
     }
 
-    /// Operator inspection must supply the action associated with the captured
-    /// contract, then repeat common validation before displaying stored text.
+    /// Retained-state fixtures repeat common validation against the admitted
+    /// action before treating stored text as a validated rejection.
+    #[cfg(test)]
     pub(crate) fn from_stored(action: &Action, encoded: &str) -> Result<Self> {
         ensure!(
             encoded.len() <= MAX_ACTION_REJECTION_BYTES,

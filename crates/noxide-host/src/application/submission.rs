@@ -389,6 +389,7 @@ impl Application {
         let attempt = self.attempt_action(tx, context, budget).await;
         let _wasm = budget.wasm.take();
         let (mut tx, receipt, nonce) = match attempt? {
+            action::Attempt::Aborted { error } => return Err(error),
             action::Attempt::Settled(outcome) => {
                 return Ok((
                     None,

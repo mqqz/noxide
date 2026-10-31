@@ -96,6 +96,14 @@ pub(crate) async fn known_conflict_once<T>(future: impl std::future::Future<Outp
         .await
 }
 
+pub(crate) async fn known_conflicts<T>(
+    count: usize,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    FAULT
+        .scope(plan(Point::Effect, Mode::Abort, count), future)
+        .await
+}
 pub(crate) async fn lose_commit_ack<T>(future: impl std::future::Future<Output = T>) -> T {
     FAULT
         .scope(plan(Point::Commit, Mode::LoseAck, 1), future)

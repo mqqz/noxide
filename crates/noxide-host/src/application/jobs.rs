@@ -105,7 +105,7 @@ impl Application {
             });
         }
         probe.rollback().await?;
-        for _ in 0..3 {
+        for attempt_index in 0..3 {
             let mut tx = self.database.begin(budget.deadline.into_std()).await?;
             self.admission(&mut tx, false).await?;
             budget.spend(1)?;
@@ -158,19 +158,28 @@ impl Application {
             };
             let attempt = self.attempt_action(tx, context, budget).await;
             let _wasm = budget.wasm.take();
-            let attempt = match attempt {
-                Ok(attempt) => attempt,
-                Err(error)
-                    if crate::database::retryable(&error) && Instant::now() < budget.deadline =>
-                {
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-                // Core errors can contain uncertain cleanup. Leave Running for
-                // receipt-first recovery rather than falsely recording an abort.
-                Err(error) => return Err(error),
-            };
+            // Only the explicit core proof permits retry/backoff. Raw errors can
+            // contain uncertain provider cleanup and leave Running for recovery.
+            let attempt = attempt?;
             let (mut tx, receipt, nonce, recovered) = match attempt {
+                action::Attempt::Aborted { error } => {
+                    if attempt_index < 2
+                        && crate::database::retryable(&error)
+                        && Instant::now() < budget.deadline
+                    {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    return self
+                        .finish_job_failure(
+                            claim,
+                            &capture,
+                            time.timestamp(),
+                            Failure::Transient,
+                            budget,
+                        )
+                        .await;
+                }
                 action::Attempt::Settled(settled) => {
                     let failure = match settled {
                         action::Settled::Rejected(rejection) => {
@@ -217,7 +226,10 @@ impl Application {
                     tx.rollback()
                         .await
                         .map_err(|_| RequestError::OutcomeUnknown)?;
-                    if crate::database::retryable(&error) {
+                    if attempt_index < 2
+                        && crate::database::retryable(&error)
+                        && Instant::now() < budget.deadline
+                    {
                         continue;
                     }
                     return self

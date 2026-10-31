@@ -18,6 +18,7 @@ use noxide_protocol::{
     Action, ActionTarget, Fields, Input, OperationKind, RedirectSource, RequestKind, RequestView,
     ResponseIntent, Revision, Step, TargetSource, VERSION,
 };
+#[cfg(test)]
 pub(crate) use rejection::MAX_ACTION_REJECTION_BYTES;
 pub use rejection::{ActionRejection, ValidatedActionRejection};
 pub(super) use targets::ReviewConflict;
@@ -147,6 +148,11 @@ pub(super) enum Attempt {
         receipt: Committed,
     },
     Settled(Settled),
+    /// No COMMIT was attempted and provider rollback was acknowledged. Adapters
+    /// may classify retry/backoff; an ordinary Err supplies no such evidence.
+    Aborted {
+        error: anyhow::Error,
+    },
 }
 pub(super) struct Committed {
     pub payload: String,
@@ -276,7 +282,7 @@ impl Application {
                 if error.is::<repository::ReferenceUnavailable>() {
                     return Ok(Attempt::Settled(Settled::Unavailable));
                 }
-                return Err(error);
+                return Ok(Attempt::Aborted { error });
             }
         };
         let gated_destination = navigation
@@ -374,7 +380,7 @@ impl Application {
                 if error.is::<crate::repository::ReferenceUnavailable>() {
                     return Ok(Attempt::Settled(Settled::Unavailable));
                 }
-                return Err(error);
+                return Ok(Attempt::Aborted { error });
             }
         };
         if let ResponseIntent::Rejected {
@@ -383,19 +389,24 @@ impl Application {
         } = &outcome
         {
             effects.tx.rollback().await?;
-            let rejection = ValidatedActionRejection::new(
+            let rejection = match ValidatedActionRejection::new(
                 manifest::action(&self.manifest, a.id)?,
                 ActionRejection::Rejected {
                     field_errors: field_errors.clone(),
                     message: message.clone(),
                 },
-            )?;
+            ) {
+                Ok(rejection) => rejection,
+                Err(error) => return Ok(Attempt::Aborted { error }),
+            };
             return Ok(Attempt::Settled(Settled::Rejected(rejection)));
         }
-        ensure!(
-            outcome == ResponseIntent::Execute,
-            "invalid action decision"
-        );
+        if outcome != ResponseIntent::Execute {
+            effects.tx.rollback().await?;
+            return Ok(Attempt::Aborted {
+                error: anyhow::anyhow!("invalid action decision"),
+            });
+        }
         let outcomes = match effects.execute_transaction(a, time).await {
             Ok(outcomes) => outcomes,
             Err(error) => {
@@ -405,7 +416,9 @@ impl Application {
                     return Ok(Attempt::Settled(Settled::Unavailable));
                 }
                 if error.is::<repository::CalculationUnavailable>() {
-                    return Err(RequestError::InvalidRequest.into());
+                    return Ok(Attempt::Aborted {
+                        error: RequestError::InvalidRequest.into(),
+                    });
                 }
                 if let Some(guard) = error.downcast_ref::<repository::GuardFailure>() {
                     let rejection = ValidatedActionRejection::new(
@@ -417,7 +430,7 @@ impl Application {
                     )?;
                     return Ok(Attempt::Settled(Settled::Rejected(rejection)));
                 }
-                return Err(error);
+                return Ok(Attempt::Aborted { error });
             }
         };
         budget.database_calls = effects.calls;
@@ -430,7 +443,7 @@ impl Application {
             if error.is::<repository::ReferenceUnavailable>() {
                 return Ok(Attempt::Settled(Settled::Unavailable));
             }
-            return Err(error);
+            return Ok(Attempt::Aborted { error });
         }
         budget.database_calls = effects.calls;
         let destination = if let Some(plan) = navigation {
@@ -475,8 +488,8 @@ impl Application {
         })
     }
 
-    /// Browser adapter admission. Service admission deliberately has no constructor
-    /// until persisted grant/job/fence checks exist (P10).
+    /// Browser admission verifies its own credentials; service admission below
+    /// requires a separate authoritative queue proof.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn admit_web_invocation<'a>(
         &'a self,
