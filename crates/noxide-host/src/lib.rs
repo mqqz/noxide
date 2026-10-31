@@ -1,6 +1,8 @@
 //! Trusted execution, rendering, and persistence for Noxide applications.
 pub mod assets;
 mod blob_io;
+pub mod blob_deployment;
+pub use blob_deployment::{BlobDeployment,DeploymentResources};
 mod blob_multipart;
 mod blob_state;
 mod blob_store;
