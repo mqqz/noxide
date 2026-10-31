@@ -1,5 +1,6 @@
 use super::*;
 mod membership;
+mod query_indexes;
 
 impl Database {
     /// Reconcile operation-derived indexes under the operator maintenance lock.
@@ -188,63 +189,6 @@ impl Transaction {
         self.reference_indexes(&manifest.resources).await?;
         self.initial_membership_indexes(&manifest.resources).await?;
         self.store_schema(&manifest.resources, &[]).await
-    }
-
-    async fn query_indexes(&mut self) -> Result<Vec<String>> {
-        let sql = match self.backend {
-            super::Backend::Closed => unreachable!("closed maintenance transaction"),
-            Backend::Sqlite(_) => {
-                "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='nx_records' AND name GLOB 'nx_q_*'"
-            }
-            Backend::Postgres(_) => {
-                "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND tablename='nx_records' AND left(indexname,5)='nx_q_'"
-            }
-        };
-        Ok(self
-            .fetch::<1>(sql, &[])
-            .await?
-            .into_iter()
-            .map(|[name]| name)
-            .collect())
-    }
-    async fn validate_query_indexes(&mut self, manifest: &noxide_protocol::Manifest) -> Result<()> {
-        let existing = self.query_indexes().await?;
-        for requirement in crate::query_plan::required_indexes(manifest)? {
-            let storage = self.storage_key(&requirement.resource).await?;
-            let name = requirement.name(storage);
-            ensure!(
-                existing.contains(&name),
-                "missing derived index {name} for resource {} queries {:?}; run noxide schema indexes CONFIG",
-                requirement.resource,
-                requirement.queries
-            );
-        }
-        Ok(())
-    }
-    async fn reconcile_query_indexes(
-        &mut self,
-        manifest: &noxide_protocol::Manifest,
-    ) -> Result<()> {
-        let existing = self.query_indexes().await?;
-        let mut required = std::collections::BTreeSet::new();
-        for requirement in crate::query_plan::required_indexes(manifest)? {
-            let storage = self.storage_key(&requirement.resource).await?;
-            let name = requirement.name(storage);
-            if !existing.contains(&name) {
-                self.execute(&requirement.sql(self, storage)?, &[]).await?;
-            }
-            required.insert(name);
-        }
-        for name in existing {
-            ensure!(
-                name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'),
-                "invalid derived index name"
-            );
-            if !required.contains(&name) {
-                self.execute(&format!("DROP INDEX {name}"), &[]).await?;
-            }
-        }
-        Ok(())
     }
 
     async fn validate_account_indexes(

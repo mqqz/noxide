@@ -96,19 +96,14 @@ impl IndexRequirement {
         self.sql_with(
             storage,
             |field| provider.field_expression(field),
-            Some(provider.binary_collation()),
+            provider.binary_collation(),
         )
-    }
-    /// Temporary pre-P09 consumer bridge. C removes this when native verification
-    /// switches atomically to pinned table/provider/shape. Binary P09 is closed.
-    pub(crate) fn sql(&self, tx: &crate::database::Transaction, storage: i64) -> Result<String> {
-        self.sql_with(storage, |field| tx.field_expression(field), None)
     }
     fn sql_with(
         &self,
         storage: i64,
         field_expression: impl Fn(&str) -> Result<String>,
-        binary_collation: Option<&str>,
+        binary_collation: &str,
     ) -> Result<String> {
         ensure!(storage > 0, "invalid storage identity");
         if self.table == IndexTable::Postings {
@@ -141,12 +136,9 @@ impl IndexRequirement {
                 let expression = field_expression(field)?;
                 match representation {
                     ScalarRepresentation::Numeric => format!("(CAST({expression} AS BIGINT))"),
-                    ScalarRepresentation::Binary => format!(
-                        "(({expression}) COLLATE {})",
-                        binary_collation.ok_or_else(|| anyhow::anyhow!(
-                            "P09 native provider bridge required"
-                        ))?
-                    ),
+                    ScalarRepresentation::Binary => {
+                        format!("(({expression}) COLLATE {})", binary_collation)
+                    }
                 }
             }
         });
