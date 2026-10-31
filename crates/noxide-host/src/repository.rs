@@ -1,6 +1,6 @@
 mod authority;
 mod computation;
-mod queries;
+pub(crate) mod queries;
 pub(crate) mod search;
 use crate::{
     auth::Principal,

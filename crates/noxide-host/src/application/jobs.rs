@@ -5,7 +5,7 @@ use crate::jobs::{
 };
 use noxide_protocol::{jobs::ScheduledTarget, time::Timestamp};
 
-pub(crate) enum JobRunOutcome {
+pub enum JobRunOutcome {
     Completed {
         outcomes: Vec<MutationOutcome>,
         recovered: bool,
@@ -280,8 +280,8 @@ impl Application {
         Ok(canonical)
     }
 
-    /// Candidate identities are never authority. Reconciliation, recurrence and
-    /// originating schedules use this one current service-eligible seal boundary.
+    /// Resolve candidate identities in this transaction before current service
+    /// authorization. Existing captures may be explicitly reconciled, never copied.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn seal_job_targets(
         &self,
@@ -291,6 +291,75 @@ impl Application {
         candidates: &BTreeMap<String, SealedTarget>,
         time: crate::lifecycle_clock::AttemptTime,
         calls: &mut u32,
+    ) -> Result<BTreeMap<String, SealedTarget>> {
+        let rows = self
+            .load_job_target_rows(tx, candidates, &mut BTreeMap::new(), calls)
+            .await?;
+        let principal = auth::Principal::from_locked_job_grant(locked);
+        let mut authority = self.authority_context(Some(time))?;
+        self.seal_job_target_rows(
+            &mut repository::ReadContext {
+                tx,
+                manifest: &self.manifest,
+                principal: &principal,
+                authority: &mut authority,
+                budget: repository::ReadBudget::Action(calls),
+            },
+            locked,
+            id,
+            &rows,
+        )
+        .await
+    }
+
+    async fn load_job_target_rows(
+        &self,
+        tx: &mut Transaction,
+        candidates: &BTreeMap<String, SealedTarget>,
+        cache: &mut BTreeMap<(u32, u64), StoredRecord>,
+        calls: &mut u32,
+    ) -> Result<BTreeMap<String, StoredRecord>> {
+        ensure!(candidates.len() <= 4, repository::ReferenceUnavailable);
+        let mut rows = BTreeMap::new();
+        for (alias, candidate) in candidates {
+            ensure!(
+                candidate.id > 0
+                    && candidate.id <= i64::MAX as u64
+                    && !candidate.incarnation.is_empty()
+                    && candidate.incarnation.len() <= 64,
+                repository::ReferenceUnavailable
+            );
+            let key = (candidate.resource, candidate.id);
+            if let std::collections::btree_map::Entry::Vacant(entry) = cache.entry(key) {
+                *calls = calls
+                    .checked_sub(2)
+                    .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
+                entry.insert(
+                    repository::load(tx, &self.manifest, candidate.resource, candidate.id)
+                        .await?
+                        .ok_or(repository::ReferenceUnavailable)?,
+                );
+            }
+            let stored = &cache[&key];
+            ensure!(
+                stored.incarnation == candidate.incarnation,
+                repository::ReferenceUnavailable
+            );
+            rows.insert(alias.clone(), stored.clone());
+        }
+        Ok(rows)
+    }
+
+    /// Host-only row boundary for canonical query candidates and final action rows.
+    /// Callers must obtain every row from this same transaction, with no intervening
+    /// resource mutation. Sharing row data never shares an alias's read authority.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn seal_job_target_rows(
+        &self,
+        context: &mut repository::ReadContext<'_>,
+        locked: &crate::jobs::VerifiedScheduleGrant,
+        id: u32,
+        rows: &BTreeMap<String, StoredRecord>,
     ) -> Result<BTreeMap<String, SealedTarget>> {
         let grant = locked.grant();
         ensure!(
@@ -306,15 +375,18 @@ impl Application {
             .find(|rule| rule.action == id)
             .ok_or(repository::ReferenceUnavailable)?;
         ensure!(
-            candidates.len() == action.targets.len() && rule.targets.len() == action.targets.len(),
+            rows.len() == action.targets.len() && rule.targets.len() == action.targets.len(),
             repository::ReferenceUnavailable
         );
-        let principal = auth::Principal::from_locked_job_grant(locked);
-        let mut authority = self.authority_context(Some(time))?;
+        ensure!(
+            context.principal.authority_key()
+                == auth::Principal::from_locked_job_grant(locked).authority_key()
+                && std::ptr::eq(context.manifest, self.manifest.as_ref()),
+            repository::ReferenceUnavailable
+        );
         let mut targets = BTreeMap::new();
-        let mut rows = BTreeMap::new();
         for target in &action.targets {
-            let candidate = candidates
+            let stored = rows
                 .get(&target.name)
                 .ok_or(repository::ReferenceUnavailable)?;
             let binding = rule
@@ -328,47 +400,27 @@ impl Application {
                 _ => anyhow::bail!(repository::ReferenceUnavailable),
             };
             ensure!(
-                target.resource == candidate.resource
-                    && binding.resource == candidate.resource
+                target.resource == stored.record.resource
+                    && binding.resource == stored.record.resource
                     && binding.eligible == eligible
-                    && candidate.id > 0
-                    && candidate.id <= i64::MAX as u64
-                    && !candidate.incarnation.is_empty()
-                    && candidate.incarnation.len() <= 64,
-                repository::ReferenceUnavailable
-            );
-            *calls = calls
-                .checked_sub(2)
-                .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
-            let stored = repository::load(tx, &self.manifest, candidate.resource, candidate.id)
-                .await?
-                .ok_or(repository::ReferenceUnavailable)?;
-            ensure!(
-                stored.incarnation == candidate.incarnation,
+                    && stored.record.id > 0
+                    && stored.record.id <= i64::MAX as u64
+                    && !stored.incarnation.is_empty()
+                    && stored.incarnation.len() <= 64
+                    && stored.revision > 0,
                 repository::ReferenceUnavailable
             );
             let read = manifest::operation(&self.manifest, eligible)?;
             ensure!(
-                repository::authorize_stored_read(
-                    &mut repository::ReadContext {
-                        tx,
-                        manifest: &self.manifest,
-                        principal: &principal,
-                        authority: &mut authority,
-                        budget: repository::ReadBudget::Action(calls)
-                    },
-                    read,
-                    &stored
-                )
-                .await?,
+                repository::authorize_stored_read(context, read, stored).await?,
                 repository::ReferenceUnavailable
             );
             targets.insert(
                 target.name.clone(),
                 SealedTarget {
-                    resource: candidate.resource,
-                    id: candidate.id,
-                    incarnation: candidate.incarnation.clone(),
+                    resource: stored.record.resource,
+                    id: stored.record.id,
+                    incarnation: stored.incarnation.clone(),
                     revision: if target.revision == Revision::Identity {
                         0
                     } else {
@@ -376,7 +428,6 @@ impl Application {
                     },
                 },
             );
-            rows.insert(target.name.clone(), stored);
         }
         for target in &action.targets {
             if let TargetSource::Reference {
@@ -399,6 +450,7 @@ impl Application {
 
     /// Fixed schedule effects share the mutation transaction and receipt. Scalar
     /// values come from initial snapshots; Created supplies identities only.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn enqueue_action_jobs(
         &self,
         effects: &mut Effects,
@@ -436,6 +488,9 @@ impl Application {
                 auth::Principal::Service(service) => service.tenant().to_owned(),
             },
         };
+        // Only queue bookkeeping follows; no resource row can change while these
+        // two fixed effects are sealed. Deduplicate data loads, never authorization.
+        let mut final_rows = BTreeMap::new();
         for schedule in schedules {
             let destination = manifest::action(&self.manifest, schedule.action)?;
             let (due, raw) = {
@@ -499,14 +554,28 @@ impl Application {
                     },
                 );
             }
-            let targets = self
-                .seal_job_targets(
+            let rows = self
+                .load_job_target_rows(
                     &mut effects.tx,
+                    &candidates,
+                    &mut final_rows,
+                    &mut effects.calls,
+                )
+                .await?;
+            let principal = auth::Principal::from_locked_job_grant(&locked);
+            let mut authority = self.authority_context(Some(time))?;
+            let targets = self
+                .seal_job_target_rows(
+                    &mut repository::ReadContext {
+                        tx: &mut effects.tx,
+                        manifest: &self.manifest,
+                        principal: &principal,
+                        authority: &mut authority,
+                        budget: repository::ReadBudget::Action(&mut effects.calls),
+                    },
                     &locked,
                     destination.id,
-                    &candidates,
-                    time,
-                    &mut effects.calls,
+                    &rows,
                 )
                 .await?;
             let grant = locked.grant();
@@ -536,4 +605,4 @@ impl Application {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

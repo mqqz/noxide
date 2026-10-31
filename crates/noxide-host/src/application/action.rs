@@ -18,7 +18,8 @@ use noxide_protocol::{
     Action, ActionTarget, Fields, Input, OperationKind, RedirectSource, RequestKind, RequestView,
     ResponseIntent, Revision, Step, TargetSource, VERSION,
 };
-pub(crate) use rejection::{ActionRejection, MAX_ACTION_REJECTION_BYTES, ValidatedActionRejection};
+pub(crate) use rejection::MAX_ACTION_REJECTION_BYTES;
+pub use rejection::{ActionRejection, ValidatedActionRejection};
 pub(super) use targets::ReviewConflict;
 use tokio::time::Instant;
 
@@ -426,6 +427,9 @@ impl Application {
         {
             budget.database_calls = effects.calls;
             effects.tx.rollback().await?;
+            if error.is::<repository::ReferenceUnavailable>() {
+                return Ok(Attempt::Settled(Settled::Unavailable));
+            }
             return Err(error);
         }
         budget.database_calls = effects.calls;
@@ -840,8 +844,8 @@ mod tests {
         assert_eq!(core.steps, action.steps);
         assert_eq!(core.inputs, action.inputs);
         assert_eq!(core.targets, action.targets);
-        // No production service constructor exists: a headless declaration alone
-        // cannot enter the web adapter or create a service invocation context.
+        // A headless declaration alone cannot enter the web adapter or create
+        // service authority without the queue's verified transaction proof.
         assert!(manifest::web_action(&manifest, action.id).is_err());
         let app = Application::new(
             &crate::test_support::component(None),

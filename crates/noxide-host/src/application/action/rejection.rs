@@ -11,7 +11,7 @@ pub(crate) const MAX_ACTION_REJECTION_BYTES: usize = 24 * 1_024;
 /// Structured action result before common host validation. It deliberately has
 /// no serialization implementation; persistence accepts only the validated type.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) enum ActionRejection {
+pub enum ActionRejection {
     Rejected {
         field_errors: Fields,
         message: String,
@@ -25,7 +25,7 @@ pub(crate) enum ActionRejection {
 /// Private fields and no Deserialize implementation prevent a stored assertion
 /// from becoming a validated result without the current admitted Action.
 #[derive(Clone)]
-pub(crate) struct ValidatedActionRejection {
+pub struct ValidatedActionRejection {
     value: ActionRejection,
     encoded: String,
     action: (u32, u32),
@@ -98,13 +98,13 @@ impl ValidatedActionRejection {
         let stored: StoredRejection = serde_json::from_str(encoded)?;
         Self::new(action, stored.into())
     }
-    pub(crate) fn action(&self) -> (u32, u32) {
+    pub fn action(&self) -> (u32, u32) {
         self.action
     }
-    pub(crate) fn as_rejection(&self) -> &ActionRejection {
+    pub fn as_rejection(&self) -> &ActionRejection {
         &self.value
     }
-    pub(crate) fn into_rejection(self) -> ActionRejection {
+    pub fn into_rejection(self) -> ActionRejection {
         self.value
     }
     pub(crate) fn stored_json(&self) -> &str {
