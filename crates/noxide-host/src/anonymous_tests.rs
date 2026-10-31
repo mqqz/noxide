@@ -980,6 +980,7 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
             available_forms: vec![],
         };
         let mut effects = crate::repository::Effects {
+            authority: Default::default(),
             provenance: Default::default(),
             follow_sources: Vec::new(),
             invoked: Default::default(),

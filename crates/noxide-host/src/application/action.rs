@@ -207,12 +207,13 @@ impl Application {
                 },
             });
         }
-        let time = if a.uses_time() {
+        let time = if a.uses_time() || crate::authority::uses_time(&self.manifest) {
             budget.spend(1)?;
             Some(self.temporal_after_admission(&mut tx).await?)
         } else {
             None
         };
+        let mut authority = self.authority_context(time)?;
         if self.authorize_create(a, &principal).is_err() {
             tx.rollback().await?;
             return Ok(Attempt::Settled(Settled::Unavailable));
@@ -220,6 +221,7 @@ impl Application {
         let (records, capability_grant) = match self
             .resolve_action_targets(
                 &mut tx,
+                &mut authority,
                 a,
                 &grants,
                 &principal,
@@ -296,6 +298,7 @@ impl Application {
             inspection,
         };
         let effects = Effects {
+            authority,
             provenance: Default::default(),
             follow_sources: Vec::new(),
             invoked: Default::default(),
@@ -580,6 +583,7 @@ pub(super) struct ExecutionBudget {
     pub(super) host_calls: u32,
     pub(super) database_calls: u32,
     parent_navigation_reserved: bool,
+    navigation_calls: u32,
     // Hold admission through binding response preparation and receipt persistence.
     pub(super) wasm: Option<tokio::sync::OwnedSemaphorePermit>,
 }
@@ -595,11 +599,13 @@ impl ExecutionBudget {
         // Navigation runs once after the successful commit, outside all retries.
         // Its quota covers begin/commit, the target lookup and its optional gate.
         if !self.parent_navigation_reserved {
+            let reserved = 4 + 2 * u32::from(gated);
             self.database_calls = self
                 .database_calls
-                .checked_sub(4 + 2 * u32::from(gated))
+                .checked_sub(reserved)
                 .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
             self.parent_navigation_reserved = true;
+            self.navigation_calls = reserved;
         }
         // Each attempt actually captures the parent with storage_resource + load.
         // Charge before calling it so errors and rolled-back work stay charged.
@@ -609,6 +615,15 @@ impl ExecutionBudget {
             .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
         Ok(())
     }
+    pub(super) fn take_delivery_calls(&mut self) -> Result<u32> {
+        let calls = self
+            .database_calls
+            .checked_add(self.navigation_calls)
+            .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
+        self.database_calls = 0;
+        self.navigation_calls = 0;
+        Ok(calls)
+    }
     pub(super) fn new(limits: &crate::runtime::Limits, deadline: Instant) -> Self {
         Self {
             deadline,
@@ -616,6 +631,7 @@ impl ExecutionBudget {
             host_calls: limits.host_calls,
             database_calls: 16,
             parent_navigation_reserved: false,
+            navigation_calls: 0,
             wasm: None,
         }
     }
@@ -860,8 +876,8 @@ mod tests {
         assert_eq!(saved.location, replay.location);
     }
 
-    #[test]
-    fn target_reads_require_both_declared_and_issuing_route_authority() {
+    #[tokio::test]
+    async fn target_reads_require_both_declared_and_issuing_route_authority() {
         use crate::{Database, HostKeys, runtime::Limits, test_support as fixture};
         let mut manifest = fixture::manifest();
         let mut independent = manifest.operations[1].clone();
@@ -870,11 +886,14 @@ mod tests {
         manifest.actions[0].targets = vec![fixture::page_target(1, vec![9], Revision::Exact)];
         manifest.routes[0].forms.clear();
         manifest.routes[1].forms = vec![1];
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::sqlite(directory.path().join("target-authority.db"));
+        database.initialize().await.unwrap();
         let app = Application::new(
             &fixture::component(None),
             &serde_json::to_vec(&manifest).unwrap(),
             manifest::digest(&manifest).unwrap(),
-            Database::sqlite(":memory:"),
+            database,
             HostKeys::generate().unwrap(),
             Limits::default(),
             crate::assets::AssetBundle::default(),
@@ -898,27 +917,30 @@ mod tests {
             cap_version: None,
         };
         assert!(
-            !app.target_allowed(
+            !app.test_target_allowed(
                 ActionCore::of(&manifest.actions[0]).unwrap(),
                 Some(2),
                 &principal,
                 &stored
             )
+            .await
             .unwrap()
         );
         let mut core = manifest.actions[0].clone();
         core.targets[0].source = TargetSource::Page { reads: vec![2] };
         assert!(
-            app.target_allowed(ActionCore::of(&core).unwrap(), Some(2), &principal, &stored)
+            app.test_target_allowed(ActionCore::of(&core).unwrap(), Some(2), &principal, &stored)
+                .await
                 .unwrap()
         );
         assert!(
-            !app.target_allowed(
+            !app.test_target_allowed(
                 ActionCore::of(&core).unwrap(),
                 Some(2),
                 &auth::Principal::Anonymous,
                 &stored
             )
+            .await
             .unwrap()
         );
     }
@@ -1026,6 +1048,7 @@ mod tests {
         assert!(
             app.resolve_action_targets(
                 &mut tx,
+                &mut Default::default(),
                 ActionCore::of(&manifest.actions[1]).unwrap(),
                 &grants,
                 &auth::Principal::Anonymous,
@@ -1041,6 +1064,7 @@ mod tests {
         assert!(
             app.resolve_action_targets(
                 &mut tx,
+                &mut Default::default(),
                 ActionCore::of(&mutation_only).unwrap(),
                 &grants,
                 &auth::Principal::Anonymous,

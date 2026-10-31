@@ -320,19 +320,9 @@ impl Effects {
         let target = manifest::action_target(action.targets, name)?;
         let projection = target.projection.as_ref().ok_or(CalculationUnavailable)?;
         let read = manifest::operation(&self.manifest, projection.operation)?.clone();
-        if manifest::is_public(&read)
-            && manifest::resource(&self.manifest, read.resource)?
-                .gate
-                .is_some()
-        {
-            ensure!(self.calls >= 2, "database call budget");
-            self.calls -= 2;
-        }
         ensure!(
             authorize_stored_read(
-                &mut self.tx,
-                &self.manifest,
-                &self.principal,
+                &mut self.read_context(),
                 &read,
                 stored.ok_or(ReferenceUnavailable)?
             )
@@ -348,22 +338,6 @@ impl Effects {
         operation: &Operation,
         fields: &Fields,
     ) -> Result<()> {
-        let (owner, tenant) = match &self.principal {
-            Principal::Anonymous => ("", ""),
-            Principal::User(user) => (user.id.as_str(), user.tenant.as_str()),
-        };
-        ensure!(
-            allowed(
-                &operation.policy,
-                &self.principal,
-                crate::policy::Row {
-                    owner,
-                    tenant,
-                    fields
-                }
-            ),
-            ReferenceUnavailable
-        );
-        Ok(())
+        self.authorize_candidate(operation, fields).await
     }
 }

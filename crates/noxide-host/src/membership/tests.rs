@@ -252,7 +252,8 @@ async fn transaction(db: &Database) -> Transaction {
 
 async fn attempt(db: &Database) -> AttemptTime {
     let freshness = Freshness::default();
-    let committed = lifecycle_clock::tick(transaction(db).await, &AtomicI64::new(0))
+    let mut clock_tx = transaction(db).await;
+    let committed = lifecycle_clock::tick(&mut clock_tx, &AtomicI64::new(0))
         .await
         .unwrap();
     freshness.committed(committed).unwrap();

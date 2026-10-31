@@ -41,6 +41,7 @@ fn declarations() -> Manifest {
 }
 fn effects(tx: Transaction, m: &Manifest, id: &str, action: bool, recipient: &str) -> Effects {
     Effects {
+        authority: Default::default(),
         provenance: Default::default(),
         follow_sources: Vec::new(),
         invoked: Default::default(),
@@ -292,7 +293,7 @@ async fn contract(db: Database, descending: bool) {
         }
         assert_eq!(seen.len(), expected);
         assert_eq!(
-            repository::read_resource(&mut e.tx, &m, &e.principal, &m.operations[1], ids[44])
+            repository::test_read_resource(&mut e.tx, &m, &e.principal, &m.operations[1], ids[44])
                 .await
                 .unwrap()
                 .is_some(),
@@ -338,7 +339,7 @@ async fn contract(db: Database, descending: bool) {
         roles: vec![],
     });
     assert!(
-        repository::read_resource(&mut tx, &m, &moved, &m.operations[1], ids[44])
+        repository::test_read_resource(&mut tx, &m, &moved, &m.operations[1], ids[44])
             .await
             .unwrap()
             .is_some()
@@ -351,7 +352,7 @@ async fn contract(db: Database, descending: bool) {
         Predicate::SameTenant,
     ]];
     assert!(
-        repository::read_resource(&mut tx, &m, &moved, &confined, ids[44])
+        repository::test_read_resource(&mut tx, &m, &moved, &confined, ids[44])
             .await
             .unwrap()
             .is_none()
@@ -709,6 +710,9 @@ async fn filtered_lists(db: Database) {
                                     ("owner".into(), alice.as_str())
                                 }
                                 crate::policy::IndexColumn::Tenant => ("tenant".into(), "team"),
+                                crate::policy::IndexColumn::Timestamp(_) => unreachable!(
+                                    "this query-work fixture has no expiry declaration"
+                                ),
                                 crate::policy::IndexColumn::Field(field) => (
                                     tx.field_expression(field).unwrap(),
                                     if field == "archived" {
@@ -789,7 +793,7 @@ async fn filtered_lists(db: Database) {
                         for row in rows {
                             assert_eq!(row.fields["archived"], "false");
                             assert!(
-                                repository::read_resource(
+                                repository::test_read_resource(
                                     &mut e.tx,
                                     &selected,
                                     &e.principal,
@@ -815,7 +819,7 @@ async fn filtered_lists(db: Database) {
                     };
                     assert_eq!(ids, expected);
                     assert!(
-                        repository::read_resource(
+                        repository::test_read_resource(
                             &mut e.tx,
                             &selected,
                             &e.principal,
@@ -827,7 +831,7 @@ async fn filtered_lists(db: Database) {
                         .is_some()
                     );
                     assert!(
-                        repository::read_resource(
+                        repository::test_read_resource(
                             &mut e.tx,
                             &selected,
                             &e.principal,

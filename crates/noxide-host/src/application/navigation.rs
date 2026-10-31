@@ -230,6 +230,7 @@ impl Application {
         &self,
         mut prepared: Prepared,
         deadline: Instant,
+        mut database_calls: u32,
     ) -> Rendered {
         #[cfg(test)]
         {
@@ -248,7 +249,20 @@ impl Application {
         // Navigation calls are reserved once, including a possible destination gate.
         // Capture is charged separately on every mutation attempt.
         let resolved = timeout_at(deadline, async {
+            database_calls = database_calls
+                .checked_sub(2)
+                .ok_or_else(|| anyhow::anyhow!("navigation database call budget"))?;
             let mut tx = self.database.begin_read(deadline.into_std()).await?;
+            self.admission(&mut tx, false).await?;
+            let time = if crate::authority::uses_time(&self.manifest) {
+                database_calls = database_calls
+                    .checked_sub(1)
+                    .ok_or_else(|| anyhow::anyhow!("navigation clock call budget"))?;
+                Some(self.temporal_after_admission(&mut tx).await?)
+            } else {
+                None
+            };
+            let mut authority = self.authority_context(time)?;
             let route = manifest::route(&self.manifest, destination.route)?;
             let principal = if route.access == Access::Public {
                 auth::Principal::Anonymous
@@ -261,9 +275,13 @@ impl Application {
                 return Ok::<_, anyhow::Error>(None);
             }
             let record = repository::authorize_page_resource(
-                &mut tx,
-                &self.manifest,
-                &principal,
+                &mut repository::ReadContext {
+                    tx: &mut tx,
+                    manifest: &self.manifest,
+                    principal: &principal,
+                    authority: &mut authority,
+                    budget: repository::ReadBudget::Action(&mut database_calls),
+                },
                 route,
                 destination.resource,
                 destination.id,
@@ -437,15 +455,16 @@ mod tests {
                 })
             };
             let mut tx = db.begin_read(deadline.into_std()).await.unwrap();
-            let normal = repository::read_resource(&mut tx, &m, &principal, &m.operations[3], 10)
-                .await
-                .unwrap();
+            let normal =
+                repository::test_read_resource(&mut tx, &m, &principal, &m.operations[3], 10)
+                    .await
+                    .unwrap();
             assert_eq!(normal.is_some(), expected);
             tx.commit().await.unwrap();
             // Exercise the post-commit response path, not just its read helper.
             // The parent is unpublished, so the child's visibility predicate fails.
             let response = app
-                .finish_navigation(
+                .test_finish_navigation(
                     Prepared {
                         fallback: success(),
                         navigation: Some((
@@ -645,7 +664,7 @@ mod tests {
             .await
             .unwrap();
         tx.commit().await.unwrap();
-        let response = app.finish_navigation(prepared, deadline).await;
+        let response = app.test_finish_navigation(prepared, deadline).await;
         assert_eq!(response.body, fallback);
         assert_eq!(response.status, 200);
         let recovery = app
@@ -704,7 +723,7 @@ mod tests {
             .unwrap();
         tx.commit().await.unwrap();
         let response = app
-            .finish_navigation(prepared, Instant::now() - Duration::from_millis(1))
+            .test_finish_navigation(prepared, Instant::now() - Duration::from_millis(1))
             .await;
         assert_eq!(response.body, fallback);
     }

@@ -66,7 +66,17 @@ impl Application {
                 return Ok(response.fallback);
             };
             match timeout_at(deadline, tx.commit()).await {
-                Ok(Ok(())) => return Ok(self.finish_navigation(response, deadline).await),
+                Ok(Ok(())) => {
+                    return Ok(self
+                        .finish_navigation(
+                            response,
+                            deadline,
+                            budget
+                                .take_delivery_calls()
+                                .map_err(RequestError::database)?,
+                        )
+                        .await);
+                }
                 Ok(Err(error)) if retryable(&error) => {
                     // SQLite busy can leave COMMIT's transaction active. A new
                     // attempt is legal only after this rollback succeeds.
@@ -116,6 +126,7 @@ impl Application {
             .await
             .map_err(|_| RequestError::Busy)?;
         let deadline = Instant::now() + self.runtime.limits().wall_time;
+        let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
         let prepared = timeout_at(deadline, async {
             let a = manifest::web_action(&self.manifest, action)?;
             let core = ActionCore::of(a.core)?;
@@ -175,10 +186,17 @@ impl Application {
                 }
                 return Ok(response);
             }
-            let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
+            let time = if crate::authority::uses_time(&self.manifest) {
+                budget.spend(1)?;
+                Some(self.temporal_after_admission(&mut tx).await?)
+            } else {
+                None
+            };
+            let mut authority = self.authority_context(time)?;
             match self
                 .resolve_action_targets(
                     &mut tx,
+                    &mut authority,
                     core,
                     &grants,
                     &principal,
@@ -245,7 +263,9 @@ impl Application {
             Ok(navigation::Prepared::ready(rendered))
         })
         .await??;
-        Ok(self.finish_navigation(prepared, deadline).await)
+        Ok(self
+            .finish_navigation(prepared, deadline, budget.take_delivery_calls()?)
+            .await)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -432,7 +452,9 @@ mod parent_redirect_budget_tests {
                 tx.rollback().await.unwrap();
             } else {
                 tx.commit().await.unwrap();
-                let response = app.finish_navigation(prepared, deadline).await;
+                let response = app
+                    .finish_navigation(prepared, deadline, budget.take_delivery_calls().unwrap())
+                    .await;
                 let body = String::from_utf8(response.body).unwrap();
                 assert!(body.contains("<pre>"));
                 assert!(body.contains("href=\"/threads/10\""));

@@ -177,6 +177,7 @@ async fn stored_bounds(db: &Database) {
         .unwrap();
     }
     let mut effects = Effects {
+        authority: Default::default(),
         provenance: Default::default(),
         follow_sources: Vec::new(),
         invoked: Default::default(),

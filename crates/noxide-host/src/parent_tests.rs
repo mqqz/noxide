@@ -139,6 +139,7 @@ pub(crate) async fn seed(db: &Database, m: &Manifest) {
 }
 async fn effects(db: &Database, m: &Manifest, route: u32, target: u64) -> Effects {
     Effects {
+        authority: Default::default(),
         provenance: Default::default(),
         follow_sources: Vec::new(),
         invoked: Default::default(),
@@ -1651,10 +1652,10 @@ async fn parent_read_authority_matches_normal_get_and_excludes_list_authority() 
             .await
             .unwrap();
         let normal =
-            crate::repository::read_resource(&mut tx, &m, &principal, &m.operations[3], 10)
+            crate::repository::test_read_resource(&mut tx, &m, &principal, &m.operations[3], 10)
                 .await
                 .unwrap();
-        let redirect = crate::repository::authorize_page_resource(
+        let redirect = crate::repository::test_authorize_page_resource(
             &mut tx,
             &m,
             &principal,
@@ -1744,7 +1745,7 @@ async fn filtered_parent_case(db: Database) {
         assert_eq!(rows[0].id, if descending { 12 } else { 4 });
         assert!(!rows[0].fields.contains_key("archived"));
         assert!(
-            crate::repository::read_resource(&mut e.tx, &m, &e.principal, &m.operations[1], 2)
+            crate::repository::test_read_resource(&mut e.tx, &m, &e.principal, &m.operations[1], 2)
                 .await
                 .unwrap()
                 .is_some()
@@ -2100,7 +2101,7 @@ async fn gated_destination_case(db: Database) {
             .begin_read(Instant::now() + Duration::from_secs(5))
             .await
             .unwrap();
-        let result = crate::repository::authorize_page_resource(
+        let result = crate::repository::test_authorize_page_resource(
             &mut tx,
             &m,
             &Principal::Anonymous,
@@ -2195,12 +2196,12 @@ async fn mixed_destination_reads_match_direct_reads() {
                     let mut direct = false;
                     for id in &m.routes[1].operations {
                         let op = manifest::operation(&m, *id).unwrap();
-                        direct |= crate::repository::read_resource(&mut tx, &m, principal, op, 2)
+                        direct |= crate::repository::test_read_resource(&mut tx, &m, principal, op, 2)
                             .await
                             .unwrap()
                             .is_some();
                     }
-                    let destination = crate::repository::authorize_page_resource(
+                    let destination = crate::repository::test_authorize_page_resource(
                         &mut tx,
                         &m,
                         principal,
@@ -2222,7 +2223,7 @@ async fn mixed_destination_reads_match_direct_reads() {
                         "destination must use the same independent read policies and public gate as GET"
                     );
                     assert!(
-                        crate::repository::authorize_page_resource(
+                        crate::repository::test_authorize_page_resource(
                             &mut tx,
                             &m,
                             principal,
@@ -2236,7 +2237,7 @@ async fn mixed_destination_reads_match_direct_reads() {
                         .is_none()
                     );
                     assert!(
-                        crate::repository::authorize_page_resource(
+                        crate::repository::test_authorize_page_resource(
                             &mut tx,
                             &m,
                             principal,

@@ -1,9 +1,10 @@
 # Membership and resource expiry
 
 Status: P07 integration candidate, not accepted or ready to activate. Canonical
-wire/admission, policy/SQL helpers and SDK lowering are present. The named P04
-checkpoint still needs its final fixes; runtime call sites, schema enforcement,
-provider measurements and the combined review remain integration gates. See the
+wire/admission, policy/SQL helpers, runtime read/mutation hooks and SDK lowering
+are present on the final P04 source checkpoint. Schema enforcement, full action
+and read-path regression coverage, provider measurements and the combined review
+remain integration gates. See the
 [capability contracts](architecture/capability-contracts.md) and
 [security contract](architecture/runtime.md#security-contract).
 
@@ -86,6 +87,14 @@ not rerun original temporal guards. Current delivery authorization uses a fresh
 read attempt. Public parent gates constrain public grants only; independent
 private read grants retain their authority.
 
+P04 snapshots retain the initial approved read/projection values for that one
+invocation. An earlier step cannot erase data already captured under that grant.
+The declared flow may use those initial values after membership revocation or a
+source expiry change; it does not reload or obtain a new source read grant.
+Every later current-row read, guard authority check and mutation policy uses
+fresh witnesses. A retry captures a fresh snapshot, and a later ordinary request
+must independently authorize the source. Exact revision/review rules still apply.
+
 ## Explicit typed declarations
 
 ```rust,ignore
@@ -115,8 +124,11 @@ admin policy; ordinary membership ownership cannot grant or change roles.
 The SDK equivalence test checks literal lowering, field-key mapping, identity
 and reference matching, metadata-only schema registration, native tuple and
 explicit/default horizon declarations. The earlier disabled checkpoint passed
-four real SQLite/PostgreSQL leaf tests; those results do not establish this new
-integration. Full provider truth tables, owned-nonmember denial, bootstrap,
+four real SQLite/PostgreSQL leaf tests. The first integrated primitive round
+passes seven tests with both real providers, including production SQL/row parity,
+actual expiry/horizons, account scope, historical duplicates, owned-nonmember
+denial, mutation freshness and read-only clock state. Those focused results do
+not establish all runtime paths. Full bootstrap and sequential snapshot tests,
 anonymous picker, all-read-path expiry/freshness, schema/index activation,
 adversarial 100k-row measurements and independent combined P04/P07 review remain
 required. No deployment, audited-security or anonymity claim follows from local

@@ -1,3 +1,4 @@
+mod authority;
 mod computation;
 use crate::{
     auth::Principal,
@@ -6,6 +7,9 @@ use crate::{
     security::RecordTarget,
 };
 use anyhow::{Result, ensure};
+pub(crate) use authority::{ReadBudget, ReadContext};
+#[cfg(test)]
+pub(crate) use authority::{test_authorize_page_resource, test_read_resource};
 pub(crate) use computation::CalculationUnavailable;
 use noxide_protocol::*;
 use std::sync::Arc;
@@ -76,7 +80,7 @@ pub(crate) fn create_prerequisites(operation: &Operation, principal: &Principal)
     operation.policy.any.iter().any(|rule| {
         !rule.is_empty()
             && rule.iter().all(|predicate| match predicate {
-                Predicate::PrincipalIs { .. } => true,
+                Predicate::PrincipalIs { .. } | Predicate::ExistsRelated(_) => true,
                 Predicate::Public
                 | Predicate::Capability
                 | Predicate::Owner
@@ -99,6 +103,7 @@ pub(crate) fn create_prerequisites(operation: &Operation, principal: &Principal)
 pub(crate) const MAX_LIST_DATABASE_CALLS: usize = 4096;
 
 pub(crate) struct Effects {
+    pub authority: crate::authority::Authority,
     pub provenance:
         std::collections::BTreeMap<(u32, u32, u64), std::collections::BTreeMap<String, u64>>,
     pub follow_sources: Vec<(u32, u64)>,
@@ -205,16 +210,14 @@ pub(crate) use crate::policy::allowed;
 
 /// Common host read authorization and projection; no guest code is executed.
 pub(crate) async fn read_resource(
-    tx: &mut Transaction,
-    m: &Manifest,
-    principal: &Principal,
+    context: &mut ReadContext<'_>,
     op: &Operation,
     target: u64,
 ) -> Result<Option<Record>> {
-    let Some(stored) = load(tx, m, op.resource, target).await? else {
+    let Some(stored) = context.load(op.resource, target).await? else {
         return Ok(None);
     };
-    if !authorize_stored_read(tx, m, principal, op, &stored).await? {
+    if !authorize_stored_read(context, op, &stored).await? {
         return Ok(None);
     }
     let mut record = stored.record;
@@ -227,10 +230,9 @@ pub(crate) async fn read_resource(
     }
     Ok(Some(record))
 }
+
 pub(crate) async fn authorize_stored_read(
-    tx: &mut Transaction,
-    m: &Manifest,
-    principal: &Principal,
+    context: &mut ReadContext<'_>,
     op: &Operation,
     stored: &StoredRecord,
 ) -> Result<bool> {
@@ -238,101 +240,76 @@ pub(crate) async fn authorize_stored_read(
         matches!(op.kind, OperationKind::Read | OperationKind::List),
         "invalid row read authority"
     );
-    let mut read = op.clone();
-    read.kind = OperationKind::Read;
-    if !read_allowed(m, principal, &read, stored)? {
+    if !read_allowed(context, op, stored).await? {
         return Ok(false);
     }
+    let source = manifest::resource(context.manifest, op.resource)?;
     if manifest::is_public(op)
-        && manifest::resource(m, op.resource)?.gate.is_some()
-        && let Some(parent) = manifest::reference_resource(
-            m,
-            op.resource,
-            &manifest::resource(m, op.resource)?
-                .gate
-                .as_ref()
-                .expect("gate")
-                .field,
-        )?
+        && let Some(gate) = &source.gate
     {
-        let source_resource = manifest::resource(m, op.resource)?;
-        let field = manifest::reference_field(
-            source_resource,
-            &source_resource.gate.as_ref().expect("gate").field,
-        )
-        .expect("reference");
-        let id = stored
-            .record
-            .fields
-            .get(&field.name)
-            .ok_or_else(|| anyhow::anyhow!("missing parent"))?
-            .parse()?;
-        let parent = load(tx, m, parent.id, id).await?;
-        if !parent.is_some_and(|p| manifest::gate_permits(source_resource, &p.record.fields, false))
+        let parent = manifest::reference_resource(context.manifest, op.resource, &gate.field)?
+            .expect("admitted gate reference");
+        let id = stored.record.fields[&gate.field].parse()?;
+        let Some(parent) = context.load(parent.id, id).await? else {
+            return Ok(false);
+        };
+        if !context.unexpired(&parent)?
+            || !manifest::gate_permits(source, &parent.record.fields, false)
         {
             return Ok(false);
         }
     }
     Ok(true)
 }
-pub(crate) fn read_allowed(
-    m: &Manifest,
-    principal: &Principal,
+
+pub(crate) async fn read_allowed(
+    context: &mut ReadContext<'_>,
     op: &Operation,
     stored: &StoredRecord,
 ) -> Result<bool> {
     ensure!(
-        op.kind == OperationKind::Read && op.resource == stored.record.resource,
+        matches!(op.kind, OperationKind::Read | OperationKind::List)
+            && op.resource == stored.record.resource,
         "invalid read binding"
     );
-    manifest::validate_fields(manifest::resource(m, op.resource)?, &stored.record.fields)?;
-    if !allowed(
-        &op.policy,
-        principal,
-        crate::policy::Row {
-            owner: &stored.owner,
-            tenant: &stored.tenant,
-            fields: &stored.record.fields,
-        },
-    ) {
+    if !context.authorize(op, stored).await? {
         return Ok(false);
     }
     if manifest::is_public(op) {
-        let visible = op
+        let visibility = op
             .visibility
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("missing visibility"))?;
         ensure!(op.fields.is_some(), "missing read projection");
-        if stored.record.fields.get(&visible.field) != Some(&visible.equals) {
+        if stored.record.fields.get(&visibility.field) != Some(&visibility.equals) {
             return Ok(false);
         }
     }
     Ok(true)
 }
+
 pub(crate) async fn authorize_page_resource(
-    tx: &mut Transaction,
-    m: &Manifest,
-    principal: &Principal,
+    context: &mut ReadContext<'_>,
     route: &Route,
     resource: u32,
     id: u64,
     incarnation: Option<&str>,
 ) -> Result<Option<StoredRecord>> {
     ensure!(route.resource == Some(resource), "route resource differs");
-    let Some(stored) = load(tx, m, resource, id).await? else {
+    let Some(stored) = context.load(resource, id).await? else {
         return Ok(None);
     };
-    if incarnation.is_some_and(|i| i != stored.incarnation) {
+    if incarnation.is_some_and(|value| value != stored.incarnation) {
         return Ok(None);
     }
     let mut reads = 0;
     let mut public_read = false;
     let mut private_read = false;
     for operation in &route.operations {
-        let op = manifest::operation(m, *operation)?;
+        let op = manifest::operation(context.manifest, *operation)?;
         if op.kind == OperationKind::Read && op.via.is_none() && op.resource == resource {
             reads += 1;
-            if read_allowed(m, principal, op, &stored)? {
+            if read_allowed(context, op, &stored).await? {
                 if manifest::is_public(op) {
                     public_read = true;
                 } else {
@@ -345,19 +322,20 @@ pub(crate) async fn authorize_page_resource(
     if !public_read && !private_read {
         return Ok(None);
     }
-    // Read operations are independent grants, as on GET. Public-only authority
-    // still requires the parent gate; an authorized private read does not.
-    if !private_read && let Some(gate) = &manifest::resource(m, resource)?.gate {
-        let target = manifest::reference_resource(m, resource, &gate.field)?.expect("gate target");
+    if !private_read && let Some(gate) = &manifest::resource(context.manifest, resource)?.gate {
+        let parent = manifest::reference_resource(context.manifest, resource, &gate.field)?
+            .expect("admitted gate reference");
         let id = stored.record.fields[&gate.field].parse()?;
-        let target = load(tx, m, target.id, id).await?;
-        if target.is_none_or(|target| {
-            !manifest::gate_permits(
-                manifest::resource(m, resource).expect("admitted resource"),
-                &target.record.fields,
+        let Some(parent) = context.load(parent.id, id).await? else {
+            return Ok(None);
+        };
+        if !context.unexpired(&parent)?
+            || !manifest::gate_permits(
+                manifest::resource(context.manifest, resource)?,
+                &parent.record.fields,
                 false,
             )
-        }) {
+        {
             return Ok(None);
         }
     }
@@ -399,7 +377,7 @@ impl Effects {
                     Some(stored)
                 }
             };
-            self.authorize_step(&op, stored.as_ref())?;
+            self.authorize_step(&op, stored.as_ref()).await?;
             if op.kind != OperationKind::Create {
                 self.current_guard_authority(action, step, stored.as_ref())
                     .await?;
@@ -476,6 +454,7 @@ impl Effects {
                 }
                 _ => anyhow::bail!("transaction requires mutation"),
             };
+            self.authority.invalidate();
             self.target_rows.remove(&(outcome.resource, outcome.id));
             outcomes.push(outcome);
             #[cfg(test)]
@@ -484,7 +463,11 @@ impl Effects {
         Ok(outcomes)
     }
 
-    fn authorize_step(&self, op: &Operation, stored: Option<&StoredRecord>) -> Result<()> {
+    async fn authorize_step(
+        &mut self,
+        op: &Operation,
+        stored: Option<&StoredRecord>,
+    ) -> Result<()> {
         if op.kind == OperationKind::Create {
             ensure!(
                 create_prerequisites(op, &self.principal),
@@ -493,6 +476,7 @@ impl Effects {
         } else {
             let stored = stored.ok_or(ReferenceUnavailable)?;
             if manifest::is_capability(op) {
+                ensure!(self.row_unexpired(stored)?, ReferenceUnavailable);
                 ensure!(
                     self.capability_grant
                         .as_ref()
@@ -504,15 +488,7 @@ impl Effects {
                 );
             } else {
                 ensure!(
-                    allowed(
-                        &op.policy,
-                        &self.principal,
-                        crate::policy::Row {
-                            owner: &stored.owner,
-                            tenant: &stored.tenant,
-                            fields: &stored.record.fields,
-                        }
-                    ),
+                    self.authorize_existing(op, stored).await?,
                     ReferenceUnavailable
                 );
             }
@@ -588,7 +564,7 @@ impl Effects {
                     .ok_or_else(|| anyhow::anyhow!("missing binding eligibility"))?,
             )?;
             ensure!(
-                authorize_stored_read(&mut self.tx, &m, &self.principal, eligible, &stored).await?
+                authorize_stored_read(&mut self.read_context(), eligible, &stored).await?
                     && (resource
                         .gate
                         .as_ref()
@@ -606,6 +582,9 @@ impl Effects {
             }
         }
         manifest::validate_fields(resource, &fields)?;
+        for unique in &resource.unique {
+            crate::membership::canonical_tuple(resource, unique, &fields)?;
+        }
         let public = manifest::is_public(op);
         let user = if public {
             None
@@ -670,6 +649,7 @@ impl Effects {
         let mut fields = stored.record.fields.clone();
         fields.extend(assignments);
         manifest::validate_fields(manifest::resource(&self.manifest, op.resource)?, &fields)?;
+        self.check_expiry_update(op, &stored.record.fields, &fields)?;
         let next = stored
             .revision
             .checked_add(1)
@@ -775,7 +755,7 @@ impl Effects {
         let direction = plan.direction();
         let cursor = if plan.preview { None } else { self.cursor };
         let mut params = vec![Param::Number(storage_resource)];
-        let clauses = crate::policy::sql(&self.tx, &op.policy, &self.principal, &mut params);
+        let clauses = self.authority_sql(op, &mut params).await?;
         let visibility = self.visibility_clause(op, &mut params)?;
         let mut parent_clause = String::new();
         if let Some(scope) = &plan.scope {
@@ -810,20 +790,26 @@ impl Effects {
             self.charge_list_calls(1)?;
             let rows = self.tx.fetch::<5>(&sql, &page_params).await?;
             let count = rows.len();
-            for [seq, id, owner, tenant, fields] in rows {
+            let parsed: Vec<Fields> = rows
+                .iter()
+                .map(|row| serde_json::from_str(&row[4]))
+                .collect::<std::result::Result<_, _>>()?;
+            let policy_rows: Vec<_> = rows
+                .iter()
+                .zip(&parsed)
+                .map(|(row, fields)| {
+                    Ok(crate::authority::Row {
+                        id: row[1].parse()?,
+                        owner: &row[2],
+                        tenant: &row[3],
+                        fields,
+                    })
+                })
+                .collect::<Result<_>>()?;
+            let decisions = self.authorize_rows(op, &policy_rows).await?;
+            for ([seq, id, _owner, _tenant, fields], permitted) in rows.into_iter().zip(decisions) {
                 plan.check_selection(&serde_json::from_str(&fields)?, &self.request.params)?;
-                ensure!(
-                    allowed(
-                        &op.policy,
-                        &self.principal,
-                        crate::policy::Row {
-                            owner: &owner,
-                            tenant: &tenant,
-                            fields: &serde_json::from_str(&fields)?
-                        }
-                    ),
-                    "policy invariant"
-                );
+                ensure!(permitted, "policy invariant");
                 let record = Record {
                     resource: op.resource,
                     id: id.parse()?,
@@ -914,57 +900,70 @@ impl Effects {
         let mut records = Vec::new();
         let mut last = cursor;
         self.more = None;
-        let ordered: Box<dyn Iterator<Item = (u64, u64)> + Send> = if plan.descending() {
-            Box::new(candidates.into_iter().rev())
+        let ordered: Vec<_> = if plan.descending() {
+            candidates.into_iter().rev().collect()
         } else {
-            Box::new(candidates.into_iter())
+            candidates.into_iter().collect()
         };
-        for (seq, id) in ordered {
-            if if plan.descending() {
-                seq < boundary
-            } else {
-                seq > boundary
-            } {
-                break;
+        let ordered: Vec<_> = ordered
+            .into_iter()
+            .take_while(|(seq, _)| {
+                if plan.descending() {
+                    *seq >= boundary
+                } else {
+                    *seq <= boundary
+                }
+            })
+            .collect();
+        'page: for group in ordered.chunks(crate::membership::MAX_BATCH) {
+            let ids: Vec<_> = group.iter().map(|(_, id)| *id).collect();
+            let loaded = authority::load_batch(
+                &mut self.tx,
+                &self.manifest,
+                op.resource,
+                storage_resource,
+                &ids,
+                &mut self.list_calls,
+            )
+            .await?;
+            let stored: Vec<_> = group
+                .iter()
+                .map(|(_, id)| {
+                    loaded
+                        .get(id)
+                        .ok_or_else(|| anyhow::anyhow!("record disappeared"))
+                })
+                .collect::<Result<_>>()?;
+            let policy_rows: Vec<_> = stored.iter().map(|stored| stored.authority_row()).collect();
+            let allowed = self.authorize_rows(op, &policy_rows).await?;
+            for (((seq, _), stored), allowed) in group.iter().zip(stored).zip(allowed) {
+                if !allowed {
+                    last = Some(*seq);
+                    continue;
+                }
+                if let Some(field) = &plan.scope
+                    && stored
+                        .record
+                        .fields
+                        .get(field)
+                        .and_then(|value| value.parse::<u64>().ok())
+                        != self.request.target
+                {
+                    last = Some(*seq);
+                    continue;
+                }
+                plan.check_selection(&stored.record.fields, &self.request.params)?;
+                let mut record = stored.record.clone();
+                record.fields = self.visible_fields(op, record.fields)?;
+                if records.len() == size
+                    || !append_prefix(&mut records, record, self.result_limit, plan.preview)?
+                {
+                    self.truncated = true;
+                    self.more = last;
+                    break 'page;
+                }
+                last = Some(*seq);
             }
-            self.charge_list_calls(2)?;
-            let stored = load(&mut self.tx, &self.manifest, op.resource, id)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("record disappeared"))?;
-            if !allowed(
-                &op.policy,
-                &self.principal,
-                crate::policy::Row {
-                    owner: &stored.owner,
-                    tenant: &stored.tenant,
-                    fields: &stored.record.fields,
-                },
-            ) {
-                last = Some(seq);
-                continue;
-            }
-            if let Some(field) = &plan.scope
-                && stored
-                    .record
-                    .fields
-                    .get(field)
-                    .and_then(|v| v.parse::<u64>().ok())
-                    != self.request.target
-            {
-                last = Some(seq);
-                continue;
-            }
-            plan.check_selection(&stored.record.fields, &self.request.params)?;
-            let mut record = stored.record;
-            record.fields = self.visible_fields(op, record.fields)?;
-            if records.len() == size
-                || !append_prefix(&mut records, record, self.result_limit, plan.preview)?
-            {
-                self.truncated = true;
-                self.more = last;
-                break;
-            }
-            last = Some(seq);
         }
         if self.more.is_none() && bounded_more {
             self.truncated = true;
@@ -1071,7 +1070,7 @@ impl Effects {
             );
             let rows = self.tx.fetch::<4>(&sql, &params).await?;
             // Gate target reads are batched separately below; no per-record round trips.
-            let mut candidates = Vec::new();
+            let mut loaded = Vec::new();
             for [id, owner, tenant, fields] in rows {
                 let fields = serde_json::from_str(&fields)?;
                 manifest::validate_fields(
@@ -1090,9 +1089,25 @@ impl Effects {
                     revision: 1,
                     cap_version: None,
                 };
-                if read_allowed(&self.manifest, &self.principal, &op, &stored)? {
-                    candidates.push(stored.record);
+                loaded.push(stored);
+            }
+            let policy_rows: Vec<_> = loaded.iter().map(StoredRecord::authority_row).collect();
+            let permitted = self.authorize_rows(&op, &policy_rows).await?;
+            let mut candidates = Vec::new();
+            for (stored, allowed) in loaded.into_iter().zip(permitted) {
+                if !allowed {
+                    continue;
                 }
+                if manifest::is_public(&op) {
+                    let visibility = op
+                        .visibility
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("missing public visibility"))?;
+                    if stored.record.fields.get(&visibility.field) != Some(&visibility.equals) {
+                        continue;
+                    }
+                }
+                candidates.push(stored.record);
             }
             if manifest::is_public(&op)
                 && let Some(gate) = manifest::resource(&self.manifest, op.resource)?
@@ -1123,7 +1138,15 @@ impl Effects {
                     );
                     for [id, fields] in self.tx.fetch::<2>(&sql, &params).await? {
                         let fields = serde_json::from_str(&fields)?;
-                        if manifest::gate_permits(
+                        manifest::validate_fields(
+                            manifest::resource(&self.manifest, target_resource)?,
+                            &fields,
+                        )?;
+                        if crate::expiry::available(
+                            manifest::resource(&self.manifest, target_resource)?,
+                            &fields,
+                            self.authority.time(),
+                        )? && manifest::gate_permits(
                             manifest::resource(&self.manifest, op.resource)?,
                             &fields,
                             false,
@@ -1235,9 +1258,9 @@ impl Effects {
             OperationKind::Create | OperationKind::Update | OperationKind::Delete => {
                 anyhow::bail!("mutation outside declared transaction")
             }
-            OperationKind::Read => serde_json::to_vec(
-                &read_resource(&mut self.tx, &self.manifest, &self.principal, &op, target).await?,
-            )?,
+            OperationKind::Read => {
+                serde_json::to_vec(&read_resource(&mut self.read_context(), &op, target).await?)?
+            }
             OperationKind::List => {
                 self.result_limit = self.list_result_limit(&op)?;
                 self.truncated = false;
@@ -1273,10 +1296,18 @@ impl Effects {
                         "invalid list parent"
                     );
                     let record = load(&mut self.tx, &self.manifest, parent, id).await?;
-                    if record.as_ref().is_none_or(|r| {
-                        manifest::is_public(&op)
-                            && !manifest::gate_permits(&source_resource, &r.record.fields, false)
-                    }) {
+                    let gate_visible = match &record {
+                        Some(record) => {
+                            self.row_unexpired(record)?
+                                && manifest::gate_permits(
+                                    &source_resource,
+                                    &record.record.fields,
+                                    false,
+                                )
+                        }
+                        None => false,
+                    };
+                    if !gate_visible {
                         let bytes = if plan.preview {
                             self.more = previous_more;
                             serde_json::to_vec(&PreviewResult {

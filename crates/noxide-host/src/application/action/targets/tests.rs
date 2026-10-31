@@ -29,6 +29,8 @@ fn declarations() -> Manifest {
     });
     let names = ["a", "b", "c", "d"];
     m.resources.push(Resource {
+        expiry: None,
+        unique: Vec::new(),
         id: 2,
         name: "links".into(),
         gate: None,
@@ -1225,6 +1227,7 @@ async fn follow_provenance_keeps_each_reference_field_separate() {
     .await
     .unwrap();
     let mut effects = Effects {
+        authority: Default::default(),
         provenance: Default::default(),
         follow_sources: vec![],
         invoked: Default::default(),
@@ -1337,6 +1340,7 @@ async fn picker_query_ignores_and_preserves_unrelated_route_pagination() {
     .await
     .unwrap();
     let mut effects = Effects {
+        authority: Default::default(),
         provenance: Default::default(),
         follow_sources: vec![],
         invoked: Default::default(),

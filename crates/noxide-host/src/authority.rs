@@ -71,6 +71,9 @@ impl Authority {
         self.time
     }
     pub(crate) fn invalidate(&mut self) {
+        if let Some(witnesses) = &mut self.witnesses {
+            witnesses.invalidate();
+        }
         self.witnesses = None;
     }
 
@@ -123,8 +126,28 @@ impl Authority {
                 .collect::<Result<_>>()?
         };
         let plans = membership::plans(manifest, operation)?;
+        // Independent ordinary grants need no membership lookup. In particular,
+        // a proposed create has no self identity to join before insertion.
+        let ordinary: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                policy::allowed(
+                    &operation.policy,
+                    principal,
+                    policy::Row {
+                        owner: row.owner,
+                        tenant: row.tenant,
+                        fields: row.fields,
+                    },
+                )
+            })
+            .collect();
         let mut decisions: BTreeMap<ExistsRelated, Vec<bool>> = BTreeMap::new();
         if !plans.is_empty()
+            && visible
+                .iter()
+                .zip(&ordinary)
+                .any(|(visible, ordinary)| *visible && !*ordinary)
             && let Principal::User(user) = principal
             && !user.tenant.is_empty()
         {
@@ -138,7 +161,7 @@ impl Authority {
                 .iter()
                 .zip(&visible)
                 .enumerate()
-                .filter(|(_, (_, visible))| **visible)
+                .filter(|(index, (_, visible))| **visible && !ordinary[*index])
                 .map(|(index, (row, _))| {
                     Ok((
                         index,

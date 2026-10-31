@@ -1,4 +1,5 @@
 mod action;
+mod authority;
 pub(crate) use action::ActionCore;
 use action::{CanonicalActionInput, ExecutionBudget};
 mod capabilities;
@@ -845,19 +846,19 @@ impl Application {
         })
     }
 
-    fn target_allowed(
+    async fn target_allowed(
         &self,
+        context: &mut repository::ReadContext<'_>,
         action: ActionCore<'_>,
         route: Option<u32>,
-        principal: &auth::Principal,
         stored: &StoredRecord,
     ) -> Result<bool> {
+        if !context.unexpired(stored)? {
+            return Ok(false);
+        }
         let route = route
             .map(|id| manifest::route(&self.manifest, id))
             .transpose()?;
-        let permitted = |op: &Operation| {
-            repository::read_allowed(&self.manifest, principal, op, stored).unwrap_or(false)
-        };
         for target in action
             .targets
             .iter()
@@ -866,19 +867,39 @@ impl Application {
             let TargetSource::Page { reads } = &target.source else {
                 unreachable!()
             };
-            if target.resource != stored.record.resource
-                || !reads
-                    .iter()
-                    .filter(|id| route.is_none_or(|route| route.operations.contains(id)))
-                    .any(|id| manifest::operation(&self.manifest, *id).is_ok_and(permitted))
+            if target.resource != stored.record.resource {
+                return Ok(false);
+            }
+            let mut permitted = false;
+            for id in reads
+                .iter()
+                .filter(|id| route.is_none_or(|route| route.operations.contains(id)))
             {
+                if repository::authorize_stored_read(
+                    context,
+                    manifest::operation(&self.manifest, *id)?,
+                    stored,
+                )
+                .await?
+                {
+                    permitted = true;
+                    break;
+                }
+            }
+            if !permitted {
                 return Ok(false);
             }
             for projection in [target.projection.as_ref(), target.inspect.as_ref()]
                 .into_iter()
                 .flatten()
             {
-                if !permitted(manifest::operation(&self.manifest, projection.operation)?) {
+                if !repository::authorize_stored_read(
+                    context,
+                    manifest::operation(&self.manifest, projection.operation)?,
+                    stored,
+                )
+                .await?
+                {
                     return Ok(false);
                 }
             }
@@ -886,15 +907,7 @@ impl Application {
                 let op = manifest::operation(&self.manifest, step.operation)?;
                 if matches!(&step.target, Target::Named(name) if name == &target.name)
                     && !manifest::is_capability(op)
-                    && !repository::allowed(
-                        &op.policy,
-                        principal,
-                        crate::policy::Row {
-                            owner: &stored.owner,
-                            tenant: &stored.tenant,
-                            fields: &stored.record.fields,
-                        },
-                    )
+                    && !context.authorize(op, stored).await?
                 {
                     return Ok(false);
                 }
@@ -907,7 +920,7 @@ impl Application {
                                 .get(&assignment.field)
                                 .ok_or(repository::ReferenceUnavailable)?,
                         )?;
-                        if !permitted(eligible)
+                        if !repository::authorize_stored_read(context, eligible, stored).await?
                             || manifest::resource(&self.manifest, op.resource)?
                                 .gate
                                 .as_ref()
@@ -931,6 +944,8 @@ impl Application {
     async fn forms(
         &self,
         tx: &mut Transaction,
+        authority: &mut crate::authority::Authority,
+        database_calls: &mut usize,
         route: u32,
         target: Option<u64>,
         session: Option<&Token>,
@@ -941,6 +956,9 @@ impl Application {
         let r = manifest::route(&self.manifest, route)?;
         let stored = match (r.resource, target) {
             (Some(resource), Some(id)) => {
+                *database_calls = database_calls
+                    .checked_sub(2)
+                    .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
                 repository::load(tx, &self.manifest, resource, id).await?
             }
             _ => None,
@@ -968,13 +986,25 @@ impl Application {
             };
             let credentials = if manifest::signed_resource(&self.manifest, &action)?.is_some() {
                 if let Some(record) = &stored {
-                    if (manifest::is_capability(op) && record.cap_version.is_some())
-                        || self.target_allowed(
-                            ActionCore::of(action.core)?,
-                            Some(route),
-                            principal,
-                            record,
-                        )?
+                    if crate::expiry::available(
+                        manifest::resource(&self.manifest, record.record.resource)?,
+                        &record.record.fields,
+                        authority.time(),
+                    )? && ((manifest::is_capability(op) && record.cap_version.is_some())
+                        || self
+                            .target_allowed(
+                                &mut repository::ReadContext {
+                                    tx,
+                                    manifest: &self.manifest,
+                                    principal,
+                                    authority,
+                                    budget: repository::ReadBudget::Query(database_calls),
+                                },
+                                ActionCore::of(action.core)?,
+                                Some(route),
+                                record,
+                            )
+                            .await?)
                     {
                         let grant = RecordTarget {
                             resource: record.record.resource,
@@ -1161,9 +1191,16 @@ impl Application {
                 Some((token, principal)) => (Some(token), principal),
                 None => (None, auth::Principal::Anonymous),
             };
+            let mut database_calls = crate::repository::MAX_LIST_DATABASE_CALLS;
+            let time = if crate::authority::uses_time(&self.manifest) {
+                database_calls = database_calls.checked_sub(1).ok_or(RequestError::Busy)?;
+                Some(self.temporal_after_admission(&mut tx).await?)
+            } else { None };
+            let mut authority = self.authority_context(time).map_err(RequestError::database)?;
             let list = manifest::route(&self.manifest,route).map_err(|_| RequestError::InvalidRequest)?.operations.iter().filter_map(|id| manifest::operation(&self.manifest,*id).ok()).find(|op| op.kind==OperationKind::List && !manifest::is_preview(op));
             let scope_incarnation = if let (Some(target),Some(op)) = (target,list) {
                 if let Some(parent)=op.scope.as_deref().map(|field| manifest::reference_resource(&self.manifest,op.resource,field)).transpose().map_err(|_| RequestError::Rejected)?.flatten() {
+                    database_calls = database_calls.checked_sub(2).ok_or(RequestError::Busy)?;
                     crate::repository::load(&mut tx,&self.manifest,parent.id,target).await.map_err(RequestError::database)?.map(|r|r.incarnation)
                 } else {None}
             } else {None};
@@ -1181,7 +1218,7 @@ impl Application {
                 if let Some(token) = anonymous_cookie.and_then(|c| self.keys.anonymous(c, now).ok()) { (Some(token), None) }
                 else { let (token,cookie) = self.keys.issue(TokenKind::Anonymous, "", now, security::ANONYMOUS_TTL).map_err(|_| RequestError::Rejected)?; (Some(token),Some(cookie)) }
             } else { (None,None) };
-            let mut forms = self.forms(&mut tx, route, target, session.as_ref(), anonymous.as_ref(), &principal, now).await.map_err(|_| RequestError::Rejected)?;
+            let mut forms = self.forms(&mut tx, &mut authority, &mut database_calls, route, target, session.as_ref(), anonymous.as_ref(), &principal, now).await.map_err(|_| RequestError::Rejected)?;
             let request = RequestView {
                 params: params.clone(),
                 available_forms: forms
@@ -1195,11 +1232,12 @@ impl Application {
                 inspection: BTreeMap::new(),
             };
             let effects = Effects {
+                authority,
                 provenance: Default::default(),
                 follow_sources: Vec::new(),
                 invoked: Default::default(),
                 list_bytes: 0,
-                list_calls: crate::repository::MAX_LIST_DATABASE_CALLS,
+                list_calls: database_calls,
                 result_limit: noxide_protocol::MAX_RESULT_BYTES,
                 truncated: false,
                 see_all: Vec::new(),

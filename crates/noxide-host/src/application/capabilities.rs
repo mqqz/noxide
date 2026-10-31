@@ -29,6 +29,7 @@ impl Application {
             .await
             .map_err(|_| RequestError::Busy)?;
         let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
         timeout_at(deadline, async {
             let mut tx = self
                 .database
@@ -48,6 +49,12 @@ impl Application {
             let route = self
                 .capability_route(resource)
                 .map_err(|_| RequestError::InvalidRequest)?;
+            let time = if crate::authority::uses_time(&self.manifest) {
+                budget.spend(1).map_err(RequestError::database)?;
+                Some(self.temporal_after_admission(&mut tx).await?)
+            } else {
+                None
+            };
             let record = repository::load(&mut tx, &self.manifest, resource, id)
                 .await
                 .map_err(RequestError::database)?;
@@ -55,6 +62,16 @@ impl Application {
                 return render::unavailable(&self.presentation, &self.manifest)
                     .map_err(|_| RequestError::Rejected);
             };
+            if !crate::expiry::available(
+                manifest::resource(&self.manifest, resource).map_err(RequestError::database)?,
+                &record.record.fields,
+                time,
+            )
+            .map_err(RequestError::database)?
+            {
+                return render::unavailable(&self.presentation, &self.manifest)
+                    .map_err(|_| RequestError::Rejected);
+            }
             let (anonymous, new_cookie) =
                 match cookie.and_then(|c| self.keys.anonymous(c, now).ok()) {
                     Some(token) => (token, None),
@@ -132,10 +149,20 @@ impl Application {
             .await
             .map_err(|_| RequestError::Busy)?;
         let deadline = Instant::now() + self.runtime.limits().wall_time;
+        let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
         for _ in 0..3 {
             let prepared = timeout_at(
                 deadline,
-                self.prepare_rotation(resource, id, cookie, csrf, submission, secret, deadline),
+                self.prepare_rotation(
+                    resource,
+                    id,
+                    cookie,
+                    csrf,
+                    submission,
+                    secret,
+                    deadline,
+                    &mut budget,
+                ),
             )
             .await;
             let (mut tx, page) = match prepared {
@@ -171,6 +198,7 @@ impl Application {
         submission: &str,
         secret: &str,
         deadline: Instant,
+        budget: &mut ExecutionBudget,
     ) -> Result<(Transaction, Rendered)> {
         let mut tx = self.database.begin(deadline.into_std()).await?;
         self.admission(&mut tx, false).await?;
@@ -230,11 +258,25 @@ impl Application {
             let page = self.edit_handover(&mut tx, &receipt, target.route).await?;
             return Ok((tx, page));
         }
+        let time = if crate::authority::uses_time(&self.manifest) {
+            budget.spend(1)?;
+            Some(self.temporal_after_admission(&mut tx).await?)
+        } else {
+            None
+        };
         let stored = repository::load(&mut tx, &self.manifest, resource, id)
             .await?
             .ok_or(RequestError::InvalidRequest)?;
         ensure!(
             stored.incarnation == target.incarnation,
+            RequestError::InvalidRequest
+        );
+        ensure!(
+            crate::expiry::available(
+                manifest::resource(&self.manifest, resource)?,
+                &stored.record.fields,
+                time
+            )?,
             RequestError::InvalidRequest
         );
         let current = stored.cap_version.ok_or(RequestError::InvalidRequest)?;

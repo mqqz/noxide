@@ -277,6 +277,7 @@ fn effects(
     target: Option<u64>,
 ) -> Effects {
     Effects {
+        authority: Default::default(),
         provenance: Default::default(),
         follow_sources: Vec::new(),
         invoked: Default::default(),

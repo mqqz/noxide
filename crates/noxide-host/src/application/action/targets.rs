@@ -237,26 +237,32 @@ impl Application {
     async fn target_read(
         &self,
         tx: &mut Transaction,
+        authority: &mut crate::authority::Authority,
         principal: &auth::Principal,
         operation: u32,
         stored: &StoredRecord,
         budget: &mut ExecutionBudget,
     ) -> Result<bool> {
         let read = manifest::operation(&self.manifest, operation)?;
-        let gated = manifest::is_public(read)
-            && manifest::resource(&self.manifest, read.resource)?
-                .gate
-                .is_some();
-        if gated {
-            budget.spend(2)?;
-        }
-        repository::authorize_stored_read(tx, &self.manifest, principal, read, stored).await
+        repository::authorize_stored_read(
+            &mut repository::ReadContext {
+                tx,
+                manifest: &self.manifest,
+                principal,
+                authority,
+                budget: repository::ReadBudget::Action(&mut budget.database_calls),
+            },
+            read,
+            stored,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(in crate::application) async fn resolve_action_targets(
         &self,
         tx: &mut Transaction,
+        authority: &mut crate::authority::Authority,
         action: ActionCore<'_>,
         grants: &BTreeMap<String, TargetGrant>,
         principal: &auth::Principal,
@@ -298,6 +304,14 @@ impl Application {
                 );
             }
             let stored = &records[&key];
+            ensure!(
+                crate::expiry::available(
+                    manifest::resource(&self.manifest, stored.record.resource)?,
+                    &stored.record.fields,
+                    authority.time()
+                )?,
+                repository::ReferenceUnavailable
+            );
             ensure!(
                 stored.incarnation == target.incarnation,
                 repository::ReferenceUnavailable
@@ -346,7 +360,7 @@ impl Application {
                     });
                     for read in reads {
                         if self
-                            .target_read(tx, principal, read, stored, budget)
+                            .target_read(tx, authority, principal, read, stored, budget)
                             .await?
                         {
                             permitted = true;
@@ -369,8 +383,15 @@ impl Application {
             .flatten()
             {
                 ensure!(
-                    self.target_read(tx, principal, projection.operation, stored, budget)
-                        .await?,
+                    self.target_read(
+                        tx,
+                        authority,
+                        principal,
+                        projection.operation,
+                        stored,
+                        budget
+                    )
+                    .await?,
                     repository::ReferenceUnavailable
                 );
             }
@@ -386,15 +407,15 @@ impl Application {
                     && !manifest::is_capability(operation)
                 {
                     ensure!(
-                        repository::allowed(
-                            &operation.policy,
+                        repository::ReadContext {
+                            tx,
+                            manifest: &self.manifest,
                             principal,
-                            crate::policy::Row {
-                                owner: &stored.owner,
-                                tenant: &stored.tenant,
-                                fields: &stored.record.fields,
-                            }
-                        ),
+                            authority,
+                            budget: repository::ReadBudget::Action(&mut budget.database_calls)
+                        }
+                        .authorize(operation, stored)
+                        .await?,
                         repository::ReferenceUnavailable
                     );
                 }
@@ -409,7 +430,7 @@ impl Application {
                             .get(&assignment.field)
                             .ok_or(repository::ReferenceUnavailable)?;
                         ensure!(
-                            self.target_read(tx, principal, eligible, stored, budget)
+                            self.target_read(tx, authority, principal, eligible, stored, budget)
                                 .await?,
                             repository::ReferenceUnavailable
                         );
@@ -478,6 +499,10 @@ impl Application {
         picker: bool,
     ) -> Result<StoredRecord> {
         if let Some(row) = effects.target_rows.get(&(resource, id)) {
+            ensure!(
+                effects.row_unexpired(row)?,
+                repository::ReferenceUnavailable
+            );
             return Ok(row.clone());
         }
         if picker {
@@ -489,6 +514,10 @@ impl Application {
         let stored = repository::load(&mut effects.tx, &effects.manifest, resource, id)
             .await?
             .ok_or(repository::ReferenceUnavailable)?;
+        ensure!(
+            effects.row_unexpired(&stored)?,
+            repository::ReferenceUnavailable
+        );
         effects.target_rows.insert((resource, id), stored.clone());
         Ok(stored)
     }
@@ -507,22 +536,19 @@ impl Application {
         .flatten()
         {
             let read = manifest::operation(&effects.manifest, projection.operation)?.clone();
-            if manifest::is_public(&read)
-                && manifest::resource(&effects.manifest, read.resource)?
-                    .gate
-                    .is_some()
-            {
-                if picker {
-                    effects.charge_list_calls(2)?;
-                } else {
-                    ensure!(effects.calls >= 2, "database call budget");
-                    effects.calls -= 2;
-                }
-            }
+            let budget = if picker {
+                repository::ReadBudget::Query(&mut effects.list_calls)
+            } else {
+                repository::ReadBudget::Action(&mut effects.calls)
+            };
             if !repository::authorize_stored_read(
-                &mut effects.tx,
-                &effects.manifest,
-                &effects.principal,
+                &mut repository::ReadContext {
+                    tx: &mut effects.tx,
+                    manifest: &effects.manifest,
+                    principal: &effects.principal,
+                    authority: &mut effects.authority,
+                    budget,
+                },
                 &read,
                 stored,
             )
@@ -631,6 +657,7 @@ impl Application {
                 session
             }
             .ok_or(RequestError::Authentication)?;
+            effects.authority.invalidate();
             let principal = effects.principal.clone();
             if manifest::anonymous_action(first) {
                 effects.principal = auth::Principal::Anonymous;
@@ -639,6 +666,7 @@ impl Application {
                 .complete_target_form(effects, action, binding, form, subject, now)
                 .await;
             effects.principal = principal;
+            effects.authority.invalidate();
             // Cached rows contain no authority, and no picker authority survives
             // into another binding or the guest route context.
             effects.target_rows.clear();
