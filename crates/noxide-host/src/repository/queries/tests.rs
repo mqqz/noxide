@@ -171,8 +171,6 @@ async fn fixture(db: &Database, m: &Manifest) -> i64 {
         .await
         .unwrap();
     }
-    // Fresh isolated fixture only. Activation is normally operator-owned.
-    tx.execute("INSERT INTO nx_search_state(resource,tokenizer,declaration,version,state) VALUES($1,$2,$3,1,'ready') ON CONFLICT(resource) DO NOTHING",&[storage.into(),crate::search::TOKENIZER_ID.into(),serde_json::to_string(m.resources[0].search.as_ref().unwrap()).unwrap().into()]).await.unwrap();
     for (id, owner, body, rank) in [
         (1, BOB, "rust العربية", 3),
         (2, ALICE, "rust only", 2),
@@ -627,7 +625,6 @@ async fn four_step_receipts_case(db: Database) {
     db.reconcile_query_indexes(&m).await.unwrap();
     let mut tx = begin(&db).await;
     let storage = tx.storage_resource(&m, 1).await.unwrap();
-    tx.execute("INSERT INTO nx_search_state(resource,tokenizer,declaration,version,state) VALUES($1,$2,$3,1,'ready') ON CONFLICT(resource) DO NOTHING",&[storage.into(),crate::search::TOKENIZER_ID.into(),serde_json::to_string(m.resources[0].search.as_ref().unwrap()).unwrap().into()]).await.unwrap();
     let seed = Fields::from(
         ["body", "detail", "summary", "title"].map(|field| (field.into(), "seed".into())),
     );
