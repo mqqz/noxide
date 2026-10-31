@@ -13,12 +13,14 @@ pub fn manifest() -> Manifest {
         assets: Vec::new(),
         version: VERSION,
         resources: vec![Resource {
+            search: None,
             expiry: None,
             unique: Vec::new(),
             gate: None,
             id: 1,
             name: "notes".into(),
             fields: vec![TextField {
+                immutable: false,
                 kind: FieldKind::Text,
                 optional: false,
                 initial: None,
@@ -29,6 +31,7 @@ pub fn manifest() -> Manifest {
         }],
         operations: vec![
             Operation {
+                query: None,
                 bind: Default::default(),
                 scope: None,
                 via: None,
@@ -43,6 +46,7 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
+                query: None,
                 bind: Default::default(),
                 scope: None,
                 via: None,
@@ -57,6 +61,7 @@ pub fn manifest() -> Manifest {
                 policy: owner.clone(),
             },
             Operation {
+                query: None,
                 bind: Default::default(),
                 scope: None,
                 via: None,

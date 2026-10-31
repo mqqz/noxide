@@ -42,6 +42,7 @@ async fn schema_drafts_require_backfills_and_apply_the_approved_target() {
     app.activate().await.unwrap();
     let mut target = source.clone();
     target.resources[0].fields.push(TextField {
+        immutable: false,
         name: "completed".into(),
         label: "Completed".into(),
         max_bytes: 8,

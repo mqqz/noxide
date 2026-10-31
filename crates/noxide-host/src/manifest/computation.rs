@@ -334,6 +334,7 @@ fn literal_domain(literal: &Literal) -> Result<Domain> {
         ),
     };
     let field = TextField {
+        immutable: false,
         name: "literal".into(),
         label: "Literal".into(),
         kind: kind.clone(),

@@ -12,6 +12,7 @@ use std::{
 
 fn text(name: &str, kind: FieldKind) -> TextField {
     TextField {
+        immutable: false,
         name: name.into(),
         label: name.into(),
         kind,
@@ -24,6 +25,7 @@ fn text(name: &str, kind: FieldKind) -> TextField {
 fn resources() -> Vec<Resource> {
     vec![
         Resource {
+            search: None,
             expiry: None,
             unique: Vec::new(),
             id: 1,
@@ -32,6 +34,7 @@ fn resources() -> Vec<Resource> {
             fields: vec![text("title", FieldKind::Text)],
         },
         Resource {
+            search: None,
             expiry: None,
             unique: Vec::new(),
             id: 2,
@@ -78,6 +81,7 @@ fn resources() -> Vec<Resource> {
             ],
         },
         Resource {
+            search: None,
             expiry: None,
             unique: Vec::new(),
             id: 3,

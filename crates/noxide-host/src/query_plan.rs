@@ -60,7 +60,14 @@ pub(crate) fn compile_all(m: &Manifest) -> Result<BTreeMap<u32, Arc<ListPlan>>> 
 
 impl ListPlan {
     pub(crate) fn descending(&self) -> bool {
-        self.order == ListOrder::CreatedDesc
+        matches!(
+            self.order,
+            ListOrder::CreatedDesc
+                | ListOrder::Field {
+                    direction: noxide_protocol::query::Direction::Descending,
+                    ..
+                }
+        )
     }
     pub(crate) fn direction(&self) -> &'static str {
         if self.descending() { "DESC" } else { "ASC" }
@@ -252,6 +259,7 @@ mod tests {
         let mut m = crate::test_support::manifest();
         for name in ["a", "b", "c", "d"] {
             m.resources[0].fields.push(TextField {
+                immutable: false,
                 name: name.into(),
                 label: name.into(),
                 kind: FieldKind::Boolean,

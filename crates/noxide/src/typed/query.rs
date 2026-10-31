@@ -3,6 +3,7 @@ use crate::{Context, Record, RequestView};
 use noxide_protocol::{Operation, OperationKind};
 use std::marker::PhantomData;
 pub trait QueryType {
+    const PUBLIC: bool = false;
     type Resource: ResourceType;
     type Output;
     fn operation() -> Operation;
@@ -137,3 +138,87 @@ impl<Q: QueryType> std::ops::Deref for QueryRecord<Q> {
         &self.resource
     }
 }
+
+/// Aggregate declarations never implement the row query interface.
+pub trait AggregateQuery {
+    type Resource: ResourceType;
+    type Output;
+    fn operation() -> Operation;
+    fn support_operations() -> Vec<Operation>;
+    fn policy_resources() -> Vec<noxide_protocol::Resource>;
+    fn decode(value: noxide_protocol::query::AggregateValue) -> Self::Output;
+}
+pub trait AggregateScalar: Sized {
+    fn decode_aggregate(value: noxide_protocol::query::AggregateValue) -> Option<Self>;
+}
+impl AggregateScalar for i64 {
+    fn decode_aggregate(value: noxide_protocol::query::AggregateValue) -> Option<Self> {
+        let noxide_protocol::query::AggregateValue::Integer(value) = value else {
+            panic!("host aggregate scalar contract")
+        };
+        value
+    }
+}
+impl AggregateScalar for super::resource::Timestamp {
+    fn decode_aggregate(value: noxide_protocol::query::AggregateValue) -> Option<Self> {
+        let noxide_protocol::query::AggregateValue::Timestamp(value) = value else {
+            panic!("host aggregate timestamp contract")
+        };
+        value
+    }
+}
+/// One bounded aggregate host call. A limit/error never contains a partial value.
+pub struct Aggregate<Q> {
+    params: std::collections::BTreeMap<String, String>,
+    context: Context,
+    marker: PhantomData<Q>,
+}
+impl<Q: AggregateQuery> FromRequest for Aggregate<Q> {
+    fn from_request(request: &RequestView) -> Self {
+        Self {
+            params: request.params.clone(),
+            context: Context { _private: () },
+            marker: PhantomData,
+        }
+    }
+}
+impl<Q: AggregateQuery> Aggregate<Q> {
+    pub fn param(&self, name: &str) -> Option<&str> {
+        self.params.get(name).map(String::as_str)
+    }
+    pub fn fetch(&mut self) -> Result<Q::Output, noxide_protocol::query::QueryError> {
+        let value: noxide_protocol::query::AggregateResult =
+            self.context.invoke(Q::operation().id, 0);
+        value.map(Q::decode)
+    }
+}
+/// Bounded raw query spelling. Host canonicalization and admission are mandatory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchText(String);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidSearchText;
+impl SearchText {
+    pub fn new(text: impl Into<String>) -> Result<Self, InvalidSearchText> {
+        let text = text.into();
+        if text.is_empty() || text.len() > 4096 {
+            Err(InvalidSearchText)
+        } else {
+            Ok(Self(text))
+        }
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl super::resource::FieldValue for SearchText {
+    fn kind() -> noxide_protocol::FieldKind {
+        noxide_protocol::FieldKind::Text
+    }
+    fn encode(&self) -> String {
+        self.0.clone()
+    }
+    fn decode(value: &str) -> Self {
+        Self::new(value).expect("host search parameter contract")
+    }
+}
+impl super::resource::ParamValue for SearchText {}

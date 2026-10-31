@@ -564,6 +564,7 @@ async fn ordinary_actions_cannot_write_moderator_fields_or_reuse_credential() {
             .unwrap();
         let mut m = fixture::record_actions::declarations();
         m.resources[0].fields.push(TextField {
+            immutable: false,
             name: "published".into(),
             label: "Published".into(),
             kind: FieldKind::Boolean,

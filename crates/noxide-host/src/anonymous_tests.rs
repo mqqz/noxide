@@ -10,6 +10,7 @@ use std::{
 fn declarations() -> Manifest {
     let mut m = fixture::manifest();
     m.resources[0].fields.push(TextField {
+        immutable: false,
         kind: FieldKind::Boolean,
         optional: false,
         initial: None,
@@ -18,6 +19,7 @@ fn declarations() -> Manifest {
         max_bytes: 5,
     });
     m.resources[0].fields.push(TextField {
+        immutable: false,
         kind: FieldKind::Text,
         optional: true,
         initial: None,
@@ -39,6 +41,7 @@ fn declarations() -> Manifest {
     }
     for (id, kind) in [(4, OperationKind::Update), (5, OperationKind::Delete)] {
         m.operations.push(Operation {
+            query: None,
             bind: Default::default(),
             scope: None,
             via: None,
@@ -883,6 +886,7 @@ async fn capability_never_reaches_guest_or_widens_inspection_or_repository_autho
         let mut m = declarations();
         if inspect {
             m.operations.push(Operation {
+                query: None,
                 bind: Default::default(),
                 scope: None,
                 via: None,

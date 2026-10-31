@@ -1248,6 +1248,7 @@ mod application_schema_tests {
         manifest.actions[0].inputs[0].kind = manifest.resources[0].fields[0].kind.clone();
         manifest.actions[0].inputs[0].max_bytes = 20;
         manifest.resources[0].fields.push(TextField {
+            immutable: false,
             name: "completed".into(),
             label: "Completed".into(),
             max_bytes: 5,

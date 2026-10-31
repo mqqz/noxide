@@ -594,6 +594,7 @@ mod tests {
 
     fn field(name: &str, kind: FieldKind, optional: bool) -> TextField {
         TextField {
+            immutable: false,
             name: name.into(),
             label: format!("Label {name}"),
             max_bytes: 200,

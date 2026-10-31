@@ -29,6 +29,7 @@ fn declarations() -> Manifest {
     });
     let names = ["a", "b", "c", "d"];
     m.resources.push(Resource {
+        search: None,
         expiry: None,
         unique: Vec::new(),
         id: 2,
@@ -37,6 +38,7 @@ fn declarations() -> Manifest {
         fields: names
             .iter()
             .map(|name| TextField {
+                immutable: false,
                 name: (*name).into(),
                 label: (*name).into(),
                 kind: FieldKind::Reference {
@@ -786,6 +788,7 @@ async fn created_step_references_and_account_inputs_share_the_existing_executor(
 async fn created_contract(db: Option<Database>) {
     let mut m = declarations();
     m.resources[1].fields.push(TextField {
+        immutable: false,
         name: "recipient".into(),
         label: "Recipient".into(),
         kind: FieldKind::Account {
@@ -1116,6 +1119,7 @@ async fn postgres_created_references_and_active_account_inputs() {
 async fn public_picker_visibility_does_not_revoke_explicit_private_eligibility() {
     let mut m = declarations();
     m.resources[0].fields.push(TextField {
+        immutable: false,
         name: "published".into(),
         label: "Published".into(),
         kind: FieldKind::Boolean,
@@ -1278,6 +1282,7 @@ async fn follow_provenance_keeps_each_reference_field_separate() {
 async fn anonymous_picker_uses_its_own_principal_on_an_authenticated_page() {
     let mut m = declarations();
     m.resources[0].fields.push(TextField {
+        immutable: false,
         name: "published".into(),
         label: "Published".into(),
         kind: FieldKind::Boolean,

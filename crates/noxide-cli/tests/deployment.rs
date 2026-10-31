@@ -7,9 +7,11 @@ fn manifest() -> Manifest {
         assets: Vec::new(),
         blobs: None,
         resources: vec![Resource {
+            search: None,
             id: 1,
             name: "notes".into(),
             fields: vec![TextField {
+                immutable: false,
                 name: "body".into(),
                 label: "Body".into(),
                 kind: FieldKind::Text,
@@ -22,6 +24,7 @@ fn manifest() -> Manifest {
             unique: Vec::new(),
         }],
         operations: vec![Operation {
+            query: None,
             id: 1,
             resource: 1,
             kind: OperationKind::Read,

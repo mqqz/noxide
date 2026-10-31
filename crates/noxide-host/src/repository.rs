@@ -726,6 +726,15 @@ impl Effects {
         stored: &StoredRecord,
         assignments: Fields,
     ) -> Result<MutationOutcome> {
+        let schema = manifest::resource(&self.manifest, op.resource)?;
+        for name in assignments.keys() {
+            let field = schema
+                .fields
+                .iter()
+                .find(|field| &field.name == name)
+                .ok_or(ReferenceUnavailable)?;
+            ensure!(!field.is_immutable(), "immutable field cannot be updated");
+        }
         let mut fields = stored.record.fields.clone();
         fields.extend(assignments);
         manifest::validate_fields(manifest::resource(&self.manifest, op.resource)?, &fields)?;
@@ -1362,6 +1371,7 @@ impl Effects {
             .storage_resource(&self.manifest, op.resource)
             .await?;
         let value = match op.kind {
+            OperationKind::Aggregate => anyhow::bail!("aggregate runtime is not available"),
             OperationKind::Create | OperationKind::Update | OperationKind::Delete => {
                 anyhow::bail!("mutation outside declared transaction")
             }

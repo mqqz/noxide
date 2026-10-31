@@ -73,10 +73,12 @@ pub trait ResourceType: Sized {
     fn record_id(&self) -> u64;
 }
 pub trait FieldSpec<const KEY: u32> {
+    const IMMUTABLE: bool = Self::Value::IMMUTABLE;
     type Value: FieldValue;
     const KEY: &'static str;
 }
 pub trait FieldValue: Sized {
+    const SEARCHABLE: bool = false;
     const FILTERABLE: bool = false;
     const REFERENCE: bool = false;
     const IMMUTABLE: bool = false;
@@ -101,6 +103,7 @@ impl<R: ResourceType> FieldValue for Id<R> {
     }
 }
 impl FieldValue for String {
+    const SEARCHABLE: bool = true;
     fn kind() -> FieldKind {
         FieldKind::Text
     }
@@ -142,6 +145,7 @@ impl FieldValue for i64 {
     }
 }
 impl<T: FieldValue> FieldValue for Option<T> {
+    const SEARCHABLE: bool = T::SEARCHABLE;
     const FILTERABLE: bool = T::FILTERABLE;
     const IMMUTABLE: bool = T::IMMUTABLE;
     const REFERENCE: bool = T::REFERENCE;
@@ -194,6 +198,9 @@ impl FieldValue for AccountId {
 
 pub trait ParamValue: FieldValue {}
 impl ParamValue for bool {}
+impl ParamValue for i64 {}
+impl ParamValue for Timestamp {}
+impl ParamValue for Duration {}
 impl<T: ParamValue> ParamValue for Option<T> {}
 
 impl FieldValue for Timestamp {

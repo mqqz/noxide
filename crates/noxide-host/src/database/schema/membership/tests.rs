@@ -9,6 +9,7 @@ const ALICE: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 fn field(name: &str, kind: FieldKind) -> TextField {
     TextField {
+        immutable: false,
         name: name.into(),
         label: name.into(),
         kind,
@@ -54,6 +55,7 @@ fn declarations() -> Manifest {
         field("expires", FieldKind::Timestamp),
     ]);
     m.operations.push(noxide_protocol::Operation {
+        query: None,
         id: 1,
         resource: 2,
         kind: noxide_protocol::OperationKind::List,

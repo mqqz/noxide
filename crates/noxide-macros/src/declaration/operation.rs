@@ -5,7 +5,17 @@ use syn::{
     parse::{Parse, ParseStream},
     spanned::Spanned,
 };
+type RangeDeclaration = (Ident, Option<(Expr, bool)>, Option<(Expr, bool)>);
 pub(crate) struct OperationDeclaration {
+    pub(crate) aggregate_field: Option<Ident>,
+    pub(crate) scalar_order: Option<(Ident, Ident, Ident)>,
+    pub(crate) search: Option<(Vec<Ident>, Ident)>,
+    pub(crate) range: Option<RangeDeclaration>,
+    pub(crate) disclose_search: Vec<Ident>,
+    pub(crate) disclose_order: Vec<Ident>,
+    pub(crate) disclose_range: Vec<Ident>,
+    pub(crate) disclose_aggregate: bool,
+
     pub(crate) scope: Option<Ident>,
     pub(crate) via: Option<(Type, Ident)>,
     pub(crate) bind: Option<(Ident, Type)>,
@@ -32,10 +42,25 @@ impl Parse for OperationDeclaration {
         let resource;
         parenthesized!(resource in input);
         let resource_type = resource.parse()?;
+        let aggregate = matches!(kind.to_string().as_str(), "count" | "sum" | "min" | "max");
+        let aggregate_field = if aggregate && resource.peek(Token![,]) {
+            resource.parse::<Token![,]>()?;
+            Some(resource.parse()?)
+        } else {
+            None
+        };
         if !resource.is_empty() {
             return Err(resource.error("expected one resource type"));
         }
         let mut result = Self {
+            aggregate_field,
+            scalar_order: None,
+            search: None,
+            range: None,
+            disclose_search: Vec::new(),
+            disclose_order: Vec::new(),
+            disclose_range: Vec::new(),
+            disclose_aggregate: false,
             scope: None,
             via: None,
             bind: None,
@@ -171,9 +196,127 @@ impl Parse for OperationDeclaration {
                         .into_iter()
                         .collect();
                 }
+                "search" => {
+                    if result.kind != "list" {
+                        return Err(input.error("search requires list"));
+                    }
+                    let content;
+                    parenthesized!(content in input);
+                    let fields: Ident = content.parse()?;
+                    if fields != "fields" {
+                        return Err(content.error("search requires fields(...)"));
+                    }
+                    let names;
+                    parenthesized!(names in content);
+                    let names: Vec<Ident> = names
+                        .parse_terminated(Ident::parse, Token![,])?
+                        .into_iter()
+                        .collect();
+                    let unique: BTreeSet<_> = names.iter().map(ToString::to_string).collect();
+                    if names.is_empty() || names.len() > 4 || names.len() != unique.len() {
+                        return Err(content.error("search requires one to four distinct fields"));
+                    }
+                    content.parse::<Token![,]>()?;
+                    let option: Ident = content.parse()?;
+                    if option != "parameter" {
+                        return Err(content.error("search requires parameter=name"));
+                    }
+                    content.parse::<Token![=]>()?;
+                    let parameter = content.parse()?;
+                    if !content.is_empty() {
+                        return Err(content.error("unexpected search arguments"));
+                    }
+                    result.search = Some((names, parameter));
+                }
+                "range" => {
+                    if result.kind != "list" {
+                        return Err(input.error("range requires list"));
+                    }
+                    let content;
+                    parenthesized!(content in input);
+                    let field = content.parse()?;
+                    let mut lower = None;
+                    let mut upper = None;
+                    while !content.is_empty() {
+                        content.parse::<Token![,]>()?;
+                        let bound: Ident = content.parse()?;
+                        content.parse::<Token![=]>()?;
+                        let inclusive: Ident = content.parse()?;
+                        if inclusive != "inclusive" && inclusive != "exclusive" {
+                            return Err(content
+                                .error("range requires inclusive(value) or exclusive(value)"));
+                        }
+                        let value;
+                        parenthesized!(value in content);
+                        let expression = value.parse()?;
+                        if !value.is_empty() {
+                            return Err(value.error("expected one range value"));
+                        }
+                        let slot = if bound == "lower" {
+                            &mut lower
+                        } else if bound == "upper" {
+                            &mut upper
+                        } else {
+                            return Err(content.error("range requires lower or upper"));
+                        };
+                        if slot
+                            .replace((expression, inclusive == "inclusive"))
+                            .is_some()
+                        {
+                            return Err(content.error("duplicate range bound"));
+                        }
+                    }
+                    if lower.is_none() && upper.is_none() {
+                        return Err(content.error("range requires at least one bound"));
+                    }
+                    result.range = Some((field, lower, upper));
+                }
+                "disclose_search" | "disclose_order" | "disclose_range" => {
+                    if result.kind != "list" {
+                        return Err(input.error("query inference disclosure requires a list"));
+                    }
+                    let content;
+                    parenthesized!(content in input);
+                    let fields = content
+                        .parse_terminated(Ident::parse, Token![,])?
+                        .into_iter()
+                        .collect();
+                    if option == "disclose_search" {
+                        result.disclose_search = fields;
+                    } else if option == "disclose_order" {
+                        result.disclose_order = fields;
+                    } else {
+                        result.disclose_range = fields;
+                    }
+                }
+                "disclose_aggregate" => {
+                    if !aggregate {
+                        return Err(input.error("disclose_aggregate requires an aggregate"));
+                    }
+                    result.disclose_aggregate = true;
+                }
                 "order" => {
                     input.parse::<Token![=]>()?;
                     let order: Ident = input.parse()?;
+                    if order == "field" && result.kind == "list" {
+                        let content;
+                        parenthesized!(content in input);
+                        let field = content.parse()?;
+                        content.parse::<Token![,]>()?;
+                        let direction: Ident = content.parse()?;
+                        content.parse::<Token![,]>()?;
+                        let mode: Ident = content.parse()?;
+                        if !content.is_empty()
+                            || (direction != "ascending" && direction != "descending")
+                            || (mode != "immutable" && mode != "live_view")
+                        {
+                            return Err(content.error(
+                                "order field requires direction and immutable/live_view mode",
+                            ));
+                        }
+                        result.scalar_order = Some((field, direction, mode));
+                        continue;
+                    }
                     if (order != "created_asc" && order != "created_desc") || result.kind != "list"
                     {
                         return Err(syn::Error::new(
@@ -257,7 +400,7 @@ impl Parse for OperationDeclaration {
                 _ => return Err(syn::Error::new(option.span(), "unknown declaration option")),
             }
         }
-        if result.policy.is_empty() {
+        if result.policy.is_empty() && !aggregate {
             return Err(input.error("an explicit allow policy is required"));
         }
         Ok(result)

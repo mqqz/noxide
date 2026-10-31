@@ -122,6 +122,7 @@ pub(crate) fn expand_page(declaration: PageDeclaration, item: syn::ItemFn) -> sy
     let param_names: Vec<_> = params.iter().map(ToString::to_string).collect();
     let mut target = None;
     let mut query_operations = Vec::new();
+    let mut support_operations = Vec::new();
     let mut forms = Vec::new();
     let mut resources = Vec::new();
     let mut policy_resources = Vec::new();
@@ -140,6 +141,14 @@ pub(crate) fn expand_page(declaration: PageDeclaration, item: syn::ItemFn) -> sy
                 query_operations.push(quote!(<#inner as ::noxide::QueryType>::operation()));
                 resources.push(quote!(<<#inner as ::noxide::QueryType>::Resource as ::noxide::ResourceType>::definition()));
                 policy_resources.push(quote!(<#inner as ::noxide::QueryType>::policy_resources()));
+            }
+            "Aggregate" => {
+                query_operations.push(quote!(<#inner as ::noxide::AggregateQuery>::operation()));
+                support_operations
+                    .push(quote!(<#inner as ::noxide::AggregateQuery>::support_operations()));
+                resources.push(quote!(<<#inner as ::noxide::AggregateQuery>::Resource as ::noxide::ResourceType>::definition()));
+                policy_resources
+                    .push(quote!(<#inner as ::noxide::AggregateQuery>::policy_resources()));
             }
             "Form" => {
                 forms.push(quote!(<#inner as ::noxide::WebActionType>::web_binding().id));
@@ -216,6 +225,7 @@ pub(crate) fn expand_page(declaration: PageDeclaration, item: syn::ItemFn) -> sy
             pub fn register(builder: &mut ::noxide::ApplicationDefinition) {
                 #(builder.resource(#resources);)*
                 #(for resource in #policy_resources { builder.resource(resource); })*
+                #(for operation in #support_operations {builder.operation(operation);})*
                 #(builder.operation(#query_operations);)*
                 builder.page(definition());
             }

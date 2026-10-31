@@ -547,6 +547,7 @@ mod tests {
             ("expires", FieldKind::Timestamp),
         ] {
             resources[0].fields.push(TextField {
+                immutable: false,
                 name: name.into(),
                 label: name.into(),
                 kind,

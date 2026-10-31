@@ -6,13 +6,14 @@ pub mod computation;
 pub mod document;
 pub mod expiry;
 pub mod membership;
+pub mod query;
 pub mod time;
 pub use computation::{Comparison, Guard, GuardCondition, GuardRejection, Literal, Value};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 pub const MAX_IR_BYTES: usize = 65_536;
 pub const MAX_NODES: usize = 1_024;
 pub const MAX_DEPTH: usize = 32;
@@ -136,6 +137,8 @@ pub struct Policy {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TextField {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub immutable: bool,
     pub kind: FieldKind,
     pub optional: bool,
     #[serde(deserialize_with = "required_initial")]
@@ -143,6 +146,16 @@ pub struct TextField {
     pub name: String,
     pub label: String,
     pub max_bytes: u32,
+}
+
+impl TextField {
+    pub fn is_immutable(&self) -> bool {
+        self.immutable
+            || matches!(
+                self.kind,
+                FieldKind::Reference { .. } | FieldKind::Account { .. } | FieldKind::Blob { .. }
+            )
+    }
 }
 
 fn required_initial<'de, D: serde::Deserializer<'de>>(
@@ -247,6 +260,8 @@ pub enum FormInstruction {
 #[serde(deny_unknown_fields)]
 pub struct Resource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<query::SearchIndex>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expiry: Option<expiry::ResourceExpiry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unique: Vec<membership::MembershipUnique>,
@@ -259,6 +274,7 @@ pub struct Resource {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperationKind {
+    Aggregate,
     List,
     Read,
     Create,
@@ -269,6 +285,8 @@ pub enum OperationKind {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<query::Query>,
     #[serde(
         default,
         skip_serializing_if = "BTreeMap::is_empty",
@@ -357,6 +375,11 @@ pub enum Operand {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ListOrder {
+    Field {
+        field: String,
+        direction: query::Direction,
+        mode: query::SortMode,
+    },
     CreatedAsc,
     CreatedDesc,
 }
@@ -710,6 +733,7 @@ mod tests {
         let blob = format!("b1_{}", "a".repeat(64));
         let upload = format!("u1_{}", "b".repeat(64));
         let field = TextField {
+            immutable: false,
             kind: FieldKind::Blob { max_bytes: 1024 },
             optional: false,
             initial: None,

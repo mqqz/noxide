@@ -855,6 +855,7 @@ fn proposed_manifest(principal: bool) -> Manifest {
         .fields
         .extend([
             TextField {
+                immutable: false,
                 name: "recipient".into(),
                 label: "Recipient".into(),
                 kind: FieldKind::Account {
@@ -865,6 +866,7 @@ fn proposed_manifest(principal: bool) -> Manifest {
                 max_bytes: 43,
             },
             TextField {
+                immutable: false,
                 name: "marker".into(),
                 label: "Marker".into(),
                 kind: FieldKind::Boolean,

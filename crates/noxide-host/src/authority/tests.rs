@@ -20,6 +20,7 @@ const BOB: &str = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA";
 
 fn field(name: &str, kind: FieldKind) -> TextField {
     TextField {
+        immutable: false,
         kind,
         name: name.into(),
         label: name.into(),
@@ -44,6 +45,7 @@ fn choice(name: &str, values: &[&str]) -> TextField {
 }
 fn resource(id: u32, name: &str, fields: Vec<TextField>) -> Resource {
     Resource {
+        search: None,
         id,
         name: name.into(),
         fields,
@@ -70,6 +72,7 @@ fn related(target: RelatedTarget) -> Predicate {
 }
 fn operation(id: u32, resource: u32, kind: OperationKind, predicate: Predicate) -> Operation {
     Operation {
+        query: None,
         id,
         resource,
         kind,

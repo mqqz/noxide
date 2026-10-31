@@ -18,6 +18,7 @@ fn declarations() -> Manifest {
     let mut m = fixture::manifest();
     m.resources[0].fields.extend([
         TextField {
+            immutable: false,
             kind: FieldKind::Boolean,
             optional: false,
             initial: None,
@@ -26,6 +27,7 @@ fn declarations() -> Manifest {
             max_bytes: 5,
         },
         TextField {
+            immutable: false,
             kind: FieldKind::Text,
             optional: false,
             initial: None,
@@ -66,6 +68,7 @@ fn declarations() -> Manifest {
         ),
     ] {
         m.operations.push(Operation {
+            query: None,
             bind: Default::default(),
             scope: None,
             via: None,
@@ -193,6 +196,7 @@ fn manifest_private_operations_forbid_public_metadata() {
 fn manifest_action_inspection_cannot_use_public_read() {
     let mut m = declarations();
     m.operations.push(Operation {
+        query: None,
         bind: Default::default(),
         scope: None,
         via: None,
@@ -828,6 +832,7 @@ async fn sqlite_initial_create_commit_is_host_owned() {
     for public in [false, true] {
         let mut m = fixture::manifest();
         m.resources[0].fields.push(TextField {
+            immutable: false,
             kind: FieldKind::Boolean,
             optional: false,
             initial: Some("true".into()),
@@ -895,6 +900,7 @@ async fn sqlite_initial_create_commit_is_host_owned() {
             tx.commit().await.unwrap();
             let mut updates = m.clone();
             updates.operations.push(Operation {
+                query: None,
                 bind: Default::default(),
                 scope: None,
                 via: None,

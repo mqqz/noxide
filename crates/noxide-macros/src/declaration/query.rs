@@ -10,6 +10,13 @@ pub(crate) fn expand_query(
     item: syn::ItemStruct,
 ) -> syn::Result<Tokens> {
     marker(&item)?;
+    if matches!(
+        declaration.kind.to_string().as_str(),
+        "count" | "sum" | "min" | "max"
+    ) {
+        return expand_aggregate(declaration, item);
+    }
+
     let kind = match declaration.kind.to_string().as_str() {
         "list" => quote!(::noxide::__private::OperationKind::List),
         "read" => quote!(::noxide::__private::OperationKind::Read),
@@ -87,6 +94,23 @@ pub(crate) fn expand_query(
     } else {
         quote!(::noxide::__private::ListOrder::CreatedAsc)
     };
+    let order = if let Some((field, direction, mode)) = &declaration.scalar_order {
+        let hash = stable_id(&field.to_string());
+        let resource = &declaration.resource;
+        let direction = if direction == "ascending" {
+            quote!(::noxide::__private::query::Direction::Ascending)
+        } else {
+            quote!(::noxide::__private::query::Direction::Descending)
+        };
+        let mode = if mode == "immutable" {
+            quote!(::noxide::__private::query::SortMode::Immutable)
+        } else {
+            quote!(::noxide::__private::query::SortMode::LiveView)
+        };
+        quote!(::noxide::__private::ListOrder::Field {field:<#resource as ::noxide::FieldSpec<#hash>>::KEY.into(), direction:#direction, mode:#mode})
+    } else {
+        order
+    };
     let preview = match &declaration.preview {
         None => quote!(None),
         Some(route) => {
@@ -157,6 +181,84 @@ pub(crate) fn expand_query(
             quote!(<#resource as ::noxide::FieldSpec<#hash>>::KEY.into())
         })
         .collect();
+    let search = if let Some((fields, parameter)) = &declaration.search {
+        let hashes: Vec<_> = fields
+            .iter()
+            .map(|field| stable_id(&field.to_string()))
+            .collect();
+        let parameter = parameter.to_string();
+        quote!(Some({ const _: () = { #(assert!(<<#resource as ::noxide::FieldSpec<#hashes>>::Value as ::noxide::FieldValue>::SEARCHABLE,"search requires Text fields");)* }; let mut fields=vec![#(<#resource as ::noxide::FieldSpec<#hashes>>::KEY.into()),*];fields.sort();::noxide::__private::query::Search{fields,parameter:#parameter.into()} }))
+    } else {
+        quote!(None)
+    };
+    let range = if let Some((field, lower, upper)) = &declaration.range {
+        let hash = stable_id(&field.to_string());
+        let bound = |value: &Option<(syn::Expr, bool)>| -> syn::Result<Tokens> {
+            let Some((expression, inclusive)) = value else {
+                return Ok(quote!(None));
+            };
+            let value = query_operand(expression, resource, hash)?;
+            Ok(quote!(Some(::noxide::__private::query::Bound{value:#value,inclusive:#inclusive})))
+        };
+        let lower = bound(lower)?;
+        let upper = bound(upper)?;
+        quote!(Some(::noxide::__private::query::Range{field:<#resource as ::noxide::FieldSpec<#hash>>::KEY.into(),lower:#lower,upper:#upper}))
+    } else {
+        quote!(None)
+    };
+    let mut query_disclosures = Vec::new();
+    for (kind, names, expected) in [
+        (
+            "Search",
+            &declaration.disclose_search,
+            declaration
+                .search
+                .as_ref()
+                .map_or_else(Vec::new, |(fields, _)| fields.clone()),
+        ),
+        (
+            "Order",
+            &declaration.disclose_order,
+            declaration
+                .scalar_order
+                .as_ref()
+                .map_or_else(Vec::new, |(field, _, _)| vec![field.clone()]),
+        ),
+        (
+            "Range",
+            &declaration.disclose_range,
+            declaration
+                .range
+                .as_ref()
+                .map_or_else(Vec::new, |(field, _, _)| vec![field.clone()]),
+        ),
+    ] {
+        let expected: std::collections::BTreeSet<_> = expected
+            .iter()
+            .filter(|field| public && !declaration.fields.contains(field))
+            .map(ToString::to_string)
+            .collect();
+        let actual: std::collections::BTreeSet<_> = names.iter().map(ToString::to_string).collect();
+        if expected != actual || actual.len() != names.len() {
+            return Err(syn::Error::new(
+                item.span(),
+                "query disclosure must exactly name unprojected public inference fields",
+            ));
+        }
+        let kind = format_ident!("{kind}");
+        for field in names {
+            let hash = stable_id(&field.to_string());
+            query_disclosures.push(quote!(::noxide::__private::query::Disclosure::#kind{field:<#resource as ::noxide::FieldSpec<#hash>>::KEY.into()}));
+        }
+    }
+    let query = if declaration.search.is_some()
+        || declaration.range.is_some()
+        || !query_disclosures.is_empty()
+    {
+        quote!(Some({let mut disclose=vec![#(#query_disclosures),*];disclose.sort();::noxide::__private::query::Query{search:#search,range:#range,aggregate:None,disclose}}))
+    } else {
+        quote!(None)
+    };
     let (projection, output, decode, visibility, fields) = if public {
         let names = &declaration.fields;
         let mut identity = "__noxide_record_id".to_owned();
@@ -215,19 +317,157 @@ pub(crate) fn expand_query(
         #projection
         impl #query_trait for #name { #source }
         impl ::noxide::QueryType for #name {
+            const PUBLIC: bool = #public;
             fn policy_resources() -> Vec<::noxide::__private::Resource> { #policy_resources }
             type Resource = #resource;
             type Output = #output;
             fn record_id(record: &Self::Output) -> u64 { #identity }
             fn from_record(record: ::noxide::__private::Record) -> Self::Output { #decode }
             fn operation() -> ::noxide::__private::Operation {
-                ::noxide::__private::Operation { bind: Default::default(), scope: #scope, via: #via,
+                ::noxide::__private::Operation {
+                    query: #query, bind: Default::default(), scope: #scope, via: #via,
                     filter: vec![#(#filters),*], disclose: vec![#(#disclosures),*],
                 list: #list, visibility: #visibility, fields: #fields,
                     id: ::noxide::stable_id(concat!("query:", module_path!(), "::", stringify!(#name))),
                     resource: <#resource as ::noxide::ResourceType>::definition().id,
                     kind: #kind, policy: #policy,
                 }
+            }
+        }
+    })
+}
+
+fn query_operand(expression: &syn::Expr, resource: &syn::Type, hash: u32) -> syn::Result<Tokens> {
+    if let syn::Expr::Call(call) = expression
+        && matches!(call.func.as_ref(),syn::Expr::Path(path) if path.path.is_ident("param"))
+    {
+        if call.args.len() != 1 {
+            return Err(syn::Error::new(
+                expression.span(),
+                "param requires one name",
+            ));
+        }
+        let syn::Expr::Path(path) = &call.args[0] else {
+            return Err(syn::Error::new(expression.span(), "param requires a name"));
+        };
+        let name = path
+            .path
+            .get_ident()
+            .ok_or_else(|| syn::Error::new(expression.span(), "param requires a name"))?
+            .to_string();
+        Ok(quote!(::noxide::__private::Operand::Param(#name.into())))
+    } else {
+        Ok(
+            quote!({let value:&<#resource as ::noxide::FieldSpec<#hash>>::Value=&(#expression);::noxide::__private::Operand::Literal(::noxide::FieldValue::encode(value))}),
+        )
+    }
+}
+fn expand_aggregate(
+    declaration: OperationDeclaration,
+    item: syn::ItemStruct,
+) -> syn::Result<Tokens> {
+    let function = declaration.kind.to_string();
+    let source = &declaration.resource;
+    let name = &item.ident;
+    if !declaration.policy.is_empty()
+        || declaration.scope.is_some()
+        || declaration.via.is_some()
+        || declaration.bind.is_some()
+        || declaration.preview.is_some()
+        || !declaration.filter.is_empty()
+        || !declaration.disclose.is_empty()
+        || declaration.order.is_some()
+        || declaration.scalar_order.is_some()
+        || declaration.search.is_some()
+        || declaration.range.is_some()
+        || declaration.page_size.is_some()
+        || !declaration.fields.is_empty()
+        || declaration.visible.is_some()
+        || declaration.redirect.is_some()
+        || declaration.inspect.is_some()
+        || !declaration.inspection_fields.is_empty()
+        || !declaration.disclose_search.is_empty()
+        || !declaration.disclose_order.is_empty()
+        || !declaration.disclose_range.is_empty()
+        || declaration.version != 1
+    {
+        return Err(syn::Error::new(
+            item.span(),
+            "aggregate copies its named List query; authority and selection overrides are forbidden",
+        ));
+    }
+    let disclose = declaration.disclose_aggregate;
+    let (definition, output, decode, field, check) = if function == "count" {
+        if declaration.aggregate_field.is_some() {
+            return Err(syn::Error::new(item.span(), "count has no operand field"));
+        }
+        (
+            quote!(::noxide::__private::query::AggregateFunction::Count),
+            quote!(u64),
+            quote!({
+                let ::noxide::__private::query::AggregateValue::Count(value) = value else {
+                    panic!("host count contract")
+                };
+                value
+            }),
+            quote!(None),
+            quote!(),
+        )
+    } else {
+        let operand = declaration
+            .aggregate_field
+            .as_ref()
+            .ok_or_else(|| syn::Error::new(item.span(), "scalar aggregate requires a field"))?;
+        let hash = stable_id(&operand.to_string());
+        let resource = quote!(<#source as ::noxide::QueryType>::Resource);
+        let value = quote!(<#resource as ::noxide::FieldSpec<#hash>>::Value);
+        let key = quote!(<#resource as ::noxide::FieldSpec<#hash>>::KEY);
+        let function_name = match function.as_str() {
+            "sum" => format_ident!("Sum"),
+            "min" => format_ident!("Min"),
+            _ => format_ident!("Max"),
+        };
+        let definition = quote!(::noxide::__private::query::AggregateFunction::#function_name{field:#key.into()});
+        let (output, decode, check) = if function == "sum" {
+            (
+                quote!(i64),
+                quote!({
+                    let ::noxide::__private::query::AggregateValue::Sum(value) = value else {
+                        panic!("host sum contract")
+                    };
+                    value
+                }),
+                quote!(fn scalar<T: ::noxide::FieldSpec<#hash,Value=i64>>(){} scalar::<#resource>();),
+            )
+        } else {
+            (
+                quote!(Option<#value>),
+                quote!(<#value as ::noxide::AggregateScalar>::decode_aggregate(value)),
+                quote!(fn scalar<T: ::noxide::AggregateScalar>(){} scalar::<#value>();),
+            )
+        };
+        (definition, output, decode, quote!(Some(#key.into())), check)
+    };
+    Ok(quote! {
+        #item
+        impl ::noxide::AggregateQuery for #name {
+            type Resource=<#source as ::noxide::QueryType>::Resource;
+            type Output=#output;
+            fn policy_resources()->Vec<::noxide::__private::Resource>{<#source as ::noxide::QueryType>::policy_resources()}
+            fn support_operations()->Vec<::noxide::__private::Operation>{vec![<#source as ::noxide::QueryType>::operation()]}
+            fn decode(value: ::noxide::__private::query::AggregateValue)->Self::Output{#decode}
+            fn operation()->::noxide::__private::Operation{
+                fn list<T: ::noxide::ListQuery>(){} list::<#source>(); #check
+                const _: ()=assert!(!<#source as ::noxide::QueryType>::PUBLIC||#disclose,"public aggregate inference requires disclose_aggregate");
+                let mut operation=<#source as ::noxide::QueryType>::operation();
+                let source=operation.id;
+                operation.id=::noxide::stable_id(concat!("aggregate:",module_path!(),"::",stringify!(#name)));
+                operation.kind=::noxide::__private::OperationKind::Aggregate;
+                operation.list=None;
+                let mut query=::noxide::__private::query::Query::default();
+                query.aggregate=Some(::noxide::__private::query::Aggregate{source,function:#definition});
+                if #disclose {query.disclose.push(::noxide::__private::query::Disclosure::Aggregate{field:#field});query.disclose.sort();}
+                operation.query=Some(query);operation
             }
         }
     })

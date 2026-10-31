@@ -219,7 +219,7 @@ pub(crate) fn expand_action(
         quote!(())
     };
     let immutable_check = if declaration.kind == "update" {
-        quote!(const _: () = { #(assert!(!<#values as ::noxide::FieldValue>::IMMUTABLE, "immutable fields cannot be updated");)* };)
+        quote!(const _: () = { #(assert!(!<#resource as ::noxide::FieldSpec<#hashes>>::IMMUTABLE, "immutable fields cannot be updated");)* };)
     } else {
         Tokens::new()
     };
@@ -276,7 +276,8 @@ pub(crate) fn expand_action(
                 unique
             }
             fn operations() -> Vec<::noxide::__private::Operation> {
-                vec![::noxide::__private::Operation { bind: #bind, scope: None, via: None,
+                vec![::noxide::__private::Operation {
+                    query: None, bind: #bind, scope: None, via: None,
                     filter: Vec::new(), disclose: Vec::new(),
                 list: None, visibility: None, fields: None,
                     id: ::noxide::stable_id(concat!("mutation:", module_path!(), "::", stringify!(#name))),
@@ -856,6 +857,13 @@ fn expand_transaction(
                 return Err(syn::Error::new(field.span(), "duplicate assignment"));
             }
             let hash = stable_id(&field.to_string());
+            let immutable_check = if step.kind == "update" {
+                quote!(
+                    const _: () = assert!(!<#resource as ::noxide::FieldSpec<#hash>>::IMMUTABLE,"immutable fields cannot be updated");
+                )
+            } else {
+                quote!()
+            };
             let value = match change {
                 DeclaredChange::Set(expr) => {
                     let value = value_expression(
@@ -900,7 +908,7 @@ fn expand_transaction(
                     }
                 }
             };
-            assignments.push(quote!(::noxide::__private::Assignment { field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into(), change: #value }));
+            assignments.push(quote!(::noxide::__private::Assignment { field: <#resource as ::noxide::FieldSpec<#hash>>::KEY.into(), change: { #immutable_check #value } }));
         }
         let mut eligibility_fields = BTreeSet::new();
         let bindings: Vec<_> = step.eligible.iter().map(|(field, eligible)| {
@@ -933,7 +941,8 @@ fn expand_transaction(
             ));
         }
         let policy = policy_tokens(rules, resource);
-        operations.push(quote!(::noxide::__private::Operation { bind: #bind, scope: None, via: None, filter: Vec::new(), disclose: Vec::new(), list: None, id: #operation_id, resource: <#resource as ::noxide::ResourceType>::definition().id, kind: #kind, policy: #policy, visibility: None, fields: None }));
+        operations.push(quote!(::noxide::__private::Operation {
+            query: None, bind: #bind, scope: None, via: None, filter: Vec::new(), disclose: Vec::new(), list: None, id: #operation_id, resource: <#resource as ::noxide::ResourceType>::definition().id, kind: #kind, policy: #policy, visibility: None, fields: None }));
         let guards = &step.guards;
         steps.push(quote!(::noxide::__private::Step { guards: vec![#(#guards),*], operation: #operation_id, target: #target, assign: vec![#(#assignments),*] }));
         if let Some(step_name) = &step.name {

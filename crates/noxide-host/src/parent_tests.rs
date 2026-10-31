@@ -10,6 +10,7 @@ use std::{
 
 fn boolean(name: &str) -> TextField {
     TextField {
+        immutable: false,
         name: name.into(),
         label: name.into(),
         kind: FieldKind::Boolean,
@@ -23,6 +24,7 @@ pub(crate) fn declarations() -> Manifest {
     m.resources[0].fields.extend([
         boolean("published"),
         TextField {
+            immutable: false,
             name: "thread".into(),
             label: "Thread".into(),
             max_bytes: 20,
@@ -45,6 +47,7 @@ pub(crate) fn declarations() -> Manifest {
         },
     });
     m.resources.push(Resource {
+        search: None,
         expiry: None,
         unique: Vec::new(),
         gate: None,
@@ -63,6 +66,7 @@ pub(crate) fn declarations() -> Manifest {
         }
     }
     m.operations.push(Operation {
+        query: None,
         bind: Default::default(),
         scope: None,
         via: None,
@@ -231,6 +235,7 @@ async fn mutation_case(db: Database) {
     db.initialize().await.unwrap();
     let mut m = declarations();
     m.operations.push(Operation {
+        query: None,
         bind: Default::default(),
         scope: None,
         via: None,
@@ -616,6 +621,7 @@ async fn integrity_case(db: Database, _sqlite: bool) {
         tenant_scoped: false,
     };
     m.operations.push(Operation {
+        query: None,
         bind: Default::default(),
         scope: None,
         via: None,
@@ -870,6 +876,7 @@ async fn index_scope_case(db: Database, sqlite: bool) {
     db.initialize().await.unwrap();
     let mut m = declarations();
     m.resources.push(Resource {
+        search: None,
         expiry: None,
         unique: Vec::new(),
         gate: None,
@@ -877,6 +884,7 @@ async fn index_scope_case(db: Database, sqlite: bool) {
         name: "unrelated".into(),
         fields: ["thread", "parent_thread"]
             .map(|name| TextField {
+                immutable: false,
                 kind: FieldKind::Text,
                 optional: false,
                 initial: None,
@@ -1063,6 +1071,7 @@ async fn chronological_prefix_case(db: Database, descending: bool) {
         page_size: 20,
     });
     m.resources[0].fields.push(TextField {
+        immutable: false,
         initial: None,
         name: "extra".into(),
         label: "Extra".into(),

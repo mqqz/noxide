@@ -941,6 +941,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut m = fixture::manifest();
         m.resources[0].fields.push(TextField {
+            immutable: false,
             kind: noxide_protocol::FieldKind::Text,
             optional: false,
             initial: None,

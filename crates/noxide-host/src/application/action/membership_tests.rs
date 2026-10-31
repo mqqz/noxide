@@ -266,6 +266,7 @@ fn sequential_manifest(boundary: Boundary, after: After) -> Manifest {
     let member = resource(&m, "memberships");
     let read = read(&m, "memberships");
     let field = TextField {
+        immutable: false,
         name: "note".into(),
         label: "Note".into(),
         kind: FieldKind::Text,
@@ -280,6 +281,7 @@ fn sequential_manifest(boundary: Boundary, after: After) -> Manifest {
         .fields
         .push(field.clone());
     m.resources.push(Resource {
+        search: None,
         id: 900,
         name: "archives".into(),
         gate: None,
@@ -662,12 +664,14 @@ async fn anonymous_picker_contract(db: Option<Database>) {
         preview: None,
     });
     m.resources.push(Resource {
+        search: None,
         id: 911,
         name: "selected_links".into(),
         gate: None,
         expiry: None,
         unique: vec![],
         fields: vec![TextField {
+            immutable: false,
             name: "workspace".into(),
             label: "Workspace".into(),
             kind: FieldKind::Reference {

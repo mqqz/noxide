@@ -1,6 +1,7 @@
 mod authority;
 mod blobs;
 mod computation;
+mod query;
 use anyhow::{Result, ensure};
 pub use computation::{ComputationDisclosure, ComputationSource, action_disclosures};
 use noxide_protocol::*;
@@ -12,6 +13,7 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest> {
     let mut manifest: Manifest = serde_json::from_slice(bytes)?;
     validate(&manifest)?;
     canonical_targets(&mut manifest);
+    query::canonicalize(&mut manifest);
     Ok(manifest)
 }
 
@@ -28,6 +30,7 @@ pub fn digest(manifest: &Manifest) -> Result<[u8; 32]> {
     canonical.actions.sort_by_key(|action| action.id);
     canonical.web_bindings.sort_by_key(|binding| binding.id);
     canonical_targets(&mut canonical);
+    query::canonicalize(&mut canonical);
     for resource in &mut canonical.resources {
         resource.unique.sort();
     }
@@ -211,6 +214,12 @@ pub use noxide_protocol::identifier;
 
 pub fn validate(m: &Manifest) -> Result<()> {
     ensure!(m.version == VERSION, "unsupported manifest version");
+    query::validate_declarations(m)?;
+    // The compiling wire11 contract cannot enable a partially wired executor.
+    ensure!(
+        !query::uses_extensions(m),
+        "P09 query runtime is not available"
+    );
     crate::assets::validate_declarations(&m.assets)?;
     ensure!(
         m.routes
@@ -982,6 +991,10 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
                     ),
                 "reference is immutable"
             );
+            ensure!(
+                op.kind != OperationKind::Update || !field.immutable,
+                "declared immutable field cannot be updated"
+            );
             match &assignment.change {
                 Change::Set(value) => {
                     if let Target::Named(name) = &step.target {
@@ -1542,6 +1555,7 @@ mod tests {
 
     fn field(name: &str, kind: FieldKind, optional: bool) -> TextField {
         TextField {
+            immutable: false,
             name: name.into(),
             label: name.into(),
             max_bytes: 200,
@@ -1870,6 +1884,7 @@ mod initial_tests {
     fn declarations() -> Manifest {
         let mut m = crate::test_support::manifest();
         m.resources[0].fields.push(TextField {
+            immutable: false,
             name: "published".into(),
             label: "Published".into(),
             kind: FieldKind::Boolean,
@@ -1982,6 +1997,7 @@ mod transaction_tests {
 
     fn field(name: &str, kind: FieldKind, max_bytes: u32) -> TextField {
         TextField {
+            immutable: false,
             name: name.into(),
             label: name.into(),
             kind,
@@ -2007,6 +2023,7 @@ mod transaction_tests {
             20,
         )];
         m.resources.push(Resource {
+            search: None,
             expiry: None,
             unique: Vec::new(),
             gate: None,
@@ -2031,6 +2048,7 @@ mod transaction_tests {
             ],
         });
         m.resources.push(Resource {
+            search: None,
             expiry: None,
             unique: Vec::new(),
             gate: None,
@@ -2152,6 +2170,7 @@ mod transaction_tests {
     fn transaction_admission_allows_initialized_field_updates_and_account_create_inputs() {
         let mut initialized = crate::test_support::manifest();
         initialized.resources[0].fields.push(TextField {
+            immutable: false,
             name: "published".into(),
             label: "Published".into(),
             kind: FieldKind::Boolean,

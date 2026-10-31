@@ -201,6 +201,7 @@ impl ActionType for Headless {
     fn operations() -> Vec<noxide::__private::Operation> {
         use noxide::__private::*;
         vec![Operation {
+            query: None,
             id: 8,
             resource: <Product as noxide::ResourceType>::definition().id,
             kind: OperationKind::Create,

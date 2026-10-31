@@ -9,7 +9,7 @@ use syn::{
 
 pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
     reject_generics(&input)?;
-    let (persistent_key, expiry, unique) = authority_options(&input)?;
+    let (persistent_key, expiry, unique, search) = authority_options(&input)?;
     let Data::Struct(data) = &input.data else {
         return Err(syn::Error::new(
             input.span(),
@@ -96,6 +96,7 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
         let duration = matches!(scalar_ty,syn::Type::Path(path) if path.path.segments.last().is_some_and(|segment|segment.ident=="Duration"));
         let mut max_duration_seconds = None;
         let mut scope = false;
+        let mut immutable = false;
         let mut initial = None;
         let mut visible = None;
         let mut create_when = None;
@@ -117,6 +118,14 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
         }
         if let Some(attr) = attrs.first() {
             attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("immutable") {
+                    if immutable {
+                        return Err(meta.error("duplicate immutable field declaration"));
+                    }
+                    immutable = true;
+                    return Ok(());
+                }
+
                 if meta.path.is_ident("max_duration_seconds") {
                     if !duration || max_duration_seconds.is_some() {
                         return Err(meta.error("max_duration_seconds requires a Duration field"));
@@ -333,6 +342,7 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
         definitions.push(quote! {{
             let kind={#bounds};
             ::noxide::__private::TextField {
+                immutable: #immutable,
                 name: #field_key.into(), label: #label.into(), max_bytes: #maximum_output,
                 initial: #initial, kind, optional: <#ty as ::noxide::FieldValue>::OPTIONAL,
             }
@@ -350,6 +360,7 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
         specs.push(quote! {
             impl ::noxide::FieldSpec<#hash> for #name {
                 type Value = #ty;
+                const IMMUTABLE: bool = #immutable || <#ty as ::noxide::FieldValue>::IMMUTABLE;
                 const KEY: &'static str = #field_key;
             }
         });
@@ -395,6 +406,17 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
             }
         })
     });
+    let search = search.map_or_else(|| quote!(None), |(fields, max_bytes)| {
+        let hashes:Vec<_>=fields.iter().map(|field|stable_id(&field.to_string())).collect();
+        quote!({
+            const _: () = { #(assert!(<<#name as ::noxide::FieldSpec<#hashes>>::Value as ::noxide::FieldValue>::SEARCHABLE,"search indexes require Text fields");)* };
+            let mut fields=vec![#(<#name as ::noxide::FieldSpec<#hashes>>::KEY.into()),*];
+            fields.sort();
+            Some(::noxide::__private::query::SearchIndex {
+                tokenizer: ::noxide::__private::query::TOKENIZER_ID.into(), fields, max_bytes: #max_bytes,
+            })
+        })
+    });
     Ok(quote! {
         impl ::noxide::ResourceType for #name {
             const GATE_FIELD: u32 = #gate_field;
@@ -402,6 +424,7 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
             const KEY: &'static str = #persistent_key;
             fn definition() -> ::noxide::__private::Resource {
                 ::noxide::__private::Resource {
+                    search: #search,
                     expiry: #expiry, unique: vec![#(#unique),*],
                     id: ::noxide::stable_id(<Self as ::noxide::ResourceType>::KEY), name: <Self as ::noxide::ResourceType>::KEY.into(), fields: vec![#(#definitions),*], gate: #gate,
                 }
@@ -418,7 +441,10 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
 
 type ExpiryOption = Option<(Ident, i64)>;
 type UniqueOptions = Vec<(Ident, Ident)>;
-fn authority_options(input: &DeriveInput) -> syn::Result<(LitStr, ExpiryOption, UniqueOptions)> {
+type SearchOption = Option<(Vec<Ident>, u32)>;
+fn authority_options(
+    input: &DeriveInput,
+) -> syn::Result<(LitStr, ExpiryOption, UniqueOptions, SearchOption)> {
     let attrs: Vec<_> = input
         .attrs
         .iter()
@@ -433,6 +459,7 @@ fn authority_options(input: &DeriveInput) -> syn::Result<(LitStr, ExpiryOption, 
     let mut persistent_key = None;
     let mut expiry = None;
     let mut unique = Vec::new();
+    let mut search = None;
     let mut tuples = BTreeSet::new();
     attrs[0].parse_nested_meta(|meta| {
         if meta.path.is_ident("key") && persistent_key.is_none() {
@@ -458,6 +485,34 @@ fn authority_options(input: &DeriveInput) -> syn::Result<(LitStr, ExpiryOption, 
                 return Err(content.error("expiry horizon must be at most 30 days"));
             }
             expiry = Some((field, seconds));
+        } else if meta.path.is_ident("search") && search.is_none() {
+            let content;
+            parenthesized!(content in meta.input);
+            let option = content.parse::<Ident>()?;
+            if option != "fields" {
+                return Err(content.error("search requires fields(...), max_bytes=..."));
+            }
+            let names;
+            parenthesized!(names in content);
+            let fields: Vec<Ident> = names
+                .parse_terminated(|input| input.parse::<Ident>(), Token![,])?
+                .into_iter()
+                .collect();
+            let unique: BTreeSet<_> = fields.iter().map(ToString::to_string).collect();
+            if fields.is_empty() || fields.len() > 4 || fields.len() != unique.len() {
+                return Err(content.error("search requires one to four distinct fields"));
+            }
+            content.parse::<Token![,]>()?;
+            let bound = content.parse::<Ident>()?;
+            if bound != "max_bytes" {
+                return Err(content.error("search requires max_bytes"));
+            }
+            content.parse::<Token![=]>()?;
+            let bytes = content.parse::<LitInt>()?.base10_parse::<u32>()?;
+            if !content.is_empty() || !(1..=16384).contains(&bytes) {
+                return Err(content.error("search max_bytes must be 1..=16384"));
+            }
+            search = Some((fields, bytes));
         } else if meta.path.is_ident("unique") {
             let content;
             parenthesized!(content in meta.input);
@@ -482,6 +537,7 @@ fn authority_options(input: &DeriveInput) -> syn::Result<(LitStr, ExpiryOption, 
             .ok_or_else(|| syn::Error::new(input.span(), "missing persistent resource key"))?,
         expiry,
         unique,
+        search,
     ))
 }
 

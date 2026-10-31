@@ -13,6 +13,7 @@ use std::{
 fn declarations() -> Manifest {
     let mut m = crate::test_support::manifest();
     m.resources[0].fields.push(TextField {
+        immutable: false,
         name: "recipient".into(),
         label: "Recipient".into(),
         kind: FieldKind::Account {
@@ -524,6 +525,7 @@ async fn filtered_lists(db: Database) {
         params: vec![],
     });
     m.resources[0].fields.push(TextField {
+        immutable: false,
         name: "archived".into(),
         label: "Archived".into(),
         kind: FieldKind::Boolean,
@@ -912,6 +914,7 @@ async fn postgres_filtered_account_and_single_lists() {
 fn preview_declarations() -> Manifest {
     let mut m = declarations();
     m.resources[0].fields.push(TextField {
+        immutable: false,
         name: "extra".into(),
         label: "Extra".into(),
         kind: FieldKind::Text,
@@ -978,6 +981,7 @@ fn host_rejects_forged_preview_shapes_and_destinations() {
     assert!(manifest::validate(&bad).is_err());
     let mut selection = m.clone();
     selection.resources[0].fields.push(TextField {
+        immutable: false,
         name: "archived".into(),
         label: "Archived".into(),
         kind: FieldKind::Boolean,
@@ -1061,6 +1065,7 @@ fn preview_parameter_declarations() -> Manifest {
     let mut m = preview_declarations();
     for name in ["source_flag", "destination_flag"] {
         m.resources[0].fields.push(TextField {
+            immutable: false,
             name: name.into(),
             label: name.into(),
             kind: FieldKind::Boolean,
@@ -1417,6 +1422,7 @@ async fn previews_case(db: Database) {
     e.tx.rollback().await.unwrap();
     let mut target = m.clone();
     target.resources[0].fields.push(TextField {
+        immutable: false,
         name: "archived".into(),
         label: "Archived".into(),
         kind: FieldKind::Boolean,

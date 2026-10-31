@@ -20,6 +20,7 @@ fn declarations() -> Manifest {
 fn host_rejects_required_parameters_on_index_route() {
     let mut m = crate::test_support::manifest();
     m.resources[0].fields.push(TextField {
+        immutable: false,
         name: "flag".into(),
         label: "Flag".into(),
         kind: FieldKind::Boolean,
@@ -65,6 +66,7 @@ fn host_rejects_required_parameters_on_index_route() {
 #[test]
 fn host_rejects_parameterized_mutation_redirects() {
     let boolean = |name: &str| TextField {
+        immutable: false,
         name: name.into(),
         label: name.into(),
         kind: FieldKind::Boolean,
@@ -92,6 +94,7 @@ fn host_rejects_parameterized_mutation_redirects() {
             Target::Named("target".into())
         };
         m.resources.push(Resource {
+            search: None,
             expiry: None,
             unique: Vec::new(),
             gate: None,
@@ -99,6 +102,7 @@ fn host_rejects_parameterized_mutation_redirects() {
             name: "children".into(),
             fields: vec![
                 TextField {
+                    immutable: false,
                     name: "note".into(),
                     label: "Note".into(),
                     max_bytes: 20,
