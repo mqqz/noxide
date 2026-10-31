@@ -1,19 +1,8 @@
-//! Independent canonical P09 admission. Execution remains denied until all bridges land.
+//! Independent canonical admission for bounded queries and aggregates.
 use super::*;
 use noxide_protocol::query::{AggregateFunction, CursorValue, Disclosure, SortMode};
 use std::collections::BTreeSet;
 
-pub(super) fn uses_extensions(m: &Manifest) -> bool {
-    m.resources.iter().any(|r| r.search.is_some())
-        || m.operations.iter().any(|op| {
-            op.query.is_some()
-                || op.kind == OperationKind::Aggregate
-                || op
-                    .list
-                    .as_ref()
-                    .is_some_and(|list| matches!(list.order, ListOrder::Field { .. }))
-        })
-}
 pub(super) fn canonicalize(m: &mut Manifest) {
     for resource in &mut m.resources {
         if let Some(index) = &mut resource.search {
@@ -316,18 +305,20 @@ mod tests {
             }),
             ..Default::default()
         });
+        let mut search_route = m.routes[0].clone();
+        search_route.id = 3;
+        search_route.path = "/search".into();
+        search_route.params = vec!["terms".into()];
+        search_route.forms.clear();
+        m.routes[0].operations.retain(|operation| *operation != 1);
+        m.routes.push(search_route);
         m
     }
     #[test]
-    fn canonical_contract_is_valid_but_partial_runtime_is_unavailable() {
+    fn canonical_contract_is_admitted_and_forged_declarations_are_rejected() {
         let m = declarations();
         validate_declarations(&m).unwrap();
-        assert!(
-            super::super::validate(&m)
-                .unwrap_err()
-                .to_string()
-                .contains("P09 query runtime is not available")
-        );
+        super::super::validate(&m).unwrap();
         for change in 0..4 {
             let mut bad = m.clone();
             match change {
@@ -351,6 +342,7 @@ mod tests {
                 }
             };
             assert!(validate_declarations(&bad).is_err());
+            assert!(super::super::validate(&bad).is_err());
         }
     }
     #[test]

@@ -276,11 +276,6 @@ pub use noxide_protocol::identifier;
 pub fn validate(m: &Manifest) -> Result<()> {
     ensure!(m.version == VERSION, "unsupported manifest version");
     query::validate_declarations(m)?;
-    // The compiling wire11 contract cannot enable a partially wired executor.
-    ensure!(
-        !query::uses_extensions(m) || cfg!(test),
-        "P09 query runtime is not available"
-    );
     crate::assets::validate_declarations(&m.assets)?;
     ensure!(
         m.routes
