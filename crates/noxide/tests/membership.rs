@@ -4,7 +4,8 @@ use noxide::__private::{
     membership::{ExistsRelated, MembershipLiteral, MembershipUnique, RelatedTarget},
 };
 use noxide::{
-    AccountId, Choice, Duration, Id, QueryType, Resource, ResourceType, Timestamp, query,
+    AccountId, ActionType, Choice, Duration, Id, QueryType, Resource, ResourceType, Timestamp,
+    WebActionType, action, query,
 };
 use std::collections::BTreeMap;
 
@@ -67,6 +68,36 @@ struct AdminWorkspace;
     conditions(active = true, role = Role::Member)))]
 struct MemberDocument;
 
+#[query(read(Workspace), allow = owner)]
+struct OwnedWorkspace;
+
+mod show {
+    pub fn id() -> u32 {
+        99
+    }
+}
+
+#[action(update(Document), fields(expires_at),
+    allow = exists_related(Membership, reference = workspace,
+        target = reference(workspace), account = account, conditions(role = Role::Admin)),
+    redirect = show)]
+struct ExtendDocument;
+
+#[action(inputs(), transaction(update(Document, target,
+    set(expires_at = transaction_time() + seconds(60)),
+    allow = exists_related(Membership, reference = workspace,
+        target = reference(workspace), account = account, conditions(role = Role::Admin)))),
+    allow = owner, redirect = show(target))]
+struct ExtendDocumentStep;
+
+#[action(inputs(title: String = 100), transaction(
+    workspace = create(Workspace, set(title = title)),
+    create(Membership, set(workspace = workspace, account = principal(), role = "admin",
+        active = true, expires_at = transaction_time() + seconds(3600)),
+        eligible = OwnedWorkspace, allow = principal_is(account))),
+    allow = owner, redirect = show(workspace))]
+struct BootstrapWorkspace;
+
 #[test]
 fn membership_and_lifecycle_lower_to_explicit_canonical_contract() {
     let membership = Membership::definition();
@@ -118,4 +149,66 @@ fn membership_and_lifecycle_lower_to_explicit_canonical_contract() {
         MembershipLiteral::Choice("member".into())
     );
     assert_eq!(MemberDocument::policy_resources(), vec![membership]);
+}
+
+#[test]
+fn action_membership_metadata_and_bootstrap_lower_without_membership_reads() {
+    let expected = Membership::definition();
+    assert!(ExtendDocument::resources().contains(&expected));
+    assert!(ExtendDocumentStep::resources().contains(&expected));
+    let declarations = noxide::TargetDeclarations::new().page::<AdminWorkspace>(
+        "workspace",
+        noxide::__private::Revision::Exact,
+        &["title"],
+    );
+    assert!(declarations.resources.contains(&expected));
+    assert!(
+        declarations
+            .operations
+            .iter()
+            .all(|op| op.resource != expected.id)
+    );
+    let bootstrap = BootstrapWorkspace::definition();
+    let membership = &bootstrap.steps[1];
+    use noxide::__private::{Change, Literal, Value};
+    assert!(
+        membership
+            .assign
+            .iter()
+            .any(|assignment| assignment.field == "workspace_ref"
+                && assignment.change == Change::Set(Value::Created(0)))
+    );
+    assert!(
+        membership
+            .assign
+            .iter()
+            .any(|assignment| assignment.field == "account"
+                && assignment.change == Change::Set(Value::Principal))
+    );
+    assert!(
+        membership
+            .assign
+            .iter()
+            .any(|assignment| assignment.field == "role"
+                && assignment.change
+                    == Change::Set(Value::Literal(Literal::Choice("admin".into()))))
+    );
+    let operations = BootstrapWorkspace::operations();
+    assert_eq!(
+        operations
+            .iter()
+            .find(|op| op.id == membership.operation)
+            .unwrap()
+            .policy
+            .any,
+        vec![vec![Predicate::PrincipalIs {
+            field: "account".into()
+        }]]
+    );
+    assert!(operations.iter().all(|op| op.resource != expected.id
+        || !matches!(
+            op.kind,
+            noxide::__private::OperationKind::Read | noxide::__private::OperationKind::List
+        )));
+    assert_eq!(BootstrapWorkspace::web_binding().action, bootstrap.id);
 }

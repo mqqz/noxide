@@ -216,6 +216,7 @@ impl TargetDeclarations {
             inspect: None,
         });
         self.resources.push(Q::Resource::definition());
+        self.resources.extend(Q::policy_resources());
         self.operations.push(operation);
     }
     pub fn page<Q: super::query::ReadQuery>(
@@ -290,6 +291,7 @@ impl TargetDeclarations {
         });
         target.revision = noxide_protocol::Revision::Exact;
         self.resources.push(Q::Resource::definition());
+        self.resources.extend(Q::policy_resources());
         self.operations.push(Q::operation());
         self
     }

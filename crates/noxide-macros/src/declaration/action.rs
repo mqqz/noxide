@@ -1,4 +1,4 @@
-use crate::declaration::policy::{PolicyAtom, policy_tokens};
+use crate::declaration::policy::{PolicyAtom, policy_tokens, resource_tokens};
 use crate::declaration::{OperationDeclaration, marker};
 use crate::syntax::stable_id;
 use proc_macro2::TokenStream as Tokens;
@@ -152,6 +152,11 @@ pub(crate) fn expand_action(
         quote!(::std::collections::BTreeMap::new())
     };
     let policy = policy_tokens(&declaration.policy, &declaration.resource);
+    let policy_resources = resource_tokens(&declaration.policy);
+    let read_resources: Vec<_> = declaration.bind.iter().map(|(_, query)| query).chain(declaration.inspect.iter()).map(|query| quote! {
+        resources.push(<<#query as ::noxide::QueryType>::Resource as ::noxide::ResourceType>::definition());
+        resources.extend(<#query as ::noxide::QueryType>::policy_resources());
+    }).collect();
     let version = declaration.version;
     let names = &declaration.fields;
     let hashes: Vec<_> = names
@@ -256,6 +261,12 @@ pub(crate) fn expand_action(
             type Input = #input_name;
 
             type Original = #original_type;
+            fn resources() -> Vec<::noxide::__private::Resource> {
+                let mut resources = vec![<#resource as ::noxide::ResourceType>::definition()];
+                resources.extend(#policy_resources);
+                #(#read_resources)*
+                resources
+            }
             fn operations() -> Vec<::noxide::__private::Operation> {
                 vec![::noxide::__private::Operation { bind: #bind, scope: None, via: None,
                     filter: Vec::new(), disclose: Vec::new(),
@@ -913,6 +924,20 @@ fn expand_transaction(
         .iter()
         .flat_map(|step| step.eligible.iter().map(|(_, query)| query))
         .map(|query| quote!(<#query as ::noxide::QueryType>::operation()));
+    let global_policy_resources = resource_tokens(&declaration.policy);
+    let step_policy_resources: Vec<_> = declaration
+        .steps
+        .iter()
+        .filter_map(|step| step.policy.as_ref())
+        .map(|rules| {
+            let resources = resource_tokens(rules);
+            quote!(resources.extend(#resources);)
+        })
+        .collect();
+    let read_policy_resources: Vec<_> = declaration.steps.iter().flat_map(|step| step.eligible.iter().map(|(_, query)| query)).chain(declaration.inspect.iter()).map(|query| quote! {
+        resources.push(<<#query as ::noxide::QueryType>::Resource as ::noxide::ResourceType>::definition());
+        resources.extend(<#query as ::noxide::QueryType>::policy_resources());
+    }).collect();
     let custom_resources = declaration
         .targets
         .as_ref()
@@ -1009,7 +1034,14 @@ fn expand_transaction(
             type Original = #original_type;
 
 
-            fn resources() -> Vec<::noxide::__private::Resource> { let mut resources = vec![#(<#resources as ::noxide::ResourceType>::definition()),*]; resources.extend(#custom_resources); resources }
+            fn resources() -> Vec<::noxide::__private::Resource> {
+                let mut resources = vec![#(<#resources as ::noxide::ResourceType>::definition()),*];
+                resources.extend(#global_policy_resources);
+                #(#step_policy_resources)*
+                #(#read_policy_resources)*
+                resources.extend(#custom_resources);
+                resources
+            }
             fn operations() -> Vec<::noxide::__private::Operation> { let mut operations = vec![#(#operations,)* #(#eligibility_operations),*]; operations.extend(#custom_operations); operations }
             fn inspection() -> Option<::noxide::__private::Operation> { #inspection_operation }
             fn definition() -> ::noxide::__private::Action { let steps = vec![#(#steps),*]; let targets = #target_definitions; ::noxide::__private::Action { id: ::noxide::stable_id(concat!("action:", module_path!(), "::", stringify!(#name))), version: #version, name: #label.into(), targets, inputs: vec![#(#schemas),*], steps } }
