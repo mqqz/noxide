@@ -24,12 +24,16 @@ pub(crate) struct CompiledCondition {
 
 pub(crate) fn compile(m: &Manifest, op: &Operation) -> Result<ListPlan> {
     ensure!(op.kind == OperationKind::List, "expected list operation");
-    manifest::resource(m, op.resource)?;
+    let resource = manifest::resource(m, op.resource)?;
     let scope = op.scope.clone();
     Ok(ListPlan {
         operation: op.id,
         preview: op.list.as_ref().is_some_and(|s| s.preview.is_some()),
-        strategy: policy::list_strategy(&op.policy, scope.is_some()),
+        strategy: if resource.expiry.is_some() {
+            policy::residual_strategy(&op.policy)
+        } else {
+            policy::list_strategy(&op.policy, scope.is_some())
+        },
         scope,
         selection: op
             .filter
@@ -134,6 +138,9 @@ impl IndexRequirement {
                 policy::IndexColumn::Owner => "owner".into(),
                 policy::IndexColumn::Tenant => "tenant".into(),
                 policy::IndexColumn::Field(field) => format!("({})", tx.field_expression(field)?),
+                policy::IndexColumn::Timestamp(field) => {
+                    format!("(CAST({} AS BIGINT))", tx.field_expression(field)?)
+                }
             });
         }
         columns.push("created_seq".into());
@@ -176,6 +183,26 @@ pub(crate) fn required_indexes(m: &Manifest) -> Result<Vec<IndexRequirement>> {
             fields.sort();
             columns.extend(fields.into_iter().map(IndexColumn::Field));
             keys.entry((resource.name.clone(), columns))
+                .or_default()
+                .push(op.id);
+        }
+    }
+    // Specialized lookup shapes share the existing eight-shape budget and
+    // reconciliation machinery with list indexes. Literal values do not create
+    // additional shapes; condition field order is canonical.
+    for op in &m.operations {
+        for plan in crate::membership::plans(m, op)? {
+            let related = plan.declaration();
+            let mut columns = vec![
+                IndexColumn::Tenant,
+                IndexColumn::Field(related.reference.clone()),
+                IndexColumn::Field(related.account.clone()),
+            ];
+            columns.extend(related.conditions.keys().cloned().map(IndexColumn::Field));
+            if let Some(expiry) = &plan.resource().expiry {
+                columns.push(IndexColumn::Timestamp(expiry.field.clone()));
+            }
+            keys.entry((related.resource.clone(), columns))
                 .or_default()
                 .push(op.id);
         }

@@ -7,6 +7,8 @@ fn manifest() -> Manifest {
         assets: Vec::new(),
         version: VERSION,
         resources: vec![Resource {
+            expiry: None,
+            unique: Vec::new(),
             gate: None,
             id: 1,
             name: "notes".into(),

@@ -6,6 +6,10 @@ pub trait QueryType {
     type Resource: ResourceType;
     type Output;
     fn operation() -> Operation;
+    /// Schemas inspected by explicit membership authority; grants no operations.
+    fn policy_resources() -> Vec<noxide_protocol::Resource> {
+        Vec::new()
+    }
     fn from_record(record: Record) -> Self::Output;
     fn record_id(record: &Self::Output) -> u64;
 }

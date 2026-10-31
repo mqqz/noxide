@@ -45,6 +45,8 @@ pub(crate) fn declarations() -> Manifest {
         },
     });
     m.resources.push(Resource {
+        expiry: None,
+        unique: Vec::new(),
         gate: None,
         id: 2,
         name: "threads".into(),
@@ -859,6 +861,8 @@ async fn index_scope_case(db: Database, sqlite: bool) {
     db.initialize().await.unwrap();
     let mut m = declarations();
     m.resources.push(Resource {
+        expiry: None,
+        unique: Vec::new(),
         gate: None,
         id: 3,
         name: "unrelated".into(),

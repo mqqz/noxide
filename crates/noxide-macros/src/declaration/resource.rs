@@ -1,7 +1,5 @@
 use crate::declaration::page::generic_argument;
-use crate::syntax::{
-    key, reject_generics, required_key, stable_id, text_type, validate_field_type,
-};
+use crate::syntax::{key, reject_generics, stable_id, text_type, validate_field_type};
 use proc_macro2::TokenStream as Tokens;
 use quote::quote;
 use std::collections::BTreeSet;
@@ -11,7 +9,7 @@ use syn::{
 
 pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
     reject_generics(&input)?;
-    let persistent_key = required_key(&input.attrs, "resource")?;
+    let (persistent_key, expiry, unique) = authority_options(&input)?;
     let Data::Struct(data) = &input.data else {
         return Err(syn::Error::new(
             input.span(),
@@ -363,6 +361,30 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
         ));
     }
     let id_name = id_name.expect("checked id");
+    let expiry = expiry.map_or_else(|| quote!(None), |(field, seconds)| {
+        let hash = stable_id(&field.to_string());
+        quote!({
+            fn check<T: ::noxide::FieldSpec<#hash, Value = ::noxide::Timestamp>>() {}
+            check::<Self>();
+            Some(::noxide::__private::expiry::ResourceExpiry {
+                field: <Self as ::noxide::FieldSpec<#hash>>::KEY.into(),
+                max_after: ::noxide::Duration::from_secs(#seconds).expect("admitted expiry horizon"),
+            })
+        })
+    });
+    let unique = unique.iter().map(|(reference, account)| {
+        let reference = stable_id(&reference.to_string());
+        let account = stable_id(&account.to_string());
+        quote!({
+            const _: () = assert!(<<#name as ::noxide::FieldSpec<#reference>>::Value as ::noxide::FieldValue>::REFERENCE, "unique tuple requires a reference field");
+            fn check<T: ::noxide::FieldSpec<#account, Value = ::noxide::AccountId>>() {}
+            check::<Self>();
+            ::noxide::__private::membership::MembershipUnique {
+                reference: <Self as ::noxide::FieldSpec<#reference>>::KEY.into(),
+                account: <Self as ::noxide::FieldSpec<#account>>::KEY.into(),
+            }
+        })
+    });
     Ok(quote! {
         impl ::noxide::ResourceType for #name {
             const GATE_FIELD: u32 = #gate_field;
@@ -370,6 +392,7 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
             const KEY: &'static str = #persistent_key;
             fn definition() -> ::noxide::__private::Resource {
                 ::noxide::__private::Resource {
+                    expiry: #expiry, unique: vec![#(#unique),*],
                     id: ::noxide::stable_id(<Self as ::noxide::ResourceType>::KEY), name: <Self as ::noxide::ResourceType>::KEY.into(), fields: vec![#(#definitions),*], gate: #gate,
                 }
             }
@@ -381,4 +404,91 @@ pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
         impl #name { #(#handles)* }
         #(#specs)*
     })
+}
+
+type ExpiryOption = Option<(Ident, i64)>;
+type UniqueOptions = Vec<(Ident, Ident)>;
+fn authority_options(input: &DeriveInput) -> syn::Result<(LitStr, ExpiryOption, UniqueOptions)> {
+    let attrs: Vec<_> = input
+        .attrs
+        .iter()
+        .filter(|a| a.path().is_ident("resource"))
+        .collect();
+    if attrs.len() != 1 {
+        return Err(syn::Error::new(
+            input.span(),
+            "expected one #[resource(...)]",
+        ));
+    }
+    let mut persistent_key = None;
+    let mut expiry = None;
+    let mut unique = Vec::new();
+    let mut tuples = BTreeSet::new();
+    attrs[0].parse_nested_meta(|meta| {
+        if meta.path.is_ident("key") && persistent_key.is_none() {
+            persistent_key = Some(key(meta.value()?.parse()?)?);
+        } else if meta.path.is_ident("expiry") && expiry.is_none() {
+            let content;
+            parenthesized!(content in meta.input);
+            let field = content.parse::<Ident>()?;
+            // The default is explicit in the emitted, approval-hashed contract.
+            let mut seconds = noxide_protocol::expiry::MAX_EXPIRY_MILLIS / 1_000;
+            if !content.is_empty() {
+                content.parse::<Token![,]>()?;
+                let bound = content.parse::<Ident>()?;
+                if bound != "max_after_seconds" {
+                    return Err(content.error("expected max_after_seconds"));
+                }
+                content.parse::<Token![=]>()?;
+                seconds = content.parse::<LitInt>()?.base10_parse()?;
+            }
+            if !content.is_empty()
+                || !(0..=noxide_protocol::expiry::MAX_EXPIRY_MILLIS / 1_000).contains(&seconds)
+            {
+                return Err(content.error("expiry horizon must be at most 30 days"));
+            }
+            expiry = Some((field, seconds));
+        } else if meta.path.is_ident("unique") {
+            let content;
+            parenthesized!(content in meta.input);
+            let reference = content.parse::<Ident>()?;
+            content.parse::<Token![,]>()?;
+            let account = content.parse::<Ident>()?;
+            if !content.is_empty()
+                || unique.len() == 4
+                || !tuples.insert((reference.to_string(), account.to_string()))
+            {
+                return Err(content
+                    .error("expected at most four distinct unique(reference, account) tuples"));
+            }
+            unique.push((reference, account));
+        } else {
+            return Err(meta.error("unknown or duplicate resource option"));
+        }
+        Ok(())
+    })?;
+    Ok((
+        persistent_key
+            .ok_or_else(|| syn::Error::new(input.span(), "missing persistent resource key"))?,
+        expiry,
+        unique,
+    ))
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+
+    #[test]
+    fn resource_authority_options_are_explicit_and_bounded() {
+        for options in [
+            "key=\"items\",expiry(expires,max_after_seconds=2592001)",
+            "key=\"items\",expiry(expires),expiry(other)",
+            "key=\"items\",unique(workspace,account),unique(workspace,account)",
+            "key=\"items\",unique(a,b),unique(a,c),unique(a,d),unique(a,e),unique(a,f)",
+        ] {
+            let input: DeriveInput = syn::parse_str(&format!("#[resource({options})] struct Item {{ #[id] id: Id<Self>, #[field()] expires: Timestamp }}")).unwrap();
+            assert!(expand_resource(input).is_err(), "{options}");
+        }
+    }
 }

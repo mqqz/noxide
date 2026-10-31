@@ -38,6 +38,9 @@ mod registration_tests;
 
 mod form_layout;
 mod policy;
+mod membership;
+mod expiry;
+mod authority;
 mod routing;
 
 #[cfg(test)]

@@ -24,12 +24,16 @@ fn text(name: &str, kind: FieldKind) -> TextField {
 fn resources() -> Vec<Resource> {
     vec![
         Resource {
+            expiry: None,
+            unique: Vec::new(),
             id: 1,
             name: "workspace".into(),
             gate: None,
             fields: vec![text("title", FieldKind::Text)],
         },
         Resource {
+            expiry: None,
+            unique: Vec::new(),
             id: 2,
             name: "membership".into(),
             gate: None,
@@ -74,6 +78,8 @@ fn resources() -> Vec<Resource> {
             ],
         },
         Resource {
+            expiry: None,
+            unique: Vec::new(),
             id: 3,
             name: "document".into(),
             gate: None,
@@ -446,6 +452,12 @@ async fn contract(db: Database) {
     );
     tx.execute(
         "UPDATE nx_accounts SET tenant='team' WHERE id=$1",
+        &[alice.into()],
+    )
+    .await
+    .unwrap();
+    tx.execute(
+        "UPDATE nx_records SET owner=$1 WHERE resource=10 AND id IN (1,9)",
         &[alice.into()],
     )
     .await

@@ -1,4 +1,5 @@
 mod computation;
+mod authority;
 use anyhow::{Result, ensure};
 pub use computation::{ComputationDisclosure, ComputationSource, action_disclosures};
 use noxide_protocol::*;
@@ -23,6 +24,9 @@ pub fn digest(manifest: &Manifest) -> Result<[u8; 32]> {
     canonical.actions.sort_by_key(|action| action.id);
     canonical.web_bindings.sort_by_key(|binding| binding.id);
     canonical_targets(&mut canonical);
+    for resource in &mut canonical.resources {
+        resource.unique.sort();
+    }
     for action in &mut canonical.actions {
         for step in &mut action.steps {
             step.assign.sort_by(|a, b| a.field.cmp(&b.field));
@@ -527,6 +531,7 @@ pub fn validate(m: &Manifest) -> Result<()> {
             );
         }
     }
+    authority::validate(m)?;
     let mut paths = BTreeSet::new();
     crate::query_plan::required_indexes(m)?;
     for r in &m.routes {
@@ -1954,6 +1959,8 @@ mod transaction_tests {
             20,
         )];
         m.resources.push(Resource {
+            expiry: None,
+            unique: Vec::new(),
             gate: None,
             id: 2,
             name: "orders".into(),
@@ -1976,6 +1983,8 @@ mod transaction_tests {
             ],
         });
         m.resources.push(Resource {
+            expiry: None,
+            unique: Vec::new(),
             gate: None,
             id: 3,
             name: "order_notes".into(),

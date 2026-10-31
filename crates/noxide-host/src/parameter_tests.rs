@@ -92,6 +92,8 @@ fn host_rejects_parameterized_mutation_redirects() {
             Target::Named("target".into())
         };
         m.resources.push(Resource {
+            expiry: None,
+            unique: Vec::new(),
             gate: None,
             id: 2,
             name: "children".into(),

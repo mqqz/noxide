@@ -1,5 +1,5 @@
 use noxide_protocol::identifier;
-use syn::{Attribute, DeriveInput, LitStr, Type, spanned::Spanned};
+use syn::{DeriveInput, LitStr, Type, spanned::Spanned};
 
 pub(crate) fn key(value: LitStr) -> syn::Result<LitStr> {
     if identifier(&value.value()) {
@@ -27,29 +27,6 @@ pub(crate) fn reject_generics(input: &DeriveInput) -> syn::Result<()> {
             "application declarations cannot be generic",
         ))
     }
-}
-
-pub(crate) fn required_key(attrs: &[Attribute], attribute: &str) -> syn::Result<LitStr> {
-    let mut found = None;
-    let mut count = 0;
-    for attr in attrs.iter().filter(|attr| attr.path().is_ident(attribute)) {
-        count += 1;
-        attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("key") && found.is_none() {
-                found = Some(key(meta.value()?.parse()?)?);
-                Ok(())
-            } else {
-                Err(meta.error("expected one explicit key = \"persistent_name\""))
-            }
-        })?;
-    }
-    if count != 1 {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            format!("expected one #[{attribute}(key = \"persistent_name\")]"),
-        ));
-    }
-    found.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "missing persistent key"))
 }
 
 pub(crate) fn text_type(ty: &Type) -> bool {

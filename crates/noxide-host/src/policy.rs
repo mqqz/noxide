@@ -15,13 +15,21 @@ pub(crate) struct ScanRule {
     pub rule: usize,
     pub exact: bool,
 }
+
+pub(crate) fn residual_strategy(policy: &Policy) -> ListStrategy {
+    ListStrategy::Merge(
+        (0..policy.any.len())
+            .map(|rule| ScanRule { rule, exact: false })
+            .collect(),
+    )
+}
 pub(crate) fn list_strategy(policy: &Policy, scoped: bool) -> ListStrategy {
-    if !policy
-        .any
-        .iter()
-        .flatten()
-        .any(|p| matches!(p, Predicate::PrincipalIs { .. }))
-    {
+    if !policy.any.iter().flatten().any(|p| {
+        matches!(
+            p,
+            Predicate::PrincipalIs { .. } | Predicate::ExistsRelated(_)
+        )
+    }) {
         return ListStrategy::Single;
     }
     ListStrategy::Merge(
@@ -32,6 +40,9 @@ pub(crate) fn list_strategy(policy: &Policy, scoped: bool) -> ListStrategy {
             .map(|(rule, atoms)| ScanRule {
                 rule,
                 exact: !scoped
+                    && !atoms
+                        .iter()
+                        .any(|p| matches!(p, Predicate::ExistsRelated(_)))
                     && atoms
                         .iter()
                         .filter(|p| matches!(p, Predicate::Owner | Predicate::PrincipalIs { .. }))
@@ -68,6 +79,7 @@ enum Condition<'a> {
     Owner(&'a str),
     Tenant(&'a str),
     Account { field: &'a str, id: &'a str },
+    Related(&'a noxide_protocol::membership::ExistsRelated),
 }
 
 fn bind<'a>(predicate: &'a Predicate, principal: &'a Principal) -> Condition<'a> {
@@ -86,6 +98,7 @@ fn bind<'a>(predicate: &'a Predicate, principal: &'a Principal) -> Condition<'a>
                 Condition::Tenant(&user.tenant)
             }
         }
+        (Principal::User(_), Predicate::ExistsRelated(related)) => Condition::Related(related),
         (
             Principal::User(user),
             Predicate::Role {
@@ -117,10 +130,20 @@ pub(crate) struct Row<'a> {
     pub fields: &'a noxide_protocol::Fields,
 }
 pub(crate) fn allowed(policy: &Policy, principal: &Principal, row: Row<'_>) -> bool {
+    allowed_with(policy, principal, row, |_| false)
+}
+
+pub(crate) fn allowed_with(
+    policy: &Policy,
+    principal: &Principal,
+    row: Row<'_>,
+    mut related: impl FnMut(&noxide_protocol::membership::ExistsRelated) -> bool,
+) -> bool {
     policy.any.iter().any(|rule| {
         !rule.is_empty()
             && rule.iter().all(|p| match bind(p, principal) {
                 Condition::Account { field, id } => row.fields.get(field).is_some_and(|v| v == id),
+                Condition::Related(predicate) => related(predicate),
                 Condition::Allow => true,
                 Condition::Deny => false,
                 Condition::Owner(value) => row.owner == value,
@@ -134,41 +157,58 @@ pub(crate) fn sql(
     principal: &Principal,
     params: &mut Vec<Param>,
 ) -> Vec<String> {
+    sql_with(tx, policy, principal, params, |_, _| Ok("1=0".into()))
+        .expect("infallible base policy")
+}
+
+pub(crate) fn sql_with(
+    tx: &Transaction,
+    policy: &Policy,
+    principal: &Principal,
+    params: &mut Vec<Param>,
+    mut related: impl FnMut(
+        &noxide_protocol::membership::ExistsRelated,
+        &mut Vec<Param>,
+    ) -> anyhow::Result<String>,
+) -> anyhow::Result<Vec<String>> {
     if policy.any.is_empty() {
-        return vec!["1=0".into()];
+        return Ok(vec!["1=0".into()]);
     }
     policy
         .any
         .iter()
         .map(|rule| {
             if rule.is_empty() {
-                return "1=0".into();
+                return Ok("1=0".into());
             }
             let terms: Vec<_> = rule
                 .iter()
-                .map(|p| match bind(p, principal) {
-                    Condition::Account { field, id } => {
-                        params.push(id.into());
-                        format!(
-                            "{}=${}",
-                            tx.field_expression(field).expect("admitted account field"),
-                            params.len()
-                        )
-                    }
-                    Condition::Allow => "1=1".into(),
-                    Condition::Deny => "1=0".into(),
-                    condition => {
-                        let (column, value) = match condition {
-                            Condition::Owner(value) => ("owner", value),
-                            Condition::Tenant(value) => ("tenant", value),
-                            _ => unreachable!(),
-                        };
-                        params.push(value.into());
-                        format!("{column}=${}", params.len())
-                    }
+                .map(|p| {
+                    Ok(match bind(p, principal) {
+                        Condition::Related(predicate) => return related(predicate, params),
+                        Condition::Account { field, id } => {
+                            params.push(id.into());
+                            format!(
+                                "{}=${}",
+                                tx.field_expression(field).expect("admitted account field"),
+                                params.len()
+                            )
+                        }
+                        Condition::Allow => "1=1".into(),
+                        Condition::Deny => "1=0".into(),
+                        condition => {
+                            let (column, value) = match condition {
+                                Condition::Owner(value) => ("owner", value),
+                                Condition::Tenant(value) => ("tenant", value),
+                                _ => unreachable!(),
+                            };
+                            params.push(value.into());
+                            format!("{column}=${}", params.len())
+                        }
+                    })
                 })
-                .collect();
-            format!("({})", terms.join(" AND "))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(format!("({})", terms.join(" AND ")))
         })
         .collect()
 }
@@ -343,6 +383,7 @@ pub(crate) enum IndexColumn {
     Owner,
     Tenant,
     Field(String),
+    Timestamp(String),
 }
 pub(crate) fn index_prefix(policy: &Policy, scan: Option<&ScanRule>) -> Vec<IndexColumn> {
     let atoms = match scan {

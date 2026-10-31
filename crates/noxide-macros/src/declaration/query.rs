@@ -1,4 +1,4 @@
-use crate::declaration::policy::{PolicyAtom, policy_tokens};
+use crate::declaration::policy::{PolicyAtom, policy_tokens, resource_tokens};
 use crate::declaration::{OperationDeclaration, marker};
 use crate::syntax::stable_id;
 use proc_macro2::TokenStream as Tokens;
@@ -131,6 +131,7 @@ pub(crate) fn expand_query(
         quote!(None)
     };
     let policy = policy_tokens(&declaration.policy, &declaration.resource);
+    let policy_resources = resource_tokens(&declaration.policy);
     let vis = &item.vis;
     let output_name = format_ident!("{name}Record");
     let filters: Vec<_> = declaration.filter.iter().map(|(field, value)| -> syn::Result<Tokens> {
@@ -214,6 +215,7 @@ pub(crate) fn expand_query(
         #projection
         impl #query_trait for #name { #source }
         impl ::noxide::QueryType for #name {
+            fn policy_resources() -> Vec<::noxide::__private::Resource> { #policy_resources }
             type Resource = #resource;
             type Output = #output;
             fn record_id(record: &Self::Output) -> u64 { #identity }

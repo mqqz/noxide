@@ -3,13 +3,15 @@
 pub mod assets;
 pub mod computation;
 pub mod document;
+pub mod expiry;
+pub mod membership;
 pub mod time;
 pub use computation::{Comparison, Guard, GuardCondition, GuardRejection, Literal, Value};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 pub const MAX_IR_BYTES: usize = 65_536;
 pub const MAX_NODES: usize = 1_024;
 pub const MAX_DEPTH: usize = 32;
@@ -118,6 +120,7 @@ pub enum Predicate {
     SameTenant,
     PrincipalIs { field: String },
     Role { name: String, tenant_scoped: bool },
+    ExistsRelated(membership::ExistsRelated),
 }
 
 /// Grants access if every predicate in at least one nonempty rule matches.
@@ -234,6 +237,10 @@ pub enum FormInstruction {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Resource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiry: Option<expiry::ResourceExpiry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unique: Vec<membership::MembershipUnique>,
     pub gate: Option<Gate>,
     pub id: u32,
     pub name: String,

@@ -1,94 +1,123 @@
-# Membership preparation
+# Membership and resource expiry
 
-Status: disabled P07 leaf modules. The production module roots do not register
-these files. There is no enabled `ExistsRelated` predicate, SDK declaration, or
-membership-authorized application in this checkpoint. The
-[capability expansion contract](architecture/capability-contracts.md) and
-[security contract](architecture/runtime.md#security-contract) govern integration.
+Status: P07 integration candidate, not accepted or ready to activate. Canonical
+wire/admission, policy/SQL helpers and SDK lowering are present. The named P04
+checkpoint still needs its final fixes; runtime call sites, schema enforcement,
+provider measurements and the combined review remain integration gates. See the
+[capability contracts](architecture/capability-contracts.md) and
+[security contract](architecture/runtime.md#security-contract).
 
-`noxide-protocol/src/membership.rs` defines the proposed specialized declaration:
-one membership resource, its immutable resource-reference field, its immutable
-account field, and at most four literal Boolean/Choice conditions. The reference
-matches the protected row's identity or one named immutable reference on that
-row. The account always matches the authenticated current principal. An operation
-may declare at most two membership predicates. Conditions use a sorted map and
-typed values; there are no nested policies, recursive joins, arbitrary expressions,
-caller-selected accounts, or membership-row read/list grants.
+`ExistsRelated` declares one membership resource, one immutable resource-reference
+field, an immutable account field matching the current principal, and up to four
+literal Boolean/Choice conditions. Its reference matches either the protected
+row's identity or one named immutable reference on that row. An operation has at
+most two membership atoms. The schema and typed SDK independently check field
+kinds, reference targets and canonical literal values. There are no recursive
+policies, chains, arbitrary joins, caller-selected accounts or policy callbacks.
 
-`noxide-host/src/membership.rs` independently validates these shapes against
-resource schemas. Its lookup returns only Boolean witnesses, in protected-row
-order. It requires a nonempty principal tenant and a canonical account identity.
-The provider checks the current account is active and that its tenant, membership
-tenant, protected tenant, and principal tenant match. The current deployment
-contract/incarnation/generation is checked inside the query. Existing global and
-tenant roles retain their separate semantics; this module does not change them.
+Lookup authority inspects only the declared existence/condition fields. It grants
+no membership read/list operation and requires no such operation. The SDK
+registers the membership schema as metadata. Existing owner, global-role and
+tenant-role predicates keep their semantics. Membership-row ownership never
+substitutes for the declared role-management policy.
 
-One request attempt owns its witness map and a typed `AttemptTime`. The host must
-obtain that value through the lifecycle freshness guard. Every retry constructs a
-new map. A batch has at most 64 protected rows; one query resolves all distinct
-uncached reference keys. Duplicate memberships do not duplicate results. The map
-holds at most 128 scoped witnesses, including denials, and checks capacity before
-querying. Its key includes the admitted declaration, storage resource and full
-deployment fence. Database work uses the existing transaction deadline and debits
-the caller's shared database-call allowance. Cache reuse never changes the fixed
-attempt time. Integration must clear the map after **every** mutation step.
+Every witness requires the current active principal account, matching principal,
+protected-row, membership and account tenants, and the current deployment fence.
+Resource expiry applies both to the protected row and each membership witness.
+Revoked/deleted/status-mismatched or expired memberships cannot authorize a new
+operation. All conditions must match the same membership row; separate incomplete
+rows cannot combine. Historical duplicates do not multiply an existence result.
 
-The provider uniqueness helper creates a partial unique index for the canonical
-`(reference, account)` tuple on one storage resource. It compares two scalar
-columns directly, avoiding ambiguous concatenation. The database belongs to one
-deployment; the index is stricter than tenant-partitioned uniqueness and rejects
-the same tuple even with another stored tenant. Status, role and owner do not
-partition it: a revoked or historical membership still occupies its tuple.
-Distinct accounts and references remain possible. Canonical validation rejects
-alternate reference encodings and invalid account encodings before creation.
-Schema activation must validate canonical existing records and reject historical
-duplicates before reconciling this index. This checkpoint provides DDL and tests;
-it does not install schema-management hooks or add storage migrations.
+One request attempt owns its authority context and fixed typed `AttemptTime`.
+Witnesses are prepared for at most 64 candidate rows and two predicates at once,
+with at most 128 retained witnesses. A single provider query resolves all distinct
+keys for one predicate batch. The context discards witnesses after each batch and
+mutation step; a retry constructs a new context. A temporary anonymous picker
+principal cannot inherit an authenticated witness. No cross-request/transaction
+cache exists. Catalog reads and witness queries debit the existing shared DB-call
+allowance and use the transaction's existing monotonic deadline.
 
-Final create authorization must evaluate the fully resolved proposed row. The
-workspace bootstrap is a workspace create followed by membership create with
-the created workspace reference, current principal account, and literal initial
-admin role. P04 must supply those assignments and final proposed-row policy
-evaluation. Existing membership-row ownership grants no role-management authority.
-Managing members uses the declared admin policy for that workspace; an ordinary
-member cannot grant themselves an admin role. No empty-row owner shortcut is
-implemented here.
+Membership lookup indexes share the existing eight derived shapes/resource with
+list indexes. The equality prefix is tenant, reference, account and canonical
+condition-field order, followed by a numeric expiry range when present. SQL uses
+the catalog-derived resource constant, enabling PostgreSQL partial-index proof.
+EXISTS/LIMIT 1 avoids returning duplicate matches. Required index presence and
+actual provider work remain activation and measurement requirements; one SQL
+roundtrip alone is not evidence of bounded physical scan work.
 
-## Verification and remaining integration
+Optional `unique(reference, account)` declares provider-enforced creation
+uniqueness. There are at most four distinct tuples/resource. Two indexed scalar
+columns preserve canonical identity without ambiguous concatenation. Resource
+storage is deployment-scoped; status, role, owner and tenant do not partition the
+unique tuple. Revoked or historical rows still occupy a declared tuple. Without a
+unique declaration, historical duplicates remain legal and use the same bounded
+specialized lookup. Schema activation validates canonical raw records and rejects
+invalid encodings or newly prohibited duplicates, preserving operator data.
 
-The focused tests register only the two new module roots in a disposable copy.
-They execute the production transaction code against real SQLite and PostgreSQL.
-They compare SQL results with a separate stored-row predicate check, exercise
-both protected identity and protected-reference matching, and cover inactive or
-wrong-tenant accounts, other accounts, wrong tenants, wrong deployment/storage
-scopes, historical duplicates, revoked/status-expired rows, mutation invalidation,
-batch/call/cache bounds and provider-enforced uniqueness. The PostgreSQL test
-creates and drops its own fixture database and fails if its provider URL is
-absent. No skipped provider test is counted as successful evidence.
+## Expiry and write horizons
 
-The literal `status = expired` test proves Choice-condition behavior. It does
-**not** prove resource temporal expiry. The current baseline has no timestamp
-field or resource expiry declaration. Requiring typed attempt time alone cannot
-enforce expiry. No substitute expiry flag is introduced.
+A resource expiry declaration names a required canonical Timestamp field and an
+explicit `max_after` Duration, at most 30 days. The typed SDK default is 30 days;
+the emitted contract always contains the chosen bound for operator approval. A
+deployment may lower it. Business timestamps without an expiry declaration are
+unaffected.
 
-Before enabling this feature, integrate all of the following together:
+The host checks a create or actual expiry-field change against
+`expires_at <= attempt_time + max_after`, with checked arithmetic. Past/equal
+expiry is valid and immediately invisible to ordinary operations. Updating other
+fields without changing expiry does not revalidate against a newly lowered
+horizon. Ordinary operations still cannot update an expired target to revive it.
+There is no raw wall-clock sample in this check.
 
-- Protocol/root registration, manifest admission and approval hashing, plus
-  explicit SDK lowering and forged-manifest tests.
-- P03 named immutable references, storage ID resolution and reference integrity;
-  P04 timestamp fields, resource expiry and proposed-row authorization.
-- The existing policy interpreter and parameterized SQL, plus every ordinary
-  read/list/follow/navigation/inspection/mutation path. Existing public gates may
-  constrain public authority only; an independent private read stays independent.
-- Batched preparation in existing list/follow paths, shared budgets, per-step
-  invalidation and a fresh witness map on every retry. Index admission/reconciliation
-  must support the specialized lookup without introducing a second query engine.
-- Lifecycle expiry filtering on protected rows and membership witnesses using
-  the one fixed attempt watermark, failing closed when freshness is unavailable.
-- Schema preflight and provider index reconciliation, bootstrap/admin-management
-  application proof, SQL/direct policy parity, negative authority tests and the
-  independent combined P04/P07 review.
+Ordinary visibility requires `expires_at > attempt_time`. Apply this to GET,
+lists, follows, targets, inspection, navigation, reference eligibility and
+mutations before data or guard disclosure. Future search/aggregate/download paths
+must consume the same authority context. Expiry does not delete rows or release
+inventory. No ordinary-route maintenance bypass is exposed; P10 must introduce
+separately admitted host maintenance authority before cleanup can access expired
+rows.
 
-Service/job authority remains unavailable until P10. These leaf tests do not
-establish integrated P07 completion, deployment acceptance, audited security,
-query performance, or transport anonymity.
+The accepted lifecycle service supplies one durable watermark per attempt and
+requires maintenance progress within five monotonic seconds. GET performs no
+clock writes. Applications declaring expiry or membership conservatively require
+fresh temporal admission for every attempt. P04 expressions and P07 visibility
+share that same captured time. A new retry gets a new time; receipt replay does
+not rerun original temporal guards. Current delivery authorization uses a fresh
+read attempt. Public parent gates constrain public grants only; independent
+private read grants retain their authority.
+
+## Explicit typed declarations
+
+```rust,ignore
+#[derive(Resource)]
+#[resource(key = "memberships", unique(workspace, account),
+           expiry(expires_at, max_after_seconds = 3600))]
+struct Membership {
+    #[id] id: Id<Self>,
+    #[field()] workspace: Id<Workspace>,
+    #[field(scope = same_tenant)] account: AccountId,
+    #[field()] role: Role,
+    #[field()] expires_at: Timestamp,
+}
+
+#[query(read(Workspace), allow = exists_related(Membership,
+    reference = workspace, target = self_record, account = account,
+    conditions(role = Role::Admin)))]
+struct AdminWorkspace;
+```
+
+Use `target = reference(workspace)` when protecting a document with an immutable
+workspace reference. Final proposed-row create authorization enables the approved
+bootstrap: workspace create, then membership create with `Created(0)`, `Principal`
+and a literal admin role. Membership-management actions require the workspace
+admin policy; ordinary membership ownership cannot grant or change roles.
+
+The SDK equivalence test checks literal lowering, field-key mapping, identity
+and reference matching, metadata-only schema registration, native tuple and
+explicit/default horizon declarations. The earlier disabled checkpoint passed
+four real SQLite/PostgreSQL leaf tests; those results do not establish this new
+integration. Full provider truth tables, owned-nonmember denial, bootstrap,
+anonymous picker, all-read-path expiry/freshness, schema/index activation,
+adversarial 100k-row measurements and independent combined P04/P07 review remain
+required. No deployment, audited-security or anonymity claim follows from local
+checks.
