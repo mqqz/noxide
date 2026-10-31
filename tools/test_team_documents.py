@@ -65,7 +65,7 @@ def main():
                 assert client.submit(html, "/login", username=name, password="Membership walkthrough password")[0] == 303
             _, _, html = alice.request("GET", "/")
             status, headers, _ = alice.submit(html, actions["Create workspace"], name="Private <team>")
-            assert status == 303
+            assert status == 303, f"Create workspace: expected 303, received {status}"
             workspace = headers["location"]
             assert bob.request("GET", workspace)[0] == 404
             assert eve.request("GET", workspace)[0] == 404
