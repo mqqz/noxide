@@ -193,6 +193,7 @@ async fn known_success_contract(db: &Database) {
         if index > 0 {
             phase(db, async |tx: &mut Transaction| {
                 tx.grant_effect_endpoint("deployment", "contract", &effective.grants[0])
+                    .await
             })
             .await
             .unwrap();
@@ -217,11 +218,12 @@ async fn known_success_contract(db: &Database) {
         match mutation {
             "revoke" => phase(db, async |tx: &mut Transaction| {
                 tx.revoke_effect_endpoint("deployment", "alpha", "events")
+                    .await
             })
             .await
             .unwrap(),
             "cancel" => phase(db, async |tx: &mut Transaction| {
-                tx.cancel_effect("deployment", &capture.id()?)
+                tx.cancel_effect("deployment", &capture.id()?).await
             })
             .await
             .unwrap(),
@@ -327,15 +329,17 @@ async fn quota_contract(db: &Database, app_full: bool) {
         .unwrap();
     }
     assert!(
-        phase(db, async |tx: &mut Transaction| tx.resume_effect(
-            "deployment",
-            "contract",
-            &effective,
-            &dead.id()?,
-            1,
-            at(1002),
-            true
-        ))
+        phase(db, async |tx: &mut Transaction| tx
+            .resume_effect(
+                "deployment",
+                "contract",
+                &effective,
+                &dead.id()?,
+                1,
+                at(1002),
+                true
+            )
+            .await)
         .await
         .is_err()
     );
