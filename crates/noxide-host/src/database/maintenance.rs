@@ -32,6 +32,38 @@ impl std::fmt::Display for ConnectStopped {
     }
 }
 impl std::error::Error for ConnectStopped {}
+impl ConnectStopped {
+    fn sqlite_busy(&self) -> bool {
+        let Some(sqlx::Error::Database(error)) = self.0.downcast_ref::<sqlx::Error>() else {
+            return false;
+        };
+        error
+            .try_downcast_ref::<sqlx::sqlite::SqliteError>()
+            .is_some()
+            && matches!(error.code().as_deref(), Some("5" | "517"))
+    }
+}
+
+#[cfg(test)]
+struct CleanSetupProbe {
+    attempts: std::sync::atomic::AtomicUsize,
+    pause_first: bool,
+    stopped: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+#[cfg(test)]
+tokio::task_local! { static CLEAN_SETUP_PROBE: Arc<CleanSetupProbe>; }
+
+#[cfg(test)]
+async fn after_clean_setup_stop() {
+    if let Ok(probe) = CLEAN_SETUP_PROBE.try_with(Clone::clone) {
+        let previous = probe.attempts.fetch_add(1, Ordering::AcqRel);
+        if probe.pause_first && previous == 0 {
+            probe.stopped.notify_one();
+            probe.resume.notified().await;
+        }
+    }
+}
 
 pub(super) struct Control {
     connection: sqlx::PgConnection,
@@ -208,24 +240,48 @@ impl MaintenanceLease {
         }
     }
     pub(crate) async fn begin(&mut self, database: &Database) -> Result<()> {
-        match database.begin_maintenance(self.deadline).await {
-            Ok(tx) => {
-                self.tx = Some(tx);
-                if self.tx().maintenance.is_some() {
-                    let locked = self.tx().fetch::<1>("SELECT CAST(singleton AS TEXT) FROM nx_clock WHERE singleton=1 FOR UPDATE NOWAIT", &[]).await;
-                    if let Err(error) = locked {
-                        self.finish().await?;
-                        return Err(error);
+        for attempt in 0..3 {
+            // A previous clean failure says nothing about the next connection.
+            // Cancellation during a new open must retain/quarantine capacity.
+            self.known_stopped = false;
+            match database.begin_maintenance(self.deadline).await {
+                Ok(tx) => {
+                    self.tx = Some(tx);
+                    if self.tx().maintenance.is_some() {
+                        let locked = self.tx().fetch::<1>("SELECT CAST(singleton AS TEXT) FROM nx_clock WHERE singleton=1 FOR UPDATE NOWAIT", &[]).await;
+                        if let Err(error) = locked {
+                            self.finish().await?;
+                            return Err(error);
+                        }
                     }
+                    return Ok(());
                 }
-                Ok(())
+                Err(error) => {
+                    let Some(stopped) = error.downcast_ref::<ConnectStopped>() else {
+                        return Err(MaintenanceUncertain.into());
+                    };
+                    // ConnectStopped is produced only after acknowledged close.
+                    // Retry no other error, including raw busy or timeout errors.
+                    self.known_stopped = true;
+                    #[cfg(test)]
+                    after_clean_setup_stop().await;
+                    if attempt < 2 && stopped.sqlite_busy() {
+                        tokio::task::yield_now().await;
+                        // Recheck after yielding, before a new open can make
+                        // its stop state uncertain under the original deadline.
+                        let work_remaining = self
+                            .deadline
+                            .checked_sub(CLEANUP_RESERVE)
+                            .is_some_and(|work| Instant::now() < work);
+                        if work_remaining {
+                            continue;
+                        }
+                    }
+                    return Err(error);
+                }
             }
-            Err(error) if error.is::<ConnectStopped>() => {
-                self.known_stopped = true;
-                Err(error)
-            }
-            Err(_) => Err(MaintenanceUncertain.into()),
         }
+        unreachable!("maintenance setup attempts are bounded")
     }
     pub(crate) fn tx(&mut self) -> &mut Transaction {
         self.tx.as_mut().expect("maintenance began")
@@ -296,6 +352,184 @@ impl Drop for MaintenanceLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn clean_probe(pause_first: bool) -> Arc<CleanSetupProbe> {
+        Arc::new(CleanSetupProbe {
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            pause_first,
+            stopped: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+        })
+    }
+
+    async fn not_quarantined(database: &Database, freshness: &crate::lifecycle_clock::Freshness) {
+        let mut tx = database
+            .begin_read(Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
+        let error = freshness.attempt(&mut tx).await.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<crate::lifecycle_clock::TemporalUnavailable>(),
+            Some(&crate::lifecycle_clock::TemporalUnavailable::NotStarted)
+        );
+        tx.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_clean_busy_retry_waits_for_ack_and_keeps_original_capacity() {
+        use tokio::sync::Semaphore;
+        let root = tempfile::tempdir().unwrap().keep();
+        eprintln!(
+            "retained clean-retry maintenance fixture: {}",
+            root.display()
+        );
+        let database = Database::sqlite(root.join("maintenance-clean-retry.db"));
+        database.initialize().await.unwrap();
+        let DatabaseOptions::Sqlite { path, .. } = &database.options else {
+            unreachable!()
+        };
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false);
+        let mut writer = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut writer)
+            .await
+            .unwrap();
+        let slots = Arc::new(Semaphore::new(1));
+        let freshness = crate::lifecycle_clock::Freshness::default();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut lease = MaintenanceLease::new(
+            slots.clone().try_acquire_owned().unwrap(),
+            deadline,
+            freshness.clone(),
+        );
+        let stopped = Arc::new(AtomicBool::new(false));
+        let probe = clean_probe(true);
+        let result = tokio::time::timeout_at(
+            deadline.into(),
+            MAINTENANCE_CLOSE_PROBE.scope(
+                stopped.clone(),
+                CLEAN_SETUP_PROBE.scope(probe.clone(), async {
+                    let (result, ()) = tokio::join!(lease.begin(&database), async {
+                        probe.stopped.notified().await;
+                        assert!(
+                            stopped.load(Ordering::Acquire),
+                            "the rejected connection must acknowledge close before retry"
+                        );
+                        assert_eq!(
+                            slots.available_permits(),
+                            0,
+                            "a clean intermediate stop cannot release the maintenance slot"
+                        );
+                        // This real external writer is released only after that close
+                        // acknowledgment and before the next bounded setup attempt.
+                        sqlx::query("ROLLBACK").execute(&mut writer).await.unwrap();
+                        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+                            .fetch_one(&mut writer)
+                            .await
+                            .unwrap();
+                        assert_eq!(mode, "wal", "retry cannot change persisted journal mode");
+                        probe.resume.notify_one();
+                    });
+                    result
+                }),
+            ),
+        )
+        .await
+        .expect("clean setup retry must stay within its original deadline");
+        result.unwrap();
+        assert_eq!(probe.attempts.load(Ordering::Acquire), 1);
+        assert_eq!(lease.deadline, deadline);
+        assert!(
+            !lease.known_stopped,
+            "the successful new transaction is still live"
+        );
+        assert_eq!(slots.available_permits(), 0);
+        lease.finish().await.unwrap();
+        assert_eq!(
+            slots.available_permits(),
+            1,
+            "capacity returns only after the successful provider stops"
+        );
+        writer.close().await.unwrap();
+        not_quarantined(&database, &freshness).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_persistent_clean_busy_stops_after_three_attempts() {
+        use tokio::sync::Semaphore;
+        let root = tempfile::tempdir().unwrap().keep();
+        eprintln!(
+            "retained persistent-busy maintenance fixture: {}",
+            root.display()
+        );
+        let database = Database::sqlite(root.join("maintenance-three-busy.db"));
+        database.initialize().await.unwrap();
+        let DatabaseOptions::Sqlite { path, .. } = &database.options else {
+            unreachable!()
+        };
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false);
+        let mut writer = sqlx::SqliteConnection::connect_with(&options)
+            .await
+            .unwrap();
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut writer)
+            .await
+            .unwrap();
+        let slots = Arc::new(Semaphore::new(1));
+        let freshness = crate::lifecycle_clock::Freshness::default();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut lease = MaintenanceLease::new(
+            slots.clone().try_acquire_owned().unwrap(),
+            deadline,
+            freshness.clone(),
+        );
+        let stopped = Arc::new(AtomicBool::new(false));
+        let probe = clean_probe(false);
+        let error = MAINTENANCE_CLOSE_PROBE
+            .scope(
+                stopped.clone(),
+                CLEAN_SETUP_PROBE.scope(probe.clone(), lease.begin(&database)),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<ConnectStopped>()
+                .is_some_and(ConnectStopped::sqlite_busy)
+        );
+        assert_eq!(probe.attempts.load(Ordering::Acquire), 3);
+        assert!(stopped.load(Ordering::Acquire));
+        assert_eq!(lease.deadline, deadline);
+        assert!(lease.known_stopped);
+        assert_eq!(slots.available_permits(), 0);
+        drop(lease);
+        assert_eq!(
+            slots.available_permits(),
+            1,
+            "three acknowledged stops leave no quarantined connection"
+        );
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&mut writer)
+            .await
+            .unwrap();
+        assert_eq!(mode, "wal");
+        sqlx::query("ROLLBACK").execute(&mut writer).await.unwrap();
+        writer.close().await.unwrap();
+        not_quarantined(&database, &freshness).await;
+    }
+
+    #[test]
+    fn clean_setup_retry_never_classifies_error_messages_or_non_database_errors() {
+        assert!(!ConnectStopped(anyhow::anyhow!("database is locked (code: 5)")).sqlite_busy());
+        assert!(!ConnectStopped(sqlx::Error::PoolTimedOut.into()).sqlite_busy());
+        assert!(!ConnectStopped(sqlx::Error::RowNotFound.into()).sqlite_busy());
+    }
 
     #[tokio::test]
     async fn sqlite_blocked_setup_confirms_stop_before_releasing_capacity() {
