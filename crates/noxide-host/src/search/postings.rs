@@ -57,7 +57,8 @@ mod tests {
 
     #[test]
     fn payload_has_explicit_fields_without_repeated_record_facts() {
-        let record = indexed_record(&[Some("Rust العربية"), Some("Rust")], 100).unwrap();
+        let record =
+            indexed_record(&[Some("Rust العربية"), Some("Rust")], 100, &mut || Ok(())).unwrap();
         let prepared = PreparedPostings::new(&record, || Ok(())).unwrap();
         assert_eq!(
             prepared.payload(),
@@ -72,7 +73,7 @@ mod tests {
             .map(|i| format!("a{i:04}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let record = indexed_record(&[Some(text.as_str()); 4], 16_384).unwrap();
+        let record = indexed_record(&[Some(text.as_str()); 4], 16_384, &mut || Ok(())).unwrap();
         let mut checkpoints = 0;
         let prepared = PreparedPostings::new(&record, || {
             checkpoints += 1;
@@ -88,7 +89,7 @@ mod tests {
 
     #[test]
     fn failed_work_checkpoint_returns_no_partial_payload() {
-        let record = indexed_record(&[Some("a b")], 10).unwrap();
+        let record = indexed_record(&[Some("a b")], 10, &mut || Ok(())).unwrap();
         let mut calls = 0;
         let result = PreparedPostings::new(&record, || {
             calls += 1;

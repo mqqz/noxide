@@ -46,12 +46,14 @@ impl IndexedRecord {
 pub fn indexed_record(
     values: &[Option<&str>],
     admitted_bytes: usize,
-) -> Result<IndexedRecord, Error> {
+    checkpoint: &mut impl FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<IndexedRecord> {
+    checkpoint()?;
     if values.is_empty() || values.len() > MAX_INDEXED_FIELDS {
-        return Err(Error::IndexedFields);
+        return Err(Error::IndexedFields.into());
     }
     if admitted_bytes == 0 || admitted_bytes > MAX_INDEXED_BYTES {
-        return Err(Error::IndexedLimit);
+        return Err(Error::IndexedLimit.into());
     }
     let indexed_bytes = values.iter().try_fold(0usize, |total, value| {
         total
@@ -59,16 +61,16 @@ pub fn indexed_record(
             .ok_or(Error::InputBytes)
     })?;
     if indexed_bytes > admitted_bytes {
-        return Err(Error::InputBytes);
+        return Err(Error::InputBytes.into());
     }
     let mut stages = Stages::new(MAX_RECORD_STAGE_BYTES);
     let mut dictionary = BTreeSet::new();
     let mut field_tokens = Vec::with_capacity(values.len());
     let mut posting_bytes = 0usize;
     for value in values {
-        let canonical = normalize(value.unwrap_or(""), &mut stages)?;
+        let canonical = normalize(value.unwrap_or(""), &mut stages, checkpoint)?;
         let mut unique = BTreeSet::new();
-        split(&canonical, |token| {
+        split(&canonical, checkpoint, |token| {
             if !dictionary.contains(token) {
                 if dictionary.len() == MAX_RECORD_TOKENS {
                     return Err(Error::RecordTokens);
@@ -88,15 +90,27 @@ pub fn indexed_record(
         })?;
         field_tokens.push(unique);
     }
-    let tokens: Vec<_> = dictionary.into_iter().collect();
-    let ordinals: BTreeMap<_, _> = tokens
-        .iter()
-        .enumerate()
-        .map(|(index, token)| (token.as_str(), index as u16))
-        .collect();
+    checkpoint()?;
+    let mut tokens = Vec::with_capacity(dictionary.len());
+    for (index, token) in dictionary.into_iter().enumerate() {
+        if index.is_multiple_of(64) {
+            checkpoint()?;
+        }
+        tokens.push(token);
+    }
+    let mut ordinals = BTreeMap::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if index.is_multiple_of(64) {
+            checkpoint()?;
+        }
+        ordinals.insert(token.as_str(), index as u16);
+    }
     let mut postings = Vec::new();
     for (field, unique) in field_tokens.into_iter().enumerate() {
         for token in unique {
+            if postings.len().is_multiple_of(64) {
+                checkpoint()?;
+            }
             postings.push(FieldToken {
                 field: field as u8,
                 token: ordinals[token.as_str()],
@@ -104,6 +118,7 @@ pub fn indexed_record(
         }
     }
     debug_assert!(postings.len() <= MAX_POSTINGS);
+    checkpoint()?;
     Ok(IndexedRecord {
         tokens,
         postings,

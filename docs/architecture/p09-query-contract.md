@@ -104,3 +104,16 @@ are validated together before parameters are appended; no endpoint arithmetic is
 used. Mutable LiveView ordering can omit or repeat a row when another request
 moves its sort key across a cursor. That behavior is explicitly chosen by the
 declaration; immutable ordering prevents those key moves.
+
+Tokenizer/index construction now requires the caller's mutable checkpoint:
+`canonical_query(text, &mut checkpoint)` and
+`indexed_record(values, max_bytes, &mut checkpoint)` return `anyhow::Result`.
+Typed input-limit errors remain downcastable, and request/operator checkpoint
+errors propagate unchanged. There is no unchecked production wrapper; infallible
+wrappers exist only in the test module. Preflight checks decomposed scalars before
+normalization reorder; normalization/splitting poll within64 scalars, full-string
+lowercase polls before and after, and dictionary/posting preparation polls bounded
+groups. Failure injection at every reachable boundary returns no query/postings.
+The callback type and pure tests do not prove real host ownership: registration
+requires every production call site to pass the existing required RequestScope
+checkpoint or a valid OperatorCheckpoint from its bounded transaction.

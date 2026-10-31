@@ -1,5 +1,94 @@
 use super::*;
 
+// Infallible pure fixture wrappers are test-only. Production callers must pass
+// their real required request/operator checkpoint and retain its original error.
+fn canonical_query(text: &str) -> Result<CanonicalQuery, Error> {
+    super::canonical_query(text, &mut || Ok(()))
+        .map_err(|error| *error.downcast_ref::<Error>().expect("tokenization error"))
+}
+fn indexed_record(values: &[Option<&str>], max_bytes: usize) -> Result<IndexedRecord, Error> {
+    super::indexed_record(values, max_bytes, &mut || Ok(()))
+        .map_err(|error| *error.downcast_ref::<Error>().expect("tokenization error"))
+}
+
+#[derive(Debug)]
+struct Interrupted(usize);
+impl std::fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("original work owner interrupted")
+    }
+}
+impl std::error::Error for Interrupted {}
+
+#[test]
+fn every_query_work_boundary_preserves_the_original_failure_without_a_result() {
+    let text = format!("{}{} ΟΣ İ عربي", "a".repeat(64), ".".repeat(1024));
+    let mut checkpoints = 0;
+    let query = super::canonical_query(&text, &mut || {
+        checkpoints += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        query.tokens(),
+        [
+            "a".repeat(64),
+            "i\u{307}".into(),
+            "ος".into(),
+            "عربي".into()
+        ]
+    );
+    assert!(checkpoints > 64);
+    for stop in 1..=checkpoints {
+        let mut calls = 0;
+        let error = super::canonical_query(&text, &mut || {
+            calls += 1;
+            if calls == stop {
+                return Err(Interrupted(stop).into());
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(error.downcast_ref::<Interrupted>().unwrap().0, stop);
+        assert_eq!(calls, stop);
+    }
+    let error = super::canonical_query("", &mut || Err(Interrupted(0).into())).unwrap_err();
+    assert_eq!(error.downcast_ref::<Interrupted>().unwrap().0, 0);
+}
+
+#[test]
+fn every_index_work_boundary_preserves_the_original_failure_without_postings() {
+    let text = (0..128)
+        .map(|number| format!("word{number:03}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let values = [Some(text.as_str()); 4];
+    let mut checkpoints = 0;
+    let record = super::indexed_record(&values, MAX_INDEXED_BYTES, &mut || {
+        checkpoints += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(record.tokens().len(), 128);
+    assert_eq!(record.postings().len(), 512);
+    assert!(checkpoints > 64);
+    for stop in 1..=checkpoints {
+        let mut calls = 0;
+        let error = super::indexed_record(&values, MAX_INDEXED_BYTES, &mut || {
+            calls += 1;
+            if calls == stop {
+                return Err(Interrupted(stop).into());
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(error.downcast_ref::<Interrupted>().unwrap().0, stop);
+        assert_eq!(calls, stop);
+    }
+    let error = super::indexed_record(&[], 0, &mut || Err(Interrupted(0).into())).unwrap_err();
+    assert_eq!(error.downcast_ref::<Interrupted>().unwrap().0, 0);
+}
+
 #[test]
 fn unicode_vectors_have_handwritten_portable_results() {
     let cases: &[(&str, &[&str])] = &[

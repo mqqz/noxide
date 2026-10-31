@@ -95,15 +95,19 @@ impl CanonicalQuery {
 
 /// Query count applies to occurrences before deduplication. Canonical sorted
 /// strings are the only query values later used for equality and cursor binding.
-pub fn canonical_query(text: &str) -> Result<CanonicalQuery, Error> {
+pub fn canonical_query(
+    text: &str,
+    checkpoint: &mut impl FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<CanonicalQuery> {
+    checkpoint()?;
     if text.len() > MAX_QUERY_BYTES {
-        return Err(Error::InputBytes);
+        return Err(Error::InputBytes.into());
     }
     let mut work = Stages::new(MAX_QUERY_STAGE_BYTES);
-    let canonical = normalize(text, &mut work)?;
+    let canonical = normalize(text, &mut work, checkpoint)?;
     let mut occurrences = 0usize;
     let mut tokens = BTreeSet::new();
-    split(&canonical, |token| {
+    split(&canonical, checkpoint, |token| {
         occurrences += 1;
         if occurrences > MAX_QUERY_TOKENS {
             return Err(Error::QueryTokens);
@@ -112,8 +116,9 @@ pub fn canonical_query(text: &str) -> Result<CanonicalQuery, Error> {
         Ok(())
     })?;
     if tokens.is_empty() {
-        return Err(Error::EmptyQuery);
+        return Err(Error::EmptyQuery.into());
     }
+    checkpoint()?;
     Ok(CanonicalQuery {
         tokens: tokens.into_iter().collect(),
     })
@@ -147,16 +152,29 @@ fn spend(remaining: &mut usize, bytes: usize) -> Result<(), Error> {
 }
 /// Preflight compatibility decomposition without invoking the reordering
 /// iterator. This bounds its nonstarter buffer and canonical-ordering work.
-fn preflight(text: &str, remaining: &mut usize) -> Result<(), Error> {
+fn preflight(
+    text: &str,
+    remaining: &mut usize,
+    checkpoint: &mut impl FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    checkpoint()?;
     let mut nonstarters = 0usize;
+    let mut decomposed = 0usize;
     for scalar in text.chars() {
         let mut failure = None;
         decompose_compatible(scalar, |part| {
             if failure.is_some() {
                 return;
             }
-            if let Err(error) = spend(remaining, part.len_utf8()) {
+            if decomposed.is_multiple_of(64)
+                && let Err(error) = checkpoint()
+            {
                 failure = Some(error);
+                return;
+            }
+            decomposed += 1;
+            if let Err(error) = spend(remaining, part.len_utf8()) {
+                failure = Some(error.into());
                 return;
             }
             if canonical_combining_class(part) == 0 {
@@ -164,7 +182,7 @@ fn preflight(text: &str, remaining: &mut usize) -> Result<(), Error> {
             } else {
                 nonstarters += 1;
                 if nonstarters > MAX_NONSTARTERS {
-                    failure = Some(Error::CombiningSequence);
+                    failure = Some(Error::CombiningSequence.into());
                 }
             }
         });
@@ -172,38 +190,61 @@ fn preflight(text: &str, remaining: &mut usize) -> Result<(), Error> {
             return Err(error);
         }
     }
+    checkpoint()?;
     Ok(())
 }
 fn collect_bounded(
     scalars: impl Iterator<Item = char>,
     remaining: &mut usize,
-) -> Result<String, Error> {
+    checkpoint: &mut impl FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<String> {
     let mut result = String::new();
-    for scalar in scalars {
+    let mut scalars = scalars;
+    let mut count = 0usize;
+    loop {
+        // Poll before pulling the next bounded normalizer segment, including
+        // empty input. No final result survives a failed owner checkpoint.
+        if count.is_multiple_of(64) {
+            checkpoint()?;
+        }
+        let Some(scalar) = scalars.next() else { break };
+        count += 1;
         spend(remaining, scalar.len_utf8())?;
         result.push(scalar);
     }
+    checkpoint()?;
     Ok(result)
 }
-pub(super) fn normalize(text: &str, stages: &mut Stages) -> Result<String, Error> {
-    preflight(text, &mut stages.decomposed)?;
-    let first = collect_bounded(text.nfkc(), &mut stages.first)?;
+pub(super) fn normalize(
+    text: &str,
+    stages: &mut Stages,
+    checkpoint: &mut impl FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<String> {
+    preflight(text, &mut stages.decomposed, checkpoint)?;
+    let first = collect_bounded(text.nfkc(), &mut stages.first, checkpoint)?;
     // Full-string casing is required: char::to_lowercase misses final sigma.
     // Unicode17 default lowercase has at most three output scalars per input
     // scalar. The first string is bounded before this finite expansion allocates.
+    checkpoint()?;
     let lowercase = first.to_lowercase();
+    checkpoint()?;
     spend(&mut stages.lowercase, lowercase.len())?;
-    preflight(&lowercase, &mut stages.final_decomposed)?;
-    collect_bounded(lowercase.nfkc(), &mut stages.final_normalized)
+    preflight(&lowercase, &mut stages.final_decomposed, checkpoint)?;
+    collect_bounded(lowercase.nfkc(), &mut stages.final_normalized, checkpoint)
 }
 
 pub(super) fn split(
     text: &str,
+    checkpoint: &mut impl FnMut() -> anyhow::Result<()>,
     mut emit: impl FnMut(&str) -> Result<(), Error>,
-) -> Result<(), Error> {
+) -> anyhow::Result<()> {
+    checkpoint()?;
     let mut start = None;
     let mut scalars = 0usize;
-    for (offset, scalar) in text.char_indices() {
+    for (index, (offset, scalar)) in text.char_indices().enumerate() {
+        if index.is_multiple_of(64) {
+            checkpoint()?;
+        }
         let continues = match scalar.general_category_group() {
             GeneralCategoryGroup::Letter | GeneralCategoryGroup::Number => {
                 if start.is_none() {
@@ -217,7 +258,7 @@ pub(super) fn split(
         if continues {
             scalars += 1;
             if scalars > MAX_TOKEN_SCALARS {
-                return Err(Error::TokenScalars);
+                return Err(Error::TokenScalars.into());
             }
         } else {
             if let Some(begin) = start.take() {
@@ -229,5 +270,6 @@ pub(super) fn split(
     if let Some(begin) = start {
         emit(&text[begin..])?;
     }
+    checkpoint()?;
     Ok(())
 }
