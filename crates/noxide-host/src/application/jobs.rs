@@ -353,7 +353,6 @@ impl Application {
     /// Host-only row boundary for canonical query candidates and final action rows.
     /// Callers must obtain every row from this same transaction, with no intervening
     /// resource mutation. Sharing row data never shares an alias's read authority.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn seal_job_target_rows(
         &self,
         context: &mut repository::ReadContext<'_>,

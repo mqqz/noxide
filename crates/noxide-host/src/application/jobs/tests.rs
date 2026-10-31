@@ -145,29 +145,31 @@ impl Case {
         db.create_account("alice", "service fixture password", "team")
             .await
             .unwrap();
+        let job_deployment = JobDeployment {
+            grants: vec![JobGrant {
+                worker: "repair".into(),
+                tenant: "team".into(),
+                actions: m.jobs.as_ref().unwrap().workers[0]
+                    .actions
+                    .iter()
+                    .map(|rule| rule.action)
+                    .collect::<BTreeSet<_>>(),
+            }],
+            limits: JobLimits::default(),
+        };
+        let approved = crate::deployment::approval_digest(&m, None, Some(&job_deployment)).unwrap();
         let app = Arc::new(
             Application::new(
                 &fixture::component(None),
                 &serde_json::to_vec(&m).unwrap(),
-                manifest::digest(&m).unwrap(),
+                approved,
                 db.clone(),
                 HostKeys::generate().unwrap(),
                 Limits::default(),
                 crate::DeploymentResources {
                     assets: crate::assets::AssetBundle::default(),
                     blobs: None,
-                    jobs: Some(JobDeployment {
-                        grants: vec![JobGrant {
-                            worker: "repair".into(),
-                            tenant: "team".into(),
-                            actions: m.jobs.as_ref().unwrap().workers[0]
-                                .actions
-                                .iter()
-                                .map(|rule| rule.action)
-                                .collect::<BTreeSet<_>>(),
-                        }],
-                        limits: JobLimits::default(),
-                    }),
+                    jobs: Some(job_deployment),
                 },
             )
             .unwrap(),

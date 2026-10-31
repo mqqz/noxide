@@ -857,6 +857,7 @@ mod tests {
             crate::DeploymentResources {
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
+                jobs: None,
             },
         )
         .unwrap();
@@ -892,6 +893,7 @@ mod tests {
                 crate::DeploymentResources {
                     assets: crate::assets::AssetBundle::default(),
                     blobs: None,
+                    jobs: None,
                 },
             )
             .unwrap(),
@@ -1064,6 +1066,7 @@ mod tests {
             crate::DeploymentResources {
                 assets: crate::assets::AssetBundle::default(),
                 blobs: None,
+                jobs: None,
             },
         )
         .unwrap();
@@ -1158,6 +1161,7 @@ mod tests {
                 crate::DeploymentResources {
                     assets: crate::assets::AssetBundle::default(),
                     blobs: None,
+                    jobs: None,
                 },
             )
             .unwrap(),
