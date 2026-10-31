@@ -106,7 +106,11 @@ fn effects(tx: Transaction, m: &Manifest) -> Effects {
             input: Fields::new(),
             inspection: Default::default(),
             available_forms: vec![],
-            params: Fields::from([("terms".into(), "rust العربية".into())]),
+            params: if m.routes[0].params.iter().any(|name| name == "terms") {
+                Fields::from([("terms".into(), "rust العربية".into())])
+            } else {
+                Fields::new()
+            },
         },
         grants: Default::default(),
         target_rows: Default::default(),
@@ -140,11 +144,22 @@ async fn begin(db: &Database) -> Transaction {
         .await
         .unwrap()
 }
-async fn insert(tx: &mut Transaction, storage: i64, id: i64, owner: &str, body: &str, rank: i64) {
-    let fields = Fields::from([
+async fn insert(
+    tx: &mut Transaction,
+    storage: i64,
+    id: i64,
+    owner: &str,
+    body: &str,
+    rank: i64,
+    workspace: bool,
+) {
+    let mut fields = Fields::from([
         ("body".into(), body.into()),
         ("rank".into(), rank.to_string()),
     ]);
+    if workspace {
+        fields.insert("workspace".into(), "42".into());
+    }
     tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,$3,'team',$4,'row',1,$2)",&[storage.into(),id.into(),owner.into(),serde_json::to_string(&fields).unwrap().into()]).await.unwrap();
     let checkpoint = tx.operator_checkpoint().unwrap();
     let indexed =
@@ -171,17 +186,38 @@ async fn fixture(db: &Database, m: &Manifest) -> i64 {
         .await
         .unwrap();
     }
+    if m.resources.len() == 2 {
+        let parent = tx.storage_resource(m, 2).await.unwrap();
+        for id in [42i64, 43] {
+            tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,$3,'team',$4,'workspace',1,$5)", &[parent.into(),id.into(),ALICE.into(),serde_json::to_string(&Fields::from([("body".into(),format!("Workspace{id}"))])).unwrap().into(),(400000+id).into()]).await.unwrap();
+        }
+    }
     for (id, owner, body, rank) in [
         (1, BOB, "rust العربية", 3),
         (2, ALICE, "rust only", 2),
         (3, ALICE, "rust العربية", 2),
         (4, ALICE, "العربية rust", 1),
     ] {
-        insert(&mut tx, storage, id, owner, body, rank).await;
+        insert(
+            &mut tx,
+            storage,
+            id,
+            owner,
+            body,
+            rank,
+            m.resources[0]
+                .fields
+                .iter()
+                .any(|field| field.name == "workspace"),
+        )
+        .await;
     }
-    tx.execute("UPDATE nx_creation_counter SET value=4", &[])
-        .await
-        .unwrap();
+    tx.execute(
+        "UPDATE nx_creation_counter SET value=(SELECT MAX(created_seq) FROM nx_records)",
+        &[],
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     storage
 }
@@ -380,7 +416,41 @@ async fn sqlite_p09_aggregate_1001_candidates_returns_limit_without_partial() {
 }
 
 async fn hundred_thousand_case(db: Database) {
-    let m = manifest();
+    let mut m = manifest();
+    m.resources.push(Resource {
+        id: 2,
+        name: "workspaces".into(),
+        fields: vec![m.resources[0].fields[0].clone()],
+        search: None,
+        expiry: None,
+        unique: vec![],
+        gate: None,
+    });
+    m.resources[0].fields.push(TextField {
+        immutable: true,
+        name: "workspace".into(),
+        label: "Workspace".into(),
+        kind: FieldKind::Reference {
+            resource: "workspaces".into(),
+        },
+        optional: false,
+        initial: None,
+        max_bytes: 20,
+    });
+    let mut read = m.operations[1].clone();
+    read.id = 5;
+    read.resource = 2;
+    m.operations.push(read);
+    m.operations[2].bind.insert("workspace".into(), 5);
+    m.routes.push(Route {
+        id: 4,
+        path: "/workspaces/{workspace}".into(),
+        resource: Some(2),
+        params: vec![],
+        operations: vec![5],
+        forms: vec![],
+        access: Access::Authenticated,
+    });
     let storage = fixture(&db, &m).await;
     let mut tx = db
         .begin(Instant::now() + Duration::from_secs(30))
@@ -401,6 +471,7 @@ async fn hundred_thousand_case(db: Database) {
     let fields = serde_json::to_string(&Fields::from([
         ("body".into(), "rust العربية".into()),
         ("rank".into(), "5".into()),
+        ("workspace".into(), "43".into()),
     ]))
     .unwrap();
     for batch in 0..10 {
@@ -411,9 +482,12 @@ async fn hundred_thousand_case(db: Database) {
     for token in ["rust", "العربية"] {
         tx.execute("INSERT INTO nx_search_postings(resource,record_id,field,token,incarnation,revision,created_seq) SELECT resource,id,0,$2,incarnation,revision,created_seq FROM nx_records WHERE resource=$1 AND incarnation='unrelated'",&[storage.into(),token.into()]).await.unwrap();
     }
-    tx.execute("UPDATE nx_creation_counter SET value=200004", &[])
-        .await
-        .unwrap();
+    tx.execute(
+        "UPDATE nx_creation_counter SET value=(SELECT MAX(created_seq) FROM nx_records)",
+        &[],
+    )
+    .await
+    .unwrap();
     tx.execute("ANALYZE nx_records", &[]).await.unwrap();
     tx.execute("ANALYZE nx_search_postings", &[]).await.unwrap();
     tx.commit().await.unwrap();
@@ -463,6 +537,69 @@ async fn hundred_thousand_case(db: Database) {
         {
             let expression=crate::query_plan::scalar::Scalar::new(&scalar.resources[0].fields[1],query::Direction::Ascending).unwrap().expression(e.tx.query_provider().unwrap()).unwrap();
             let sql=format!("SELECT id FROM nx_records WHERE resource={storage} AND owner='{ALICE}' ORDER BY {expression} ASC,id ASC LIMIT 64");let visits=e.tx.examined_rows(&sql).await.unwrap();assert!(visits<=64,"scalar prefix visited {visits}");eprintln!("P09 100k real provider scalarowner={visits} visits");
+        }
+        e.tx.rollback().await.unwrap();
+    }).await;
+    // A policy OR must seal independent indexed streams before current policy.
+    // In descending order the100k hidden rank5 records precede every owned row.
+    let mut multi = scalar.clone();
+    multi.operations[0].policy.any.push(vec![Predicate::Role {
+        name: "moderator".into(),
+        tenant_scoped: false,
+    }]);
+    multi.operations[3].policy = multi.operations[0].policy.clone();
+    multi.operations[0].list.as_mut().unwrap().order = ListOrder::Field {
+        field: "rank".into(),
+        direction: query::Direction::Descending,
+        mode: query::SortMode::Immutable,
+    };
+    db.reconcile_query_indexes(&multi).await.unwrap();
+    owner().await.run(async {
+        let mut e=effects(begin(&db).await,&multi);
+        let rows:Vec<Record>=serde_json::from_slice(&e.invoke(1,0).await.unwrap()).unwrap();assert!(rows.is_empty());
+        assert_eq!(e.more,Some(CursorKey::Scalar{value:CursorValue::Integer(5),record:1099937}),"policy OR cannot scan until the later owned rows");
+        #[cfg(feature="query-metrics")]
+        {
+            let expression=crate::query_plan::scalar::Scalar::new(&multi.resources[0].fields[1],query::Direction::Descending).unwrap().expression(e.tx.query_provider().unwrap()).unwrap();
+            let global=format!("SELECT id FROM nx_records WHERE resource={storage} ORDER BY {expression} DESC,id DESC LIMIT 64");
+            let owned=format!("SELECT id FROM nx_records WHERE resource={storage} AND owner='{ALICE}' ORDER BY {expression} DESC,id DESC LIMIT 64");
+            let global_visits=e.tx.examined_rows(&global).await.unwrap();let owner_visits=e.tx.examined_rows(&owned).await.unwrap();assert!(global_visits<=64 && owner_visits<=64);eprintln!("P09 100k policy OR fixed streams:global={global_visits} owned={owner_visits} actual visits; hidden empty continuation preserved");
+        }
+        e.tx.rollback().await.unwrap();
+    }).await;
+    owner()
+        .await
+        .run(async {
+            let mut e = effects(begin(&db).await, &multi);
+            e.cursor = Some(CursorKey::Scalar {
+                value: CursorValue::Integer(5),
+                record: 1000001,
+            });
+            let rows: Vec<Record> = serde_json::from_slice(&e.invoke(1, 0).await.unwrap()).unwrap();
+            assert_eq!(
+                rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+                [3, 2],
+                "deferred owned heads are preserved"
+            );
+            e.tx.rollback().await.unwrap();
+        })
+        .await;
+    // The same100k Bob-owned rows belong to another exact scope. Ordinary
+    // aggregate metadata requires its own protected/scope/created index shape.
+    let mut scoped = m.clone();
+    scoped.operations[0].query = None;
+    scoped.operations[0].scope = Some("workspace".into());
+    scoped.operations[3].scope = Some("workspace".into());
+    scoped.routes[0].params.clear();
+    scoped.routes[0].resource = Some(2);
+    scoped.routes[0].path = "/workspaces/{workspace}/search".into();
+    db.reconcile_query_indexes(&scoped).await.unwrap();
+    owner().await.run(async {
+        let mut e=effects(begin(&db).await,&scoped);e.request.target=Some(42);e.principal=Principal::User(User{id:BOB.into(),tenant:"team".into(),roles:vec![]});
+        let count:AggregateResult=serde_json::from_slice(&e.invoke(4,0).await.unwrap()).unwrap();assert_eq!(count,Ok(query::AggregateValue::Count(1)));
+        #[cfg(feature="query-metrics")]
+        {
+            let field=e.tx.field_expression("workspace").unwrap();let sql=format!("SELECT id FROM nx_records WHERE resource={storage} AND owner='{BOB}' AND {field}='42' ORDER BY created_seq ASC,id ASC LIMIT 64");let visits=e.tx.examined_rows(&sql).await.unwrap();assert!(visits<=64,"scoped aggregate scanned {visits}");eprintln!("P09 100k ordinary aggregate exact owner/scope={visits} actual visits");
         }
         e.tx.rollback().await.unwrap();
     }).await;

@@ -18,6 +18,7 @@ struct Candidate {
 struct Window {
     rows: Vec<Candidate>,
     exhausted: bool,
+    raw_work: usize,
 }
 fn id(key: &CursorKey) -> u64 {
     match key {
@@ -224,13 +225,17 @@ impl Effects {
             }
             return seal_posting_streams(streams, per, plan.descending());
         }
-        let policies: Vec<_> = match &plan.strategy {
-            crate::policy::ListStrategy::Single => vec![op.policy.clone()],
-            crate::policy::ListStrategy::Merge(scans) => scans
-                .iter()
-                .map(|scan| crate::policy::scan_policy(&op.policy, scan))
-                .collect(),
+        // Each protected prefix has its own bounded ordered stream. A policy OR
+        // must never become a residual SQL filter before the frontier LIMIT.
+        let crate::policy::ListStrategy::Merge(scans) =
+            crate::policy::residual_strategy(&op.policy)
+        else {
+            unreachable!("fixed residual streams")
         };
+        let policies: Vec<_> = scans
+            .iter()
+            .map(|scan| crate::policy::scan_policy(&op.policy, scan))
+            .collect();
         let per = (cap / policies.len()).min(64);
         ensure!(per > 0, "query candidate limit");
         if terms.is_some() {
@@ -447,6 +452,7 @@ impl Effects {
     }
 }
 fn seal_streams(streams: Vec<Vec<Candidate>>, limit: usize, descending: bool) -> Result<Window> {
+    let raw_work = streams.iter().map(Vec::len).sum();
     let mut cutoff: Option<CursorKey> = None;
     let mut merged: BTreeMap<u64, Candidate> = BTreeMap::new();
     for stream in streams {
@@ -519,6 +525,7 @@ fn seal_streams(streams: Vec<Vec<Candidate>>, limit: usize, descending: bool) ->
     Ok(Window {
         rows,
         exhausted: cutoff.is_none(),
+        raw_work,
     })
 }
 
@@ -706,10 +713,7 @@ impl Effects {
                 } else {
                     (1001usize.saturating_sub(examined)).min(256)
                 };
-                let streams = match &plan.strategy {
-                    crate::policy::ListStrategy::Single => 1,
-                    crate::policy::ListStrategy::Merge(scans) => scans.len(),
-                };
+                let streams = source.policy.any.len();
                 let streams = if terms.is_some()
                     && plan.scope.is_none()
                     && !matches!(plan.order, ListOrder::Field { .. })
@@ -724,6 +728,22 @@ impl Effects {
                 let window = self
                     .query_window(&source, storage, &plan, after.as_ref(), cap, terms.as_ref())
                     .await?;
+                // Raw aliases and deferred heads consume the same finite scan
+                // allowance before AND/authorization. Deduplication refunds none.
+                let mut raw_failure = None;
+                for index in window.rows.len()..window.raw_work {
+                    if index.is_multiple_of(64) {
+                        RequestScope::checkpoint_current()?;
+                    }
+                    if let Err(error) = scan.visit(None) {
+                        raw_failure = Some(error);
+                        break;
+                    }
+                    examined += 1;
+                }
+                if let Some(error) = raw_failure {
+                    break Err(error);
+                }
                 let matches = self
                     .search_matches(storage, &window.rows, terms.as_ref())
                     .await?;
@@ -892,6 +912,7 @@ fn seal_posting_streams(
             })
             .collect(),
         exhausted: frontier.exhausted,
+        raw_work: frontier.observed_work,
     })
 }
 

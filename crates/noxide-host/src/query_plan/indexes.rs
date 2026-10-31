@@ -183,7 +183,14 @@ pub(crate) fn required_indexes(m: &Manifest) -> Result<Vec<IndexRequirement>> {
             op.list.as_ref().map(|list| &list.order),
             Some(ListOrder::Field { .. })
         );
-        let extended = search || scalar;
+        let aggregate_source = m.operations.iter().any(|consumer| {
+            consumer
+                .query
+                .as_ref()
+                .and_then(|query| query.aggregate.as_ref())
+                .is_some_and(|aggregate| aggregate.source == op.id)
+        });
+        let extended = search || scalar || aggregate_source;
         // Broad created search seals postings, not a second unused record scan.
         if search && !scalar && op.scope.is_none() {
             let resource = manifest::resource(m, op.resource)?;
@@ -227,10 +234,19 @@ pub(crate) fn required_indexes(m: &Manifest) -> Result<Vec<IndexRequirement>> {
                 }
             }
         };
-        let scans: Vec<_> = match &plan.strategy {
+        let bounded = policy::residual_strategy(&op.policy);
+        let mut scans: Vec<_> = match if extended { &bounded } else { &plan.strategy } {
             ListStrategy::Single => vec![None],
             ListStrategy::Merge(scans) => scans.iter().map(Some).collect(),
         };
+        // A routed ordinary source still uses its canonical existing List
+        // strategy. Retain its filtered shape as well as aggregate frontiers.
+        if aggregate_source && !search && !scalar && !op.filter.is_empty() {
+            match &plan.strategy {
+                ListStrategy::Single => scans.push(None),
+                ListStrategy::Merge(legacy) => scans.extend(legacy.iter().map(Some)),
+            }
+        }
         for scan in scans {
             let mut columns = policy::index_prefix(&op.policy, scan);
             if extended || matches!(plan.strategy, ListStrategy::Single) {
