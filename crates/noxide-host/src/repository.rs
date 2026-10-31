@@ -1,5 +1,6 @@
 mod authority;
 mod computation;
+pub(crate) mod search;
 use crate::{
     auth::Principal,
     database::{Param, Transaction},
@@ -713,6 +714,8 @@ impl Effects {
             let user = user.expect("authorized private creation");
             self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,$3,$4,$5,$6,1,$7)", &[storage_resource.into(), (id as i64).into(), user.id.as_str().into(), user.tenant.as_str().into(), serde_json::to_string(&fields)?.into(), incarnation.as_str().into(), created_seq.into()]).await?;
         }
+        self.update_search(op.resource, storage_resource, id, &incarnation, 1, &fields)
+            .await?;
         Ok(MutationOutcome {
             kind: MutationKind::Created,
             resource: op.resource,
@@ -750,6 +753,15 @@ impl Effects {
             .await?;
         let changed = self.tx.execute("UPDATE nx_records SET fields=$5,revision=$6 WHERE resource=$1 AND id=$2 AND incarnation=$3 AND revision=$4", &[storage_resource.into(), (stored.record.id as i64).into(), stored.incarnation.as_str().into(), stored.revision.into(), serde_json::to_string(&fields)?.into(), next.into()]).await?;
         ensure!(changed == 1, ConditionalConflict);
+        self.update_search(
+            op.resource,
+            storage_resource,
+            stored.record.id,
+            &stored.incarnation,
+            next,
+            &fields,
+        )
+        .await?;
         Ok(MutationOutcome {
             kind: MutationKind::Updated,
             resource: op.resource,

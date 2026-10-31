@@ -17,6 +17,12 @@ impl PreparedPostings {
     /// There is no unchecked constructor. Serialization never opens a database.
     pub fn new(record: &IndexedRecord, mut checkpoint: impl FnMut() -> Result<()>) -> Result<Self> {
         checkpoint()?;
+        super::require_tokenizer(record.tokenizer())?;
+        ensure!(
+            record.indexed_bytes() <= super::index::MAX_INDEXED_BYTES
+                && record.posting_bytes() <= MAX_POSTING_BYTES,
+            "posting source bounds"
+        );
         ensure!(record.postings().len() <= MAX_POSTINGS, "posting count");
         let mut bytes = Vec::new();
         bytes.push(b'[');

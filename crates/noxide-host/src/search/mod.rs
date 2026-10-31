@@ -3,15 +3,13 @@ mod index;
 mod postings;
 mod tokenizer;
 
-pub use index::{
-    FieldToken, IndexedRecord, MAX_INDEXED_BYTES, MAX_INDEXED_FIELDS, MAX_POSTING_BYTES,
-    MAX_POSTINGS, MAX_RECORD_TOKENS, indexed_record,
-};
-pub use postings::{MAX_PAYLOAD_BYTES, PreparedPostings};
-pub use tokenizer::{
-    CanonicalQuery, Error, MAX_QUERY_BYTES, MAX_QUERY_TOKENS, MAX_TOKEN_SCALARS, TOKENIZER_ID,
-    canonical_query, require_tokenizer,
-};
+#[cfg(test)]
+pub use index::{FieldToken, MAX_INDEXED_BYTES};
+pub use index::{IndexedRecord, MAX_POSTING_BYTES, MAX_POSTINGS, indexed_record};
+pub use postings::PreparedPostings;
+#[cfg(test)]
+pub use tokenizer::{CanonicalQuery, Error, MAX_QUERY_BYTES, TOKENIZER_ID};
+pub use tokenizer::{canonical_query, require_tokenizer};
 
 #[cfg(test)]
 mod tests;
