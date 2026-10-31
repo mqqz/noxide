@@ -844,16 +844,16 @@ mod search_transition_tests {
             resource: key.clone(),
         };
         assert!(transition(&before, &indexed, &[]).is_err());
-        assert!(transition(&before, &indexed, &[authority.clone()]).is_err());
-        assert!(transition(&before, &indexed, &[rebuild.clone()]).is_err());
-        transition(&before, &indexed, &[add.clone()]).unwrap();
+        assert!(transition(&before, &indexed, std::slice::from_ref(&authority)).is_err());
+        assert!(transition(&before, &indexed, std::slice::from_ref(&rebuild)).is_err());
+        transition(&before, &indexed, std::slice::from_ref(&add)).unwrap();
         assert!(transition(&indexed, &indexed, &[add]).is_err());
         let mut changed = indexed.clone();
         changed[0].search = Some(index(2048));
         assert!(transition(&indexed, &changed, &[authority]).is_err());
         transition(&indexed, &changed, &[rebuild]).unwrap();
-        assert!(transition(&indexed, &changed, &[remove.clone()]).is_err());
-        transition(&indexed, &before, &[remove.clone()]).unwrap();
+        assert!(transition(&indexed, &changed, std::slice::from_ref(&remove)).is_err());
+        transition(&indexed, &before, std::slice::from_ref(&remove)).unwrap();
         assert!(transition(&before, &before, &[remove]).is_err());
     }
     #[test]
@@ -867,7 +867,7 @@ mod search_transition_tests {
         let remove = MigrationOp::RemoveSearchIndex {
             resource: key.clone(),
         };
-        assert!(transition(&indexed, &[], &[drop.clone()]).is_err());
+        assert!(transition(&indexed, &[], std::slice::from_ref(&drop)).is_err());
         assert!(transition(&indexed, &[], &[drop.clone(), remove.clone()]).is_err());
         transition(&indexed, &[], &[remove, drop]).unwrap();
         let mut renamed = indexed.clone();
@@ -903,7 +903,7 @@ mod search_transition_tests {
             from: "body".into(),
             to: "text".into(),
         };
-        assert!(transition(&before, &after, &[rename.clone()]).is_err());
+        assert!(transition(&before, &after, std::slice::from_ref(&rename)).is_err());
         transition(
             &before,
             &after,
