@@ -149,6 +149,7 @@ async fn case(db: Option<Database>, proxy: SocketAddr, secret: bool) -> Case {
             .tempdir_in(root)
             .unwrap()
             .keep();
+        let directory = std::fs::canonicalize(directory).unwrap();
         let path = directory.join("token");
         use std::{io::Write, os::unix::fs::OpenOptionsExt};
         let mut file = std::fs::OpenOptions::new()

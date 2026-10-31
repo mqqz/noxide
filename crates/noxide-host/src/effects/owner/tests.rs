@@ -5,11 +5,12 @@ fn directory() -> std::path::PathBuf {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/capability-evidence/p11-owner-fixtures");
     std::fs::create_dir_all(&root).unwrap();
-    tempfile::Builder::new()
+    let path = tempfile::Builder::new()
         .prefix("owner-")
         .tempdir_in(root)
         .unwrap()
-        .keep()
+        .keep();
+    std::fs::canonicalize(path).unwrap()
 }
 fn owner(path: &Path, store: &str) -> Arc<DeliveryOwner> {
     let deadline = Instant::now() + Duration::from_secs(5);
