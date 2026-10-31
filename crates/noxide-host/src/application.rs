@@ -1,5 +1,6 @@
 mod action;
 mod authority;
+use crate::database::lifecycle::{AdmissionOwner, Registry, RequestScope};
 pub(crate) use action::ActionCore;
 use action::{CanonicalActionInput, ExecutionBudget};
 mod capabilities;
@@ -172,7 +173,28 @@ pub enum RequestError {
     OutcomeUnknown,
 }
 impl RequestError {
+    fn authentication(error: auth::AuthError) -> Self {
+        match error {
+            auth::AuthError::Invalid => Self::Authentication,
+            auth::AuthError::Unavailable => Self::Busy,
+        }
+    }
+    fn deadline() -> Self {
+        if RequestScope::commit_pending() {
+            Self::OutcomeUnknown
+        } else {
+            Self::Busy
+        }
+    }
     fn database(error: anyhow::Error) -> Self {
+        if error.is::<crate::database::CommitFailure>() {
+            return Self::OutcomeUnknown;
+        }
+        if error.is::<crate::database::lifecycle::Unavailable>()
+            || error.is::<crate::database::lifecycle::meter::StatementLimit>()
+        {
+            return Self::Busy;
+        }
         if retryable(&error) {
             Self::Busy
         } else {
@@ -192,8 +214,7 @@ impl std::fmt::Display for RequestError {
                 Self::InvalidRequest => "This request is invalid or has expired.",
                 Self::Rejected => "The request could not be completed.",
                 Self::Busy => "The service is busy. Retry this request.",
-                Self::OutcomeUnknown =>
-                    "The save result is not yet confirmed. Retry the same submission to recover it.",
+                Self::OutcomeUnknown => "The operation result is not yet confirmed.",
             }
         )
     }
@@ -219,6 +240,8 @@ pub struct Application {
     maintenance: Arc<tokio::sync::Semaphore>,
     maintenance_running: std::sync::atomic::AtomicBool,
     pub(crate) admission_limits: AdmissionLimits,
+    pub(crate) request_lifecycle: Arc<Registry>,
+    database_statement_limit: u16,
     #[cfg(test)]
     pub(crate) postcommit_barrier:
         std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
@@ -240,6 +263,74 @@ pub struct LoginChallenge {
 }
 
 impl Application {
+    pub(crate) fn request_lifecycle(&self) -> Arc<Registry> {
+        self.request_lifecycle.clone()
+    }
+    fn request_scope(&self, cap: std::time::Duration) -> RequestScope {
+        RequestScope::current_or_new(
+            self.request_lifecycle.clone(),
+            cap,
+            self.database_statement_limit,
+        )
+    }
+    fn owned_request(
+        &self,
+        request: Arc<tokio::sync::OwnedSemaphorePermit>,
+        database: Arc<tokio::sync::OwnedSemaphorePermit>,
+        anonymous: Option<tokio::sync::OwnedSemaphorePermit>,
+        cap: std::time::Duration,
+    ) -> AdmissionOwner {
+        AdmissionOwner::new(self.request_scope(cap), request, database, anonymous)
+    }
+    pub(crate) fn http_request_scope(
+        &self,
+        class: crate::runtime::limiter::RequestClass,
+        path: &str,
+        outer: Option<crate::http::TransportDeadline>,
+    ) -> RequestScope {
+        use crate::runtime::limiter::RequestClass;
+        let cap = if matches!(class, RequestClass::PasswordHash) {
+            std::time::Duration::from_secs(3)
+        } else if path == self.presentation.login_path
+            || path == self.presentation.registration_path
+            || path == self.presentation.logout_path
+        {
+            std::time::Duration::from_secs(2)
+        } else {
+            self.runtime.limits().wall_time
+        };
+        let outer = outer.map_or_else(|| Instant::now() + cap, |outer| outer.0);
+        RequestScope::new(
+            self.request_lifecycle.clone(),
+            outer,
+            cap,
+            self.database_statement_limit,
+        )
+    }
+    async fn finish_commit<T>(
+        tx: &mut Transaction,
+        prepared: T,
+    ) -> std::result::Result<T, RequestError> {
+        let result = tx.commit().await;
+        if tx.commit_acknowledged() {
+            return Ok(prepared);
+        }
+        if tx.commit_may_have_succeeded() {
+            return Err(RequestError::OutcomeUnknown);
+        }
+        result.map(|_| prepared).map_err(RequestError::database)
+    }
+    /// Lower the total actual provider-statement ceiling for an ordinary request.
+    /// This supplements all existing action/list/query budgets.
+    pub fn with_database_statement_limit(mut self, limit: u16) -> Result<Self> {
+        self.request_lifecycle.ensure_idle()?;
+        ensure!(
+            (1..=256).contains(&limit),
+            "database statement limit must be between 1 and 256"
+        );
+        self.database_statement_limit = limit;
+        Ok(self)
+    }
     pub fn with_registration(mut self, registration: auth::Registration) -> Self {
         self.registration = registration;
         self
@@ -252,82 +343,104 @@ impl Application {
         password: &str,
         invite: Option<&str>,
     ) -> std::result::Result<(), RequestError> {
-        if self.registration == auth::Registration::Closed {
-            return Err(RequestError::InvalidRequest);
-        }
-        let request = self
-            .admission_limits
-            .requests()
-            .request()
+        let entry_scope = self.request_scope(std::time::Duration::from_secs(3));
+        entry_scope
+            .run(async {
+                if self.registration == auth::Registration::Closed {
+                    return Err(RequestError::InvalidRequest);
+                }
+                let request = self
+                    .admission_limits
+                    .requests()
+                    .request()
+                    .await
+                    .map_err(|_| RequestError::deadline())?;
+                let database = Arc::new(
+                    self.admission_limits
+                        .database()
+                        .acquire()
+                        .await
+                        .map_err(|_| RequestError::deadline())?,
+                );
+                let owner = self.owned_request(
+                    request.clone(),
+                    database.clone(),
+                    None,
+                    std::time::Duration::from_secs(3),
+                );
+                let deadline = owner.work_deadline();
+                owner
+                    .run(async {
+                        timeout_at(deadline, async {
+                            let mut tx = self
+                                .database
+                                .begin(deadline.into_std())
+                                .await
+                                .map_err(|_| RequestError::deadline())?;
+                            self.admission(&mut tx, false)
+                                .await
+                                .map_err(RequestError::database)?;
+                            let now = self
+                                .observe_clock_write(
+                                    &mut tx,
+                                    security::now().map_err(|_| RequestError::Rejected)?,
+                                )
+                                .await
+                                .map_err(RequestError::database)?;
+                            let token = self
+                                .keys
+                                .verify(challenge, now)
+                                .map_err(|_| RequestError::InvalidRequest)?;
+                            if token.kind != TokenKind::Login {
+                                return Err(RequestError::InvalidRequest);
+                            }
+                            self.keys
+                                .verify_csrf(&token.nonce, csrf)
+                                .map_err(|_| RequestError::InvalidRequest)?;
+                            if !self.admission_limits.argon2_attempts.allow() {
+                                return Err(RequestError::Busy);
+                            }
+                            let permit = self
+                                .admission_limits
+                                .argon2
+                                .acquire()
+                                .await
+                                .map_err(|_| RequestError::deadline())?;
+                            let permits = HashPermits {
+                                _argon2: permit,
+                                _request: request.clone(),
+                                _database: database.clone(),
+                                #[cfg(test)]
+                                gate: self.admission_limits.hash_gate.lock().unwrap().clone(),
+                            };
+                            auth::register(
+                                &mut tx,
+                                self.registration,
+                                username,
+                                password,
+                                invite,
+                                now,
+                                permits,
+                            )
+                            .await
+                            .map_err(|error| {
+                                if error.is::<crate::database::lifecycle::meter::StatementLimit>() {
+                                    RequestError::Busy
+                                } else {
+                                    RequestError::Rejected
+                                }
+                            })?;
+                            Self::finish_commit(&mut tx, ()).await
+                        })
+                        .await
+                        .map_err(|_| RequestError::deadline())?
+                    })
+                    .await
+            })
             .await
-            .map_err(|_| RequestError::Busy)?;
-        let database = Arc::new(
-            self.admission_limits
-                .database()
-                .acquire()
-                .await
-                .map_err(|_| RequestError::Busy)?,
-        );
-        let deadline = Instant::now() + std::time::Duration::from_secs(3);
-        timeout_at(deadline, async {
-            let mut tx = self
-                .database
-                .begin(deadline.into_std())
-                .await
-                .map_err(|_| RequestError::Busy)?;
-            self.admission(&mut tx, false)
-                .await
-                .map_err(RequestError::database)?;
-            let now = self
-                .observe_clock_write(
-                    &mut tx,
-                    security::now().map_err(|_| RequestError::Rejected)?,
-                )
-                .await
-                .map_err(RequestError::database)?;
-            let token = self
-                .keys
-                .verify(challenge, now)
-                .map_err(|_| RequestError::InvalidRequest)?;
-            if token.kind != TokenKind::Login {
-                return Err(RequestError::InvalidRequest);
-            }
-            self.keys
-                .verify_csrf(&token.nonce, csrf)
-                .map_err(|_| RequestError::InvalidRequest)?;
-            if !self.admission_limits.argon2_attempts.allow() {
-                return Err(RequestError::Busy);
-            }
-            let permit = self
-                .admission_limits
-                .argon2
-                .acquire()
-                .await
-                .map_err(|_| RequestError::Busy)?;
-            let permits = HashPermits {
-                _argon2: permit,
-                _request: request.clone(),
-                _database: database.clone(),
-                #[cfg(test)]
-                gate: self.admission_limits.hash_gate.lock().unwrap().clone(),
-            };
-            auth::register(
-                &mut tx,
-                self.registration,
-                username,
-                password,
-                invite,
-                now,
-                permits,
-            )
-            .await
-            .map_err(|_| RequestError::Rejected)?;
-            tx.commit().await.map_err(|_| RequestError::Rejected)
-        })
-        .await
-        .map_err(|_| RequestError::Busy)?
     }
     pub fn with_signed_in_reserve(mut self, reserve: u8) -> Result<Self> {
+        self.request_lifecycle.ensure_idle()?;
         ensure!(reserve <= 50, "signed_in_reserve must be between 0 and 50");
         self.admission_limits = AdmissionLimits::new(
             reserve,
@@ -345,87 +458,113 @@ impl Application {
         &self,
         cookie: &str,
     ) -> std::result::Result<String, RequestError> {
-        let _request = self
-            .admission_limits
-            .requests()
-            .request()
+        let entry_scope = self.request_scope(self.runtime.limits().wall_time);
+        entry_scope
+            .run(async {
+                let _request = self
+                    .admission_limits
+                    .requests()
+                    .request()
+                    .await
+                    .map_err(|_| RequestError::deadline())?;
+                let _database = self
+                    .admission_limits
+                    .database()
+                    .acquire()
+                    .await
+                    .map_err(|_| RequestError::deadline())?;
+                let owner = self.owned_request(
+                    _request,
+                    Arc::new(_database),
+                    None,
+                    self.runtime.limits().wall_time,
+                );
+                let deadline = owner.work_deadline();
+                owner
+                    .run(async {
+                        timeout_at(deadline, async {
+                            let mut tx = self
+                                .database
+                                .begin_read(deadline.into_std())
+                                .await
+                                .map_err(|_| RequestError::deadline())?;
+                            self.admission(&mut tx, false)
+                                .await
+                                .map_err(RequestError::database)?;
+                            let wall = security::now().map_err(|_| RequestError::Rejected)?;
+                            let now = security::observe_clock_read(&mut tx, wall, &self.clock)
+                                .await
+                                .map_err(RequestError::database)?;
+                            self.clock.fetch_max(now, Ordering::Relaxed);
+                            let (_, principal) = self
+                                .route_identity(&mut tx, &Access::Authenticated, Some(cookie), now)
+                                .await?
+                                .ok_or(RequestError::Authentication)?;
+                            let id = principal
+                                .user()
+                                .map_err(|_| RequestError::Authentication)?
+                                .id
+                                .clone();
+                            Self::finish_commit(&mut tx, id).await
+                        })
+                        .await
+                        .map_err(|_| RequestError::deadline())?
+                    })
+                    .await
+            })
             .await
-            .map_err(|_| RequestError::Busy)?;
-        let _database = self
-            .admission_limits
-            .database()
-            .acquire()
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        let deadline = Instant::now() + self.runtime.limits().wall_time;
-        timeout_at(deadline, async {
-            let mut tx = self
-                .database
-                .begin_read(deadline.into_std())
-                .await
-                .map_err(|_| RequestError::Busy)?;
-            self.admission(&mut tx, false)
-                .await
-                .map_err(RequestError::database)?;
-            let wall = security::now().map_err(|_| RequestError::Rejected)?;
-            let now = security::observe_clock_read(&mut tx, wall, &self.clock)
-                .await
-                .map_err(RequestError::database)?;
-            self.clock.fetch_max(now, Ordering::Relaxed);
-            let (_, principal) = self
-                .route_identity(&mut tx, &Access::Authenticated, Some(cookie), now)
-                .await?
-                .ok_or(RequestError::Authentication)?;
-            let id = principal
-                .user()
-                .map_err(|_| RequestError::Authentication)?
-                .id
-                .clone();
-            tx.commit().await.map_err(RequestError::database)?;
-            Ok(id)
-        })
-        .await
-        .map_err(|_| RequestError::Busy)?
     }
 
     pub(crate) async fn session_candidate(
         &self,
         cookie: &str,
     ) -> std::result::Result<Option<String>, RequestError> {
-        let deadline = Instant::now() + std::time::Duration::from_secs(1);
-        timeout_at(deadline, async {
-            let _request = self
-                .admission_limits
-                .session_requests()
-                .acquire()
+        let entry_scope = self.request_scope(std::time::Duration::from_secs(1));
+        entry_scope
+            .run(async {
+                let scope = self.request_scope(std::time::Duration::from_secs(1));
+                let deadline = scope.work_deadline();
+                timeout_at(deadline, async {
+                    let _request = self
+                        .admission_limits
+                        .session_requests()
+                        .acquire()
+                        .await
+                        .map_err(|_| RequestError::deadline())?;
+                    let _database = self
+                        .admission_limits
+                        .session_database()
+                        .acquire()
+                        .await
+                        .map_err(|_| RequestError::deadline())?;
+                    let owner =
+                        AdmissionOwner::new(scope, Arc::new(_request), Arc::new(_database), None);
+                    owner
+                        .run(async {
+                            let mut tx = self
+                                .database
+                                .begin_read(deadline.into_std())
+                                .await
+                                .map_err(|_| RequestError::deadline())?;
+                            // Scheduling preflight only; the request repeats admission and
+                            // authorization inside its own transaction.
+                            let now = security::now()
+                                .map_err(|_| RequestError::Rejected)?
+                                .max(self.clock.load(Ordering::Relaxed));
+                            let principal =
+                                match auth::authenticate(&mut tx, &self.keys, cookie, now).await {
+                                    Ok((_, auth::Principal::User(user))) => Some(user.id),
+                                    Err(auth::AuthError::Invalid) => None,
+                                    _ => return Err(RequestError::Busy),
+                                };
+                            Self::finish_commit(&mut tx, principal).await
+                        })
+                        .await
+                })
                 .await
-                .map_err(|_| RequestError::Busy)?;
-            let _database = self
-                .admission_limits
-                .session_database()
-                .acquire()
-                .await
-                .map_err(|_| RequestError::Busy)?;
-            let mut tx = self
-                .database
-                .begin_read(deadline.into_std())
-                .await
-                .map_err(|_| RequestError::Busy)?;
-            // Scheduling preflight only; the request repeats admission and
-            // authorization inside its own transaction.
-            let now = security::now()
-                .map_err(|_| RequestError::Rejected)?
-                .max(self.clock.load(Ordering::Relaxed));
-            let principal = match auth::authenticate(&mut tx, &self.keys, cookie, now).await {
-                Ok((_, auth::Principal::User(user))) => Some(user.id),
-                Err(auth::AuthError::Invalid) => None,
-                _ => return Err(RequestError::Busy),
-            };
-            tx.commit().await.map_err(|_| RequestError::Busy)?;
-            Ok(principal)
-        })
-        .await
-        .map_err(|_| RequestError::Busy)?
+                .map_err(|_| RequestError::deadline())?
+            })
+            .await
     }
     pub(crate) fn session_envelope(&self, cookie: &str) -> bool {
         security::now()
@@ -542,6 +681,8 @@ impl Application {
             maintenance: Arc::new(tokio::sync::Semaphore::new(1)),
             maintenance_running: std::sync::atomic::AtomicBool::new(false),
             admission_limits,
+            request_lifecycle: Arc::new(Registry::default()),
+            database_statement_limit: 256,
             #[cfg(test)]
             postcommit_barrier: std::sync::Mutex::new(None),
         })
@@ -555,41 +696,60 @@ impl Application {
     }
 
     pub async fn login_challenge(&self) -> std::result::Result<LoginChallenge, RequestError> {
-        let _request = self
-            .admission_limits
-            .requests()
-            .request()
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        let _database = self
-            .admission_limits
-            .database()
-            .acquire()
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        let mut tx = self
-            .database
-            .begin_read(std::time::Instant::now() + std::time::Duration::from_secs(2))
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        self.admission(&mut tx, false)
-            .await
-            .map_err(RequestError::database)?;
-        let now = security::now().map_err(|_| RequestError::Rejected)?;
-        let now = security::observe_clock_read(&mut tx, now, &self.clock)
-            .await
-            .map_err(RequestError::database)?;
-        self.clock.fetch_max(now, Ordering::Relaxed);
+        let entry_scope = self.request_scope(std::time::Duration::from_secs(2));
+        entry_scope
+            .run(async {
+                let _request = self
+                    .admission_limits
+                    .requests()
+                    .request()
+                    .await
+                    .map_err(|_| RequestError::deadline())?;
+                let _database = self
+                    .admission_limits
+                    .database()
+                    .acquire()
+                    .await
+                    .map_err(|_| RequestError::deadline())?;
+                let owner = self.owned_request(
+                    _request,
+                    Arc::new(_database),
+                    None,
+                    std::time::Duration::from_secs(2),
+                );
+                let deadline = owner.work_deadline();
+                owner
+                    .run(async {
+                        let mut tx = self
+                            .database
+                            .begin_read(deadline.into_std())
+                            .await
+                            .map_err(|_| RequestError::deadline())?;
+                        self.admission(&mut tx, false)
+                            .await
+                            .map_err(RequestError::database)?;
+                        let now = security::now().map_err(|_| RequestError::Rejected)?;
+                        let now = security::observe_clock_read(&mut tx, now, &self.clock)
+                            .await
+                            .map_err(RequestError::database)?;
+                        self.clock.fetch_max(now, Ordering::Relaxed);
 
-        let (token, cookie) = self
-            .keys
-            .issue(TokenKind::Login, "", now, 900)
-            .map_err(|_| RequestError::Rejected)?;
-        tx.commit().await.map_err(|_| RequestError::Busy)?;
-        Ok(LoginChallenge {
-            cookie,
-            csrf: self.keys.csrf(&token.nonce),
-        })
+                        let (token, cookie) = self
+                            .keys
+                            .issue(TokenKind::Login, "", now, 900)
+                            .map_err(|_| RequestError::Rejected)?;
+                        Self::finish_commit(
+                            &mut tx,
+                            LoginChallenge {
+                                cookie,
+                                csrf: self.keys.csrf(&token.nonce),
+                            },
+                        )
+                        .await
+                    })
+                    .await
+            })
+            .await
     }
 
     pub async fn login(
@@ -599,111 +759,149 @@ impl Application {
         username: &str,
         password: &str,
     ) -> std::result::Result<String, RequestError> {
-        let request = self
-            .admission_limits
-            .requests()
-            .request()
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        let database = Arc::new(
-            self.admission_limits
-                .database()
-                .acquire()
-                .await
-                .map_err(|_| RequestError::Busy)?,
-        );
-        let deadline = Instant::now() + std::time::Duration::from_secs(3);
-        timeout_at(deadline, async {
-            let mut tx = self
-                .database
-                .begin(deadline.into_std())
-                .await
-                .map_err(|_| RequestError::Busy)?;
-            self.admission(&mut tx, false)
-                .await
-                .map_err(RequestError::database)?;
-            let now = security::now().map_err(|_| RequestError::Rejected)?;
-            let now = self
-                .observe_clock_write(&mut tx, now)
-                .await
-                .map_err(RequestError::database)?;
-            let token = self
-                .keys
-                .verify(challenge, now)
-                .map_err(|_| RequestError::InvalidRequest)?;
-            if token.kind != TokenKind::Login {
-                return Err(RequestError::InvalidRequest);
-            }
-            self.keys
-                .verify_csrf(&token.nonce, csrf)
-                .map_err(|_| RequestError::InvalidRequest)?;
+        let entry_scope = self.request_scope(std::time::Duration::from_secs(3));
+        entry_scope
+            .run(async {
+                let request = self
+                    .admission_limits
+                    .requests()
+                    .request()
+                    .await
+                    .map_err(|_| RequestError::deadline())?;
+                let database = Arc::new(
+                    self.admission_limits
+                        .database()
+                        .acquire()
+                        .await
+                        .map_err(|_| RequestError::deadline())?,
+                );
+                let owner = self.owned_request(
+                    request.clone(),
+                    database.clone(),
+                    None,
+                    std::time::Duration::from_secs(3),
+                );
+                let deadline = owner.work_deadline();
+                owner
+                    .run(async {
+                        timeout_at(deadline, async {
+                            let mut tx = self
+                                .database
+                                .begin(deadline.into_std())
+                                .await
+                                .map_err(|_| RequestError::deadline())?;
+                            self.admission(&mut tx, false)
+                                .await
+                                .map_err(RequestError::database)?;
+                            let now = security::now().map_err(|_| RequestError::Rejected)?;
+                            let now = self
+                                .observe_clock_write(&mut tx, now)
+                                .await
+                                .map_err(RequestError::database)?;
+                            let token = self
+                                .keys
+                                .verify(challenge, now)
+                                .map_err(|_| RequestError::InvalidRequest)?;
+                            if token.kind != TokenKind::Login {
+                                return Err(RequestError::InvalidRequest);
+                            }
+                            self.keys
+                                .verify_csrf(&token.nonce, csrf)
+                                .map_err(|_| RequestError::InvalidRequest)?;
 
-            if !self.admission_limits.argon2_attempts.allow() {
-                return Err(RequestError::Busy);
-            }
-            let permit = self
-                .admission_limits
-                .argon2
-                .acquire()
-                .await
-                .map_err(|_| RequestError::Busy)?;
-            let permits = HashPermits {
-                _argon2: permit,
-                _request: request.clone(),
-                _database: database.clone(),
-                #[cfg(test)]
-                gate: self.admission_limits.hash_gate.lock().unwrap().clone(),
-            };
-            let signed = auth::login(&mut tx, &self.keys, username, password, now, permits)
-                .await
-                .map_err(|_| RequestError::Authentication)?;
-            tx.commit().await.map_err(|_| RequestError::Busy)?;
-            Ok(signed)
-        })
-        .await
-        .map_err(|_| RequestError::Busy)?
+                            if !self.admission_limits.argon2_attempts.allow() {
+                                return Err(RequestError::Busy);
+                            }
+                            let permit = self
+                                .admission_limits
+                                .argon2
+                                .acquire()
+                                .await
+                                .map_err(|_| RequestError::deadline())?;
+                            let permits = HashPermits {
+                                _argon2: permit,
+                                _request: request.clone(),
+                                _database: database.clone(),
+                                #[cfg(test)]
+                                gate: self.admission_limits.hash_gate.lock().unwrap().clone(),
+                            };
+                            let signed = auth::login(
+                                &mut tx, &self.keys, username, password, now, permits,
+                            )
+                            .await
+                            .map_err(|error| {
+                                if error.is::<crate::database::lifecycle::meter::StatementLimit>() {
+                                    RequestError::Busy
+                                } else {
+                                    RequestError::Authentication
+                                }
+                            })?;
+                            Self::finish_commit(&mut tx, signed).await
+                        })
+                        .await
+                        .map_err(|_| RequestError::deadline())?
+                    })
+                    .await
+            })
+            .await
     }
 
     pub async fn logout(&self, cookie: &str, csrf: &str) -> std::result::Result<(), RequestError> {
-        let _request = self
-            .admission_limits
-            .requests()
-            .request()
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        let _database = self
-            .admission_limits
-            .database()
-            .acquire()
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        let mut tx = self
-            .database
-            .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        self.admission(&mut tx, false)
-            .await
-            .map_err(RequestError::database)?;
-        let now = security::now().map_err(|_| RequestError::Rejected)?;
-        let now = self
-            .observe_clock_write(&mut tx, now)
-            .await
-            .map_err(RequestError::database)?;
-        let (session, _) = auth::authenticate(&mut tx, &self.keys, cookie, now)
-            .await
-            .map_err(|_| RequestError::Authentication)?;
+        let entry_scope = self.request_scope(std::time::Duration::from_secs(2));
+        entry_scope
+            .run(async {
+                let _request = self
+                    .admission_limits
+                    .requests()
+                    .request()
+                    .await
+                    .map_err(|_| RequestError::deadline())?;
+                let _database = self
+                    .admission_limits
+                    .database()
+                    .acquire()
+                    .await
+                    .map_err(|_| RequestError::deadline())?;
+                let owner = self.owned_request(
+                    _request,
+                    Arc::new(_database),
+                    None,
+                    std::time::Duration::from_secs(2),
+                );
+                let deadline = owner.work_deadline();
+                owner
+                    .run(async {
+                        let mut tx = self
+                            .database
+                            .begin(deadline.into_std())
+                            .await
+                            .map_err(|_| RequestError::deadline())?;
+                        self.admission(&mut tx, false)
+                            .await
+                            .map_err(RequestError::database)?;
+                        let now = security::now().map_err(|_| RequestError::Rejected)?;
+                        let now = self
+                            .observe_clock_write(&mut tx, now)
+                            .await
+                            .map_err(RequestError::database)?;
+                        let (session, _) = auth::authenticate(&mut tx, &self.keys, cookie, now)
+                            .await
+                            .map_err(RequestError::authentication)?;
 
-        self.keys
-            .verify_csrf(&session.nonce, csrf)
-            .map_err(|_| RequestError::InvalidRequest)?;
-        tx.execute(
-            "DELETE FROM nx_sessions WHERE id=$1",
-            &[session.nonce.into()],
-        )
-        .await
-        .map_err(|_| RequestError::Rejected)?;
-        tx.commit().await.map_err(|_| RequestError::Busy)
+                        self.keys
+                            .verify_csrf(&session.nonce, csrf)
+                            .map_err(|_| RequestError::InvalidRequest)?;
+                        tx.execute(
+                            "DELETE FROM nx_sessions WHERE id=$1",
+                            &[session.nonce.into()],
+                        )
+                        .await
+                        .map_err(|_| RequestError::Rejected)?;
+                        Self::finish_commit(&mut tx, ()).await
+                    })
+                    .await
+            })
+            .await
     }
 
     async fn anonymous_write(
@@ -721,7 +919,7 @@ impl Application {
             .acquire()
             .await
             .map(Some)
-            .map_err(|_| RequestError::Busy)
+            .map_err(|_| RequestError::deadline())
     }
     async fn submission_identity(
         &self,
@@ -762,7 +960,7 @@ impl Application {
             );
             let (session, principal) = auth::authenticate(tx, &self.keys, cookie, now)
                 .await
-                .map_err(|_| RequestError::Authentication)?;
+                .map_err(RequestError::authentication)?;
             ensure!(token.subject == session.nonce, RequestError::InvalidRequest);
             self.keys
                 .verify_csrf(&session.nonce, csrf)
@@ -1146,18 +1344,20 @@ impl Application {
         cursor: Option<&str>,
         params: Fields,
     ) -> std::result::Result<Rendered, RequestError> {
+        let entry_scope = self.request_scope(self.runtime.limits().wall_time);
+        entry_scope.run(async {
         let _request = self
             .admission_limits
             .requests()
             .request()
             .await
-            .map_err(|_| RequestError::Busy)?;
+            .map_err(|_| RequestError::deadline())?;
         let _database = self
             .admission_limits
             .database()
             .acquire()
             .await
-            .map_err(|_| RequestError::Busy)?;
+            .map_err(|_| RequestError::deadline())?;
         if cursor.is_some_and(|c| c.len() > 4096) {
             return Err(RequestError::InvalidCursor);
         }
@@ -1167,13 +1367,21 @@ impl Application {
             target,
         };
         render::resolve(&self.manifest, &reference).map_err(|_| RequestError::InvalidRequest)?;
-        let deadline = Instant::now() + self.runtime.limits().wall_time;
+        let owner = self.owned_request(
+            _request,
+            Arc::new(_database),
+            None,
+            self.runtime.limits().wall_time,
+        );
+        let deadline = owner.work_deadline();
+        owner.run(async {
+
         timeout_at(deadline, async {
             let mut tx = self
                 .database
                 .begin_read(deadline.into_std())
                 .await
-                .map_err(|_| RequestError::Busy)?;
+                .map_err(|_| RequestError::deadline())?;
             self.admission(&mut tx, false)
                 .await
                 .map_err(RequestError::database)?;
@@ -1258,7 +1466,7 @@ impl Application {
                 .wasm()
                 .acquire()
                 .await
-                .map_err(|_| RequestError::Busy)?;
+                .map_err(|_| RequestError::deadline())?;
             let attempt = self
                 .runtime
                 .run(
@@ -1300,11 +1508,12 @@ impl Application {
             .map_err(|_| RequestError::Rejected)?;
             if let ResponseIntent::Page(doc) | ResponseIntent::NotFound(doc) = &response
                 && doc.nodes.iter().any(|n| matches!(n, Instruction::Form { action } if manifest::web_action(&self.manifest,*action).ok().and_then(|a| ActionCore::of(a.core).ok()).and_then(|a| manifest::operation(&self.manifest,a.first_operation()).ok()).is_some_and(manifest::anonymous_action))) { rendered.anonymous_cookie = new_cookie; }
-            effects.tx.commit().await.map_err(|_| RequestError::Busy)?;
-            Ok(rendered)
+            Self::finish_commit(&mut effects.tx, rendered).await
         })
         .await
-        .map_err(|_| RequestError::Busy)?
+        .map_err(|_| RequestError::deadline())?
+        }).await
+        }).await
     }
 }
 
@@ -1762,7 +1971,7 @@ impl Application {
                     now,
                 )
                 .await
-                .map_err(|_| RequestError::Authentication)?,
+                .map_err(RequestError::authentication)?,
             ),
             Access::PublicOptional => match cookie {
                 None => None,

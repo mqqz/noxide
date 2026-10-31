@@ -261,6 +261,11 @@ SQLite databases must be private; the CLI creates them with mode 0600 and reject
 group/world-readable existing files. Use a private directory for the database and
 its journal files. Keep keys outside application inputs and source control.
 
+The optional `database_statement_limit` is an integer from 1 through 256 and
+defaults to 256. It lowers the ordinary request's shared SQL statement ceiling,
+including setup, retries and cleanup. Requests exceeding it become unavailable.
+Offline operator commands retain their separate bounded deadlines.
+
 For PostgreSQL, replace the database setting with a local connection, for example:
 
 ```json

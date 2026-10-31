@@ -128,7 +128,11 @@ async fn application() -> (tempfile::TempDir, Arc<Application>) {
     (temp, app)
 }
 
-async fn fill(permits: &BoundedPermits) -> Vec<tokio::sync::OwnedSemaphorePermit> {
+async fn fill(
+    app: &Application,
+    permits: &BoundedPermits,
+) -> Vec<tokio::sync::OwnedSemaphorePermit> {
+    app.request_lifecycle().wait_idle_for_test().await.unwrap();
     let count = permits.available();
     let mut held = Vec::new();
     for _ in 0..count {
@@ -163,7 +167,7 @@ async fn busy_responses_are_identical_across_every_admission_resource() {
             _ => None,
         };
         let held = if let Some(permits) = permits {
-            fill(permits).await
+            fill(&app, permits).await
         } else {
             while app.admission_limits.argon2_attempts.allow() {}
             Vec::new()
@@ -560,8 +564,8 @@ async fn expired_cookie_skips_session_lookup_and_pays_only_class_cost() {
         .issue(TokenKind::Session, "alice", now - 100, 1)
         .unwrap();
     // A preflight lookup would time out; a verified request would also stall.
-    let _session = fill(&app.admission_limits.session_check.requests).await;
-    let _verified = fill(&app.admission_limits.verified.requests).await;
+    let _session = fill(&app, &app.admission_limits.session_check.requests).await;
+    let _verified = fill(&app, &app.admission_limits.verified.requests).await;
     assert_eq!(
         identity_get(app.clone(), "/login", &expired, Peer::Circuit(101))
             .await
@@ -593,7 +597,7 @@ async fn revoked_unexpired_candidate_pays_lookup_cost_without_using_verified_cap
     tx.execute("DELETE FROM nx_sessions", &[]).await.unwrap();
     tx.commit().await.unwrap();
     assert!(app.session_envelope(&session));
-    let _verified = fill(&app.admission_limits.verified.requests).await;
+    let _verified = fill(&app, &app.admission_limits.verified.requests).await;
     assert_eq!(
         identity_get(app.clone(), "/login", &session, Peer::Circuit(102))
             .await
@@ -624,9 +628,9 @@ async fn verified_get_and_action_complete_with_every_anonymous_share_full() {
     let html = std::str::from_utf8(&page.body).unwrap();
     let submission = fixture::hidden(html, "_submission");
     let csrf = fixture::hidden(html, "_csrf");
-    let _requests = fill(&app.admission_limits.requests).await;
-    let _database = fill(&app.admission_limits.database).await;
-    let _wasm = fill(&app.admission_limits.wasm).await;
+    let _requests = fill(&app, &app.admission_limits.requests).await;
+    let _database = fill(&app, &app.admission_limits.database).await;
+    let _wasm = fill(&app, &app.admission_limits.wasm).await;
     assert_eq!(
         identity_get(app.clone(), "/", &session, Peer::Local)
             .await
@@ -654,6 +658,7 @@ async fn verified_get_and_action_complete_with_every_anonymous_share_full() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    app.request_lifecycle().wait_idle_for_test().await.unwrap();
     assert_eq!(app.admission_limits.verified.requests.available(), 16);
 }
 
@@ -682,7 +687,7 @@ async fn local_requests_skip_circuit_budget_but_obey_partitions() {
             .status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    let _held = fill(&app.admission_limits.requests).await;
+    let _held = fill(&app, &app.admission_limits.requests).await;
     assert_eq!(
         identity_get(app.clone(), "/login", "", Peer::Local)
             .await
@@ -704,8 +709,8 @@ async fn invalid_query_parameters_obey_circuit_and_request_admission() {
         )
         .await
         .unwrap();
-    let session_database = fill(&app.admission_limits.session_check.database).await;
-    let database = fill(&app.admission_limits.database).await;
+    let session_database = fill(&app, &app.admission_limits.session_check.database).await;
+    let database = fill(&app, &app.admission_limits.database).await;
     // Charge all five requests at the same monotonic instant. Real runner
     // scheduling can otherwise refill a millitoken before the final assertion.
     tokio::time::pause();
@@ -724,7 +729,7 @@ async fn invalid_query_parameters_obey_circuit_and_request_admission() {
             .status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    let requests = fill(&app.admission_limits.requests).await;
+    let requests = fill(&app, &app.admission_limits.requests).await;
     assert_eq!(
         identity_get(app.clone(), "/?unknown=value", &session, Peer::Local)
             .await
@@ -823,9 +828,9 @@ async fn identity_provider_checks(db: Database) {
         )
         .await
         .unwrap();
-    let requests = fill(&app.admission_limits.requests).await;
-    let database = fill(&app.admission_limits.database).await;
-    let wasm = fill(&app.admission_limits.wasm).await;
+    let requests = fill(&app, &app.admission_limits.requests).await;
+    let database = fill(&app, &app.admission_limits.database).await;
+    let wasm = fill(&app, &app.admission_limits.wasm).await;
     assert_eq!(
         identity_get(app.clone(), "/", &session, Peer::Local)
             .await
@@ -844,7 +849,7 @@ async fn identity_provider_checks(db: Database) {
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    let verified = fill(&app.admission_limits.verified.requests).await;
+    let verified = fill(&app, &app.admission_limits.verified.requests).await;
     assert_eq!(
         identity_get(app.clone(), "/login", &session, Peer::Circuit(201))
             .await
@@ -852,7 +857,7 @@ async fn identity_provider_checks(db: Database) {
         StatusCode::OK
     );
     assert_eq!(app.admission_limits.circuit_millitokens(201), 0);
-    let session_share = fill(&app.admission_limits.session_check.requests).await;
+    let session_share = fill(&app, &app.admission_limits.session_check.requests).await;
     let now = security::now().unwrap();
     let (_, expired) = app
         .keys
@@ -867,7 +872,7 @@ async fn identity_provider_checks(db: Database) {
     assert_eq!(app.admission_limits.circuit_millitokens(202), 4000);
     drop((verified, session_share));
     // A candidate cannot become Anonymous because its lookup is unavailable.
-    let session_share = fill(&app.admission_limits.session_check.database).await;
+    let session_share = fill(&app, &app.admission_limits.session_check.database).await;
     assert_eq!(
         identity_get(app.clone(), "/login", &session, Peer::Local)
             .await

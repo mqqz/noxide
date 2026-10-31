@@ -84,6 +84,9 @@ impl Origin {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct TransportDeadline(pub(crate) tokio::time::Instant);
+
 struct Gateway {
     app: Arc<Application>,
     origin: Origin,
@@ -318,7 +321,6 @@ fn registration_failed(presentation: &crate::Presentation) -> Response {
 }
 
 async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Response {
-    let presentation = &gateway.app.presentation;
     use crate::runtime::limiter::{AdmissionContext, AdmissionIdentity, RequestClass};
     let app = gateway.app.clone();
     let peer = request
@@ -329,7 +331,7 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
     let path = request.uri().path();
     let class = if request.method() == axum::http::Method::GET {
         RequestClass::Get
-    } else if path == app.presentation.login_path || path == presentation.registration_path {
+    } else if path == app.presentation.login_path || path == app.presentation.registration_path {
         RequestClass::PasswordHash
     } else if capability_path(path, &app.presentation).is_some()
         || path
@@ -343,70 +345,83 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
     } else {
         RequestClass::AuthenticatedAction
     };
-    let mut context = AdmissionContext {
-        peer,
+    let scope = app.http_request_scope(
         class,
-        identity: AdmissionIdentity::Anonymous,
-    };
-    if !app
-        .admission_limits
-        .charge_circuit(context.peer, context.class)
-    {
-        return finish(busy());
-    }
-    if request.method() == axum::http::Method::GET
-        && let Some(route) = app
-            .manifest
-            .routes
-            .iter()
-            .find(|r| crate::routing::match_path(r, path).is_some())
-        && parse_query(&app.manifest, route, request.uri().query()).is_err()
-    {
-        let Ok(_permit) = app.admission_limits.requests.request().await else {
-            return finish(busy());
-        };
-        return finish(StatusCode::NOT_FOUND.into_response());
-    }
-    let public = path.starts_with(noxide_protocol::assets::ASSET_PATH_PREFIX)
-        || (path == presentation.registration_path
-            && app.registration == crate::Registration::Closed)
-        || app
-            .manifest
-            .routes
-            .iter()
-            .find(|r| crate::render::match_path(r, path).is_some())
-            .is_some_and(|r| r.access == noxide_protocol::Access::Public);
-    if !public
-        && !matches!(class, RequestClass::PasswordHash)
-        && let Ok(cookie) = cookie(request.headers(), &app.presentation.session_cookie)
-        && app.session_envelope(&cookie)
-    {
-        context.identity = AdmissionIdentity::Candidate;
-        match app.session_candidate(&cookie).await {
-            Ok(Some(principal)) => context.identity = AdmissionIdentity::Verified { principal },
-            Ok(None) => {
-                app.admission_limits.failed_session(peer);
-                context.identity = AdmissionIdentity::Anonymous;
-            }
-            Err(e) => return finish(error(e, &app.presentation.login_path)),
-        }
-    }
-    if let AdmissionIdentity::Verified { principal } = &context.identity
-        && matches!(class, RequestClass::AuthenticatedAction)
-        && !app.admission_limits.principal_action(principal)
-    {
-        return finish(busy());
-    }
-    app.admission_limits
-        .context(context, async {
-            let Ok(permit) = app.admission_limits.requests().request().await else {
-                return finish(busy());
+        path,
+        request.extensions().get::<TransportDeadline>().copied(),
+    );
+    scope
+        .run(async {
+            let path = request.uri().path();
+            let presentation = &app.presentation;
+            let mut context = AdmissionContext {
+                peer,
+                class,
+                identity: AdmissionIdentity::Anonymous,
             };
-            finish(
-                app.admission_limits
-                    .scope(permit, dispatch_inner(gateway, request))
-                    .await,
-            )
+            if !app
+                .admission_limits
+                .charge_circuit(context.peer, context.class)
+            {
+                return finish(busy());
+            }
+            if request.method() == axum::http::Method::GET
+                && let Some(route) = app
+                    .manifest
+                    .routes
+                    .iter()
+                    .find(|r| crate::routing::match_path(r, path).is_some())
+                && parse_query(&app.manifest, route, request.uri().query()).is_err()
+            {
+                let Ok(_permit) = app.admission_limits.requests.request().await else {
+                    return finish(busy());
+                };
+                return finish(StatusCode::NOT_FOUND.into_response());
+            }
+            let public = path.starts_with(noxide_protocol::assets::ASSET_PATH_PREFIX)
+                || (path == presentation.registration_path
+                    && app.registration == crate::Registration::Closed)
+                || app
+                    .manifest
+                    .routes
+                    .iter()
+                    .find(|r| crate::render::match_path(r, path).is_some())
+                    .is_some_and(|r| r.access == noxide_protocol::Access::Public);
+            if !public
+                && !matches!(class, RequestClass::PasswordHash)
+                && let Ok(cookie) = cookie(request.headers(), &app.presentation.session_cookie)
+                && app.session_envelope(&cookie)
+            {
+                context.identity = AdmissionIdentity::Candidate;
+                match app.session_candidate(&cookie).await {
+                    Ok(Some(principal)) => {
+                        context.identity = AdmissionIdentity::Verified { principal }
+                    }
+                    Ok(None) => {
+                        app.admission_limits.failed_session(peer);
+                        context.identity = AdmissionIdentity::Anonymous;
+                    }
+                    Err(e) => return finish(error(e, &app.presentation.login_path)),
+                }
+            }
+            if let AdmissionIdentity::Verified { principal } = &context.identity
+                && matches!(class, RequestClass::AuthenticatedAction)
+                && !app.admission_limits.principal_action(principal)
+            {
+                return finish(busy());
+            }
+            app.admission_limits
+                .context(context, async {
+                    let Ok(permit) = app.admission_limits.requests().request().await else {
+                        return finish(busy());
+                    };
+                    finish(
+                        app.admission_limits
+                            .scope(permit, dispatch_inner(gateway, request))
+                            .await,
+                    )
+                })
+                .await
         })
         .await
 }
@@ -651,8 +666,10 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     let session = cookie(headers, &presentation.session_cookie);
     let login = cookie(headers, &presentation.login_cookie);
     let anonymous = cookie(headers, &presentation.anonymous_cookie);
-    let bytes = match tokio::time::timeout(
-        Duration::from_secs(30),
+    let body_deadline = crate::database::lifecycle::RequestScope::current_work_deadline()
+        .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(30));
+    let bytes = match tokio::time::timeout_at(
+        body_deadline,
         to_bytes(request.into_body(), MAX_ENCODED_FORM_BYTES),
     )
     .await
@@ -709,6 +726,9 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                 response
             }
             Err(RequestError::Busy) => busy(),
+            Err(RequestError::OutcomeUnknown) => {
+                error(RequestError::OutcomeUnknown, &presentation.login_path)
+            }
             Err(_) => registration_failed(presentation),
         };
     }
@@ -743,6 +763,9 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
                 response
             }
             Err(RequestError::Busy) => busy(),
+            Err(RequestError::OutcomeUnknown) => {
+                error(RequestError::OutcomeUnknown, &presentation.login_path)
+            }
             Err(_) => (
                 StatusCode::UNAUTHORIZED,
                 "Sign-in failed. Return to the sign-in page and try again.",

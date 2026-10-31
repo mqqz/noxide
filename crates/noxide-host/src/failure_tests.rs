@@ -90,6 +90,12 @@ pub(crate) async fn after_effect(tx: &mut Transaction) -> anyhow::Result<()> {
     }
     Ok(())
 }
+pub(crate) async fn known_conflict_once<T>(future: impl std::future::Future<Output = T>) -> T {
+    FAULT
+        .scope(plan(Point::Effect, Mode::Abort, 1), future)
+        .await
+}
+
 pub(crate) async fn lose_commit_ack<T>(future: impl std::future::Future<Output = T>) -> T {
     FAULT
         .scope(plan(Point::Commit, Mode::LoseAck, 1), future)
@@ -276,11 +282,11 @@ async fn stored_bounds(db: &Database) {
         .begin(std::time::Instant::now() + Duration::from_millis(150))
         .await
         .unwrap();
-    let query = match db {
-        Database::Sqlite(_) => {
+    let query = match db.is_sqlite() {
+        true => {
             "WITH RECURSIVE slow(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM slow WHERE n<100000000) SELECT CAST(SUM(n) AS TEXT) FROM slow"
         }
-        Database::Postgres(_) => "SELECT CAST(pg_sleep(10) AS TEXT)",
+        false => "SELECT CAST(pg_sleep(10) AS TEXT)",
     };
     let began = std::time::Instant::now();
     assert!(tx.fetch::<1>(query, &[]).await.is_err());

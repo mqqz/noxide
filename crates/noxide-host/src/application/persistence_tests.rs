@@ -56,12 +56,9 @@ async fn after_writer_wait<T>(db: &Database, operation: impl Future<Output = T>)
 #[tokio::test]
 async fn request_clocks_are_sampled_after_writer_contention() {
     let temp = tempfile::tempdir().unwrap();
-    let Database::Sqlite(options) = Database::sqlite(temp.path().join("clock.db")) else {
-        unreachable!()
-    };
-    // Allow a complete second of contention without turning this clock test
-    // into a busy-timeout test. Production requests retain their wall budget.
-    let db = Database::Sqlite(options.busy_timeout(Duration::from_secs(2)));
+    // Allow a complete second of contention without changing production limits.
+    let db = Database::sqlite(temp.path().join("clock.db"))
+        .with_sqlite_busy_timeout_for_test(Duration::from_secs(2));
     let app = app(db.clone(), fixture::manifest()).await;
     let challenge = after_writer_wait(&db, app.login_challenge()).await.unwrap();
     let session = after_writer_wait(
@@ -646,9 +643,9 @@ async fn read_only_clock_and_schema(db: Database) {
     };
     assert_eq!(
         error.code().as_deref(),
-        Some(match db {
-            Database::Sqlite(_) => "8",
-            Database::Postgres(_) => "25006",
+        Some(match db.is_sqlite() {
+            true => "8",
+            false => "25006",
         })
     );
     tx.rollback().await.unwrap();

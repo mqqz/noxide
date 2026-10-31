@@ -75,7 +75,11 @@ impl BoundedPermits {
             }
         }
         let _waiting = Waiting(&self.waiting);
-        tokio::time::timeout(self.max_wait, self.sem.clone().acquire_owned())
+        let deadline = crate::database::lifecycle::RequestScope::current_work_deadline()
+            .map_or(Instant::now() + self.max_wait, |original| {
+                original.min(Instant::now() + self.max_wait)
+            });
+        tokio::time::timeout_at(deadline, self.sem.clone().acquire_owned())
             .await
             .map_err(|_| Busy)?
             .map_err(|_| Busy)

@@ -1676,6 +1676,7 @@ async fn sqlite_initial_fields_reject_clients_and_stale_contracts() {
     db.create_account("alice", "initial test password", "")
         .await
         .unwrap();
+    let mut previous_lifecycles: Vec<Arc<crate::database::lifecycle::Registry>> = Vec::new();
     for public in [true, false] {
         let mut m = declarations();
         m.resources[0].fields[1].initial = Some("true".into());
@@ -1702,7 +1703,13 @@ async fn sqlite_initial_fields_reject_clients_and_stale_contracts() {
             )
         };
         let app = make(&m);
+        // A committed response may still own physical provider cleanup.
+        // Reactivation here tests idle storage, not concurrent startup locking.
+        for previous in &previous_lifecycles {
+            previous.wait_idle_for_test().await.unwrap();
+        }
         app.activate().await.unwrap();
+        previous_lifecycles.push(app.request_lifecycle());
         let session = if public {
             None
         } else {
@@ -1760,7 +1767,13 @@ async fn sqlite_initial_fields_reject_clients_and_stale_contracts() {
             .clone()
             .unwrap_or_else(|| cookie.clone());
         let unchanged = make(&m);
+        // A committed response may still own physical provider cleanup.
+        // Reactivation here tests idle storage, not concurrent startup locking.
+        for previous in &previous_lifecycles {
+            previous.wait_idle_for_test().await.unwrap();
+        }
         unchanged.activate().await.unwrap();
+        previous_lifecycles.push(unchanged.request_lifecycle());
         unchanged
             .submit(
                 &control_cookie,
@@ -1793,7 +1806,13 @@ async fn sqlite_initial_fields_reject_clients_and_stale_contracts() {
         let mut changed = m.clone();
         changed.resources[0].fields[1].initial = Some("false".into());
         let changed = make(&changed);
+        // A committed response may still own physical provider cleanup.
+        // Reactivation here tests idle storage, not concurrent startup locking.
+        for previous in &previous_lifecycles {
+            previous.wait_idle_for_test().await.unwrap();
+        }
         changed.activate().await.unwrap();
+        previous_lifecycles.push(changed.request_lifecycle());
         let before = rows(&db).await;
         assert!(matches!(
             changed

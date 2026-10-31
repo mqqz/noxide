@@ -21,73 +21,103 @@ impl Application {
         input: Fields,
         capability: Option<&str>,
     ) -> std::result::Result<Rendered, RequestError> {
-        let binding = manifest::web_action(&self.manifest, action)
-            .map_err(|_| RequestError::InvalidRequest)?;
-        let op = manifest::operation(&self.manifest, binding.steps[0].operation)
-            .map_err(|_| RequestError::InvalidRequest)?;
-        let _admission = self
-            .admit_invocation(manifest::anonymous_action(op))
-            .await?;
-        let a = manifest::web_action(&self.manifest, action)
-            .map_err(|_| RequestError::InvalidRequest)?;
-        let canonical = self
-            .canonical_action_input(a.core.id, &input)
-            .map_err(|_| RequestError::InvalidRequest)?;
-        let deadline = Instant::now() + self.runtime.limits().wall_time;
-        let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
-        for _ in 0..3 {
-            let prepared = timeout_at(
-                deadline,
-                self.prepare(
-                    cookie,
-                    action,
-                    submission,
-                    csrf,
-                    &canonical,
-                    capability,
-                    &mut budget,
-                ),
-            )
-            .await;
-            let (mut tx, response) = match prepared {
-                Err(_) => return Err(RequestError::Rejected),
-                Ok(Err(error)) if retryable(&error) && Instant::now() < deadline => {
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-                Ok(Err(error)) => {
-                    return Err(error
-                        .downcast::<RequestError>()
-                        .unwrap_or(RequestError::Rejected));
-                }
-                Ok(Ok(prepared)) => prepared,
-            };
-            let Some(mut tx) = tx.take() else {
-                return Ok(response.fallback);
-            };
-            match timeout_at(deadline, tx.commit()).await {
-                Ok(Ok(())) => {
-                    return Ok(self
-                        .finish_navigation(
-                            response,
-                            deadline,
-                            budget
-                                .take_delivery_calls()
-                                .map_err(RequestError::database)?,
-                        )
-                        .await);
-                }
-                Ok(Err(error)) if retryable(&error) => {
-                    // SQLite busy can leave COMMIT's transaction active. A new
-                    // attempt is legal only after this rollback succeeds.
-                    if tx.rollback().await.is_err() {
-                        return Err(RequestError::OutcomeUnknown);
-                    }
-                }
-                _ => return Err(RequestError::OutcomeUnknown),
-            }
-        }
-        Err(RequestError::Busy)
+        let entry_scope = self.request_scope(self.runtime.limits().wall_time);
+        entry_scope
+            .run(async {
+                let binding = manifest::web_action(&self.manifest, action)
+                    .map_err(|_| RequestError::InvalidRequest)?;
+                let op = manifest::operation(&self.manifest, binding.steps[0].operation)
+                    .map_err(|_| RequestError::InvalidRequest)?;
+                let admission = self
+                    .admit_invocation(manifest::anonymous_action(op))
+                    .await?;
+                let owner = admission.owner;
+                owner
+                    .run(async {
+                        let a = manifest::web_action(&self.manifest, action)
+                            .map_err(|_| RequestError::InvalidRequest)?;
+                        let canonical = self
+                            .canonical_action_input(a.core.id, &input)
+                            .map_err(|_| RequestError::InvalidRequest)?;
+                        let deadline = owner.work_deadline();
+                        let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
+                        // A validated original receipt commits independently of the
+                        // current delivery/read transaction's provider frontier.
+                        let mut receipt_commit = None;
+                        for _ in 0..3 {
+                            let prepared = timeout_at(
+                                deadline,
+                                self.prepare_with_commit_evidence(
+                                    cookie,
+                                    action,
+                                    submission,
+                                    csrf,
+                                    &canonical,
+                                    capability,
+                                    &mut budget,
+                                    &mut receipt_commit,
+                                ),
+                            )
+                            .await;
+                            let (mut tx, response) = match prepared {
+                                Err(_) | Ok(Err(_)) if receipt_commit.is_some() => {
+                                    return Ok(receipt_commit.take().unwrap().fallback);
+                                }
+                                Err(_) => return Err(RequestError::Rejected),
+                                Ok(Err(error))
+                                    if retryable(&error) && Instant::now() < deadline =>
+                                {
+                                    tokio::task::yield_now().await;
+                                    continue;
+                                }
+                                Ok(Err(error)) => {
+                                    return Err(error
+                                        .downcast::<RequestError>()
+                                        .unwrap_or_else(RequestError::database));
+                                }
+                                Ok(Ok(prepared)) => prepared,
+                            };
+                            let Some(mut tx) = tx.take() else {
+                                return Ok(response.fallback);
+                            };
+                            match timeout_at(deadline, tx.commit()).await {
+                                Ok(Ok(())) => {
+                                    let Ok(calls) = budget.take_delivery_calls() else {
+                                        return Ok(response.fallback);
+                                    };
+                                    return Ok(self
+                                        .finish_navigation(response, deadline, calls)
+                                        .await);
+                                }
+                                _ if tx.commit_acknowledged() || receipt_commit.is_some() => {
+                                    // A confirmed commit remains committed even if gate cleanup
+                                    // failed or was canceled. Deliver the prepared success;
+                                    // fresh navigation cannot undo it.
+                                    return Ok(response.fallback);
+                                }
+                                Ok(Err(error)) if !tx.commit_may_have_succeeded() && error.is::<crate::database::lifecycle::meter::StatementLimit>() => {
+                                    // The actual COMMIT unit was refused before issue.
+                                    // Cleanup remains owned; this is not a sent commit.
+                                    if tx.rollback().await.is_err() {return Err(RequestError::OutcomeUnknown);}
+                                    return Err(RequestError::Busy);
+                                }
+                                Ok(Err(error))
+                                    if !tx.commit_may_have_succeeded() && retryable(&error) =>
+                                {
+                                    // SQLite busy can leave COMMIT's transaction active. A new
+                                    // attempt is legal only after this rollback succeeds.
+                                    if tx.rollback().await.is_err() {
+                                        return Err(RequestError::OutcomeUnknown);
+                                    }
+                                }
+                                _ => return Err(RequestError::OutcomeUnknown),
+                            }
+                        }
+                        Err(RequestError::Busy)
+                    })
+                    .await
+            })
+            .await
     }
 
     pub(crate) async fn recover_form(
@@ -113,161 +143,208 @@ impl Application {
         unknown: bool,
         capability: Option<&str>,
     ) -> Result<Rendered> {
-        let _request = self
-            .admission_limits
-            .requests()
-            .request()
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        let _database = self
-            .admission_limits
-            .database()
-            .acquire()
-            .await
-            .map_err(|_| RequestError::Busy)?;
-        let deadline = Instant::now() + self.runtime.limits().wall_time;
-        let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
-        let prepared = timeout_at(deadline, async {
-            let a = manifest::web_action(&self.manifest, action)?;
-            let core = ActionCore::of(a.core)?;
-            let binding = manifest::web_binding(&self.manifest, action)?;
-            let mut tx = self.database.begin(deadline.into_std()).await?;
-            self.admission(&mut tx, false).await?;
-            let now = security::now()?;
-            let now = self.observe_clock_write(&mut tx, now).await?;
-            let (token, session, principal) = self
-                .submission_identity(&mut tx, core, cookie, submission, csrf, now)
-                .await?;
-            let (_, selections) = self.action_input(a.core, input)?;
-            let grants = self.web_target_grants(
-                &token,
-                core,
-                binding,
-                &selections,
-                &session,
-                &principal,
-                now,
-            )?;
-            let targets: BTreeMap<_, _> = grants
-                .iter()
-                .map(|(name, grant)| (name.clone(), grant.identity().clone()))
-                .collect();
-            let receipt = self
-                .load_receipt(&mut tx, &token.nonce, &session.nonce)
-                .await?;
-            if let Some([digest, outcome]) = receipt.as_ref() {
-                let canonical = self.canonical_action_input(a.core.id, input).ok();
-                let expected = canonical
-                    .as_ref()
-                    .map(|input| {
-                        self.web_invocation_identity(
-                            binding,
-                            &token,
-                            &session,
-                            &principal,
-                            input.digest(),
-                            &targets,
-                        )
-                    })
-                    .transpose()?;
+        let entry_scope = self.request_scope(self.runtime.limits().wall_time);
+        entry_scope
+            .run(async {
+                let _request = self
+                    .admission_limits
+                    .requests()
+                    .request()
+                    .await
+                    .map_err(|_| RequestError::Busy)?;
+                let _database = self
+                    .admission_limits
+                    .database()
+                    .acquire()
+                    .await
+                    .map_err(|_| RequestError::Busy)?;
+                let owner = self.owned_request(
+                    _request,
+                    std::sync::Arc::new(_database),
+                    None,
+                    self.runtime.limits().wall_time,
+                );
+                let deadline = owner.work_deadline();
+                owner
+                    .run(async {
+                        let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
+                        let mut retained_response = None;
+                        let prepared = timeout_at(deadline, async {
+                            let a = manifest::web_action(&self.manifest, action)?;
+                            let core = ActionCore::of(a.core)?;
+                            let binding = manifest::web_binding(&self.manifest, action)?;
+                            let mut tx = self.database.begin(deadline.into_std()).await?;
+                            self.admission(&mut tx, false).await?;
+                            let now = security::now()?;
+                            let now = self.observe_clock_write(&mut tx, now).await?;
+                            let (token, session, principal) = self
+                                .submission_identity(&mut tx, core, cookie, submission, csrf, now)
+                                .await?;
+                            let (_, selections) = self.action_input(a.core, input)?;
+                            let grants = self.web_target_grants(
+                                &token,
+                                core,
+                                binding,
+                                &selections,
+                                &session,
+                                &principal,
+                                now,
+                            )?;
+                            let targets: BTreeMap<_, _> = grants
+                                .iter()
+                                .map(|(name, grant)| (name.clone(), grant.identity().clone()))
+                                .collect();
+                            let receipt = self
+                                .load_receipt(&mut tx, &token.nonce, &session.nonce)
+                                .await?;
+                            if let Some([digest, outcome]) = receipt.as_ref() {
+                                let canonical = self.canonical_action_input(a.core.id, input).ok();
+                                let expected = canonical
+                                    .as_ref()
+                                    .map(|input| {
+                                        self.web_invocation_identity(
+                                            binding,
+                                            &token,
+                                            &session,
+                                            &principal,
+                                            input.digest(),
+                                            &targets,
+                                        )
+                                    })
+                                    .transpose()?;
 
-                let response = if expected.as_ref() == Some(digest) {
-                    self.prepare_response(&mut tx, &a, &targets, outcome, &principal)
-                        .await
-                        .or_else(|_| self.committed_recovery(&a, submission, csrf, input))?
-                } else {
-                    navigation::Prepared::ready(render::form_already_used(
-                        &self.presentation,
-                        &self.manifest,
-                    )?)
-                };
-                if tx.commit().await.is_err() {
-                    return self.committed_recovery(&a, submission, csrf, input);
-                }
-                return Ok(response);
-            }
-            let time = if crate::authority::uses_time(&self.manifest) {
-                budget.spend(1)?;
-                Some(self.temporal_after_admission(&mut tx).await?)
-            } else {
-                None
-            };
-            let mut authority = self.authority_context(time)?;
-            match self
-                .resolve_action_targets(
-                    &mut tx,
-                    &mut authority,
-                    core,
-                    &grants,
-                    &principal,
-                    capability,
-                    now,
-                    &mut budget,
-                )
-                .await
-            {
-                Ok(_) => self.authorize_create(core, &principal)?,
-                Err(error) if error.is::<action::ReviewConflict>() && unknown => {}
-                Err(error) if error.is::<action::ReviewConflict>() => {
-                    if a.targets.len() == 1
-                        && matches!(a.targets[0].source, TargetSource::Page { .. })
-                    {
-                        let target = targets[&a.targets[0].name].clone();
-                        let stored =
-                            repository::load(&mut tx, &self.manifest, target.resource, target.id)
-                                .await?
-                                .ok_or(repository::ReferenceUnavailable)?;
-                        return self
-                            .settle(
-                                &a,
-                                action::Settled::Conflict { target, stored },
-                                submission,
-                                csrf,
+                                let response = if expected.as_ref() == Some(digest) {
+                                    let validated = self.validate_receipt(&a, &targets, outcome)?;
+                                    retained_response = Some(
+                                        self.committed_recovery(&a, submission, csrf, input)
+                                            .unwrap_or_else(|_| {
+                                                navigation::Prepared::ready(navigation::success())
+                                            }),
+                                    );
+                                    self.prepare_validated_response(
+                                        &mut tx, &a, validated, &principal,
+                                    )
+                                    .await
+                                    .or_else(|_| {
+                                        self.committed_recovery(&a, submission, csrf, input)
+                                    })?
+                                } else {
+                                    retained_response = Some(navigation::Prepared::ready(
+                                        render::form_already_used(
+                                            &self.presentation,
+                                            &self.manifest,
+                                        )?,
+                                    ));
+                                    navigation::Prepared::ready(render::form_already_used(
+                                        &self.presentation,
+                                        &self.manifest,
+                                    )?)
+                                };
+                                if tx.commit().await.is_err() {
+                                    return Ok(retained_response.take().unwrap());
+                                }
+                                return Ok(response);
+                            }
+                            let time = if crate::authority::uses_time(&self.manifest) {
+                                budget.spend(1)?;
+                                Some(self.temporal_after_admission(&mut tx).await?)
+                            } else {
+                                None
+                            };
+                            let mut authority = self.authority_context(time)?;
+                            match self
+                                .resolve_action_targets(
+                                    &mut tx,
+                                    &mut authority,
+                                    core,
+                                    &grants,
+                                    &principal,
+                                    capability,
+                                    now,
+                                    &mut budget,
+                                )
+                                .await
+                            {
+                                Ok(_) => self.authorize_create(core, &principal)?,
+                                Err(error) if error.is::<action::ReviewConflict>() && unknown => {}
+                                Err(error) if error.is::<action::ReviewConflict>() => {
+                                    if a.targets.len() == 1
+                                        && matches!(a.targets[0].source, TargetSource::Page { .. })
+                                    {
+                                        let target = targets[&a.targets[0].name].clone();
+                                        let stored = repository::load(
+                                            &mut tx,
+                                            &self.manifest,
+                                            target.resource,
+                                            target.id,
+                                        )
+                                        .await?
+                                        .ok_or(repository::ReferenceUnavailable)?;
+                                        return self
+                                            .settle(
+                                                &a,
+                                                action::Settled::Conflict { target, stored },
+                                                submission,
+                                                csrf,
+                                                input,
+                                                Some((&session, now)),
+                                            )
+                                            .map(navigation::Prepared::ready);
+                                    }
+                                    return Ok(navigation::Prepared::ready(
+                                        render::target_conflict(),
+                                    ));
+                                }
+                                Err(error) if error.is::<repository::ReferenceUnavailable>() => {
+                                    return self
+                                        .settle(
+                                            &a,
+                                            action::Settled::Unavailable,
+                                            submission,
+                                            csrf,
+                                            input,
+                                            None,
+                                        )
+                                        .map(navigation::Prepared::ready);
+                                }
+                                Err(error) => return Err(error),
+                            }
+                            let credentials = FormCredentials {
+                                selections: Default::default(),
+                                selected: Default::default(),
+                                csrf: csrf.into(),
+                                submission: submission.into(),
+                                values: Fields::new(),
+                            };
+                            let rendered = render::recovery(
+                                &self.presentation,
+                                &self.manifest,
+                                action,
+                                &credentials,
                                 input,
-                                Some((&session, now)),
-                            )
-                            .map(navigation::Prepared::ready);
-                    }
-                    return Ok(navigation::Prepared::ready(render::target_conflict()));
-                }
-                Err(error) if error.is::<repository::ReferenceUnavailable>() => {
-                    return self
-                        .settle(
-                            &a,
-                            action::Settled::Unavailable,
-                            submission,
-                            csrf,
-                            input,
-                            None,
-                        )
-                        .map(navigation::Prepared::ready);
-                }
-                Err(error) => return Err(error),
-            }
-            let credentials = FormCredentials {
-                selections: Default::default(),
-                selected: Default::default(),
-                csrf: csrf.into(),
-                submission: submission.into(),
-                values: Fields::new(),
-            };
-            let rendered = render::recovery(
-                &self.presentation,
-                &self.manifest,
-                action,
-                &credentials,
-                input,
-                render::Recovery::Retry { unknown },
-            )?;
-            tx.commit().await?;
-            Ok(navigation::Prepared::ready(rendered))
-        })
-        .await??;
-        Ok(self
-            .finish_navigation(prepared, deadline, budget.take_delivery_calls()?)
-            .await)
+                                render::Recovery::Retry { unknown },
+                            )?;
+                            tx.commit().await?;
+                            Ok(navigation::Prepared::ready(rendered))
+                        })
+                        .await;
+                        let prepared = match prepared {
+                            Ok(Ok(prepared)) => prepared,
+                            _ if retained_response.is_some() => retained_response.take().unwrap(),
+                            Ok(Err(error)) => return Err(error),
+                            Err(error) => return Err(error.into()),
+                        };
+                        let Ok(calls) = budget.take_delivery_calls() else {
+                            return Ok(prepared.fallback);
+                        };
+                        Ok(self.finish_navigation(prepared, deadline, calls).await)
+                    })
+                    .await
+            })
+            .await
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn prepare(
         &self,
@@ -278,6 +355,24 @@ impl Application {
         canonical: &CanonicalActionInput,
         capability: Option<&str>,
         budget: &mut ExecutionBudget,
+    ) -> Result<(Option<Transaction>, navigation::Prepared)> {
+        self.prepare_with_commit_evidence(
+            cookie, action, submission, csrf, canonical, capability, budget, &mut None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_with_commit_evidence(
+        &self,
+        cookie: &str,
+        action: u32,
+        submission: &str,
+        csrf: &str,
+        canonical: &CanonicalActionInput,
+        capability: Option<&str>,
+        budget: &mut ExecutionBudget,
+        receipt_commit: &mut Option<navigation::Prepared>,
     ) -> Result<(Option<Transaction>, navigation::Prepared)> {
         let a = manifest::web_action(&self.manifest, action)?;
         let input = canonical.web_fields();
@@ -309,14 +404,15 @@ impl Application {
             action::Attempt::Commit { tx, receipt, nonce } => (tx, receipt, Some(nonce)),
             action::Attempt::Replay { tx, receipt } => (tx, receipt, None),
         };
+        let validated = self.validate_receipt(&a, &receipt.targets, &receipt.payload)?;
+        if nonce.is_none() {
+            *receipt_commit = Some(
+                self.committed_recovery(&a, submission, csrf, input)
+                    .unwrap_or_else(|_| navigation::Prepared::ready(navigation::success())),
+            );
+        }
         let response = self
-            .prepare_response(
-                &mut tx,
-                &a,
-                &receipt.targets,
-                &receipt.payload,
-                &receipt.principal,
-            )
+            .prepare_validated_response(&mut tx, &a, validated, &receipt.principal)
             .await;
         let response = if nonce.is_none() {
             response.or_else(|_| self.committed_recovery(&a, submission, csrf, input))?

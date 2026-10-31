@@ -153,9 +153,9 @@ async fn snapshot(db: &Database) -> Vec<Vec<[String; 2]>> {
         t.fetch::<2>("SELECT CAST(id AS TEXT),fields FROM nx_records ORDER BY resource,id", &[]).await.unwrap(),
         t.fetch::<2>("SELECT resource_key,CAST(storage_id AS TEXT) FROM nx_resource_catalog ORDER BY storage_id", &[]).await.unwrap(),
         t.fetch::<2>("SELECT contract,generation FROM nx_deployment", &[]).await.unwrap(),
-        match db {
-            Database::Sqlite(_) => t.fetch::<2>("SELECT name,sql FROM sqlite_schema WHERE type='index' AND tbl_name='nx_records' ORDER BY name", &[]).await.unwrap(),
-            Database::Postgres(_) => t.fetch::<2>("SELECT indexname,indexdef FROM pg_catalog.pg_indexes WHERE schemaname=current_schema() AND tablename='nx_records' ORDER BY indexname", &[]).await.unwrap(),
+        match db.is_sqlite() {
+            true => t.fetch::<2>("SELECT name,sql FROM sqlite_schema WHERE type='index' AND tbl_name='nx_records' ORDER BY name", &[]).await.unwrap(),
+            false => t.fetch::<2>("SELECT indexname,indexdef FROM pg_catalog.pg_indexes WHERE schemaname=current_schema() AND tablename='nx_records' ORDER BY indexname", &[]).await.unwrap(),
         },
         t.fetch::<2>("SELECT CAST(resource AS TEXT)||':'||CAST(id AS TEXT),COALESCE(owner,'')||'|'||tenant||'|'||incarnation||'|'||CAST(revision AS TEXT)||'|'||CAST(created_seq AS TEXT) FROM nx_records ORDER BY resource,id", &[]).await.unwrap(),
         t.fetch::<2>("SELECT CAST(singleton AS TEXT),CAST(value AS TEXT) FROM nx_creation_counter", &[]).await.unwrap(),
@@ -539,9 +539,9 @@ async fn contract(db: Database) {
     assert!(!derived.is_empty());
     let actual = t.query_indexes().await.unwrap();
     assert!(derived.iter().all(|index| actual.contains(&index.name(2))));
-    let indexes = match db {
-        Database::Sqlite(_) => t.fetch::<1>("SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='nx_records'", &[]).await.unwrap(),
-        Database::Postgres(_) => t.fetch::<1>("SELECT indexname FROM pg_catalog.pg_indexes WHERE schemaname=current_schema() AND tablename='nx_records'", &[]).await.unwrap(),
+    let indexes = match db.is_sqlite() {
+        true => t.fetch::<1>("SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='nx_records'", &[]).await.unwrap(),
+        false => t.fetch::<1>("SELECT indexname FROM pg_catalog.pg_indexes WHERE schemaname=current_schema() AND tablename='nx_records'", &[]).await.unwrap(),
     };
     for name in [
         "nx_r_1_project",
@@ -665,7 +665,7 @@ async fn contract(db: Database) {
         Backend::Closed => unreachable!(),
     };
     let native = crate::membership::unique_index_name(1, &renamed.resources[0].unique[0]).unwrap();
-    if matches!(db, Database::Sqlite(_)) {
+    if db.is_sqlite() {
         assert!(
             plan.iter().any(|line| line.contains(&native)),
             "native tuple lookup plan: {plan:?}"

@@ -602,14 +602,18 @@ rows are still checked, and capability mutations still require their dedicated
 host-verified grant. Macro diagnostics are not an authorization boundary; only
 small portable rules such as identifier grammar are shared with producers.
 
-Admission waits have their own bounded queues and timeouts. Execution starts
-after admission and shares one deadline, fuel allowance, host-call allowance,
-and database-call allowance across mutation retries. Recovery is a separate,
-bounded transaction so an uncertain mutation can still have its receipt checked
-after its execution deadline expires. Cleanup retains its bounded allowance
-after execution expires. Consequently runtime wall time is an execution budget,
-not a single end-to-end HTTP latency promise. The application WASM gate bounds
-waiting; the runtime semaphore independently protects direct runtime calls.
+One host-created request scope starts before admission and session classification.
+Admission, body reading, retries, receipt checks and navigation retain that scope's
+original deadline. Existing fuel, host-call and logical database-call allowances
+remain; an additional ceiling of 256 actual SQL statements covers setup, work,
+control and cleanup across the same request. Operators may lower this ceiling.
+The final 50ms of the existing phase is reserved for cleanup within its original
+total. Cancellation retains provider capacity until physical stop is confirmed;
+unconfirmed cleanup quarantines that capacity. Receipt recovery uses a subsequent
+bounded request and cannot mistake cleanup acknowledgement for COMMIT abortion.
+See [ordinary database lifecycle](ordinary-database-lifecycle.md) for ownership,
+commit outcomes and operator boundaries. The application WASM gate bounds waiting;
+the runtime semaphore independently protects direct runtime calls.
 
 At create commit, the host inserts admitted field initial values after binding any parent and before validating the complete stored record. Clients cannot submit these fields. Initial values are contract metadata, excluded from migration schema identity; update actions retain their declared authority.
 

@@ -1728,7 +1728,7 @@ async fn filtered_parent_case(db: Database) {
         let visible = tx.field_expression("published").unwrap();
         let selected = tx.field_expression("archived").unwrap();
         let direction = if descending { "DESC" } else { "ASC" };
-        if matches!(db, Database::Postgres(_)) {
+        if !db.is_sqlite() {
             tx.execute("SET LOCAL enable_seqscan=off", &[])
                 .await
                 .unwrap();

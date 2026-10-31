@@ -37,6 +37,11 @@ struct Config {
         deserialize_with = "signed_in_reserve"
     )]
     signed_in_reserve: u8,
+    #[serde(
+        default = "default_database_statement_limit",
+        deserialize_with = "database_statement_limit"
+    )]
+    database_statement_limit: u16,
     #[serde(default)]
     registration: noxide_host::Registration,
     #[serde(default)]
@@ -63,6 +68,20 @@ fn signed_in_reserve<'de, D: serde::Deserializer<'de>>(
     if value > 50 {
         return Err(serde::de::Error::custom(
             "signed_in_reserve must be between 0 and 50",
+        ));
+    }
+    Ok(value)
+}
+fn default_database_statement_limit() -> u16 {
+    256
+}
+fn database_statement_limit<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<u16, D::Error> {
+    let value = u16::deserialize(deserializer)?;
+    if !(1..=256).contains(&value) {
+        return Err(serde::de::Error::custom(
+            "database_statement_limit must be between 1 and 256",
         ));
     }
     Ok(value)
@@ -384,6 +403,7 @@ async fn main() -> Result<()> {
                 )?
                 .with_presentation(config.presentation)?
                 .with_signed_in_reserve(config.signed_in_reserve)?
+                .with_database_statement_limit(config.database_statement_limit)?
                 .with_registration(config.registration),
             );
             if command == "validate" {
@@ -499,5 +519,46 @@ mod registration_config_tests {
         let mut config = base;
         config["registration"] = "inviter".into();
         assert!(serde_json::from_value::<Config>(config).is_err());
+    }
+}
+
+#[cfg(test)]
+mod database_statement_config_tests {
+    use super::*;
+
+    #[test]
+    fn default_ceiling_can_only_be_lowered_with_an_integer() {
+        let config = serde_json::json!({"database":{"sqlite":"store.db"}, "keys":"keys.json", "component":"app.wasm", "manifest":"manifest.json", "approved_contract":"", "origin":"http://localhost:8080", "listen":{"tcp":"127.0.0.1:8080"}});
+        assert_eq!(
+            serde_json::from_value::<Config>(config.clone())
+                .unwrap()
+                .database_statement_limit,
+            256
+        );
+        for limit in [1_u16, 64, 256] {
+            let mut value = config.clone();
+            value["database_statement_limit"] = limit.into();
+            assert_eq!(
+                serde_json::from_value::<Config>(value)
+                    .unwrap()
+                    .database_statement_limit,
+                limit
+            );
+        }
+        for limit in [
+            serde_json::json!(0),
+            serde_json::json!(257),
+            serde_json::json!(65536),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("64"),
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!({}),
+        ] {
+            let mut value = config.clone();
+            value["database_statement_limit"] = limit;
+            assert!(serde_json::from_value::<Config>(value).is_err());
+        }
     }
 }

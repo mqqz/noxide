@@ -686,7 +686,7 @@ async fn reference_integrity(db: Option<Database>) {
         .begin_read(std::time::Instant::now() + Duration::from_secs(3))
         .await
         .unwrap();
-    let indexes=tx.fetch::<1>(if matches!(case.db,Database::Sqlite(_)){"SELECT name FROM sqlite_master WHERE type='index' AND substr(name,1,5)='nx_r_'"}else{"SELECT indexname FROM pg_indexes WHERE schemaname='public' AND substr(indexname,1,5)='nx_r_'"},&[]).await.unwrap();
+    let indexes=tx.fetch::<1>(if case.db.is_sqlite(){"SELECT name FROM sqlite_master WHERE type='index' AND substr(name,1,5)='nx_r_'"}else{"SELECT indexname FROM pg_indexes WHERE schemaname='public' AND substr(indexname,1,5)='nx_r_'"},&[]).await.unwrap();
     assert_eq!(indexes.len(), 4);
     tx.commit().await.unwrap();
     let fresh = case.page(&case.alice).await;

@@ -641,9 +641,7 @@ impl ExecutionBudget {
 
 /// Common host admission envelope. A grant never replaces these permits.
 pub(super) struct InvocationAdmission {
-    _request: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
-    _database: tokio::sync::OwnedSemaphorePermit,
-    _anonymous_write: Option<tokio::sync::OwnedSemaphorePermit>,
+    pub(super) owner: crate::database::lifecycle::AdmissionOwner,
 }
 impl Application {
     pub(super) async fn admit_invocation(
@@ -664,9 +662,12 @@ impl Application {
             .await
             .map_err(|_| RequestError::Busy)?;
         Ok(InvocationAdmission {
-            _request: request,
-            _database: database,
-            _anonymous_write: anonymous_write,
+            owner: self.owned_request(
+                request,
+                std::sync::Arc::new(database),
+                anonymous_write,
+                self.runtime.limits().wall_time,
+            ),
         })
     }
 }
