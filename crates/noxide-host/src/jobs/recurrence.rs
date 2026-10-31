@@ -274,4 +274,23 @@ impl QueueContext<'_> {
         ensure!(changed == 1, "recurring cursor changed");
         Ok(())
     }
+
+    /// A resumed scan could not afford another row under this request's budget.
+    /// Give other due schedules a turn without changing its frontier/cutoffs or
+    /// pretending that an occurrence completed. This is a scan-work retry, not
+    /// a new recurring occurrence or an interval shorter than its declaration.
+    pub(crate) async fn defer_recurrence(&mut self, batch: RecurrenceBatch) -> Result<()> {
+        self.charge()?;
+        ensure!(
+            !batch.position.cursor.is_empty(),
+            "recurring deferral requires a persisted scan frontier"
+        );
+        let next = batch.now.checked_add(Duration::from_millis(1_000)?)?;
+        let changed = self.tx.execute("UPDATE nx_job_recurring SET version=version+1,next_ms=$1 WHERE deployment=$2 AND tenant=$3 AND name=$4 AND version=$5 AND state='active' AND version<9223372036854775807 AND cutoff_ms=$6 AND cutoff_seq=$7 AND cursor=$8", &[next.unix_millis().into(), batch.position.scope.deployment.as_str().into(), batch.position.scope.tenant.as_str().into(), batch.position.name.as_str().into(), batch.position.version.into(), batch.position.cutoff.unix_millis().into(), batch.position.cutoff_seq.into(), batch.position.cursor.as_str().into()]).await?;
+        ensure!(changed == 1, "recurring scan changed before deferral");
+        Ok(())
+    }
 }
+
+#[cfg(test)]
+mod tests;
