@@ -1,15 +1,56 @@
 # Architecture layers
 
-Noxide retains five workspace crates. The explicit SDK works without `#[app]`,
-CRUD shorthand, or inferred queries; see the [explicit examples](../sdk-lowering.md).
+The explicit SDK works without `#[app]`, CRUD shorthand, or inferred queries; see
+the [explicit examples](../sdk-lowering.md).
 
 | Crate | Responsibility |
 | --- | --- |
 | `noxide-protocol` | Canonical schemas, policies, operations, actions, web bindings, routes, requests, results and Document IR |
-| `noxide-host` | Independent admission, authentication, authorization, bounded persistence and execution, receipts, rendering and navigation |
+| `noxide-sql`, `noxide-sql-macros` | SQL text composed only from literals, checked identifiers, numbers and other `Sql` values |
+| `noxide-assets` | Compiled public assets and their document rendering; parses no CSS, images or fonts |
+| `noxide-asset-admission` | Asset pack validation and compilation; never linked by the server |
+| `noxide-admission` | Pure manifest admission, policy and query planning, SQL generation and identity values |
+| `noxide-render` | Document IR to bytes, with its budget passed in |
+| `noxide-sandbox` | The Wasmtime boundary and complete guest import surface, behind `HostCalls` |
+| `noxide-keys` | Host key material and the key service protocol; callers never receive key bytes |
+| `noxide-confine` | Landlock and seccomp policy for deployed processes |
+| `noxide-test-support` | Test fixtures; a dev-dependency only |
+| `noxide-host` | Authentication, authorization, persistence, jobs, effects, blobs, application orchestration and HTTP |
 | `noxide` | Typed resources, queries, actions, forms and pages; WIT bindings and guest entry points |
 | `noxide-macros` | Explicit declaration expansion and optional convenience lowering |
 | `noxide-cli` | Operator build, dependency, approval, lifecycle, schema and role commands |
+
+`tools/check_layers.py` runs in CI. It fails if a crate gains a restricted dependency
+such as `sqlx`, `rustls`, `wasmtime` or `image`, if a pure crate depends on an
+impure one, if a deployed binary enables a `test-support` feature, or if a module
+inside `noxide-host` depends on a higher layer. `tools/check_binaries.py` checks the
+symbols of each deployed binary, because `noxide-cli` builds them all.
+
+`noxide-host` still contains the store, repository, blobs, jobs and effects as
+modules, separated by that lint and not by the compiler. `Transaction` accepts only
+`Sql`, so runtime strings cannot become statement text anywhere, but statements are
+not yet confined to one crate.
+
+## Deployed processes
+
+`noxide serve` is a supervisor that holds no keys and handles no requests. It
+validates and compiles assets, then runs:
+
+| Process | Holds | Can reach after startup | Links none of |
+| --- | --- | --- | --- |
+| `noxide-server` | Guest runtime, database connections, blob store, listener | Database files or loopback database port, blob directory, its key service | `rustls`, SOCKS, `cssparser`, `image` |
+| `noxide-keyd` | Host key material | Its one socket | Network, database, Wasmtime, Tokio |
+| `noxide-effects-worker` | Effect secret paths, database connections | Database, secret files, loopback Tor proxy port | Host keys, HTTP server, login |
+
+The server and worker start on one thread, bind and activate, then confine
+themselves before any serving thread exists. Direct deployments run these binaries
+themselves and should use a separate user for each.
+
+This limits what follows a host compromise; it does not replace the guest boundary.
+A compromised server can still use the keys through its service while it runs, read
+and write everything in its database, and run job actions: jobs still run in the
+server process. Landlock port rules name no address, so loopback-only database and
+proxy connections rest on the checks in `Database::postgres` and `TorProxy::loopback`.
 
 The SDK and host use the canonical protocol. Macro implementation follows
 `convenience -> explicit declaration parser/expander -> generated SDK code and

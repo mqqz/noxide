@@ -211,3 +211,9 @@ approved native indexes before serving and retains failures; it never resets a
 preexisting database. Browser-engine checks are separate.
 Wire11 golden refreshes deliberately change the version and consequent digests;
 all other canonical fixture fields must retain their reviewed semantics.
+
+## Authority checks
+
+`tools/check_layers.py` checks crate dependencies, module layers and that no deployed
+binary enables `test-support`. `tools/check_binaries.py` checks the symbols linked into
+`noxide-server`, `noxide-effects-worker` and `noxide-keyd`. Both run in the fast job.

@@ -432,6 +432,41 @@ trusted TLS terminator and makes cookies Secure; HTTP onion/local origins use
 host-only HttpOnly, SameSite=Strict cookies without Secure. Application code
 cannot alter cookie or security-header policy.
 
+## Process isolation
+
+`noxide serve` starts `noxide-server`, its `noxide-keyd` key service and, when effects
+are declared, `noxide-effects-worker`. All must be installed beside `noxide`. See
+[deployed processes](architecture/layers.md#deployed-processes) for what each holds.
+
+Each process confines itself with Landlock and seccomp before serving. This needs
+Landlock ABI 4 (Linux 6.7) with `landlock` in the kernel's active security modules.
+If the kernel cannot enforce it, startup fails. An operator can choose otherwise:
+
+```json
+{"confinement": "best_effort"}
+```
+
+`best_effort` applies what the kernel supports and warns; `disabled` applies nothing
+and warns. Both are explicit deviations that remove the protection described here.
+
+A confined server cannot create files, so SQLite's `-wal` and `-shm` sidecars stay
+in place between runs, and it cannot unlink its Unix socket. `noxide serve` removes
+the socket on exit; `noxide-server` removes a stale one at startup, and never a live
+socket or another file type.
+
+To run the processes directly, for example under separate users:
+
+```sh
+noxide assets-compile /srv/app/runtime.json   # prints a digest; set approved_assets
+noxide-server /srv/app/runtime.json
+noxide-effects-worker /srv/app/runtime.json
+noxide effects worker-grants effect_worker    # PostgreSQL role for the worker
+```
+
+The server user reads the key file only through `noxide-keyd`, which it starts before
+confining itself. A stalled or dead key service disables the keys for that process:
+requests needing them return "busy" until you restart it.
+
 ## Tor deployment
 
 Use `tor_unix` to accept Tor's PROXY v1 circuit information on a private Unix

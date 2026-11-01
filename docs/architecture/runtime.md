@@ -26,6 +26,9 @@ validation or cooperation cannot establish it.
 A declaration requests authority; it does not confer it. New capabilities must
 preserve host authentication, authorization, rendering, and budget checks. Naming
 an API `unsafe` or `dangerous` does not exempt it from these requirements.
+Process separation and operating-system confinement are described in
+[deployed processes](layers.md#deployed-processes). They reduce what a compromise
+reaches; they are not a proof of containment.
 The trusted computing base and deployment controls below remain part of the
 boundary; these requirements do not establish resistance to host vulnerabilities
 or all side channels.

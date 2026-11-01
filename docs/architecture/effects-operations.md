@@ -66,8 +66,16 @@ there is no additional runtime-directory configuration field. That directory mus
 be private, owned and free of symlink components. The database binds a stable
 store identity to its checked directory identity. Another directory is refused.
 Activation prepares the lock file without claiming it, so inspection and
-revocation remain available while the serving process delivers work. Starting a
-delivery service or `worker-once` requires its exclusive flock.
+revocation remain available while a worker delivers. Delivery runs only in
+`noxide-effects-worker` or `worker-once`; each requires the exclusive flock. The
+serving process never delivers and links no outbound transport. `noxide serve` starts
+the worker for you. It holds no host keys and writes no deployment state; it waits for
+the serving process to activate.
+
+On PostgreSQL, run the worker under its own role. `noxide effects worker-grants ROLE`
+prints the grants; they exclude accounts, records, sessions, blobs and jobs. SQLite
+has no roles, so a worker on SQLite can read the whole database file, including
+sessions. Use PostgreSQL where that separation matters.
 
 ## Local operator commands
 
@@ -109,8 +117,7 @@ current-epoch fence as Delivered: cancellation cannot undo receiver success. An
 older epoch or superseded fence cannot finalize a newer round.
 
 `worker-once` uses the same owner, transport, admission and persistence path as the
-background service. It refuses concurrent delivery ownership. Run it only when
-the serving process has released delivery ownership.
+background worker. It refuses concurrent delivery ownership, so stop the worker first.
 
 ## Attempts, recovery and shutdown
 

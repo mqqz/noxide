@@ -26,9 +26,11 @@ anonymity and security policies enforced by default.
 | --- | --- | --- |
 | `noxide` | Library | Framework API and packaged WIT world |
 | `noxide-macros` | Procedural macro library | Framework macros |
-| `noxide-cli` | `noxide` binary | Command-line tools |
+| `noxide-cli` | `noxide`, `noxide-server`, `noxide-effects-worker`, `noxide-keyd` binaries | Command-line tools and deployed processes |
 | `noxide-protocol` | Library | Constrained document and application contracts |
-| `noxide-host` | Trusted library | Wasmtime, HTTP, authentication, policy, SQLite/PostgreSQL |
+| `noxide-host` | Trusted library | HTTP, authentication, policy, SQLite/PostgreSQL |
+| `noxide-sandbox`, `noxide-admission`, `noxide-render`, `noxide-assets`, `noxide-sql` | Trusted libraries | Wasmtime boundary, contract admission, rendering, assets, SQL text |
+| `noxide-keys`, `noxide-confine` | Trusted libraries | Key service, operating-system confinement |
 
 Create and run a starter with the installed CLI:
 
