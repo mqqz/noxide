@@ -266,6 +266,8 @@ jobs:
           POSTGRES_USER: noxide
           POSTGRES_PASSWORD: ci-only-password
           POSTGRES_DB: noxide_ci
+          # Host connection pools and maintenance need more than the default 100.
+          POSTGRES_INITDB_ARGS: --set=max_connections=512
         ports:
           - 5432:5432
         options: >-
