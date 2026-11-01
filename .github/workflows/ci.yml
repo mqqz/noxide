@@ -428,12 +428,8 @@ jobs:
             --bundle "$RUNNER_TEMP/noxide-ci/catalog" \
             --output "$RUNNER_TEMP/noxide-ci/catalog-sqlite" \
             --host-cli target/debug/noxide
-          psql "$NOXIDE_TEST_POSTGRES" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE noxide_catalog'
-          python3 tools/test_catalog_links.py \
-            --bundle "$RUNNER_TEMP/noxide-ci/catalog" \
-            --output "$RUNNER_TEMP/noxide-ci/catalog-postgres" \
-            --host-cli target/debug/noxide \
-            --postgres "${NOXIDE_TEST_POSTGRES%/*}/noxide_catalog"
+          tools/ci/retry_postgres_harness.sh noxide_catalog "$RUNNER_TEMP/noxide-ci/catalog-postgres" -- \
+            python3 tools/test_catalog_links.py --bundle "$RUNNER_TEMP/noxide-ci/catalog" --host-cli target/debug/noxide
       - name: Build and test computed reservations
         if: matrix.suite == 'examples'
         run: |
@@ -444,12 +440,8 @@ jobs:
             --bundle "$RUNNER_TEMP/noxide-ci/reservations" \
             --output "$RUNNER_TEMP/noxide-ci/reservations-sqlite" \
             --host-cli target/debug/noxide
-          psql "$NOXIDE_TEST_POSTGRES" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE noxide_reservations'
-          python3 tools/test_reservations.py \
-            --bundle "$RUNNER_TEMP/noxide-ci/reservations" \
-            --output "$RUNNER_TEMP/noxide-ci/reservations-postgres" \
-            --host-cli target/debug/noxide \
-            --postgres "${NOXIDE_TEST_POSTGRES%/*}/noxide_reservations"
+          tools/ci/retry_postgres_harness.sh noxide_reservations "$RUNNER_TEMP/noxide-ci/reservations-postgres" -- \
+            python3 tools/test_reservations.py --bundle "$RUNNER_TEMP/noxide-ci/reservations" --host-cli target/debug/noxide
       - name: Build and test expiring paste uploads, jobs and outbox
         if: matrix.suite == 'examples'
         run: |
@@ -460,12 +452,8 @@ jobs:
             --bundle "$RUNNER_TEMP/noxide-ci/expiring-paste" \
             --output "$RUNNER_TEMP/noxide-ci/expiring-paste-sqlite" \
             --host-cli target/debug/noxide
-          psql "$NOXIDE_TEST_POSTGRES" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE noxide_expiring_paste'
-          python3 tools/test_expiring_paste.py \
-            --bundle "$RUNNER_TEMP/noxide-ci/expiring-paste" \
-            --output "$RUNNER_TEMP/noxide-ci/expiring-paste-postgres" \
-            --host-cli target/debug/noxide \
-            --postgres "${NOXIDE_TEST_POSTGRES%/*}/noxide_expiring_paste"
+          tools/ci/retry_postgres_harness.sh noxide_expiring_paste "$RUNNER_TEMP/noxide-ci/expiring-paste-postgres" -- \
+            python3 tools/test_expiring_paste.py --bundle "$RUNNER_TEMP/noxide-ci/expiring-paste" --host-cli target/debug/noxide
       - name: Build and test record membership
         if: matrix.suite == 'examples'
         run: |
@@ -476,12 +464,8 @@ jobs:
             --bundle "$RUNNER_TEMP/noxide-ci/team-documents" \
             --output "$RUNNER_TEMP/noxide-ci/team-documents-sqlite" \
             --host-cli target/debug/noxide
-          psql "$NOXIDE_TEST_POSTGRES" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE noxide_team_documents'
-          python3 tools/test_team_documents.py \
-            --bundle "$RUNNER_TEMP/noxide-ci/team-documents" \
-            --output "$RUNNER_TEMP/noxide-ci/team-documents-postgres" \
-            --host-cli target/debug/noxide \
-            --postgres "${NOXIDE_TEST_POSTGRES%/*}/noxide_team_documents"
+          tools/ci/retry_postgres_harness.sh noxide_team_documents "$RUNNER_TEMP/noxide-ci/team-documents-postgres" -- \
+            python3 tools/test_team_documents.py --bundle "$RUNNER_TEMP/noxide-ci/team-documents" --host-cli target/debug/noxide
       - name: Build and test private blob transfers
         if: matrix.suite == 'examples'
         env:

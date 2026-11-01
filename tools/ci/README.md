@@ -10,7 +10,10 @@ On main, merge groups and manual/scheduled runs:
   production deadlines with contention and stress. `rerun_failed_tests.py`
   retries each failed host test once in isolation, because shared runners can
   exceed those deadlines under load; the first failure stays in the log, and a
-  test that fails twice fails the job. Crash workers are invoked by
+  test that fails twice fails the job.
+- PostgreSQL application harnesses run through `retry_postgres_harness.sh`, which
+  retries once on a fresh database for the same reason: the host fails closed
+  with Busy when a maintenance cleanup misses its deadline. Crash workers are invoked by
   their parent tests; browser fixtures run in the SDK job.
 - Query index work has a separate job and cache for `query-metrics` and
   `SQLITE_ENABLE_STMT_SCANSTATUS` builds.
