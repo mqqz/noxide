@@ -215,7 +215,11 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: host-cli
-          path: target/debug/noxide
+          path: |
+            target/debug/noxide
+            target/debug/noxide-server
+            target/debug/noxide-effects-worker
+            target/debug/noxide-keyd
           retention-days: 1
 
   packaged-cli:
@@ -313,7 +317,7 @@ jobs:
           name: host-cli
           path: target/debug
       - name: Make CLI executable
-        run: chmod +x target/debug/noxide
+        run: chmod +x target/debug/noxide target/debug/noxide-server target/debug/noxide-effects-worker target/debug/noxide-keyd
       - name: Test textarea newline preservation in Firefox
         if: matrix.suite == 'sdk'
         run: |
