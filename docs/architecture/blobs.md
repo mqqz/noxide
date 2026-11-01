@@ -200,6 +200,4 @@ A backup must fence/drain writes and GC and pair metadata, immutable objects and
 private store markers/identity, preserving permissions and verifying referenced
 length/digest before serving. Copying only one side is incomplete and is refused
 with a pair identity mismatch. The operator procedure is in
-[running applications](../running-applications.md#back-up-and-restore);
-full-program acceptance belongs to P14. Current runtime/provider evidence is
-recorded in the implementation ledger, separately from those later gates.
+[running applications](../running-applications.md#back-up-and-restore).

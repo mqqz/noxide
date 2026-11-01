@@ -435,7 +435,7 @@ mod tests {
         let root = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
         let mut admin = sqlx::PgConnection::connect(&root).await.unwrap();
         let name = format!(
-            "p06_identity_{}",
+            "nx_identity_{}",
             crate::security::random_id()
                 .unwrap()
                 .replace('-', "a")

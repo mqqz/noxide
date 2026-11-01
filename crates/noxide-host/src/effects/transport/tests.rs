@@ -929,7 +929,7 @@ async fn one_connect_deadline_spans_resolve_numeric_connect_and_tls() {
         )
         .await;
     assert!(matches!(result, Err(Error::Deadline)));
-    eprintln!("P11 connect deadline: {}ms", started.elapsed().as_millis());
+    eprintln!("connect deadline: {}ms", started.elapsed().as_millis());
     assert!(
         started.elapsed() >= CONNECT_LIMIT && started.elapsed() < Duration::from_secs(11),
         "connect deadline reset after a protocol phase"
@@ -985,7 +985,7 @@ async fn one_total_deadline_includes_connect_request_headers_and_body_discard() 
             ..
         })
     ));
-    eprintln!("P11 total deadline: {}ms", started.elapsed().as_millis());
+    eprintln!("total deadline: {}ms", started.elapsed().as_millis());
     assert!(
         started.elapsed() >= ATTEMPT_LIMIT && started.elapsed() < Duration::from_secs(31),
         "attempt deadline reset after connection or response headers"

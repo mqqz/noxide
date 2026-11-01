@@ -163,7 +163,7 @@ async fn sqlite_explicit_search_migrations_are_atomic() {
 async fn postgres_explicit_search_migrations_are_atomic() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let name = format!(
-        "nx_p09_migration_{}_{}",
+        "nx_search_migration_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -175,7 +175,7 @@ async fn postgres_explicit_search_migrations_are_atomic() {
         .execute(&mut admin)
         .await
         .unwrap();
-    eprintln!("P09 retained migration fixture: {name}");
+    eprintln!("retained migration fixture: {name}");
     let fixture = format!("{}/{name}", url.rsplit_once('/').unwrap().0);
     contract(Database::postgres(&fixture).unwrap()).await;
 }
@@ -289,7 +289,7 @@ async fn reviewer_sqlite_indexed_field_replacement_stays_searchable() {
 async fn reviewer_postgres_indexed_field_replacement_stays_searchable() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let name = format!(
-        "nx_p09_review_rewrite_{}_{}",
+        "nx_search_index_rewrite_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

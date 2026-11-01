@@ -1,6 +1,6 @@
 # Blob metadata storage
 
-The P08 runtime uses this provider-portable metadata layout for uploads,
+The blob runtime uses this provider-portable metadata layout for uploads,
 transactional attachment, pairing and fenced cleanup. See [blob storage](blobs.md)
 for the complete authority and transfer contract.
 The framework storage version is 12. Existing version-11 databases are refused
@@ -30,37 +30,9 @@ possible through the ordinary declared schema path. Record deletion uses the
 transactional detachment path, followed by deferred physical deletion; that
 runtime path is implemented by the shared action executor and blob maintenance.
 
-## Historical preparation evidence
+## Store pairing
 
-The following records predate runtime integration; current runtime gates are
-recorded in the implementation ledger and linked blob contract.
-
-Coordinator owns the schema and storage-version allocation. Requested route is
-Sol/high; effective token/credit usage is unavailable. The isolated worktree is
-`/tmp/noxide-p08-schema`, based on B's `a2a97d7` (which includes integrated
-`fd000f4`). Ordinary transaction lifecycle repair belongs separately to D; this
-patch changes neither cancellation nor COMMIT classification.
-
-Executed checks with Rust 1.98.0, CARGO_BUILD_JOBS=2, CARGO_INCREMENTAL=0,
-CARGO_TARGET_DIR=/home/mo/code/noxide/target/p08-schema:
-
-- `cargo test -p noxide-host --lib database::blob_layout::tests --locked --offline --no-run`:
-  compile exit0; schema-build-final.log.
-- Same test selector with `-- --include-ignored --test-threads=1 --nocapture` and
-  disposable NOXIDE_TEST_POSTGRES: exit0, both providers passed/zero ignored;
-  schema-providers-initial.log. The fixture verifies six missing/spoofed index
-  cases, missing primary key, four native uniqueness violations, and old-version
-  refusal preserving the version and row. The fixture-created PG database is
-  dropped only on success; no other database is inspected or dropped.
-- `cargo test -p noxide-host --lib schema::tests::blob_associations_cannot_be_reinterpreted_by_schema_migrations --locked --offline -- --exact --test-threads=1`:
-  exit0, one test passed; schema-migration-guards.log.
-
-Logs are under target/capability-evidence/p08. Independent review, full integrated
-suites, store-pairing recovery, quota races, real streaming/GC and consistent
-backup/restore remain open. No operator database mutation or external delivery
-was performed.
-
-Pairing delta: nx_blob_store also requires a canonical opaque pair_id and
+`nx_blob_store` requires a canonical opaque pair_id and
 pair_state (pending/paired), without defaults. A fresh bind durably commits its
 pending row before writing/syncing the private filesystem pairing marker, then
 acknowledges paired in the database before readiness. Mismatch or missing metadata
@@ -69,20 +41,8 @@ bind with populated object directories fails closed. A matching pair does not
 prove snapshot-time consistency: completely unknown objects are quarantined and
 accounted, not automatically deleted after a grace period. Normal crash cleanup
 requires the authoritative preexisting Uploading/reservation or deletion claim.
-The complete state machine and operator reconciliation remain B/P13 gates.
 
-The pairing-column delta was compiled and reran the same two native layout tests
-on fresh SQLite/PostgreSQL fixtures: exit0, two passed/zero ignored,
-`schema-pair-providers.log`. Added native cases accept pending/paired, reject
-an unknown state and a missing pair ID; metadata/FS commit ordering remains an
-independent runtime gate. Source formatting and diff checks pass.
-
-Independent review found a dormant PostgreSQL verifier error: expected index
-ownership was derived from the actual catalog table, permitting a required
-name on an unrelated compatible table. The reviewer's native expected-rejection
-test failed on5081d12 (fresh fixture retained). The correction takes only the
-quoted namespace from the catalog and pins the table from the host declaration.
-C adopted the independent test unchanged: both provider cases now pass with the
-spoofed index rejected, zero blob rows, and normal native constraints still
-verified. Evidence: schema-pinned-table-providers.log. Independent correction
-verification remains required before accepting this slice.
+Native layout tests on SQLite and PostgreSQL accept pending/paired and reject an
+unknown state and a missing pair ID. The PostgreSQL layout verifier takes only the
+quoted namespace from the catalog and pins each table from the host declaration,
+so a required index name on an unrelated compatible table is rejected.

@@ -2,8 +2,7 @@
 
 Wire11 defines portable token-AND search, scalar ordering, ranges and exact
 aggregates. Storage13 adds normalized search metadata and postings. These extend
-the existing query executor and shared authorization. Package test evidence and
-remaining program gates are recorded in the implementation ledger.
+the existing query executor and shared authorization.
 
 `protocol/query.rs` defines resource search declarations, list search/range,
 scalar order direction and immutable/live-view mode, explicit inference
@@ -54,7 +53,7 @@ Protected/order metadata stays once in nx_records alongside minimal postings.
 Exact-scope/scalar-order plans seal a bounded ordered record frontier before
 token-AND; broad creation-order plans seal posting candidates. Empty pages
 with continuation are possible; no scan-until-match or corpus-wide grouping before
-LIMIT is permitted. Existing eight index-shape accounting and P00 measurements,
+LIMIT is permitted. Existing eight index-shape accounting and baseline query measurements,
 including the known moderator=false ~100,021 visits, remain unchanged.
 
 Cursor authentication binds canonical normalized search tokens, range/order/
@@ -87,31 +86,29 @@ migration or an explicit new development database; no database is reset silently
 
 The postings adapter serializes compact `[field,"token"]`
 pairs, with common metadata bound separately. Its worst-case JSON payload is
-47,105 bytes: seven framing/separator bytes per2,048 pairs,32,768 token bytes,
-and one final byte. It requires a supplied work checkpoint before work, every64
+47,105 bytes: seven framing/separator bytes per 2,048 pairs, 32,768 token bytes,
+and one final byte. It requires a supplied work checkpoint before work, every 64
 pairs and after serialization. This payload bound does not establish physical
-storage/write bytes, provider plan visits or runtime budget fit. The independent
-leaf harness preserves root-locked registry identities and exercises all2,048
+storage/write bytes, provider plan visits or runtime budget fit. Tests exercise all 2,048
 pairs without truncation, cancellation failure and handwritten Unicode payloads.
 
-The arithmetic leaf `query_plan/aggregate.rs` visits every seeded candidate once,
+The aggregate module `query_plan/aggregate.rs` visits every seeded candidate once,
 including nonmatching/hidden candidates, and accepts typed operands only after the
-caller authorizes them. Its local search cap cannot exceed256 and grants no new
+caller authorizes them. Its local search cap cannot exceed 256 and grants no new
 shared allowance. It exposes no partial-value getter; only proven source exhaustion
-can finish successfully. The ordinary1,001st lookahead poisons prior arithmetic.
-Search must never issue an extra257th candidate beyond the shared request cap;
+can finish successfully. The ordinary 1,001st lookahead poisons prior arithmetic.
+Search must never issue an extra 257th candidate beyond the shared request cap;
 without independently proven completion it returns `LimitExceeded`. All failures
-remain terminal for that scan. Empty count/sum are0, empty extrema are typed None,
+remain terminal for that scan. Empty count/sum are 0, empty extrema are typed None,
 and checked i128 sum converts to i64 only at successful completion.
 
 The index registry now pins Records/Postings owning table, equality prefix,
 numeric/binary scalar ordering and stable ID tie in a canonical shape hash.
 Record index names intentionally change with that complete shape. A single
 physical `nx_search_tokens` index consumes one of eight shapes for each searchable
-resource; it is not recreated per resource. C schema consumers must use expected
+resource; it is not recreated per resource. Schema consumers use expected
 provider-specific DDL and verify actual table/namespace/column/expression/order/
-collation/predicate/validity. The temporary old consumer bridge is removed when
-C switches atomically; it cannot render binary P09 shapes. String-generation tests
+collation/predicate/validity. String-generation tests
 do not prove native index correctness or provider plan efficiency.
 
 Scalar keysets validate the signed storage ID domain, exact scalar representation
@@ -122,21 +119,21 @@ used. Mutable LiveView ordering can omit or repeat a row when another request
 moves its sort key across a cursor. That behavior is explicitly chosen by the
 declaration; immutable ordering prevents those key moves.
 
-Tokenizer/index construction now requires the caller's mutable checkpoint:
+Tokenizer/index construction requires the caller's mutable checkpoint:
 `canonical_query(text, &mut checkpoint)` and
 `indexed_record(values, max_bytes, &mut checkpoint)` return `anyhow::Result`.
 Typed input-limit errors remain downcastable, and request/operator checkpoint
 errors propagate unchanged. There is no unchecked production wrapper; infallible
 wrappers exist only in the test module. Preflight checks decomposed scalars before
-normalization reorder; normalization/splitting poll within64 scalars, full-string
+normalization reorder; normalization/splitting poll within 64 scalars, full-string
 lowercase polls before and after, and dictionary/posting preparation polls bounded
 groups. Failure injection at every reachable boundary returns no query/postings.
-The callback type and pure tests do not prove real host ownership: registration
-requires every production call site to pass the existing required RequestScope
+The callback type and pure tests do not prove real host ownership: every
+production call site must pass the existing required RequestScope
 checkpoint or a valid OperatorCheckpoint from its bounded transaction.
 
 The bounded posting frontier factors the existing conservative list-merge cutoff:
-at most four ordered streams of64 raw seeds, validated signed identities and
+at most four ordered streams of 64 raw seeds, validated signed identities and
 incarnation/revision facts. It seals the earliest saturated-stream boundary in
 ascending order (latest in descending order). Rows fetched beyond that boundary
 are deferred; an empty authorized page must not advance past them. Aliases merge
@@ -166,4 +163,4 @@ canonical stored rows. They validate all eligibility inputs, but cannot assert t
 validity of omitted business data after out-of-band database corruption. The full
 row validator still rejects such corruption. Pure spec/ordinary-predicate tests do
 not prove membership, gate, durable expiry, SQL equivalence or aggregate budget fit;
-those differential provider gates remain required.
+those properties require differential provider tests.

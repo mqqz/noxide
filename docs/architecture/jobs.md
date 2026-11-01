@@ -1,10 +1,8 @@
 # Durable jobs
 
-The P10 integration runs declared background actions through the existing action
-executor. It includes operator approval, durable queues, recurring selection and
-worker shutdown. P10 scoped acceptance passed at `85ef201`; the
-[implementation ledger](implementation-ledger.md#p10-closure-at85ef201) records
-exact-source evidence and earlier preparation history.
+Durable jobs run declared background actions through the existing action
+executor. They include operator approval, durable queues, recurring selection and
+worker shutdown.
 
 ## Authority and capture
 
@@ -152,10 +150,10 @@ Ordinary occurrence keys include the scan cutoff and target incarnation. Expiry
 repair deduplicates by schedule, scope, target identity/incarnation, expiry value and
 contract across later repair scans. Grant version changes do not reset these keys.
 
-## Storage and acceptance
+## Storage and tests
 
 Wire 12 and storage 14 register the integrated contract. The authoritative fixed DDL
-and audits live in `database/jobs_layout.rs`; the earlier leaf SQL packet is obsolete.
+and audits live in `database/jobs_layout.rs`.
 Startup audits provider-native types, nullability, keys, foreign namespaces, byte/JSON
 bounds and required B-tree indexes. Incompatible operator storage fails with an
 explicit migration/new-store message; the host does not silently reset it.
@@ -166,8 +164,5 @@ reconciliation checks current approval, canonical input and fresh target eligibi
 before creating a protected link to a new job identity. The [operations guide](jobs-operations.md)
 covers commands, clock recovery and restore fencing.
 
-The complete serial host suite passed 601 tests at the accepted source, including
-both providers; independent source review and focused crash/budget/clock gates
-are recorded in the ledger. This is scoped P10 acceptance. Final proof-application
-and combined browser/package/build-VM gates remain P12–P14; no security audit or
-deployment readiness is claimed. P11 outbox delivery remains unfinished.
+The serial host suite covers both providers, including focused crash, budget and
+clock tests. No security audit or deployment readiness is claimed.

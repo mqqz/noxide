@@ -162,8 +162,8 @@ fn listing(raw: &str) -> serde_json::Value {
 #[tokio::test]
 async fn actual_jobs_cli_reconciles_explicitly_and_preserves_fork_pause() {
     use std::os::unix::fs::PermissionsExt;
-    let evidence = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/capability-evidence/p10-cli-fixtures");
+    let evidence =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-fixtures/jobs-cli-fixtures");
     std::fs::create_dir_all(&evidence).unwrap();
     let root = tempfile::Builder::new()
         .prefix("operator-")

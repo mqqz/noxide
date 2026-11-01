@@ -1,4 +1,4 @@
-//! Trusted explicit SDK fixture for F7. All authority remains host enforced.
+//! Trusted explicit SDK query fixture. All authority remains host enforced.
 use noxide::{
     ActionType, Aggregate, ApplicationDefinition, Context, Execute, Form, Fragment, Handler, Id,
     IntoActionResponse, NotFound, Page, PageResult, Query, QueryForm, Resource, RouteRef,

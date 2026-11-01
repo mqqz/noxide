@@ -1,5 +1,5 @@
-//! Unregistered P11 preparation. No guest API, worker, endpoint grant or outbox is
-//! enabled by this leaf. Future admission must supply current endpoint/disclosure
+//! Effect transport preparation. No guest API, worker, endpoint grant or outbox is
+//! enabled by this module. Future admission must supply current endpoint/disclosure
 //! authority and invoke it outside every database transaction.
 #[path = "transport/config.rs"]
 mod config;

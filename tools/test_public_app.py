@@ -118,7 +118,9 @@ def main():
             assert status == 200 and "More in category" not in complete and ">See all</a>" not in complete
             status, _, highlights = get("/highlights?category=books")
             assert status == 200 and ">Next page</a>" not in highlights
-            assert get("/highlights?category=books&cursor=ignored")[2] == highlights
+            # A route without a paginated list rejects any cursor instead of ignoring it.
+            status, _, stray = get("/highlights?category=books&cursor=ignored")
+            assert status == 400 and 'href="/highlights?category=books"' in stray
             missing = get("/missing")
             for query in ("", "?category=unknown", "?category=Books", "?category=books&category=games", "?other=books", "?category=books&other=x", "?category=%GG"):
                 invalid = get("/categories" + query)

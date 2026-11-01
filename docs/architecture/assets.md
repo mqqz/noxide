@@ -1,6 +1,6 @@
 # Public package assets and rich documents
 
-Protocol v7 implements asset admission, SDK lowering, the executor transport and
+Noxide implements asset admission, SDK lowering, the executor transport and
 host HTTP/rendering integration. Application construction requires an independently
 admitted bundle matching the approved manifest. This is tested implementation,
 not an audited security or transport-anonymity claim.
@@ -77,7 +77,7 @@ account, capability-credential or credential-recovery pages. On application page
 only guest document content belongs inside the `.noxide-app` root; host account
 navigation and controls remain outside it.
 
-## Rich document leaf
+## Rich documents
 
 `document::PresentationNode` represents text, declared images with required alt
 text, resolved route links, labeled navigation and typed elements. Class tokens

@@ -3,7 +3,7 @@
 
 Requires a new output directory and, for --postgres, a dedicated empty loopback
 fixture database. Retains every failure artifact and never resets database rows.
-Browser-engine acceptance is a separate gate; this harness submits native forms.
+Browser-engine coverage is a separate test; this harness submits native forms.
 """
 import argparse
 import contextlib

@@ -61,7 +61,7 @@ async fn contract(db: Database) {
         let accepted = tx.check_blob_layout().await.is_ok();
         let state = tx.fetch::<3>("SELECT t.relname,pg_catalog.pg_get_indexdef(i.indexrelid),CAST((SELECT count(*) FROM nx_blobs) AS TEXT) FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class t ON t.oid=i.indrelid JOIN pg_catalog.pg_class x ON x.oid=i.indexrelid WHERE x.relname='nx_blobs_handle'", &[]).await.unwrap();
         eprintln!(
-            "P08 wrong-table probe: verifier_accepted={accepted}; table/index/blob_rows={state:?}"
+            "wrong-table probe: verifier_accepted={accepted}; table/index/blob_rows={state:?}"
         );
         assert!(!accepted, "index on wrong table accepted");
     }
@@ -197,14 +197,14 @@ async fn postgres_blob_layout_and_native_constraints() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     let name = format!(
-        "nx_p08_layout_{}_{}",
+        "nx_blob_layout_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     );
-    eprintln!("P08 owned layout fixture: {name}");
+    eprintln!("owned layout fixture: {name}");
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(&mut admin)
         .await

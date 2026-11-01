@@ -127,6 +127,7 @@ jobs:
           --skip failure_tests::crash_worker
           --skip postgres_nojs_browser_flow
           --skip postgres_typed_forms_browser_flow
+          --skip postgres_actual_sdk_nojs_http_workspace
       - name: Check documentation
         env:
           RUSTDOCFLAGS: -D warnings

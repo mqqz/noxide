@@ -563,7 +563,7 @@ mod query_form_tests {
         (m, form)
     }
     #[test]
-    fn p09_query_form_uses_escaped_native_get_controls_without_cursor() {
+    fn query_form_uses_escaped_native_get_controls_without_cursor() {
         let (m, form) = fixture();
         let mut out = Buffer(String::new());
         query_form(&mut out, &m, &form).unwrap();
@@ -582,7 +582,7 @@ mod query_form_tests {
         assert!(!out.0.contains("<script"));
     }
     #[test]
-    fn p09_query_form_rejects_forged_controls_paths_and_labels() {
+    fn query_form_rejects_forged_controls_paths_and_labels() {
         let (m, form) = fixture();
         let mut bad = form.clone();
         bad.destination

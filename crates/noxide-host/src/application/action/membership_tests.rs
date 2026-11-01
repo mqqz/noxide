@@ -865,7 +865,7 @@ async fn postgres_workspace_bootstrap_and_sequential_boundaries() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     for index in 0..9 {
-        let name = format!("nx_p07_actions_{}_{}", std::process::id(), index);
+        let name = format!("nx_actions_{}_{}", std::process::id(), index);
         sqlx::query(&format!("CREATE DATABASE {name}"))
             .execute(&mut admin)
             .await
@@ -901,7 +901,7 @@ async fn postgres_workspace_bootstrap_and_sequential_boundaries() {
 
 /// Artifact gate, deliberately separate from the WAT decision guest used above.
 #[tokio::test]
-#[ignore = "requires built P07 SDK bundle/CLI and NOXIDE_TEST_POSTGRES"]
+#[ignore = "requires built SDK bundle/CLI and NOXIDE_TEST_POSTGRES"]
 async fn postgres_actual_sdk_nojs_http_workspace() {
     use sqlx::Connection;
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
@@ -909,12 +909,12 @@ async fn postgres_actual_sdk_nojs_http_workspace() {
     let cli = std::env::var("NOXIDE_TEST_HOST_CLI").unwrap();
     let output = std::env::var("NOXIDE_TEST_NOJS_OUTPUT").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-    let name = format!("nx_p07_http_{}", std::process::id());
+    let name = format!("nx_http_{}", std::process::id());
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(&mut admin)
         .await
         .unwrap();
-    eprintln!("P07 NoJS disposable PostgreSQL fixture: {name}");
+    eprintln!("NoJS disposable PostgreSQL fixture: {name}");
     let mut parsed = url::Url::parse(&url).unwrap();
     parsed.set_path(&format!("/{name}"));
     let script =

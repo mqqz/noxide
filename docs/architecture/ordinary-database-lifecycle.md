@@ -66,9 +66,8 @@ ROLLBACK response as proof of COMMIT abort.
 
 Trusted operator initialization, schema operations and standalone Database account
 administration are outside Application request admission and this registry. Their
-typed commit frontier remains authoritative; this checkpoint does not certify
-request-permit ownership for operator commands. Jobs, outbox execution and Blob
-runtime admission remain unavailable.
+typed commit frontier remains authoritative; this registry does not certify
+request-permit ownership for operator commands.
 
 ## Actual statement accounting
 
@@ -109,11 +108,9 @@ cancel the root; dropping an owning future does. Offline rebuild obtains an expl
 OperatorCheckpoint only from a bounded active nonordinary/nonmaintenance transaction.
 The token carries that transaction's original deadline/cancellation lifetime, rejects
 request-context reuse and ends on commit/rollback attempt or drop. It cannot turn
-clock maintenance into operator authority. Future guarded tokenizer integration is
-separate and remains unavailable until its own schema/runtime acceptance.
+clock maintenance into operator authority.
 
-Author provider evidence measures the default8 work+8 control plateau in one
+Provider tests measure the default 8 work + 8 control plateau in one
 Application using real host authentication/classification, with a ninth queued
 request opening no provider. This local result does not certify arbitrary provider,
-crash, multiple-process or future job cancellation behavior. Independent actual-meter
-and combined integration review remain required.
+crash, multiple-process or job cancellation behavior.

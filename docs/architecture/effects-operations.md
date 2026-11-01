@@ -1,9 +1,8 @@
 # Operating approved effects
 
-P11 integration is under validation. The source provides an approved HTTPS POST
-outbox through Tor; package acceptance and exact provider evidence belong in the
-[implementation ledger](implementation-ledger.md). No production delivery or live
-Tor request is authorized by the local fixtures. See the [effect contract](effects.md)
+The host provides an approved HTTPS POST outbox through Tor. Effects are not yet
+certified for deployment; no production delivery or live Tor request is
+authorized by the local fixtures. See the [effect contract](effects.md)
 for declaration and disclosure rules.
 
 ## Deployment approval

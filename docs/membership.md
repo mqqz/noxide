@@ -1,13 +1,10 @@
 # Membership and resource expiry
 
-Status: P07 integration candidate, not accepted or ready to activate. Canonical
-wire/admission, policy/SQL helpers, runtime read/mutation hooks and SDK lowering
-are present on the final P04 source checkpoint. Native schema enforcement,
-provider action/lifecycle proofs, SDK equivalence and a script-free HTTP proof app
-are implemented. Acceptance requires the full-suite/read-path gates and combined independent
-review. See the
-[capability contracts](architecture/capability-contracts.md) and
-[security contract](architecture/runtime.md#security-contract).
+Canonical wire/admission, policy/SQL helpers, runtime read/mutation hooks, SDK
+lowering, native schema enforcement, provider action/lifecycle tests, SDK
+equivalence checks and a script-free HTTP example application are implemented.
+Membership and expiry are not yet certified for activation in deployments. See
+the [security contract](architecture/runtime.md#security-contract).
 
 `ExistsRelated` declares one membership resource, one immutable resource-reference
 field, an immutable account field matching the current principal, and up to four
@@ -77,15 +74,14 @@ Ordinary visibility requires `expires_at > attempt_time`. Apply this to GET,
 lists, follows, targets, inspection, navigation, reference eligibility and
 mutations before data or guard disclosure. Future search/aggregate/download paths
 must consume the same authority context. Expiry does not delete rows or release
-inventory. No ordinary-route maintenance bypass is exposed; P10 must introduce
-separately admitted host maintenance authority before cleanup can access expired
-rows.
+inventory. No ordinary-route maintenance bypass is exposed; cleanup that accesses expired
+rows requires separately admitted host maintenance authority.
 
 The accepted lifecycle service supplies one durable watermark per attempt and
 requires maintenance progress within five monotonic seconds. GET performs no
 clock writes. Applications declaring expiry or membership conservatively require
-fresh temporal admission for every attempt. P04 expressions and P07 visibility
-share that same captured time. A new retry gets a new time; receipt replay does
+fresh temporal admission for every attempt. Computed-action expressions and expiry
+visibility share that same captured time. A new retry gets a new time; receipt replay does
 not rerun original temporal guards. Current delivery authorization uses a fresh
 read attempt. Public parent gates constrain public grants only; independent
 private read grants retain their authority.
@@ -104,7 +100,7 @@ pool; exhaustion after commit returns committed success/handover without claimin
 a rollback. The existing fixed schema/admission envelope remains separately
 bounded, and the original absolute deadline is retained.
 
-P04 snapshots retain the initial approved read/projection values for that one
+Computed-action snapshots retain the initial approved read/projection values for that one
 invocation. An earlier step cannot erase data already captured under that grant.
 The declared flow may use those initial values after membership revocation or a
 source expiry change; it does not reload or obtain a new source read grant.
@@ -138,7 +134,7 @@ bootstrap: workspace create, then membership create with `Created(0)`, `Principa
 and a literal admin role. Membership-management actions require the workspace
 admin policy; ordinary membership ownership cannot grant or change roles.
 
-The SDK equivalence and compile-diagnostic gates check literal lowering, field
+The SDK equivalence and compile-diagnostic tests check literal lowering, field
 keys, identity/reference matching, metadata-only schema registration, unique tuple
 and horizon declarations. Required same-tenant account action inputs lower to the
 same explicit host input/operation metadata; missing or unsupported scopes fail
@@ -160,5 +156,4 @@ without planner overrides. SQLite scanstatus reports 67 examined rows; PostgreSQ
 EXPLAIN scan-node accounting reports 3. These provider metrics use different
 instrumentation and are not a speed comparison. The specialized lookup, native
 index activation and bounded shared budgets have dedicated provider regressions.
-Full integration and fresh combined independent review remain acceptance gates.
 No deployment, audited-security or anonymity claim follows from local checks.

@@ -2760,7 +2760,7 @@ mod transaction_tests {
 }
 
 #[cfg(test)]
-mod p09_parameter_tests {
+mod query_parameter_tests {
     use super::*;
     fn fixture() -> Manifest {
         let mut m = crate::test_support::manifest();
@@ -2796,7 +2796,7 @@ mod p09_parameter_tests {
         m
     }
     #[test]
-    fn p09_aggregate_parameters_use_metadata_without_base_list_grant() {
+    fn aggregate_parameters_use_metadata_without_base_list_grant() {
         let mut m = fixture();
         let mut aggregate = m.operations[0].clone();
         aggregate.id = 99;
@@ -2847,7 +2847,7 @@ mod p09_parameter_tests {
         }
     }
     #[test]
-    fn p09_rejects_parameter_kind_collisions_across_source_operations() {
+    fn rejects_parameter_kind_collisions_across_source_operations() {
         let mut m = fixture();
         let mut other = m.operations[0].clone();
         other.id = 98;

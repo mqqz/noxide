@@ -153,14 +153,14 @@ async fn deferred_scan(database: Database) {
 #[tokio::test]
 async fn sqlite_no_progress_defers_scan_without_losing_cutoffs_or_tenant_fairness() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/capability-evidence/p10-recurrence-fixtures");
+        .join("../../target/test-fixtures/job-recurrence-fixtures");
     std::fs::create_dir_all(&root).unwrap();
     let directory = tempfile::Builder::new()
         .prefix("defer-")
         .tempdir_in(root)
         .unwrap()
         .keep();
-    eprintln!("retained P10 recurrence fixture: {}", directory.display());
+    eprintln!("retained recurrence fixture: {}", directory.display());
     deferred_scan(Database::sqlite(directory.join("recurrence.db"))).await;
 }
 
@@ -170,7 +170,7 @@ async fn postgres_no_progress_defers_scan_without_losing_cutoffs_or_tenant_fairn
     let root = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&root).await.unwrap();
     let name = format!(
-        "nx_p10_defer_{}_{}",
+        "nx_job_defer_{}_{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -184,6 +184,6 @@ async fn postgres_no_progress_defers_scan_without_losing_cutoffs_or_tenant_fairn
     admin.close().await.unwrap();
     let mut url = url::Url::parse(&root).unwrap();
     url.set_path(&format!("/{name}"));
-    eprintln!("retained P10 recurrence fixture: {name}");
+    eprintln!("retained recurrence fixture: {name}");
     deferred_scan(Database::postgres(url.as_str()).unwrap()).await;
 }

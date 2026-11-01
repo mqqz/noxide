@@ -842,7 +842,7 @@ async fn restore_owner_contract(db: &Database) {
 }
 async fn sqlite(label: &str) -> Database {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/capability-evidence/p11-store-fixtures");
+        .join("../../target/test-fixtures/effect-store-fixtures");
     std::fs::create_dir_all(&root).unwrap();
     let directory = tempfile::Builder::new()
         .prefix(label)
@@ -850,14 +850,14 @@ async fn sqlite(label: &str) -> Database {
         .unwrap()
         .keep();
     let db = Database::sqlite(directory.join("case.db"));
-    eprintln!("retained P11 store fixture: {}", directory.display());
+    eprintln!("retained store fixture: {}", directory.display());
     db
 }
 async fn postgres(label: &str) -> Database {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     let name = format!(
-        "nx_p11_{label}_{}_{}",
+        "nx_effect_store_{label}_{}_{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

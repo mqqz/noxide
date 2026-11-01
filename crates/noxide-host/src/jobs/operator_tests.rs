@@ -107,7 +107,7 @@ async fn activate_generation(
     lease
         .begin(database)
         .await
-        .unwrap_or_else(|error| panic!("P10 operator activation phase={phase} begin: {error:#}"));
+        .unwrap_or_else(|error| panic!("operator activation phase={phase} begin: {error:#}"));
     lease
         .tx()
         .activate_jobs(
@@ -397,7 +397,7 @@ async fn paused_generation_restart(
 #[tokio::test]
 async fn sqlite_operator_restart_revocation_and_restore_do_not_resume_authority() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/capability-evidence/p10-operator-fixtures");
+        .join("../../target/test-fixtures/job-operator-fixtures");
     std::fs::create_dir_all(&root).unwrap();
     let directory = tempfile::Builder::new()
         .prefix("lifecycle-")
@@ -429,10 +429,7 @@ async fn sqlite_operator_restart_revocation_and_restore_do_not_resume_authority(
     let _anchor = sqlx::SqliteConnection::connect_with(&options)
         .await
         .unwrap();
-    eprintln!(
-        "retained P10 operator lifecycle fixture: {}",
-        path.display()
-    );
+    eprintln!("retained operator lifecycle fixture: {}", path.display());
     operator_lifecycle(Database::sqlite(path)).await;
 }
 
@@ -442,7 +439,7 @@ async fn postgres_operator_restart_revocation_and_restore_do_not_resume_authorit
     let root = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&root).await.unwrap();
     let name = format!(
-        "nx_p10_operator_{}_{}",
+        "nx_job_operator_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -456,6 +453,6 @@ async fn postgres_operator_restart_revocation_and_restore_do_not_resume_authorit
     admin.close().await.unwrap();
     let mut url = url::Url::parse(&root).unwrap();
     url.set_path(&format!("/{name}"));
-    eprintln!("retained P10 PostgreSQL operator lifecycle fixture: {name}");
+    eprintln!("retained PostgreSQL operator lifecycle fixture: {name}");
     operator_lifecycle(Database::postgres(url.as_str()).unwrap()).await;
 }

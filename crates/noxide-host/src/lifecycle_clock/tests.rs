@@ -400,7 +400,7 @@ async fn provider_contract(database: Database) {
         .await
         .unwrap();
     let old_keys = crate::HostKeys::generate().unwrap();
-    tx.deployment("p06-clock-fixture", old_keys.incarnation(), true)
+    tx.deployment("clock-fixture", old_keys.incarnation(), true)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -457,7 +457,7 @@ async fn postgres_durable_lifecycle_contract() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").expect("NOXIDE_TEST_POSTGRES");
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     let name = format!(
-        "p06_clock_{}",
+        "nx_lifecycle_clock_{}",
         security::random_id()
             .unwrap()
             .replace('-', "a")

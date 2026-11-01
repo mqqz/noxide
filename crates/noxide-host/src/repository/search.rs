@@ -56,7 +56,7 @@ impl Effects {
     }
 }
 
-/// Shared operator/runtime leaf. Caller owns activation and the current transaction.
+/// Shared operator/runtime helper. Caller owns activation and the current transaction.
 pub(crate) async fn replace_postings(
     tx: &mut Transaction,
     storage: i64,

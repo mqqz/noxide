@@ -142,7 +142,7 @@ async fn case(db: Option<Database>, proxy: SocketAddr, secret: bool) -> Case {
     let mut deployment = config(proxy);
     if secret {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/capability-evidence/p11-secret-fixtures");
+            .join("../../target/test-fixtures/effect-secret-fixtures");
         std::fs::create_dir_all(&root).unwrap();
         let directory = tempfile::Builder::new()
             .prefix("secret-")
@@ -534,7 +534,7 @@ async fn postgres(label: &str) -> Database {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     let name = format!(
-        "nx_p11_worker_{label}_{}_{}",
+        "nx_effect_worker_{label}_{}_{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -41,7 +41,7 @@ guard rejection. Missing, reincarnated and unauthorized targets share one
 unavailable outcome with no cause. `ActionCore` projects execution fields from the
 approved canonical action and declares eligible target reads. It has no route or
 redirect dependency. A separate optional navigation plan comes from verified web
-binding admission. Service admission remains unavailable until P10.
+binding admission.
 
 `application/action/targets.rs` owns typed selection-handle verification, opaque
 canonical input certificates, per-alias target authorization and NoJS picker
@@ -92,12 +92,6 @@ process or secret access. Browser output and anonymity defaults remain governed
 by the [runtime security contract](runtime.md#security-contract). These are
 requirements and implementation boundaries, not proof of audited security or
 transport anonymity.
-
-See the [inbox feasibility exercise](inbox-spike.md) for a concrete limit of the
-existing authority model.
-
-The [refactor validation record](refactor-validation.md) lists executed commands
-and checks that still require CI infrastructure.
 
 See [declarative queries](queries.md) for the staged query design and compatibility contract.
 

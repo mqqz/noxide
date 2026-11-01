@@ -29,7 +29,7 @@ struct Fixture {
 }
 async fn fixture(label: &str) -> Fixture {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/capability-evidence/p10-bootstrap-close-fixtures");
+        .join("../../target/test-fixtures/bootstrap-close-fixtures");
     std::fs::create_dir_all(&root).unwrap();
     let directory = tempfile::Builder::new()
         .prefix(label)

@@ -15,7 +15,7 @@ struct Sqlite {
 }
 async fn sqlite(label: &str) -> Sqlite {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/capability-evidence/p11-layout-fixtures");
+        .join("../../target/test-fixtures/effects-layout-fixtures");
     std::fs::create_dir_all(&root).unwrap();
     let directory = tempfile::Builder::new()
         .prefix(label)
@@ -40,7 +40,7 @@ async fn sqlite(label: &str) -> Sqlite {
         .unwrap();
     let db = Database::sqlite(&path);
     db.initialize().await.unwrap();
-    eprintln!("retained P11 SQLite native fixture: {}", path.display());
+    eprintln!("retained SQLite native fixture: {}", path.display());
     Sqlite {
         db,
         _anchor: anchor,
@@ -50,7 +50,7 @@ async fn postgres(label: &str) -> Database {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     let name = format!(
-        "nx_p11_layout_{label}_{}_{}",
+        "nx_effects_layout_{label}_{}_{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -66,7 +66,7 @@ async fn postgres(label: &str) -> Database {
     url.set_path(&format!("/{name}"));
     let db = Database::postgres(url.as_str()).unwrap();
     db.initialize().await.unwrap();
-    eprintln!("retained P11 PostgreSQL native fixture: {name}");
+    eprintln!("retained PostgreSQL native fixture: {name}");
     db
 }
 async fn valid(db: &Database) {
@@ -201,5 +201,5 @@ async fn postgres_rejects_missing_check_nullability_and_index_method() {
 #[tokio::test]
 #[ignore = "requires disposable NOXIDE_TEST_POSTGRES with CREATE DATABASE"]
 async fn postgres_rejects_foreign_namespace_tenant_link() {
-    forged(&postgres("foreign").await,&["CREATE SCHEMA p11_shadow","CREATE TABLE p11_shadow.nx_effect_tenants(deployment TEXT,tenant TEXT,PRIMARY KEY(deployment,tenant))","ALTER TABLE nx_outbox DROP CONSTRAINT nx_outbox_deployment_tenant_fkey","ALTER TABLE nx_outbox ADD CONSTRAINT nx_outbox_deployment_tenant_fkey FOREIGN KEY(deployment,tenant) REFERENCES p11_shadow.nx_effect_tenants(deployment,tenant)"]).await;
+    forged(&postgres("foreign").await,&["CREATE SCHEMA shadow","CREATE TABLE shadow.nx_effect_tenants(deployment TEXT,tenant TEXT,PRIMARY KEY(deployment,tenant))","ALTER TABLE nx_outbox DROP CONSTRAINT nx_outbox_deployment_tenant_fkey","ALTER TABLE nx_outbox ADD CONSTRAINT nx_outbox_deployment_tenant_fkey FOREIGN KEY(deployment,tenant) REFERENCES shadow.nx_effect_tenants(deployment,tenant)"]).await;
 }

@@ -232,4 +232,4 @@ impl Transaction {
 mod tests;
 
 #[cfg(test)]
-mod review_tests;
+mod adversarial_tests;

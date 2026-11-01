@@ -128,24 +128,27 @@ async fn provider(database: Database) {
         .await;
 }
 #[tokio::test]
-async fn sqlite_p09_aggregate_current_membership_expiry_and_invalidation() {
+async fn sqlite_aggregate_current_membership_expiry_and_invalidation() {
     let dir = tempfile::tempdir().unwrap().keep();
     eprintln!("retained aggregate authority fixture {}", dir.display());
-    provider(Database::sqlite(dir.join("p09-authority.db"))).await;
+    provider(Database::sqlite(dir.join("authority.db"))).await;
 }
 #[tokio::test]
 #[ignore = "requires NOXIDE_TEST_POSTGRES"]
-async fn postgres_p09_aggregate_current_membership_expiry_and_invalidation() {
+async fn postgres_aggregate_current_membership_expiry_and_invalidation() {
     use sqlx::Connection;
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-    let name = format!("nx_p09_authority_{}", crate::security::record_id().unwrap());
+    let name = format!(
+        "nx_query_authority_{}",
+        crate::security::record_id().unwrap()
+    );
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(&mut admin)
         .await
         .unwrap();
     let mut case = url::Url::parse(&url).unwrap();
     case.set_path(&name);
-    eprintln!("retained P09 authority database {name}");
+    eprintln!("retained authority database {name}");
     provider(Database::postgres(case.as_str()).unwrap()).await;
 }

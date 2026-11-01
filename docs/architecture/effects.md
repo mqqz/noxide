@@ -1,12 +1,11 @@
 # Approved external effects
 
-P11 acceptance is unfinished. The isolated integration branch connects effect
-admission, the common action executor, outbox workers and the reviewed Tor
-transport. Delivery requires explicit operator endpoint and secret-slot grants.
-The accepted branch remains at P10 until the native and independent review gates
-pass. No deployment or live external delivery is authorized by this work.
+Approved effects connect effect admission, the common action executor, outbox
+workers and the Tor transport. Delivery requires explicit operator endpoint and
+secret-slot grants. Effects are not yet certified for deployment, and no live
+external delivery is authorized by the implementation or its tests.
 
-## Frozen integration contract
+## Contract
 
 `Manifest.effects` contains `EffectContract { endpoints, emissions }`.
 `EffectEndpoint { name, secret_slot }` names a destination and optional host-only
@@ -71,6 +70,6 @@ grant changes pause captured work instead of silently rebinding it.
 
 Native layout audits, forged-contract and disclosure tests, provider atomicity,
 claim/fence/revocation/timeout/restore tests, real local proxy/TLS fixtures,
-physical shutdown barriers and exact integrated checks remain mandatory. No
-live Tor delivery, deployment, security audit or whole-program acceptance is
-claimed by this contract.
+physical shutdown barriers and integrated checks are required test coverage. No
+live Tor delivery, deployment readiness or security audit is claimed by this
+contract.

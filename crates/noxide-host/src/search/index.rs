@@ -40,7 +40,7 @@ impl IndexedRecord {
     }
 }
 
-/// Values retain an ordinal even for an absent optional Text field. This leaf
+/// Values retain an ordinal even for an absent optional Text field. This function
 /// cannot select fields, authorize reads, write postings or grant any capability.
 /// Central admission must supply exactly its declared, sorted Text fields.
 pub fn indexed_record(

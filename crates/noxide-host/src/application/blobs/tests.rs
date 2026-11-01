@@ -702,7 +702,7 @@ async fn postgres_nojs_upload_download_retry_and_gc() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     for index in 0..9 {
-        let name = format!("nx_p08_flow_{}_{}", std::process::id(), index);
+        let name = format!("nx_blob_flow_{}_{}", std::process::id(), index);
         sqlx::query(&format!("CREATE DATABASE {name}"))
             .execute(&mut admin)
             .await

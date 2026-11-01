@@ -32,5 +32,4 @@ explicit reviewed migration or newly created disposable development storage.
 
 Wire13 changes only the root version for these applications; their approval
 digests were regenerated after the baseline JSONs were checked equal. The
-reservations baseline records its P13 service-expiry contract. Old and new
-digests are in `docs/architecture/evidence/capability-expansion/p12-approval-hash-update.json`.
+reservations baseline records its service-expiry contract.

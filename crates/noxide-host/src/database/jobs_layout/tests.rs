@@ -20,7 +20,7 @@ struct SqliteFixture {
 }
 async fn sqlite(label: &str) -> SqliteFixture {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/capability-evidence/p10-layout-fixtures");
+        .join("../../target/test-fixtures/jobs-layout-fixtures");
     std::fs::create_dir_all(&root).unwrap();
     let directory = tempfile::Builder::new()
         .prefix(label)
@@ -49,7 +49,7 @@ async fn sqlite(label: &str) -> SqliteFixture {
         .unwrap();
     let db = Database::sqlite(&path);
     db.initialize().await.unwrap();
-    eprintln!("retained P10 SQLite layout fixture: {}", path.display());
+    eprintln!("retained SQLite layout fixture: {}", path.display());
     SqliteFixture {
         db,
         _anchor: anchor,
@@ -61,7 +61,7 @@ async fn postgres(label: &str) -> Database {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     let name = format!(
-        "nx_p10_layout_{label}_{}_{}",
+        "nx_jobs_layout_{label}_{}_{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -77,7 +77,7 @@ async fn postgres(label: &str) -> Database {
     case.set_path(&format!("/{name}"));
     let db = Database::postgres(case.as_str()).unwrap();
     db.initialize().await.unwrap();
-    eprintln!("retained P10 PostgreSQL layout fixture: {name}");
+    eprintln!("retained PostgreSQL layout fixture: {name}");
     db
 }
 
@@ -285,10 +285,10 @@ async fn postgres_rejects_brin_and_partial_job_indexes() {
 async fn postgres_rejects_foreign_namespace_reconciliation_link() {
     let db = postgres("foreignkey").await;
     forged_startup(&db, &[
-        "CREATE SCHEMA p10_shadow",
-        "CREATE TABLE p10_shadow.nx_jobs(id TEXT PRIMARY KEY)",
+        "CREATE SCHEMA shadow",
+        "CREATE TABLE shadow.nx_jobs(id TEXT PRIMARY KEY)",
         "ALTER TABLE nx_jobs DROP CONSTRAINT nx_jobs_reconciled_from_fkey",
-        "ALTER TABLE nx_jobs ADD CONSTRAINT nx_jobs_reconciled_from_fkey FOREIGN KEY(reconciled_from) REFERENCES p10_shadow.nx_jobs(id)",
+        "ALTER TABLE nx_jobs ADD CONSTRAINT nx_jobs_reconciled_from_fkey FOREIGN KEY(reconciled_from) REFERENCES shadow.nx_jobs(id)",
     ]).await;
 }
 

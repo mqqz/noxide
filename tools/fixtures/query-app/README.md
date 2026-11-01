@@ -8,7 +8,6 @@ registering their source List only as metadata.
 
 Use new output directories and a dedicated empty PostgreSQL database. The harness
 retains failures and never resets a database or removes previous artifacts.
-Production P09 admission must be enabled before the normal CLI build can pass.
 
 ```sh
 export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
@@ -28,5 +27,5 @@ resetting data. `result.json` records successful checkpoints; HTML, logs and
 `get-checkpoints.json` remain available on failure.
 
 The harness checks HTTP form behavior without client scripts. Browser-engine and
-broader team-document/membership/expiry acceptance are separate gates. The lockfile is
+broader team-document/membership/expiry tests are separate. The lockfile is
 copied from the reviewed blob fixture with only its root package name changed.

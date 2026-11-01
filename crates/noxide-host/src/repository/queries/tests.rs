@@ -76,7 +76,7 @@ fn effects(tx: Transaction, m: &Manifest) -> Effects {
         authority: Authority::new(
             None,
             DeploymentScope {
-                contract: "p09-tests".into(),
+                contract: "query-tests".into(),
                 incarnation: "deployment".into(),
                 generation: "active".into(),
             },
@@ -277,25 +277,25 @@ async fn runtime_case(db: Database) {
         .await;
 }
 #[tokio::test]
-async fn sqlite_p09_runtime_search_count_and_posting_rollback() {
+async fn sqlite_runtime_search_count_and_posting_rollback() {
     let dir = tempfile::tempdir().unwrap().keep();
-    eprintln!("retained P09 SQLite fixture {}", dir.display());
+    eprintln!("retained SQLite fixture {}", dir.display());
     runtime_case(Database::sqlite(dir.join("p09.db"))).await;
 }
 #[tokio::test]
 #[ignore = "requires NOXIDE_TEST_POSTGRES"]
-async fn postgres_p09_runtime_search_count_and_posting_rollback() {
+async fn postgres_runtime_search_count_and_posting_rollback() {
     use sqlx::Connection;
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-    let name = format!("nx_p09_{}", crate::security::record_id().unwrap());
+    let name = format!("nx_query_{}", crate::security::record_id().unwrap());
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(&mut admin)
         .await
         .unwrap();
     let mut case = url::Url::parse(&url).unwrap();
     case.set_path(&name);
-    eprintln!("retained P09 fixture database {name}");
+    eprintln!("retained fixture database {name}");
     runtime_case(Database::postgres(case.as_str()).unwrap()).await;
 }
 
@@ -376,9 +376,9 @@ async fn scalar_case(db: Database) {
         .await;
 }
 #[tokio::test]
-async fn sqlite_p09_scalar_cursor_range_and_sum() {
+async fn sqlite_scalar_cursor_range_and_sum() {
     let dir = tempfile::tempdir().unwrap().keep();
-    eprintln!("retained P09 scalar fixture {}", dir.display());
+    eprintln!("retained scalar fixture {}", dir.display());
     scalar_case(Database::sqlite(dir.join("p09.db"))).await;
 }
 
@@ -410,9 +410,9 @@ async fn aggregate_limit_case(db: Database) {
         .await;
 }
 #[tokio::test]
-async fn sqlite_p09_aggregate_1001_candidates_returns_limit_without_partial() {
+async fn sqlite_aggregate_1001_candidates_returns_limit_without_partial() {
     let dir = tempfile::tempdir().unwrap().keep();
-    eprintln!("retained P09 limit fixture {}", dir.display());
+    eprintln!("retained limit fixture {}", dir.display());
     aggregate_limit_case(Database::sqlite(dir.join("p09.db"))).await;
 }
 
@@ -498,7 +498,7 @@ async fn hundred_thousand_case(db: Database) {
     owner().await.run(async {
         let mut e=effects(begin(&db).await,&m);let rows:Vec<Record>=serde_json::from_slice(&e.invoke(1,0).await.unwrap()).unwrap();
         assert!(rows.is_empty());assert_eq!(e.more,Some(CursorKey::Created{sequence:64,record:1000064}));assert_eq!(RequestScope::search_candidates_remaining().unwrap(),192);
-        eprintln!("P09 100k actual runtime sealed64 hidden candidates, returned0, continuation64");
+        eprintln!("100k actual runtime sealed64 hidden candidates, returned0, continuation64");
         #[cfg(feature="query-metrics")]
         {
             let frontier=format!("SELECT record_id FROM nx_search_postings WHERE resource={storage} AND field=0 AND token='rust' ORDER BY created_seq ASC,record_id ASC LIMIT 64");
@@ -507,7 +507,7 @@ async fn hundred_thousand_case(db: Database) {
             let ids=(1000001..=1000064).map(|id|id.to_string()).collect::<Vec<_>>().join(",");
             let and=format!("SELECT record_id,incarnation,revision FROM nx_search_postings WHERE resource={storage} AND record_id IN ({ids}) AND field IN (0) AND token IN ('rust','العربية') GROUP BY record_id,incarnation,revision HAVING COUNT(DISTINCT token)=2 LIMIT 64");
             let and_visits=e.tx.examined_rows(&and).await.unwrap();assert!(and_visits<=2048,"bounded AND visited {and_visits}");
-            eprintln!("P09 100k real provider postingfrontier={frontier_visits} visits finiteAND={and_visits} visits");
+            eprintln!("100k real provider postingfrontier={frontier_visits} visits finiteAND={and_visits} visits");
         }
         e.tx.rollback().await.unwrap();
     }).await;
@@ -540,7 +540,7 @@ async fn hundred_thousand_case(db: Database) {
         #[cfg(feature="query-metrics")]
         {
             let expression=crate::query_plan::scalar::Scalar::new(&scalar.resources[0].fields[1],query::Direction::Ascending).unwrap().expression(e.tx.query_provider().unwrap()).unwrap();
-            let sql=format!("SELECT id FROM nx_records WHERE resource={storage} AND owner='{ALICE}' ORDER BY {expression} ASC,id ASC LIMIT 64");let visits=e.tx.examined_rows(&sql).await.unwrap();assert!(visits<=64,"scalar prefix visited {visits}");eprintln!("P09 100k real provider scalarowner={visits} visits");
+            let sql=format!("SELECT id FROM nx_records WHERE resource={storage} AND owner='{ALICE}' ORDER BY {expression} ASC,id ASC LIMIT 64");let visits=e.tx.examined_rows(&sql).await.unwrap();assert!(visits<=64,"scalar prefix visited {visits}");eprintln!("100k real provider scalarowner={visits} visits");
         }
         e.tx.rollback().await.unwrap();
     }).await;
@@ -567,7 +567,7 @@ async fn hundred_thousand_case(db: Database) {
             let expression=crate::query_plan::scalar::Scalar::new(&multi.resources[0].fields[1],query::Direction::Descending).unwrap().expression(e.tx.query_provider().unwrap()).unwrap();
             let global=format!("SELECT id FROM nx_records WHERE resource={storage} ORDER BY {expression} DESC,id DESC LIMIT 64");
             let owned=format!("SELECT id FROM nx_records WHERE resource={storage} AND owner='{ALICE}' ORDER BY {expression} DESC,id DESC LIMIT 64");
-            let global_visits=e.tx.examined_rows(&global).await.unwrap();let owner_visits=e.tx.examined_rows(&owned).await.unwrap();assert!(global_visits<=64 && owner_visits<=64);eprintln!("P09 100k policy OR fixed streams:global={global_visits} owned={owner_visits} actual visits; hidden empty continuation preserved");
+            let global_visits=e.tx.examined_rows(&global).await.unwrap();let owner_visits=e.tx.examined_rows(&owned).await.unwrap();assert!(global_visits<=64 && owner_visits<=64);eprintln!("100k policy OR fixed streams:global={global_visits} owned={owner_visits} actual visits; hidden empty continuation preserved");
         }
         e.tx.rollback().await.unwrap();
     }).await;
@@ -604,39 +604,39 @@ async fn hundred_thousand_case(db: Database) {
         let count:AggregateResult=serde_json::from_slice(&e.invoke(4,0).await.unwrap()).unwrap();assert_eq!(count,Ok(query::AggregateValue::Count(1)));
         #[cfg(feature="query-metrics")]
         {
-            let field=e.tx.field_expression("workspace").unwrap();let sql=format!("SELECT id FROM nx_records WHERE resource={storage} AND owner='{BOB}' AND {field}='42' ORDER BY created_seq ASC,id ASC LIMIT 64");let visits=e.tx.examined_rows(&sql).await.unwrap();assert!(visits<=64,"scoped aggregate scanned {visits}");eprintln!("P09 100k ordinary aggregate exact owner/scope={visits} actual visits");
+            let field=e.tx.field_expression("workspace").unwrap();let sql=format!("SELECT id FROM nx_records WHERE resource={storage} AND owner='{BOB}' AND {field}='42' ORDER BY created_seq ASC,id ASC LIMIT 64");let visits=e.tx.examined_rows(&sql).await.unwrap();assert!(visits<=64,"scoped aggregate scanned {visits}");eprintln!("100k ordinary aggregate exact owner/scope={visits} actual visits");
         }
         e.tx.rollback().await.unwrap();
     }).await;
 }
 #[tokio::test]
-async fn sqlite_p09_hundred_thousand_hidden_rows_keep_finite_frontier() {
+async fn sqlite_hundred_thousand_hidden_rows_keep_finite_frontier() {
     let dir = tempfile::tempdir().unwrap().keep();
-    eprintln!("retained P09 100k SQLite fixture {}", dir.display());
+    eprintln!("retained 100k SQLite fixture {}", dir.display());
     hundred_thousand_case(Database::sqlite(dir.join("p09.db"))).await;
 }
 #[tokio::test]
 #[ignore = "requires NOXIDE_TEST_POSTGRES"]
-async fn postgres_p09_hundred_thousand_hidden_rows_keep_finite_frontier() {
+async fn postgres_hundred_thousand_hidden_rows_keep_finite_frontier() {
     use sqlx::Connection;
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-    let name = format!("nx_p09_100k_{}", crate::security::record_id().unwrap());
+    let name = format!("nx_query_100k_{}", crate::security::record_id().unwrap());
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(&mut admin)
         .await
         .unwrap();
     let mut case = url::Url::parse(&url).unwrap();
     case.set_path(&name);
-    eprintln!("retained P09 100k fixture database {name}");
+    eprintln!("retained 100k fixture database {name}");
     hundred_thousand_case(Database::postgres(case.as_str()).unwrap()).await;
 }
 
 #[tokio::test]
-async fn sqlite_p09_principal_selection_aggregates_recheck_each_principal() {
+async fn sqlite_principal_selection_aggregates_recheck_each_principal() {
     let dir = tempfile::tempdir().unwrap().keep();
-    eprintln!("retained P09 principal fixture {}", dir.display());
-    let db = Database::sqlite(dir.join("p09-principal.db"));
+    eprintln!("retained principal fixture {}", dir.display());
+    let db = Database::sqlite(dir.join("principal.db"));
     let mut m = manifest();
     m.resources[0].fields.push(TextField {
         immutable: true,
@@ -874,7 +874,7 @@ async fn four_step_receipts_case(db: Database) {
     assert_eq!(reserved, 0);
     assert_eq!(free + spent, 256);
     eprintln!(
-        "P09 four-step actual SQL:spent={spent} free={free} reserved={reserved}, includes abort/retry/receipt/navigation"
+        "four-step actual SQL:spent={spent} free={free} reserved={reserved}, includes abort/retry/receipt/navigation"
     );
     app.submit(&session, 1, &submission, &csrf, input)
         .await
@@ -909,41 +909,41 @@ async fn four_step_receipts_case(db: Database) {
     if db.is_sqlite() {
         let bytes=tx.fetch::<1>("SELECT CAST((SELECT page_count FROM pragma_page_count)*(SELECT page_size FROM pragma_page_size) AS TEXT)",&[]).await.unwrap();
         eprintln!(
-            "P09 retained SQLite database allocated bytes={} (whole fixture footprint, not physical write bound)",
+            "retained SQLite database allocated bytes={} (whole fixture footprint, not physical write bound)",
             bytes[0][0]
         );
     } else {
         let bytes=tx.fetch::<2>("SELECT CAST(pg_relation_size('nx_search_postings') AS TEXT),CAST(pg_indexes_size('nx_search_postings') AS TEXT)",&[]).await.unwrap();
         let wal=tx.fetch::<1>("SELECT CAST(pg_wal_lsn_diff(pg_current_wal_insert_lsn(),CAST($1 AS pg_lsn)) AS TEXT)",&[before_wal.as_ref().unwrap().as_str().into()]).await.unwrap();
         eprintln!(
-            "P09 PostgreSQL postings relation bytes={} indexes bytes={} observed global WAL delta bytes={} (application/replay window, may include background work, not physical write bound)",
+            "PostgreSQL postings relation bytes={} indexes bytes={} observed global WAL delta bytes={} (application/replay window, may include background work, not physical write bound)",
             bytes[0][0], bytes[0][1], wal[0][0]
         );
     }
     eprintln!(
-        "P09 real four-update receipt:2048 postings per step,final2048 postings/revision5,1 receipt/four outcomes;513-token rejection, first-step abort and replay atomic"
+        "real four-update receipt:2048 postings per step,final2048 postings/revision5,1 receipt/four outcomes;513-token rejection, first-step abort and replay atomic"
     );
     tx.rollback().await.unwrap();
 }
 #[tokio::test]
-async fn sqlite_p09_four_mutation_steps_keep_postings_and_receipt_atomic() {
+async fn sqlite_four_mutation_steps_keep_postings_and_receipt_atomic() {
     let dir = tempfile::tempdir().unwrap().keep();
-    eprintln!("retained P09 receipt fixture {}", dir.display());
-    four_step_receipts_case(Database::sqlite(dir.join("p09-receipts.db"))).await;
+    eprintln!("retained receipt fixture {}", dir.display());
+    four_step_receipts_case(Database::sqlite(dir.join("receipts.db"))).await;
 }
 #[tokio::test]
 #[ignore = "requires NOXIDE_TEST_POSTGRES"]
-async fn postgres_p09_four_mutation_steps_keep_postings_and_receipt_atomic() {
+async fn postgres_four_mutation_steps_keep_postings_and_receipt_atomic() {
     use sqlx::Connection;
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-    let name = format!("nx_p09_receipt_{}", crate::security::record_id().unwrap());
+    let name = format!("nx_query_receipt_{}", crate::security::record_id().unwrap());
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(&mut admin)
         .await
         .unwrap();
     let mut case = url::Url::parse(&url).unwrap();
     case.set_path(&name);
-    eprintln!("retained P09 receipt database {name}");
+    eprintln!("retained receipt database {name}");
     four_step_receipts_case(Database::postgres(case.as_str()).unwrap()).await;
 }

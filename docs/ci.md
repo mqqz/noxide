@@ -121,8 +121,12 @@ cargo test --workspace --locked --offline -- \
   --include-ignored \
   --skip failure_tests::crash_worker \
   --skip postgres_nojs_browser_flow \
-  --skip postgres_typed_forms_browser_flow
+  --skip postgres_typed_forms_browser_flow \
+  --skip postgres_actual_sdk_nojs_http_workspace
 ```
+
+The last skip needs a built team-documents bundle; the application job covers the
+same flow through `tools/test_team_documents.py` on both providers.
 
 See [Running an application](running-applications.md) for local VM prerequisites
 and browser commands. Pass `--local` to `tools/test_sdk_package.py` or
@@ -204,6 +208,6 @@ empty PostgreSQL database. This checks native GET search controls, private
 aggregates, typed overflow, scalar pagination, cursor binding and unchanged
 record/receipt/postings/index state across GETs. The harness explicitly activates
 approved native indexes before serving and retains failures; it never resets a
-preexisting database. Browser-engine and final integrated checks remain separate.
+preexisting database. Browser-engine checks are separate.
 Wire11 golden refreshes deliberately change the version and consequent digests;
 all other canonical fixture fields must retain their reviewed semantics.

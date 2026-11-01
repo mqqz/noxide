@@ -1,6 +1,6 @@
 # Reservations
 
-This trusted proof app reserves inventory at the product price reviewed by the
+This trusted example application reserves inventory at the product price reviewed by the
 customer. It uses native HTML forms without JavaScript. Prices and totals are
 integer minor units. It takes no payments and sends no mail or network requests.
 
@@ -99,14 +99,15 @@ hold stock, reconciles one sealed job for operator `worker-once`, and proves the
 recurring repair releases another order whose one-shot was explicitly cancelled.
 Polling is bounded by committed state predicates. It does not rewrite timestamps,
 change the production duration or add a clock bypass. The external harness has no
-short deterministic fake-clock source; that faster gate requires the parent host
-test process. It reports expiry as not run unless explicitly enabled.
+short deterministic fake-clock source; that faster check requires the host test
+process. It reports expiry as not run unless explicitly enabled.
 
 `crates/noxide/tests/reservation_jobs.rs` checks the exact public SDK job lowering
 and registration boundaries. The simple and explicit SDK fixture sources emit the
-same contract; JSON baselines and approval hashes require central regeneration.
+same contract; JSON baselines and approval hashes are regenerated separately.
 Source changes alone do not establish provider, browser-engine, worker-budget or
-packaged-build acceptance. In particular, central integration must admit and meter
-recurring selection with this service-root plus derived-product target shape.
+packaged-build behavior. In particular, host admission and metering of recurring
+selection with this service-root plus derived-product target shape are not yet
+verified end to end.
 These requirements and checks do not establish audited security or transport
 anonymity; deployment infrastructure grants no guest external authority.

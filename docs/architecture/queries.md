@@ -135,7 +135,7 @@ request categories without logging values. Typed link parameters never
 bypass target validation.
 
 Search, immutable/live scalar ordering, indexed ranges and bounded Count/Sum/
-Min/Max extend these plans. See the [bounded query contract](p09-query-contract.md)
+Min/Max extend these plans. See the [bounded query contract](search.md)
 for tokenizer identity, exact-or-error aggregates, native GET forms, cursor
 transport and explicit index activation/rebuilds. All ordinary read authority,
 membership, visibility, gates and expiry still apply before output or operands.

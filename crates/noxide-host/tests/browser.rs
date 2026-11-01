@@ -57,8 +57,8 @@ async fn run_browser(component_key: &str, manifest_key: &str, tasks: bool) {
         .await
         .unwrap();
     if !status.success() {
-        eprintln!("browser evidence retained at {}", output.keep().display());
-        panic!("browser acceptance failed");
+        eprintln!("browser artifacts retained at {}", output.keep().display());
+        panic!("browser flow failed");
     }
     let mut connection = sqlx::PgConnection::connect(case.as_str()).await.unwrap();
     let row=sqlx::query("SELECT (SELECT count(*) FROM nx_records) AS records,(SELECT count(*) FROM nx_receipts) AS receipts").fetch_one(&mut connection).await.unwrap();

@@ -112,7 +112,7 @@ async fn work(database: Database) {
     }
     let visits = tx.examined_rows(&query).await.unwrap();
     eprintln!(
-        "P07 membership batch64: {visits} scanned rows; 100000 unrelated + 100000 wrong-role duplicates + 100000 expired matching duplicates; native planner, exact production EXISTS/LIMIT1 SQL"
+        "membership batch64: {visits} scanned rows; 100000 unrelated + 100000 wrong-role duplicates + 100000 expired matching duplicates; native planner, exact production EXISTS/LIMIT1 SQL"
     );
     assert!(
         (1..=256).contains(&visits),
@@ -132,7 +132,7 @@ async fn postgres_membership_batch64_bounds_adversarial_300k_work() {
     use sqlx::Connection;
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-    let name = format!("nx_p07_work_{}", std::process::id());
+    let name = format!("nx_work_{}", std::process::id());
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(&mut admin)
         .await

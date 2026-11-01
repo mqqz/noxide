@@ -3,7 +3,7 @@ use crate::effects::transport::TorProxy;
 use std::{future::Future, task::Poll, time::Duration};
 fn directory() -> std::path::PathBuf {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/capability-evidence/p11-owner-fixtures");
+        .join("../../target/test-fixtures/effect-owner-fixtures");
     std::fs::create_dir_all(&root).unwrap();
     let path = tempfile::Builder::new()
         .prefix("owner-")

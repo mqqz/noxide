@@ -341,7 +341,7 @@ impl Effects {
         );
         Ok(())
     }
-    /// P07's membership resolver joins here after references/accounts/initial
+    /// The membership resolver joins here after references/accounts/initial
     /// values have produced the canonical candidate and before guards or writes.
     pub(super) async fn authorize_create_row(
         &mut self,

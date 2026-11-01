@@ -1,7 +1,7 @@
 use noxide_protocol::{ListOrder, query::*};
 
 #[test]
-fn review_scalar_order_unknown_wire_fields_are_rejected() {
+fn scalar_order_unknown_wire_fields_are_rejected() {
     let wire = serde_json::json!({"field": {
         "field":"rank", "direction":"ascending", "mode":"immutable",
         "unchecked_authority": true
@@ -13,7 +13,7 @@ fn review_scalar_order_unknown_wire_fields_are_rejected() {
 }
 
 #[test]
-fn review_new_query_shapes_reject_unknown_wire_fields() {
+fn new_query_shapes_reject_unknown_wire_fields() {
     assert!(
         serde_json::from_value::<SearchIndex>(serde_json::json!({
             "tokenizer":TOKENIZER_ID,"fields":["body"],"max_bytes":4096,"unchecked":true

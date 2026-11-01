@@ -1,8 +1,5 @@
 # Lifecycle time
 
-Status: P06 clock integration implemented, awaiting independent review and final
-acceptance evidence. Resource expiry declarations/enforcement remain P07 work.
-
 `noxide-protocol/src/time.rs` defines distinct `Timestamp` and `Duration` types.
 Both store nonnegative signed 64-bit whole milliseconds. A timestamp is UTC since
 the Unix epoch; a duration carries no epoch. Named constructors check seconds to
@@ -89,9 +86,8 @@ operator wall accuracy is assumed, not externally certified.
 Clock recovery and key rotation must preserve both lifecycle columns. Recovery
 may reset the credential seconds observation under the existing fresh-key rule;
 it cannot reset lifecycle time, reuse a prior process's freshness lease, resume
-jobs, or undo previously observed expiry. The future jobs/effects package must
-pause durable queues at recovery and require explicit operator resumption; P06
-does not add placeholder queue tables or enable workers.
+jobs, or undo previously observed expiry. Durable job and effect queues must
+pause at recovery and require explicit operator resumption.
 
 The clock tests initialize the production schema and use real provider
 transactions/security code, with fake wall/monotonic points only in tests. They
@@ -125,12 +121,10 @@ A fresh host process/application is required to recover quarantined capacity;
 its startup still retains the durable lifecycle watermark and requires its own
 confirmed tick. This is fail-closed handling of uncertainty, not proof that an
 unresponsive provider has physically stopped. Provider cleanup and PID-scope
-assumptions remain explicit independent-review requirements.
+assumptions are explicit trusted-provider assumptions.
 
-The internal temporal-attempt accessor is ready for later consumers; no current
-resource path declares expiry. Independent review and exact final integrated-SHA
-provider/load/recovery evidence remain acceptance requirements. P07 must enforce
-resource expiry on every ordinary
+[Resource expiry](../membership.md) consumes the internal temporal-attempt
+accessor and must be enforced on every ordinary
 read/list/follow/search/aggregate/inspection/download/mutation path. Expiry does
 not release inventory or delete records, and receipt replay does not rerun
 original temporal guards. Current delivery authorization still applies.

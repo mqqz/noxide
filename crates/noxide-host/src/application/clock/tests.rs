@@ -198,7 +198,7 @@ async fn postgres_integrated_clock_startup_capacity_and_rotation() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     let name = format!(
-        "p06_integrate_{}",
+        "nx_clock_integrate_{}",
         security::random_id()
             .unwrap()
             .replace('-', "a")
@@ -382,7 +382,7 @@ async fn postgres_fixture(label: &str) -> (Database, String) {
     let root = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&root).await.unwrap();
     let name = format!(
-        "p06_{label}_{}",
+        "nx_clock_{label}_{}",
         security::random_id()
             .unwrap()
             .replace('-', "a")

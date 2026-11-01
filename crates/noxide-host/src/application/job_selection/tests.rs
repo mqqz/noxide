@@ -492,7 +492,7 @@ async fn provider(database: Database) {
             (2..=4).contains(&visits),
             "protected tenant/filter frontier examined {visits} rows"
         );
-        eprintln!("P10 selector100k unrelated index visits={visits}");
+        eprintln!("selector100k unrelated index visits={visits}");
         tx.rollback().await.unwrap();
     }
     // The barrier commits a new same-tenant expired row after the batch cutoff,
@@ -679,14 +679,14 @@ async fn provider(database: Database) {
 async fn sqlite_recurring_selector_cutoffs_scope_budget_and_native_frontier() {
     let base = std::env::var_os("NOXIDE_TEST_ARTIFACT_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("noxide-p10-selection"));
+        .unwrap_or_else(|| std::env::temp_dir().join("noxide-job-selection"));
     std::fs::create_dir_all(&base).unwrap();
     let directory = tempfile::Builder::new()
         .prefix("selector-")
         .tempdir_in(base)
         .unwrap()
         .keep();
-    eprintln!("retained P10 selector fixture {}", directory.display());
+    eprintln!("retained selector fixture {}", directory.display());
     provider(Database::sqlite(directory.join("selection.db"))).await;
 }
 #[tokio::test]
@@ -695,14 +695,14 @@ async fn postgres_recurring_selector_cutoffs_scope_budget_and_native_frontier() 
     use sqlx::Connection;
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-    let name = format!("nx_p10_select_{}", crate::security::record_id().unwrap());
+    let name = format!("nx_job_select_{}", crate::security::record_id().unwrap());
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(&mut admin)
         .await
         .unwrap();
     let mut case = url::Url::parse(&url).unwrap();
     case.set_path(&name);
-    eprintln!("retained P10 selector database {name}");
+    eprintln!("retained selector database {name}");
     provider(Database::postgres(case.as_str()).unwrap()).await;
 }
 

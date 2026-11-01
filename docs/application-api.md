@@ -888,4 +888,3 @@ operator grants supply no user ownership or browser credentials. The SDK
 the explicit registered contract.
 See [durable jobs](architecture/jobs.md) for limits and authorization, and
 [job operations](architecture/jobs-operations.md) for approval and reconciliation.
-Scheduling conveniences remain tracked separately under P12.

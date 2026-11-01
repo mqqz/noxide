@@ -715,7 +715,7 @@ async fn postgres_authority_sql_rows_expiry_and_mutations() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES")
         .expect("real PostgreSQL authority test requires NOXIDE_TEST_POSTGRES");
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-    let name = format!("nx_p07_authority_{}", std::process::id());
+    let name = format!("nx_authority_{}", std::process::id());
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(&mut admin)
         .await

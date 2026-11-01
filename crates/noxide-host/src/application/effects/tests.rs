@@ -352,7 +352,7 @@ impl Case {
         configured: Option<EffectDeployment>,
     ) -> Self {
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/capability-evidence/p11-action-fixtures");
+            .join("../../target/test-fixtures/effect-action-fixtures");
         std::fs::create_dir_all(&base).unwrap();
         let path = tempfile::Builder::new()
             .prefix("effects-")
@@ -435,7 +435,7 @@ impl Case {
             )
             .await
             .unwrap();
-        eprintln!("retained P11 action/outbox fixture: {}", path.display());
+        eprintln!("retained action/outbox fixture: {}", path.display());
         Self {
             path,
             app,
@@ -654,7 +654,7 @@ async fn real_job_source(database: Option<Database>) {
     ));
     assert_eq!(roots.len(), 1);
     eprintln!(
-        "P11 real job/effect original-budget meter: {:?}",
+        "real job/effect original-budget meter: {:?}",
         roots[0].statement_snapshot()
     );
     let (records, receipts, outbox, rows) = case.state().await;
@@ -708,7 +708,7 @@ async fn real_combined_budget(database: Option<Database>) {
     );
     assert_eq!(roots.len(), 1);
     eprintln!(
-        "P11 combined 4 mutations/2 jobs/2 emits budget refusal meter: {:?}",
+        "combined 4 mutations/2 jobs/2 emits budget refusal meter: {:?}",
         roots[0].statement_snapshot()
     );
     if let Some(jobs) = &case.app.jobs {
@@ -762,7 +762,7 @@ async fn postgres_real_action_effects_atomicity_and_replay() {
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     for mode in ["success", "ack", "rollback", "job", "combined"] {
         let name = format!(
-            "nx_p11_action_{mode}_{}",
+            "nx_effect_action_{mode}_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -774,7 +774,7 @@ async fn postgres_real_action_effects_atomicity_and_replay() {
             .unwrap();
         let mut case = url::Url::parse(&url).unwrap();
         case.set_path(&format!("/{name}"));
-        eprintln!("retained P11 PostgreSQL action fixture: {name}");
+        eprintln!("retained PostgreSQL action fixture: {name}");
         let db = Some(Database::postgres(case.as_str()).unwrap());
         match mode {
             "success" => real_success(db, false).await,

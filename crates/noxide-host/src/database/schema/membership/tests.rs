@@ -724,7 +724,7 @@ async fn postgres_schema_membership_activation() {
         .expect("NOXIDE_TEST_POSTGRES required for provider proof");
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     let name = format!(
-        "nx_p07_schema_{}_{}",
+        "nx_membership_schema_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

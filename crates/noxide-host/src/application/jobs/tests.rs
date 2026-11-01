@@ -136,7 +136,7 @@ impl Case {
     }
     async fn new_component(database: Option<Database>, m: Manifest, component: Vec<u8>) -> Self {
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/capability-evidence/p10-action-fixtures");
+            .join("../../target/test-fixtures/job-action-fixtures");
         std::fs::create_dir_all(&directory).unwrap();
         let path = tempfile::Builder::new()
             .prefix("real-action-")
@@ -191,7 +191,7 @@ impl Case {
             )
             .await
             .unwrap();
-        eprintln!("retained P10 real action fixture: {}", path.display());
+        eprintln!("retained real action fixture: {}", path.display());
         Self {
             path,
             db,
@@ -1317,7 +1317,7 @@ async fn postgres_service_action_integration() {
         "worker_maximum",
     ] {
         let name = format!(
-            "nx_p10_action_{case}_{}",
+            "nx_job_action_{case}_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -1329,7 +1329,7 @@ async fn postgres_service_action_integration() {
             .unwrap();
         let mut case_url = url::Url::parse(&url).unwrap();
         case_url.set_path(&format!("/{name}"));
-        eprintln!("retained P10 PostgreSQL fixture: {name}");
+        eprintln!("retained PostgreSQL fixture: {name}");
         let db = Some(Database::postgres(case_url.as_str()).unwrap());
         match case {
             "success" => success(db).await,

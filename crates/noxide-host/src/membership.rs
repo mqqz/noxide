@@ -1,4 +1,4 @@
-//! Disabled P07 leaf: admitted one-hop membership and request-owned witnesses.
+//! Disabled module: admitted one-hop membership and request-owned witnesses.
 //!
 //! This module grants no access until the integration in docs/membership.md is
 //! complete. In particular, ordinary resource expiry is not implemented here.

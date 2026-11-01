@@ -233,14 +233,14 @@ async fn postgres_search_layout_and_native_constraints() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     let name = format!(
-        "nx_p09_layout_{}_{}",
+        "nx_search_layout_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     );
-    eprintln!("P09 retained layout fixture: {name}");
+    eprintln!("retained layout fixture: {name}");
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(&mut admin)
         .await

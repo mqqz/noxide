@@ -9,18 +9,18 @@ fn deadline() -> Instant {
 
 #[tokio::test]
 #[ignore = "requires disposable NOXIDE_TEST_POSTGRES with CREATE DATABASE"]
-async fn review_postgres_rejects_schema_prefix_inside_state_literals() {
+async fn postgres_rejects_schema_prefix_inside_state_literals() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     let name = format!(
-        "nx_p09_review_literal_{}_{}",
+        "nx_search_layout_literal_{}_{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     );
-    eprintln!("P09 retained forged-CHECK fixture: {name}");
+    eprintln!("retained forged-CHECK fixture: {name}");
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(&mut admin)
         .await
@@ -61,7 +61,7 @@ async fn review_postgres_rejects_schema_prefix_inside_state_literals() {
         .unwrap();
     let counts = tx.fetch::<3>("SELECT CAST((SELECT COUNT(*) FROM nx_records) AS TEXT),CAST((SELECT COUNT(*) FROM nx_search_postings) AS TEXT),CAST((SELECT COUNT(*) FROM nx_receipts) AS TEXT)", &[]).await.unwrap();
     eprintln!(
-        "P09 forged-CHECK verifier_accepted={}; constraints={constraints:?}; state={state:?}; record/posting/receipt counts={counts:?}",
+        "forged-CHECK verifier_accepted={}; constraints={constraints:?}; state={state:?}; record/posting/receipt counts={counts:?}",
         result.is_ok()
     );
     tx.rollback().await.unwrap();
@@ -72,7 +72,7 @@ async fn review_postgres_rejects_schema_prefix_inside_state_literals() {
 }
 
 #[tokio::test]
-async fn review_sqlite_rejects_token_over_scalar_limit_after_nul() {
+async fn sqlite_rejects_token_over_scalar_limit_after_nul() {
     let path = std::env::temp_dir().join(format!(
         "retained-nul-{}-{}.db",
         std::process::id(),
@@ -81,7 +81,7 @@ async fn review_sqlite_rejects_token_over_scalar_limit_after_nul() {
             .unwrap()
             .as_nanos()
     ));
-    eprintln!("P09 retained NUL-token fixture: {}", path.display());
+    eprintln!("retained NUL-token fixture: {}", path.display());
     let db = Database::sqlite(path);
     db.initialize().await.unwrap();
     let mut tx = db.begin(deadline()).await.unwrap();
@@ -107,7 +107,7 @@ async fn review_sqlite_rejects_token_over_scalar_limit_after_nul() {
     let native_lengths = tx.fetch::<2>("SELECT CAST(length(token) AS TEXT),CAST(length(CAST(token AS BLOB)) AS TEXT) FROM nx_search_postings", &[]).await.unwrap();
     let counts = tx.fetch::<3>("SELECT CAST((SELECT COUNT(*) FROM nx_records) AS TEXT),CAST((SELECT COUNT(*) FROM nx_search_postings) AS TEXT),CAST((SELECT COUNT(*) FROM nx_receipts) AS TEXT)", &[]).await.unwrap();
     eprintln!(
-        "P09 NUL-token native_accepted={accepted}; initializer_accepted={}; rust_scalar_count={}; native_text/byte_lengths={native_lengths:?}; record/posting/receipt counts={counts:?}",
+        "NUL-token native_accepted={accepted}; initializer_accepted={}; rust_scalar_count={}; native_text/byte_lengths={native_lengths:?}; record/posting/receipt counts={counts:?}",
         initialize.is_ok(),
         token.chars().count()
     );

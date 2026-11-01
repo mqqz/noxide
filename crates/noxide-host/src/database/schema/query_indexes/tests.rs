@@ -134,7 +134,7 @@ async fn sqlite_query_indexes_pin_native_shape() {
 async fn postgres_query_indexes_pin_native_shape() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let name = format!(
-        "nx_p09_indexes_{}_{}",
+        "nx_query_indexes_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -146,7 +146,7 @@ async fn postgres_query_indexes_pin_native_shape() {
         .execute(&mut admin)
         .await
         .unwrap();
-    eprintln!("P09 retained index fixture: {name}");
+    eprintln!("retained index fixture: {name}");
     let fixture = format!("{}/{name}", url.rsplit_once('/').unwrap().0);
     contract(Database::postgres(&fixture).unwrap()).await;
 }

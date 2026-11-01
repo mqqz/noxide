@@ -1,11 +1,9 @@
 # Operating durable jobs
 
-The integrated P10 worker executes declared actions through the existing host action
+The job worker executes declared actions through the existing host action
 executor. Each service has an explicit worker identity, tenant and approved action
 subset. It receives no user account, browser credentials, edit secret, filesystem or
-network authority. P10 scoped acceptance and exact-source test evidence are in the
-[implementation ledger](implementation-ledger.md#p10-closure-at85ef201). Final
-combined operational and proof-application gates remain P13/P14.
+network authority.
 
 ## Deployment approval
 
@@ -152,5 +150,4 @@ copied from another owner directory. See the
 Storage 14 requires an explicit reviewed migration or a new empty database when the
 existing format differs. Jobs commands do not silently migrate or delete operator
 storage. The current implementation and focused tests do not establish an independent
-security audit or transport anonymity. P10 final integration/review gates and future
-P11 outbox delivery remain separate acceptance work.
+security audit or transport anonymity.

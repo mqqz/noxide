@@ -1,4 +1,4 @@
-//! Unregistered P09 pure values. This module grants no query or storage authority.
+//! Pure search values. This module grants no query or storage authority.
 mod index;
 mod postings;
 mod tokenizer;

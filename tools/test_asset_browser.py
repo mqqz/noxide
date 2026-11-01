@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""NoJS rich-document leaf browser regression with an all-attempt recording proxy.
+"""NoJS rich-document browser regression with an all-attempt recording proxy.
 
 The fixture must come from assets::document::tests::browser_fixture. This checks
-leaf output, not a substitute for exact-SHA integrated Application HTTP evidence.
+rendered fixture output, not the integrated Application HTTP path.
 """
 import argparse
 import http.client
@@ -80,8 +80,8 @@ def main():
             assert not any('/_noxide/assets/' in a['url'] for a in attempts[before:])
             assert not any('attacker.invalid' in a['url'] for a in attempts)
             assert all(a['allowed'] for a in attempts),('external attempt',attempts)
-            (args.output/'result.json').write_text(json.dumps({'browser':result['capabilities']['browserVersion'],'javascript_enabled':False,'attempts':attempts,'scope':'leaf fixture; integrated Application still required'},indent=2))
-            print('NoJS asset leaf: scoped CSS, image/font requests, native details/table/nav and all-attempt proxy checks passed')
+            (args.output/'result.json').write_text(json.dumps({'browser':result['capabilities']['browserVersion'],'javascript_enabled':False,'attempts':attempts,'scope':'rendered fixture; integrated Application not covered'},indent=2))
+            print('NoJS asset fixture: scoped CSS, image/font requests, native details/table/nav and all-attempt proxy checks passed')
         finally:
             (args.output/'attempts.json').write_text(json.dumps(attempts,indent=2))
             if session:

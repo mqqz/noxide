@@ -124,7 +124,7 @@ mod query_compatibility_tests {
     }
 
     #[test]
-    fn p09_cursor_scopes_bind_canonical_search_and_every_identity() {
+    fn cursor_scopes_bind_canonical_search_and_every_identity() {
         let canonical = |raw| {
             crate::search::canonical_query(raw, &mut || Ok(()))
                 .unwrap()

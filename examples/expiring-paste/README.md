@@ -145,12 +145,13 @@ job/effect epoch, pause retained work and reconcile it under current approval.
 A pairing/directory audit can refuse a copied or relocated store; retain that
 copy and use reviewed recovery rather than editing identities or bypassing the
 audit. Never automatically replay retained effects after restore. Complete
-backup/restore execution remains a parent integration gate.
+backup/restore execution is not yet tested.
 
 The SDK test in `crates/noxide/tests/expiring_paste.rs` checks exact declarations;
-the simple and explicit fixture sources are for central equivalence checks and
-JSON baseline generation. P11 and combined P13 acceptance, actual provider work
-budgets, packaged builds and browser-engine tests require separate evidence.
+the simple and explicit fixture sources are for SDK equivalence checks and
+JSON baseline generation. Effect delivery, combined service-expiry behavior,
+actual provider work budgets, packaged builds and browser-engine tests require
+separate verification.
 Source checks do not establish audited security, transport anonymity or deployment
 readiness. Application code and uploaded content remain hostile, and explicit
 deployment infrastructure grants no additional guest authority.

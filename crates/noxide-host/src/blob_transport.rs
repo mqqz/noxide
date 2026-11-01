@@ -1,5 +1,5 @@
 //! Attachment response values and bounded monotonic transfer accounting.
-//! This leaf grants no read authority and is not registered as an HTTP handler.
+//! This module grants no read authority and is not registered as an HTTP handler.
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::blobs::{
     DOWNLOAD_IDLE_MILLIS, MAX_UPLOAD_BYTES, TRANSFER_BUFFER_BYTES, TRANSFER_TOTAL_MILLIS,

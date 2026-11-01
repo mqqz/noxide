@@ -376,6 +376,3 @@ representation and debit/credit invariants), user-selected targets, deletes
 combined with other steps, updates to records created in the same transaction,
 conditional steps, more than one anonymous handover, and moving guest execution
 out of the write transaction.
-
-See the [implementation validation record](transaction-validation.md) for checks,
-acceptance-test coverage and approved design clarifications.

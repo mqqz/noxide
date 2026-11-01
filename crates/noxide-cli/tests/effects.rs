@@ -113,7 +113,7 @@ async fn inspect(root: &Path, secrets: &[&str]) -> Vec<serde_json::Value> {
 async fn actual_effect_cli_reconciles_explicitly_preserves_keys_and_redacts_payloads() {
     use std::os::unix::fs::PermissionsExt;
     let evidence = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/capability-evidence/p11-cli-fixtures");
+        .join("../../target/test-fixtures/effects-cli-fixtures");
     std::fs::create_dir_all(&evidence).unwrap();
     let root = tempfile::Builder::new()
         .prefix("operator-")

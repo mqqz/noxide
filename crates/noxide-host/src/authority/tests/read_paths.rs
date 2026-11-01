@@ -357,14 +357,14 @@ async fn postgres_read_list_follow_share_membership_and_expiry_authority() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     let prior = sqlx::query_scalar::<_, String>(
-        "SELECT datname FROM pg_database WHERE datname LIKE 'nx_p07_paths_%' ORDER BY datname",
+        "SELECT datname FROM pg_database WHERE datname LIKE 'nx_paths_%' ORDER BY datname",
     )
     .fetch_all(&mut admin)
     .await
     .unwrap();
-    eprintln!("P07 retained read-path fixtures before run: {prior:?}");
-    let name = format!("nx_p07_paths_{}", std::process::id());
-    eprintln!("P07 new read-path fixture: {name}");
+    eprintln!("retained read-path fixtures before run: {prior:?}");
+    let name = format!("nx_paths_{}", std::process::id());
+    eprintln!("new read-path fixture: {name}");
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(&mut admin)
         .await

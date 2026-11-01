@@ -644,7 +644,7 @@ async fn postgres_membership_provider_truth_table() {
     let url = std::env::var("NOXIDE_TEST_POSTGRES")
         .expect("real provider test requires NOXIDE_TEST_POSTGRES");
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-    let name = format!("nx_p07_membership_{}", std::process::id());
+    let name = format!("nx_membership_{}", std::process::id());
     sqlx::query(&format!("CREATE DATABASE {name}"))
         .execute(&mut admin)
         .await
