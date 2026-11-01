@@ -17,11 +17,14 @@
 //! let text = String::from("SELECT 1");
 //! noxide_sql::sql!(text);
 //! ```
-//! ```compile_fail
-//! fn statement(text: String) -> noxide_sql::Sql {
-//!     text.into()
-//! }
-//! ```
+#![cfg_attr(
+    not(feature = "test-support"),
+    doc = "```compile_fail
+fn statement(text: String) -> noxide_sql::Sql {
+    text.into()
+}
+```"
+)]
 #![forbid(unsafe_code)]
 #[cfg(test)]
 extern crate self as noxide_sql;

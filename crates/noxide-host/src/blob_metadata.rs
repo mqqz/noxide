@@ -87,7 +87,7 @@ impl MetadataContext<'_> {
             "anonymous_used_bytes",
         ]
         .iter()
-        .map(|name| self.tx.bounded_text(&sql!("CAST({name} AS TEXT)"), 20))
+        .map(|name| self.tx.bounded_text(sql!("CAST({name} AS TEXT)"), 20))
         .collect::<Vec<_>>()
         .joined(",");
         let rows=self.fetch::<10>(&sql!("SELECT {text},{counters},CASE WHEN EXISTS(SELECT 1 FROM nx_blobs) OR EXISTS(SELECT 1 FROM nx_blob_subjects) OR EXISTS(SELECT 1 FROM nx_blob_orphans) THEN '0' ELSE '1' END FROM nx_blob_store WHERE singleton=1"),&[]).await?;
@@ -246,7 +246,7 @@ impl MetadataContext<'_> {
                 if let Some((_, maximum)) = TEXT.iter().find(|(name, _)| name == column) {
                     self.tx.bounded_text(column, *maximum)
                 } else {
-                    self.tx.bounded_text(&sql!("CAST({column} AS TEXT)"), 20)
+                    self.tx.bounded_text(sql!("CAST({column} AS TEXT)"), 20)
                 }
             })
             .collect::<Vec<_>>()

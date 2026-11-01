@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // Shared fixtures are used selectively by each test target.
 #[allow(dead_code)]
 pub mod record_actions;

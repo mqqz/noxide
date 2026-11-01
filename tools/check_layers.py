@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Fail when a noxide-host production module depends on a higher layer.
+"""Fail when a crate or noxide-host module reaches outside its layer.
 
 Modules in the same layer may depend on each other; extraction into crates turns
 each boundary into a compiler rule. Test code is excluded.
 """
+import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -63,8 +65,59 @@ def targets(code):
     return found
 
 
-def main():
+# External crates that carry authority, and the only workspace crates allowed them.
+RESTRICTED = {
+    "sqlx": {"noxide-host"},
+    "rustls": {"noxide-host"},
+    "tokio-rustls": {"noxide-host"},
+    "webpki-roots": {"noxide-host"},
+    "argon2": {"noxide-host"},
+    "wasmtime": {"noxide-sandbox"},
+    "wasmparser": {"noxide-sandbox"},
+    "cssparser": {"noxide-asset-admission"},
+    "image": {"noxide-asset-admission"},
+    "hmac": {"noxide-keys"},
+    "chacha20poly1305": {"noxide-keys"},
+    "landlock": {"noxide-confine"},
+    "seccompiler": {"noxide-confine"},
+}
+# Workspace crates that perform no I/O, and may depend only on each other.
+PURE = {"noxide-admission", "noxide-assets", "noxide-render", "noxide-sql", "noxide-sql-macros"}
+ROOT = SRC.parent.parent.parent
+TEST_ONLY = {"noxide-test-support"}
+
+
+def crate_failures():
+    metadata = json.loads(subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--offline", "--no-deps"],
+        cwd=ROOT, check=True, capture_output=True, text=True).stdout)
+    workspace = {package["name"] for package in metadata["packages"]}
     failures = []
+    for package in metadata["packages"]:
+        name = package["name"]
+        for dependency in package["dependencies"]:
+            target = dependency["name"]
+            if dependency["kind"] == "dev":
+                continue
+            if name in RESTRICTED.get(target, {name}):
+                pass
+            else:
+                failures.append(f"{name} must not depend on {target}")
+            if target in TEST_ONLY:
+                failures.append(f"{name} has a production dependency on {target}")
+            if name in PURE and target in workspace and target not in PURE | {"noxide-protocol"}:
+                failures.append(f"pure crate {name} must not depend on {target}")
+    tree = subprocess.run(
+        ["cargo", "tree", "-p", "noxide-cli", "--offline", "--edges", "normal,build",
+         "--format", "{p} {f}"],
+        cwd=ROOT, check=True, capture_output=True, text=True).stdout
+    if "test-support" in tree:
+        failures.append("a deployed binary enables a test-support feature")
+    return failures
+
+
+def main():
+    failures = crate_failures()
     for path in sorted(SRC.rglob("*.rs")):
         relative = path.relative_to(SRC).as_posix()
         if SKIP.search("/" + relative) or relative == "lib.rs":
@@ -73,7 +126,10 @@ def main():
         if module not in RANK:
             failures.append(f"{relative}: module {module} has no layer")
             continue
-        for target in targets(production(path.read_text())):
+        code = production(path.read_text())
+        if module != "database" and re.search(r"\bsqlx::", code):
+            failures.append(f"{relative}: only the database module may use sqlx")
+        for target in targets(code):
             if target in RANK and RANK[target] > RANK[module]:
                 failures.append(f"{relative}: {module} must not depend on {target}")
     print("\n".join(failures) or "host layers ok")

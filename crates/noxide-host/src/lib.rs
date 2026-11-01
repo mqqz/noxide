@@ -1,4 +1,6 @@
 //! Trusted execution, rendering, and persistence for Noxide applications.
+// The only unsafe block reads SQLite scan counters in a test-only benchmark.
+#![cfg_attr(not(all(test, feature = "query-metrics")), forbid(unsafe_code))]
 pub use noxide_admission::{Presentation, assets, manifest, schema};
 pub(crate) use noxide_admission::{
     action_contract, expiry, ids, membership, policy, principal, query_plan, routing, search, sql,

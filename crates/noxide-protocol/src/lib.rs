@@ -1,4 +1,5 @@
 //! Versioned semantic protocol shared by the guest SDK and trusted host.
+#![forbid(unsafe_code)]
 
 pub mod assets;
 pub mod blobs;
