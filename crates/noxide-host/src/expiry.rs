@@ -1,8 +1,8 @@
 //! One lifecycle rule for ordinary visibility and authorized expiry assignments.
 use crate::{
-    database::Transaction,
-    lifecycle_clock::{AttemptTime, TemporalUnavailable},
     manifest,
+    query_plan::NativeProvider,
+    temporal::{AttemptTime, TemporalUnavailable},
 };
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::{FieldKind, Fields, Resource, expiry::MAX_EXPIRY_MILLIS, time::Timestamp};
@@ -62,9 +62,9 @@ pub(crate) fn available_to(
     fields: &Fields,
     time: Option<AttemptTime>,
     operation: &noxide_protocol::Operation,
-    principal: &crate::auth::Principal,
+    principal: &crate::principal::Principal,
 ) -> Result<bool> {
-    if operation.maintenance && matches!(principal, crate::auth::Principal::Service(_)) {
+    if operation.maintenance && matches!(principal, crate::principal::Principal::Service(_)) {
         if resource.expiry.is_some() {
             time.ok_or(TemporalUnavailable::NotStarted)?;
             // Validate the stored expiry even for explicitly approved maintenance.
@@ -97,22 +97,23 @@ pub(crate) fn check_write(
     Ok(())
 }
 
-pub(crate) fn numeric_sql(tx: &Transaction, field: &str, alias: &str) -> Result<String> {
+pub(crate) fn numeric_sql(provider: NativeProvider, field: &str, alias: &str) -> Result<String> {
     // Alias is a host-owned SQL identifier; fields are independently admitted.
     ensure!(manifest::identifier(alias), "invalid timestamp table alias");
     Ok(format!(
         "CAST({} AS BIGINT)",
-        tx.field_expression(field)?
+        provider
+            .field_expression(field)?
             .replacen("fields", &format!("{alias}.fields"), 1)
     ))
 }
 
 pub(crate) fn sql(
-    tx: &Transaction,
+    provider: NativeProvider,
     resource: &Resource,
     time: Option<AttemptTime>,
     alias: &str,
-    params: &mut Vec<crate::database::Param>,
+    params: &mut Vec<crate::sql::Param>,
 ) -> Result<String> {
     let Some(expiry) = &resource.expiry else {
         return Ok(String::new());
@@ -125,7 +126,7 @@ pub(crate) fn sql(
     );
     Ok(format!(
         " AND {}>${}",
-        numeric_sql(tx, &expiry.field, alias)?,
+        numeric_sql(provider, &expiry.field, alias)?,
         params.len()
     ))
 }

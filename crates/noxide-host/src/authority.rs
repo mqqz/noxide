@@ -5,13 +5,15 @@ use crate::{
     expiry,
     lifecycle_clock::{AttemptTime, TemporalUnavailable},
     manifest,
-    membership::{self, Deployment, LookupScope, Plan, ProtectedRow, Witnesses},
+    membership::{self, Deployment, LookupScope, Plan, ProtectedRow},
     policy,
 };
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::{Fields, Manifest, Operation, membership::ExistsRelated};
 use std::collections::BTreeMap;
 pub(crate) mod projection;
+pub(crate) mod witnesses;
+use witnesses::Witnesses;
 
 #[derive(Clone)]
 pub(crate) struct DeploymentScope {
@@ -298,7 +300,7 @@ impl Authority {
             plans.insert(plan.declaration().clone(), (plan, storage));
         }
         let clauses = policy::sql_with(
-            tx,
+            tx.query_provider()?,
             &operation.policy,
             principal,
             params,
@@ -318,7 +320,7 @@ impl Authority {
                     deployment: deployment.borrowed(),
                     time: self.time.ok_or(TemporalUnavailable::NotStarted)?,
                 };
-                plan.exists_sql(tx, *storage, &scope, true, params)
+                plan.exists_sql(tx.query_provider()?, *storage, &scope, true, params)
             },
         )?;
         let resource = manifest::resource(manifest, operation.resource)?;
@@ -328,7 +330,13 @@ impl Authority {
             }
             String::new()
         } else {
-            expiry::sql(tx, resource, self.time, "nx_records", params)?
+            expiry::sql(
+                tx.query_provider()?,
+                resource,
+                self.time,
+                "nx_records",
+                params,
+            )?
         };
         Ok(clauses
             .into_iter()

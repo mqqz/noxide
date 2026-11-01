@@ -141,7 +141,12 @@ impl Transaction {
             let storage = self.storage_key(&resource.name).await?;
             for tuple in &resource.unique {
                 let name = crate::membership::unique_index_name(storage, tuple)?;
-                let expected = crate::membership::unique_index_sql(self, resource, storage, tuple)?;
+                let expected = crate::membership::unique_index_sql(
+                    self.query_provider()?,
+                    resource,
+                    storage,
+                    tuple,
+                )?;
                 let (definition, table, usable) = actual.remove(&name).with_context(|| {
                     format!(
                         "missing membership unique index {name}; run noxide schema indexes CONFIG"
@@ -198,7 +203,12 @@ impl Transaction {
             let storage = self.storage_key(&resource.name).await?;
             for tuple in &resource.unique {
                 self.execute(
-                    &crate::membership::unique_index_sql(self, resource, storage, tuple)?,
+                    &crate::membership::unique_index_sql(
+                        self.query_provider()?,
+                        resource,
+                        storage,
+                        tuple,
+                    )?,
                     &[],
                 )
                 .await?;

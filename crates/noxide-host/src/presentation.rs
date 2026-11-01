@@ -138,7 +138,7 @@ impl Presentation {
                     ensure!(!overlap, "capability endpoint overlaps application route");
                 }
                 ensure!(
-                    crate::render::match_path(route, path).is_none(),
+                    crate::routing::match_path(route, path).is_none(),
                     "host endpoint overlaps application route"
                 );
                 if *path == self.action_path {
@@ -153,7 +153,7 @@ impl Presentation {
                         ..route.clone()
                     };
                     ensure!(
-                        !crate::render::paths_overlap(route, &action),
+                        !crate::routing::paths_overlap(route, &action),
                         "action endpoint overlaps application route"
                     );
                 }

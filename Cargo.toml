@@ -5,6 +5,7 @@ members = [
     "crates/noxide-cli",
     "crates/noxide-macros",
     "crates/noxide-protocol",
+    "crates/noxide-sandbox",
     "crates/noxide-host",
 ]
 
@@ -20,6 +21,7 @@ repository = "https://github.com/mqqz/noxide"
 noxide = { path = "crates/noxide", version = "0.1.0" }
 noxide-macros = { path = "crates/noxide-macros", version = "0.1.0" }
 noxide-protocol = { path = "crates/noxide-protocol", version = "0.1.0" }
+noxide-sandbox = { path = "crates/noxide-sandbox", version = "0.1.0" }
 noxide-host = { path = "crates/noxide-host", version = "0.1.0" }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }

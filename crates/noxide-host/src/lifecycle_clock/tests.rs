@@ -458,7 +458,7 @@ async fn postgres_durable_lifecycle_contract() {
     let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
     let name = format!(
         "nx_lifecycle_clock_{}",
-        security::random_id()
+        crate::ids::random_id()
             .unwrap()
             .replace('-', "a")
             .replace('_', "b")

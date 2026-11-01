@@ -6,7 +6,7 @@ mod effects_layout;
 mod jobs_layout;
 pub(crate) mod lifecycle;
 mod maintenance;
-mod schema;
+pub(crate) mod schema;
 mod search_layout;
 use anyhow::{Context, Result, ensure};
 pub(crate) use commit::CommitFailure;
@@ -71,26 +71,7 @@ pub(crate) struct Transaction {
     ordinary: Option<lifecycle::Ordinary>,
 }
 
-#[derive(Clone)]
-pub(crate) enum Param {
-    Text(String),
-    Number(i64),
-}
-impl From<&str> for Param {
-    fn from(s: &str) -> Self {
-        Self::Text(s.into())
-    }
-}
-impl From<String> for Param {
-    fn from(s: String) -> Self {
-        Self::Text(s)
-    }
-}
-impl From<i64> for Param {
-    fn from(n: i64) -> Self {
-        Self::Number(n)
-    }
-}
+pub(crate) use crate::sql::Param;
 
 macro_rules! bound_query {
     ($sql:expr,$params:expr) => {{
@@ -298,7 +279,7 @@ impl Database {
             }
             DatabaseOptions::Postgres(options) => {
                 let scope = if maintenance.is_some() {
-                    format!("nx-clock-{}", crate::security::random_id()?)
+                    format!("nx-clock-{}", crate::ids::random_id()?)
                 } else {
                     String::new()
                 };
@@ -466,7 +447,7 @@ impl Database {
             )
             .await?;
         }
-        let epoch = crate::security::random_id()?;
+        let epoch = crate::ids::random_id()?;
         tx.execute(
             "UPDATE nx_job_runtime SET epoch=$1,state='paused' WHERE singleton=1",
             &[epoch.into()],
@@ -480,8 +461,8 @@ impl Database {
         )
         .await?;
         tx.pause_effects_for_epoch().await?;
-        let now = crate::security::now()?;
-        let generation = crate::security::random_id()?;
+        let now = crate::ids::now()?;
+        let generation = crate::ids::random_id()?;
         tx.execute(
             "UPDATE nx_deployment SET incarnation=$1,generation=$2 WHERE singleton=1",
             &[keys.incarnation().into(), generation.into()],
@@ -505,8 +486,8 @@ impl Database {
     pub async fn maintain(&self) -> Result<()> {
         let mut tx = self.begin(Instant::now() + Duration::from_secs(2)).await?;
         tx.check_storage().await?;
-        let now = crate::security::now()?;
-        let now = crate::security::observe_clock(&mut tx, now).await?;
+        let now = crate::ids::now()?;
+        let now = crate::lifecycle_clock::observe_clock(&mut tx, now).await?;
         tx.execute("DELETE FROM nx_receipts WHERE nonce IN (SELECT nonce FROM nx_receipts WHERE expires<$1 ORDER BY expires LIMIT 256)",&[(now-60).into()]).await?;
         tx.execute("DELETE FROM nx_sessions WHERE id IN (SELECT id FROM nx_sessions WHERE expires<$1 ORDER BY expires LIMIT 256)",&[(now-60).into()]).await?;
         tx.commit().await
@@ -787,7 +768,7 @@ impl Transaction {
         incarnation: &str,
         activate: bool,
     ) -> Result<String> {
-        let candidate = crate::security::random_id()?;
+        let candidate = crate::ids::random_id()?;
         if activate {
             self.execute("INSERT INTO nx_deployment(singleton,contract,incarnation,generation) VALUES(1,$1,$2,$3) ON CONFLICT(singleton) DO NOTHING",&[contract.into(),incarnation.into(),candidate.as_str().into()]).await?;
         }
@@ -1057,11 +1038,21 @@ impl Drop for Transaction {
     }
 }
 
+/// A conditional write lost to a concurrent transaction; the attempt may retry.
+#[derive(Debug)]
+pub(crate) struct ConditionalConflict;
+impl std::fmt::Display for ConditionalConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("conditional write conflict")
+    }
+}
+impl std::error::Error for ConditionalConflict {}
+
 pub(crate) fn retryable(error: &anyhow::Error) -> bool {
     if error.is::<commit::CommitFailure>() {
         return false;
     }
-    if error.is::<crate::repository::ConditionalConflict>() {
+    if error.is::<ConditionalConflict>() {
         return true;
     }
     #[cfg(test)]

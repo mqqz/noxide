@@ -130,7 +130,7 @@ pub(super) fn validate(manifest: &Manifest) -> Result<()> {
     };
     // Scalar typing has already run with each source action's shared node and
     // used-input state. A second expression counter here would reset its ceiling.
-    crate::jobs::validate_contract(
+    job_contract::validate_contract(
         manifest,
         jobs,
         |_: &Schedule| Ok(()),

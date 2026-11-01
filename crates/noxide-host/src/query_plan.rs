@@ -121,7 +121,7 @@ impl ListPlan {
     pub(crate) fn keyset(
         &self,
         after: Option<&noxide_protocol::query::CursorKey>,
-        params: &mut Vec<crate::database::Param>,
+        params: &mut Vec<crate::sql::Param>,
     ) -> Result<String> {
         let Some(key) = after else {
             return Ok(String::new());
@@ -148,8 +148,8 @@ impl ListPlan {
 impl ListPlan {
     pub(crate) fn selection_sql(
         &self,
-        tx: &crate::database::Transaction,
-        params: &mut Vec<crate::database::Param>,
+        provider: NativeProvider,
+        params: &mut Vec<crate::sql::Param>,
         values: &noxide_protocol::Fields,
     ) -> Result<String> {
         let mut sql = String::new();
@@ -158,7 +158,7 @@ impl ListPlan {
             params.push(value.as_str().into());
             sql.push_str(&format!(
                 " AND {}=${}",
-                tx.field_expression(&condition.field)?,
+                provider.field_expression(&condition.field)?,
                 params.len()
             ));
         }

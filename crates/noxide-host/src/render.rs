@@ -26,6 +26,13 @@ pub struct RenderContext<'a> {
     pub next_page: Option<String>,
     pub preview_links: Vec<RouteRef>,
     pub downloads: BTreeMap<(u32, u64, String), String>,
+    /// Charged during unbounded-looking render work. The caller's admitted budget.
+    pub checkpoint: fn() -> Result<()>,
+}
+
+/// Work that needs a budget fails closed when the caller granted none.
+fn no_budget() -> Result<()> {
+    anyhow::bail!("render work outside an admitted request")
 }
 
 impl RenderContext<'_> {
@@ -39,6 +46,7 @@ impl RenderContext<'_> {
             next_page: None,
             preview_links: Vec::new(),
             downloads: BTreeMap::new(),
+            checkpoint: no_budget,
         }
     }
 }
@@ -351,6 +359,7 @@ pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Re
                         .manifest
                         .ok_or_else(|| anyhow::anyhow!("no routes"))?,
                     form,
+                    context.checkpoint,
                 )?;
             }
             Instruction::Form { action } => {
@@ -542,9 +551,9 @@ pub(crate) fn recovery(
         }
     }
     if let Recovery::Rejected { errors, message } = &reason {
-        crate::application::ValidatedActionRejection::new(
+        crate::action_contract::ValidatedActionRejection::new(
             a.core,
-            crate::application::ActionRejection::Rejected {
+            crate::action_contract::ActionRejection::Rejected {
                 field_errors: (*errors).clone(),
                 message: (*message).to_owned(),
             },

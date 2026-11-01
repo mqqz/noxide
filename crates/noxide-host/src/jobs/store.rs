@@ -1,6 +1,6 @@
 use super::types::*;
 use crate::{
-    application::ValidatedActionRejection,
+    action_contract::ValidatedActionRejection,
     database::{Transaction, lifecycle::RequestScope},
     query_plan::NativeProvider,
 };

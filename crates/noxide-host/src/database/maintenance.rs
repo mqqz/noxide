@@ -80,7 +80,7 @@ impl Control {
         let timeout = remaining_ms(deadline)?.min(CLEANUP_RESERVE.as_millis() as u64);
         let options = options
             .clone()
-            .application_name(&format!("nx-ctl-{}", crate::security::random_id()?))
+            .application_name(&format!("nx-ctl-{}", crate::ids::random_id()?))
             .options([
                 ("statement_timeout", format!("{timeout}ms")),
                 ("lock_timeout", "1ms".into()),
@@ -445,7 +445,7 @@ mod tests {
         let mut admin = sqlx::PgConnection::connect(&root).await.unwrap();
         let name = format!(
             "nx_identity_{}",
-            crate::security::random_id()
+            crate::ids::random_id()
                 .unwrap()
                 .replace('-', "a")
                 .replace('_', "b")

@@ -16,6 +16,13 @@ pub(crate) struct PhysicalSnapshot {
     pub(crate) partial: Option<u64>,
     pub(crate) finalized: Option<u64>,
 }
+/// One bounded physical inventory page, produced by a stopped I/O worker.
+pub(crate) struct InventoryBatch {
+    pub(crate) items: Vec<(ObjectKey, Option<PhysicalSnapshot>)>,
+    pub(crate) complete: bool,
+}
+/// One physical object observation, produced by a stopped I/O worker.
+pub(crate) struct Snapshot(pub(crate) Option<PhysicalSnapshot>);
 pub(crate) struct SnapshotItem {
     pub(crate) key: ObjectKey,
     pub(crate) physical: Option<PhysicalSnapshot>,

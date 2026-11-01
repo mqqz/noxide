@@ -1,4 +1,3 @@
-use crate::http::Peer;
 use std::{
     collections::{BTreeMap, HashMap},
     future::Future,
@@ -13,6 +12,15 @@ use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
     time::Instant,
 };
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Peer {
+    Local,
+    Circuit(u32),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TransportDeadline(pub(crate) tokio::time::Instant);
 
 pub(crate) const MAX_CONNECTIONS: usize = 256;
 pub(crate) const MAX_CONNECTIONS_PER_CIRCUIT: usize = 4;

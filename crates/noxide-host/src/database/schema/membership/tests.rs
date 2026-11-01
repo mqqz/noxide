@@ -395,7 +395,13 @@ async fn contract(db: Database) {
     let tuple = &target.resources[0].unique[0];
     let name = crate::membership::unique_index_name(1, tuple).unwrap();
     let mut t = tx(&db).await;
-    let native = crate::membership::unique_index_sql(&t, &target.resources[0], 1, tuple).unwrap();
+    let native = crate::membership::unique_index_sql(
+        t.query_provider().unwrap(),
+        &target.resources[0],
+        1,
+        tuple,
+    )
+    .unwrap();
     t.rollback().await.unwrap();
     for spoof in [
         native.replacen("CREATE UNIQUE INDEX", "CREATE INDEX", 1),

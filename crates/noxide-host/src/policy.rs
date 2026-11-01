@@ -1,8 +1,5 @@
 //! Principal binding is shared by row checks and parameterized query filtering.
-use crate::{
-    auth::Principal,
-    database::{Param, Transaction},
-};
+use crate::{principal::Principal, query_plan::NativeProvider, sql::Param};
 use noxide_protocol::{Policy, Predicate};
 
 #[derive(Debug)]
@@ -172,17 +169,17 @@ pub(crate) fn allowed_with(
     })
 }
 pub(crate) fn sql(
-    tx: &Transaction,
+    provider: NativeProvider,
     policy: &Policy,
     principal: &Principal,
     params: &mut Vec<Param>,
 ) -> Vec<String> {
-    sql_with(tx, policy, principal, params, |_, _| Ok("1=0".into()))
+    sql_with(provider, policy, principal, params, |_, _| Ok("1=0".into()))
         .expect("infallible base policy")
 }
 
 pub(crate) fn sql_with(
-    tx: &Transaction,
+    provider: NativeProvider,
     policy: &Policy,
     principal: &Principal,
     params: &mut Vec<Param>,
@@ -210,7 +207,9 @@ pub(crate) fn sql_with(
                             params.push(id.into());
                             format!(
                                 "{}=${}",
-                                tx.field_expression(field).expect("admitted account field"),
+                                provider
+                                    .field_expression(field)
+                                    .expect("admitted account field"),
                                 params.len()
                             )
                         }
@@ -362,7 +361,8 @@ mod tests {
                 for owner in ["alice", "bob", ""] {
                     for tenant in ["one", "two", ""] {
                         let mut params = vec![Param::from(owner), Param::from(tenant)];
-                        let clauses = sql(&tx, policy, principal, &mut params);
+                        let clauses =
+                            sql(tx.query_provider().unwrap(), policy, principal, &mut params);
                         let statement = format!(
                             "SELECT ({}) FROM (SELECT $1 AS owner, $2 AS tenant, '{{\"recipient\":\"bob\"}}' AS fields)",
                             clauses.join(" OR ")

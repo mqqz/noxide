@@ -1,14 +1,18 @@
 //! Host-owned blob authority and transport integration. All metadata statements
 //! share the enclosing request's actual SQL meter and original deadline.
 use super::*;
+#[cfg(test)]
+use crate::blob_upload::Barrier;
+pub(crate) use crate::blob_upload::UploadScope;
 use crate::{
+    blob_inspect::{InventoryBatch, Snapshot},
     blob_io::{IoPool, IoWitness},
     blob_metadata::{MetadataContext, Reservation, ReservationOutcome},
     blob_state::{Commitment, UploadBinding},
     blob_store::{BlobStore, IoGuard, ObjectKey, PairStep},
 };
 use anyhow::Context;
-use noxide_protocol::{blobs::*, time::Timestamp};
+use noxide_protocol::blobs::*;
 use std::sync::{Mutex, atomic::AtomicBool};
 
 pub(crate) struct BlobRuntime {
@@ -72,34 +76,6 @@ impl BlobRuntime {
     }
 }
 
-/// Sealed at verified web admission. It contains no guest-selected identity.
-#[derive(Clone)]
-pub(crate) struct UploadScope {
-    pub(crate) store: BlobStore,
-    pub(crate) binding: UploadBinding,
-    verify: Arc<IoPool>,
-    #[cfg(test)]
-    barrier: Option<Arc<Barrier>>,
-}
-#[derive(Clone)]
-pub(crate) struct UploadContext {
-    scope: UploadScope,
-    pub(crate) now: Timestamp,
-}
-impl std::ops::Deref for UploadContext {
-    type Target = UploadScope;
-    fn deref(&self) -> &UploadScope {
-        &self.scope
-    }
-}
-impl UploadScope {
-    pub(super) fn at(self, time: crate::lifecycle_clock::AttemptTime) -> UploadContext {
-        UploadContext {
-            scope: self,
-            now: time.timestamp(),
-        }
-    }
-}
 fn commitment(domain: &str, values: &[&str]) -> Result<Commitment> {
     let mut hash = Sha256::new();
     hash.update(domain.as_bytes());
@@ -199,12 +175,12 @@ impl Application {
             )?,
         };
         let binding_id = binding.to_string();
-        Ok(Some(UploadScope {
-            store: blobs.store.clone(),
-            verify: blobs.uploads.clone(),
+        Ok(Some(UploadScope::new(
+            blobs.store.clone(),
+            blobs.uploads.clone(),
             #[cfg(test)]
-            barrier: blobs.verification.lock().unwrap().clone(),
-            binding: UploadBinding {
+            blobs.verification.lock().unwrap().clone(),
+            UploadBinding {
                 slot: commitment("noxide/upload-slot/v1", &[&self.deployment, nonce])?,
                 subject,
                 context: commitment(
@@ -213,55 +189,13 @@ impl Application {
                 )?,
                 input: commitment("noxide/upload-input/v1", &[&upload.input])?,
             },
-        }))
+        )))
     }
     pub(crate) fn upload_ticket(&self, binding: u32, submission: &str) -> String {
         self.keys.csrf(&format!(
             "noxide/upload-ticket/v1:{}:{binding}:{submission}",
             self.submission_contract()
         ))
-    }
-}
-
-impl UploadContext {
-    pub(crate) async fn verify(&self, row: &crate::blob_metadata::BlobRow) -> Result<()> {
-        let deadline = RequestScope::current_work_deadline().context("upload outside request")?;
-        let store = self.store.clone();
-        let key = row.metadata.key.clone();
-        let bytes = row.metadata.bytes;
-        let digest = row.metadata.digest.context("upload digest missing")?;
-        self.verify
-            .try_start(
-                key.clone(),
-                row.metadata.generation,
-                deadline.into_std(),
-                Arc::new(AtomicBool::new(false)),
-                move |guard| {
-                    let mut opened = store.open_object(&key, bytes, guard)?;
-                    opened.verify_digest(digest)
-                },
-            )?
-            .finish()
-            .await?;
-        #[cfg(test)]
-        if let Some(barrier) = &self.barrier {
-            barrier.wait().await;
-        }
-        Ok(())
-    }
-    pub(crate) async fn absent(&self, tx: &mut Transaction) -> Result<()> {
-        ensure!(
-            MetadataContext { tx }
-                .slot(&self.binding.slot)
-                .await?
-                .is_none(),
-            repository::ReferenceUnavailable
-        );
-        #[cfg(test)]
-        if let Some(barrier) = &self.barrier {
-            barrier.wait().await;
-        }
-        Ok(())
     }
 }
 
@@ -856,10 +790,6 @@ struct Inventory {
     directory: usize,
     pending: std::collections::VecDeque<ObjectKey>,
 }
-pub(crate) struct InventoryBatch {
-    items: Vec<(ObjectKey, Option<crate::blob_inspect::PhysicalSnapshot>)>,
-    complete: bool,
-}
 impl Inventory {
     fn new(store: &BlobStore) -> Result<Self> {
         use crate::blob_store::ObjectLocation;
@@ -1237,7 +1167,6 @@ impl Application {
             .await
     }
 }
-pub(crate) struct Snapshot(Option<crate::blob_inspect::PhysicalSnapshot>);
 
 impl Application {
     async fn blob_commit(tx: &mut Transaction) -> Result<()> {
@@ -1250,19 +1179,5 @@ impl Application {
         }
         result?;
         anyhow::bail!("blob metadata commit lacks acknowledgment")
-    }
-}
-
-#[cfg(test)]
-#[derive(Default)]
-struct Barrier {
-    entered: tokio::sync::Notify,
-    release: tokio::sync::Notify,
-}
-#[cfg(test)]
-impl Barrier {
-    async fn wait(&self) {
-        self.entered.notify_one();
-        self.release.notified().await;
     }
 }

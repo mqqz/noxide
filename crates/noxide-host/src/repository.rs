@@ -19,14 +19,7 @@ use noxide_protocol::query::CursorKey;
 use noxide_protocol::*;
 use std::sync::Arc;
 
-#[derive(Debug)]
-pub(crate) struct ReferenceUnavailable;
-impl std::fmt::Display for ReferenceUnavailable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("reference unavailable")
-    }
-}
-impl std::error::Error for ReferenceUnavailable {}
+pub(crate) use crate::action_contract::ReferenceUnavailable;
 
 #[derive(Debug)]
 pub(crate) struct GuardFailure {
@@ -40,14 +33,7 @@ impl std::fmt::Display for GuardFailure {
 }
 impl std::error::Error for GuardFailure {}
 
-#[derive(Debug)]
-pub(crate) struct ConditionalConflict;
-impl std::fmt::Display for ConditionalConflict {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("conditional write conflict")
-    }
-}
-impl std::error::Error for ConditionalConflict {}
+pub(crate) use crate::database::ConditionalConflict;
 
 fn adjust(
     current: i64,
@@ -106,11 +92,26 @@ pub(crate) fn create_prerequisites(operation: &Operation, principal: &Principal)
     })
 }
 
+impl noxide_sandbox::HostCalls for Effects {
+    fn storage_allowed(&self) -> bool {
+        matches!(self.request.kind, RequestKind::Route(_))
+    }
+    async fn invoke(&mut self, operation: u32, target: u64) -> Result<Vec<u8>> {
+        Effects::invoke(self, operation, target).await
+    }
+    fn follow_source(&mut self, resource: u32, id: u64) -> Result<()> {
+        Effects::follow_source(self, resource, id)
+    }
+    async fn follow(&mut self, operation: u32) -> Result<Vec<u8>> {
+        Effects::follow(self, operation).await
+    }
+}
+
 pub(crate) const MAX_LIST_DATABASE_CALLS: usize = 4096;
 
 pub(crate) struct Effects {
     pub authority: crate::authority::Authority,
-    pub upload: Option<crate::application::blobs::UploadContext>,
+    pub upload: Option<crate::blob_upload::UploadContext>,
     pub blob_reads:
         std::collections::BTreeMap<(u32, u64, String), (String, noxide_protocol::blobs::BlobRef)>,
     pub provenance:
@@ -369,7 +370,7 @@ pub(crate) async fn authorize_page_resource(
 impl Effects {
     pub(crate) async fn execute_transaction(
         &mut self,
-        action: crate::application::ActionCore<'_>,
+        action: crate::action_contract::ActionCore<'_>,
         time: Option<crate::lifecycle_clock::AttemptTime>,
     ) -> Result<Vec<MutationOutcome>> {
         ensure!(
@@ -609,7 +610,7 @@ impl Effects {
         step: &Step,
         mut fields: Fields,
         outcomes: &[MutationOutcome],
-        action: crate::application::ActionCore<'_>,
+        action: crate::action_contract::ActionCore<'_>,
         context: &computation::Context,
     ) -> Result<(MutationOutcome, StoredRecord)> {
         let m = self.manifest.clone();
@@ -974,7 +975,8 @@ impl Effects {
                 params.len()
             );
         }
-        let selection = plan.selection_sql(&self.tx, &mut params, &self.request.params)?;
+        let selection =
+            plan.selection_sql(self.tx.query_provider()?, &mut params, &self.request.params)?;
         let mut records = Vec::new();
         let mut last = cursor.clone();
         self.more = None;
@@ -1064,10 +1066,18 @@ impl Effects {
             let exact = scan.exact;
             let scan_policy = crate::policy::scan_policy(&op.policy, scan);
             let mut scan_params = vec![Param::Number(storage_resource)];
-            let clause =
-                crate::policy::sql(&self.tx, &scan_policy, &self.principal, &mut scan_params)
-                    .join(" OR ");
-            let selection = plan.selection_sql(&self.tx, &mut scan_params, &self.request.params)?;
+            let clause = crate::policy::sql(
+                self.tx.query_provider()?,
+                &scan_policy,
+                &self.principal,
+                &mut scan_params,
+            )
+            .join(" OR ");
+            let selection = plan.selection_sql(
+                self.tx.query_provider()?,
+                &mut scan_params,
+                &self.request.params,
+            )?;
             let mut parent_clause = String::new();
             if let Some(parent) = &plan.scope {
                 let target = self

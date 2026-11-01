@@ -168,7 +168,7 @@ async fn insert(
             .unwrap();
     let prepared =
         crate::search::PreparedPostings::new(&indexed, || checkpoint.checkpoint()).unwrap();
-    crate::repository::search::replace_postings(tx, storage, id, "row", 1, id, &prepared)
+    crate::database::schema::replace_postings(tx, storage, id, "row", 1, id, &prepared)
         .await
         .unwrap();
 }
@@ -790,7 +790,7 @@ async fn four_step_receipts_case(db: Database) {
             .unwrap();
     let prepared =
         crate::search::PreparedPostings::new(&indexed, || checkpoint.checkpoint()).unwrap();
-    crate::repository::search::replace_postings(&mut tx, storage, 42, "seed", 1, 1, &prepared)
+    crate::database::schema::replace_postings(&mut tx, storage, 42, "seed", 1, 1, &prepared)
         .await
         .unwrap();
     tx.commit().await.unwrap();

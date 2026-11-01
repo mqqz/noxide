@@ -1,10 +1,17 @@
 //! Trusted execution, rendering, and persistence for Noxide applications.
+mod action_contract;
 pub mod assets;
 mod blob_inspect;
 mod blob_io;
+mod blob_upload;
 pub mod deployment;
 pub mod effect_deployment;
+mod ids;
 pub mod job_deployment;
+mod limiter;
+mod principal;
+mod sql;
+mod temporal;
 pub use deployment::{BlobDeployment, DeploymentResources};
 pub use effect_deployment::{EffectDeployment, EffectGrant, EffectLimits, EffectSecret};
 pub use effects::{EffectOperatorCommand, EffectOperatorResult, EffectSummary};
@@ -21,7 +28,11 @@ mod jobs;
 mod lifecycle_clock;
 pub mod manifest;
 pub mod render;
-pub mod runtime;
+pub mod runtime {
+    pub use noxide_sandbox::Limits;
+    /// A guest with no storage grant, for admission checks outside an application.
+    pub type Runtime = noxide_sandbox::Runtime<noxide_sandbox::NoHostCalls>;
+}
 pub mod schema;
 pub use database::Database;
 mod auth;

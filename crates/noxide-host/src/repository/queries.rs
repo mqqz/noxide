@@ -139,7 +139,7 @@ impl FrontierContext<'_> {
                 params.len()
             ));
         }
-        clause.push_str(&plan.selection_sql(self.tx, params, self.params)?);
+        clause.push_str(&plan.selection_sql(self.tx.query_provider()?, params, self.params)?);
         if let Some(range) = op.query.as_ref().and_then(|q| q.range.as_ref()) {
             clause.push_str(&plan.scalar(self.manifest)?.range_sql(
                 self.tx.query_provider()?,
@@ -228,8 +228,13 @@ impl FrontierContext<'_> {
         let order = self.query_order(plan)?;
         for policy in policies {
             let mut params = vec![storage.into()];
-            let policy =
-                crate::policy::sql(self.tx, &policy, self.principal, &mut params).join(" OR ");
+            let policy = crate::policy::sql(
+                self.tx.query_provider()?,
+                &policy,
+                self.principal,
+                &mut params,
+            )
+            .join(" OR ");
             let restrictions = self.query_restrictions(op, plan, &mut params)?;
             let keyset = self.query_keyset(plan, after, &mut params)?;
             let upper = self.upper_clause("created_seq", &mut params)?;

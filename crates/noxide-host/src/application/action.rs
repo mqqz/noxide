@@ -3,9 +3,12 @@
 mod computation_tests;
 #[cfg(test)]
 mod membership_tests;
-mod rejection;
 mod targets;
 use super::{Application, EditReceipt, RequestError, navigation};
+pub(crate) use crate::action_contract::ActionCore;
+#[cfg(test)]
+pub(crate) use crate::action_contract::MAX_ACTION_REJECTION_BYTES;
+pub use crate::action_contract::{ActionRejection, ValidatedActionRejection};
 use crate::{
     auth,
     database::{Param, Transaction},
@@ -15,53 +18,11 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use noxide_protocol::{
-    Action, ActionTarget, Fields, Input, OperationKind, RedirectSource, RequestKind, RequestView,
-    ResponseIntent, Revision, Step, TargetSource, VERSION,
+    Action, ActionTarget, Fields, OperationKind, RedirectSource, RequestKind, RequestView,
+    ResponseIntent, Revision, TargetSource, VERSION,
 };
-#[cfg(test)]
-pub(crate) use rejection::MAX_ACTION_REJECTION_BYTES;
-pub use rejection::{ActionRejection, ValidatedActionRejection};
 pub(super) use targets::ReviewConflict;
 use tokio::time::Instant;
-
-/// Execution view of an approved action.
-#[derive(Clone, Copy)]
-pub(crate) struct ActionCore<'a> {
-    pub id: u32,
-    pub version: u32,
-    pub inputs: &'a [Input],
-    pub steps: &'a [Step],
-    pub targets: &'a [ActionTarget],
-}
-impl<'a> ActionCore<'a> {
-    pub fn of(action: &'a Action) -> Result<Self> {
-        Ok(Self {
-            id: action.id,
-            version: action.version,
-            inputs: &action.inputs,
-            steps: &action.steps,
-            targets: &action.targets,
-        })
-    }
-
-    pub fn uses_time(self) -> bool {
-        self.steps.iter().any(|step| {
-            step.guards.iter().any(|guard| guard.condition.uses_time())
-                || step
-                    .assign
-                    .iter()
-                    .any(|assignment| match &assignment.change {
-                        noxide_protocol::Change::Set(value) => value.uses_time(),
-                        noxide_protocol::Change::Increase { by, .. }
-                        | noxide_protocol::Change::Decrease { by, .. } => by.uses_time(),
-                    })
-        })
-    }
-
-    pub fn first_operation(self) -> u32 {
-        self.steps[0].operation
-    }
-}
 
 /// A host-canonicalized request bound to the approved execution contract.
 pub(super) struct CanonicalActionInput {
@@ -655,7 +616,7 @@ impl Application {
         Ok(InvocationContext {
             action: ActionCore::of(action)?,
             input: canonical,
-            principal: auth::Principal::from_verified_job(verified),
+            principal: crate::jobs::verified_job_principal(verified),
             targets,
             capability: None,
             observed: time.timestamp().unix_seconds_floor(),

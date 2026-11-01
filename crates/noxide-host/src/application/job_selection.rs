@@ -274,7 +274,7 @@ impl Application {
         let storage = tx
             .storage_resource(&self.manifest, operation.resource)
             .await?;
-        let principal = auth::Principal::from_locked_job_grant(locked);
+        let principal = crate::jobs::locked_grant_principal(locked);
         let window = FrontierContext {
             tx,
             manifest: &self.manifest,

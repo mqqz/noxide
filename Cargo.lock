@@ -1380,6 +1380,7 @@ dependencies = [
  "image",
  "libsqlite3-sys",
  "noxide-protocol",
+ "noxide-sandbox",
  "rand",
  "rustix",
  "rustls",
@@ -1394,8 +1395,6 @@ dependencies = [
  "unicode-normalization",
  "unicode-properties",
  "url",
- "wasmparser 0.245.1",
- "wasmtime",
  "wat",
  "webpki-roots",
 ]
@@ -1417,6 +1416,19 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "noxide-sandbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "noxide-protocol",
+ "serde_json",
+ "tokio",
+ "wasmparser 0.245.1",
+ "wasmtime",
+ "wat",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@ description = "Trusted Noxide application runtime"
 
 [dependencies]
 noxide-protocol.workspace = true
+noxide-sandbox.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,8 +24,6 @@ rustix.workspace = true
 unicode-normalization.workspace = true
 unicode-properties.workspace = true
 tokio.workspace = true
-wasmtime = { version = "=48.0.2", default-features = false, features = ["std", "runtime", "cranelift", "component-model", "async"] }
-wasmparser = "0.245"
 sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 hyper = { version = "1", features = ["http1", "server"] }

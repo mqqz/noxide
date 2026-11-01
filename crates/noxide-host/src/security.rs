@@ -1,4 +1,9 @@
-use crate::database::{Param, Transaction};
+pub(crate) use crate::ids::{now, random_id, record_id};
+#[cfg(test)]
+pub(crate) use crate::lifecycle_clock::CLOCK_PERSIST_LAG;
+pub(crate) use crate::lifecycle_clock::{
+    CLOCK_CHECKPOINT_BEGIN_DEADLINE, observe_clock, observe_clock_bounded, observe_clock_read,
+};
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chacha20poly1305::{
@@ -96,21 +101,6 @@ pub(crate) struct Token {
     pub issued: i64,
     pub expires: i64,
     pub incarnation: String,
-}
-
-pub(crate) fn random_id() -> Result<String> {
-    let mut bytes = [0; 32];
-    OsRng
-        .try_fill_bytes(&mut bytes)
-        .map_err(|_| anyhow::anyhow!("entropy unavailable"))?;
-    Ok(URL_SAFE_NO_PAD.encode(bytes))
-}
-pub(crate) fn record_id() -> Result<u64> {
-    let mut bytes = [0; 8];
-    OsRng
-        .try_fill_bytes(&mut bytes)
-        .map_err(|_| anyhow::anyhow!("entropy unavailable"))?;
-    Ok((u64::from_le_bytes(bytes) & (i64::MAX as u64)).max(1))
 }
 
 impl HostKeys {
@@ -363,105 +353,6 @@ impl HostKeys {
             .verify_slice(&URL_SAFE_NO_PAD.decode(value)?)
             .map_err(|_| anyhow::anyhow!("csrf mismatch"))
     }
-}
-
-pub(crate) fn now() -> Result<i64> {
-    Ok(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs()
-        .try_into()?)
-}
-
-/// A small wall-clock correction may delay expiry, but must never revive it.
-/// Every caller uses the returned high-water time, including token verification.
-pub(crate) const CLOCK_ROLLBACK_TOLERANCE: i64 = 60;
-
-pub(crate) async fn observe_clock(tx: &mut Transaction, now: i64) -> Result<i64> {
-    let rows = tx
-        .fetch::<1>(
-            "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
-            &[],
-        )
-        .await?;
-    let previous: i64 = rows
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("clock missing"))?[0]
-        .parse()?;
-    ensure!(now >= 0 && previous >= 0, "invalid clock");
-    ensure!(
-        previous.saturating_sub(now) <= CLOCK_ROLLBACK_TOLERANCE,
-        "clock moved backwards beyond tolerance; use recover-clock with a fresh host key"
-    );
-    if now > previous {
-        tx.execute(
-            "UPDATE nx_clock SET observed=$1 WHERE singleton=1 AND observed<$1",
-            &[Param::Number(now)],
-        )
-        .await?;
-    }
-    Ok(now.max(previous))
-}
-
-/// Gap beyond which a request persists the clock mark itself. The lifecycle tick
-/// persists it every second, so while the tick runs requests never write
-/// nx_clock and concurrent writes do not conflict on it. If the tick stalls,
-/// requests keep the persisted mark within this bound, as before.
-pub(crate) const CLOCK_PERSIST_LAG: i64 = 2;
-
-/// Request-path clock observation with rollback checks. It writes nx_clock only
-/// when the persisted mark is more than `CLOCK_PERSIST_LAG` seconds behind.
-pub(crate) async fn observe_clock_bounded(
-    tx: &mut Transaction,
-    now: i64,
-    memory: &std::sync::atomic::AtomicI64,
-) -> Result<i64> {
-    let rows = tx
-        .fetch::<1>(
-            "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
-            &[],
-        )
-        .await?;
-    let persisted: i64 = rows
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("clock missing"))?[0]
-        .parse()?;
-    let effective = observe_clock_read(tx, now, memory).await?;
-    if effective.saturating_sub(persisted) > CLOCK_PERSIST_LAG {
-        return observe_clock(tx, effective).await;
-    }
-    Ok(effective)
-}
-
-/// One clock tick's nonresetting budget, including connection, admission, COMMIT
-/// and confirmed cleanup. It must fit a networked database while staying below the
-/// one-second tick interval; requests never wait on it.
-pub(crate) const CLOCK_CHECKPOINT_BEGIN_DEADLINE: std::time::Duration =
-    std::time::Duration::from_millis(750);
-
-pub(crate) async fn observe_clock_read(
-    tx: &mut Transaction,
-    now: i64,
-    memory: &std::sync::atomic::AtomicI64,
-) -> Result<i64> {
-    use std::sync::atomic::Ordering;
-    let rows = tx
-        .fetch::<1>(
-            "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
-            &[],
-        )
-        .await?;
-    let previous: i64 = rows
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("clock missing"))?[0]
-        .parse()?;
-    ensure!(now >= 0 && previous >= 0, "invalid clock");
-    let prior = memory.fetch_max(now, Ordering::Relaxed);
-    let high = previous.max(prior);
-    ensure!(
-        high.saturating_sub(now) <= CLOCK_ROLLBACK_TOLERANCE,
-        "clock moved backwards beyond tolerance; use recover-clock with a fresh host key"
-    );
-    Ok(now.max(high))
 }
 
 #[cfg(test)]

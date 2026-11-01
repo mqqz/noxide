@@ -82,7 +82,7 @@ impl Values<'_> {
     pub fn value(
         &self,
         value: &Value,
-        action: crate::application::ActionCore<'_>,
+        action: crate::action_contract::ActionCore<'_>,
     ) -> Result<Scalar> {
         Ok(match value {
             Value::Input(name) => {
@@ -198,7 +198,7 @@ impl Values<'_> {
     fn condition(
         &self,
         condition: &GuardCondition,
-        action: crate::application::ActionCore<'_>,
+        action: crate::action_contract::ActionCore<'_>,
     ) -> Result<bool> {
         match condition {
             GuardCondition::All(conditions) => {
@@ -228,7 +228,11 @@ impl Values<'_> {
             }
         }
     }
-    pub fn guards(&self, step: &Step, action: crate::application::ActionCore<'_>) -> Result<()> {
+    pub fn guards(
+        &self,
+        step: &Step,
+        action: crate::action_contract::ActionCore<'_>,
+    ) -> Result<()> {
         for guard in &step.guards {
             if !self.condition(&guard.condition, action)? {
                 return Err(GuardFailure {
@@ -313,7 +317,7 @@ impl Effects {
     }
     pub(super) async fn current_guard_authority(
         &mut self,
-        action: crate::application::ActionCore<'_>,
+        action: crate::action_contract::ActionCore<'_>,
         step: &Step,
         stored: Option<&StoredRecord>,
     ) -> Result<()> {

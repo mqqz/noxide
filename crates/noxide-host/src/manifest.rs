@@ -3,6 +3,7 @@ mod blobs;
 mod computation;
 mod effect_admission;
 mod job_admission;
+pub(crate) mod job_contract;
 mod query;
 use anyhow::{Result, ensure};
 pub use computation::{ComputationDisclosure, ComputationSource, action_disclosures};
@@ -656,12 +657,12 @@ pub fn validate(m: &Manifest) -> Result<()> {
     crate::query_plan::required_indexes(m)?;
     for r in &m.routes {
         validate_route_params(m, r)?;
-        crate::render::validate_path(r)?;
+        crate::routing::validate_path(r)?;
         ensure!(paths.insert(&r.path), "duplicate route path");
         for other in &m.routes {
             if other.id != r.id {
                 ensure!(
-                    !crate::render::paths_overlap(r, other),
+                    !crate::routing::paths_overlap(r, other),
                     "ambiguous route patterns"
                 );
             }

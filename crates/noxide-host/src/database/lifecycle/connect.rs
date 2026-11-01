@@ -116,7 +116,7 @@ async fn open_inner(
         }
         DatabaseOptions::Postgres(options) => {
             let remaining = maintenance::remaining_ms(deadline)?;
-            let scope = format!("nx-request-{}", crate::security::random_id()?);
+            let scope = format!("nx-request-{}", crate::ids::random_id()?);
             let options = options.clone().application_name(&scope).options([
                 ("statement_timeout", format!("{}ms", remaining.min(1500))),
                 ("lock_timeout", format!("{}ms", remaining.min(250))),

@@ -1,6 +1,6 @@
 //! Typed stable-key SQL for the existing record query executor.
 use super::{NativeProvider, ScalarRepresentation};
-use crate::database::Param;
+use crate::sql::Param;
 use anyhow::{Result, ensure};
 use noxide_protocol::{
     FieldKind, Fields, Operand, TextField,

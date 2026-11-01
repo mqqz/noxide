@@ -272,6 +272,7 @@ impl Application {
                     params: Default::default(),
                 }),
                 &RenderContext {
+                    checkpoint: crate::database::lifecycle::RequestScope::checkpoint_current,
                     presentation: &self.presentation,
                     manifest: Some(&self.manifest),
                     ..RenderContext::empty()

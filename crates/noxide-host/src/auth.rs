@@ -1,3 +1,4 @@
+pub(crate) use crate::principal::{Principal, PrincipalKey, User};
 use crate::{
     Database,
     database::{Param, Transaction},
@@ -18,88 +19,6 @@ pub enum Registration {
     Closed,
     Invite,
     Open,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) enum Principal {
-    Anonymous,
-    User(User),
-    Service(ServiceIdentity),
-}
-
-/// Constructed only from the queue's authoritative, transaction-locked grant.
-/// A worker has no account ID, user roles, session, or ownership identity.
-#[derive(Clone, Debug)]
-pub(crate) struct ServiceIdentity {
-    deployment: String,
-    tenant: String,
-    worker: String,
-}
-impl ServiceIdentity {
-    pub(crate) fn tenant(&self) -> &str {
-        &self.tenant
-    }
-    pub(crate) fn worker(&self) -> &str {
-        &self.worker
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PrincipalKey {
-    Anonymous,
-    User {
-        id: String,
-        tenant: String,
-    },
-    Service {
-        deployment: String,
-        tenant: String,
-        worker: String,
-    },
-}
-impl Principal {
-    pub(crate) fn authority_key(&self) -> PrincipalKey {
-        match self {
-            Self::Anonymous => PrincipalKey::Anonymous,
-            Self::User(user) => PrincipalKey::User {
-                id: user.id.clone(),
-                tenant: user.tenant.clone(),
-            },
-            Self::Service(service) => PrincipalKey::Service {
-                deployment: service.deployment.clone(),
-                tenant: service.tenant.clone(),
-                worker: service.worker.clone(),
-            },
-        }
-    }
-    pub(crate) fn from_locked_job_grant(proof: &crate::jobs::VerifiedScheduleGrant) -> Self {
-        let grant = proof.grant();
-        Self::Service(ServiceIdentity {
-            deployment: grant.scope.deployment.clone(),
-            tenant: grant.scope.tenant.clone(),
-            worker: grant.worker.name.clone(),
-        })
-    }
-    pub(crate) fn from_verified_job(job: &crate::jobs::VerifiedJob) -> Self {
-        Self::Service(ServiceIdentity {
-            deployment: job.deployment().to_owned(),
-            tenant: job.tenant().to_owned(),
-            worker: job.worker().to_owned(),
-        })
-    }
-    pub(crate) fn user(&self) -> Result<&User> {
-        match self {
-            Self::User(user) => Ok(user),
-            Self::Anonymous | Self::Service(_) => anyhow::bail!("policy denied"),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct User {
-    pub id: String,
-    pub tenant: String,
-    pub roles: Vec<(String, String)>,
 }
 
 impl Database {
@@ -143,7 +62,7 @@ pub(crate) async fn login(
     login_name: &str,
     password: &str,
     now: i64,
-    permits: crate::runtime::limiter::HashPermits,
+    permits: crate::limiter::HashPermits,
 ) -> Result<String> {
     ensure!(
         crate::manifest::identifier(login_name) && password.len() <= 256,
@@ -252,7 +171,7 @@ impl Database {
             Some(days) => days
                 .checked_mul(86400)
                 .ok_or_else(|| anyhow::anyhow!("invite expiry overflow"))?,
-            None => crate::runtime::limiter::INVITE_DEFAULT_EXPIRY.as_secs(),
+            None => crate::limiter::INVITE_DEFAULT_EXPIRY.as_secs(),
         };
         let lifetime: i64 = lifetime.try_into()?;
         let mut tx = self
@@ -289,7 +208,7 @@ pub(crate) async fn register(
     password: &str,
     invite: Option<&str>,
     now: i64,
-    permits: crate::runtime::limiter::HashPermits,
+    permits: crate::limiter::HashPermits,
 ) -> Result<()> {
     ensure!(
         mode != Registration::Closed

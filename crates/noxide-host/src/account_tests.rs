@@ -661,9 +661,13 @@ async fn filtered_lists(db: Database) {
                 },
             });
             let mut params = vec![Param::Number(1)];
-            let policy =
-                crate::policy::sql(&tx, &multi.operations[0].policy, &principal, &mut params)
-                    .join(" OR ");
+            let policy = crate::policy::sql(
+                tx.query_provider().unwrap(),
+                &multi.operations[0].policy,
+                &principal,
+                &mut params,
+            )
+            .join(" OR ");
             let mut sql = format!(
                 "SELECT id FROM nx_records WHERE resource=$1 AND resource=1 AND ({policy}) AND {}='false' ORDER BY nx_records.created_seq ASC LIMIT 21",
                 tx.field_expression("archived").unwrap()

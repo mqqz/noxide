@@ -1,10 +1,9 @@
 use super::*;
 use crate::{
-    Database, HostKeys, manifest,
-    runtime::{
-        Limits,
-        limiter::{BoundedPermits, HashGate},
-    },
+    Database, HostKeys,
+    limiter::{BoundedPermits, HashGate},
+    manifest,
+    runtime::Limits,
     test_support as fixture,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

@@ -144,7 +144,7 @@ async fn action_exhaustion(database: Database) {
     for limit in 1..=128 {
         app = app.with_database_statement_limit(limit).unwrap();
         let scope = app.http_request_scope(
-            crate::runtime::limiter::RequestClass::AuthenticatedAction,
+            crate::limiter::RequestClass::AuthenticatedAction,
             "/actions/1",
             None,
         );
@@ -203,7 +203,7 @@ async fn action_exhaustion(database: Database) {
     // that root. Replay uses the semantic receipt and never re-executes effects.
     app = app.with_database_statement_limit(256).unwrap();
     let scope = app.http_request_scope(
-        crate::runtime::limiter::RequestClass::AuthenticatedAction,
+        crate::limiter::RequestClass::AuthenticatedAction,
         "/actions/1",
         None,
     );
@@ -231,7 +231,7 @@ async fn action_exhaustion(database: Database) {
     )
     .await;
     let scope = app.http_request_scope(
-        crate::runtime::limiter::RequestClass::AuthenticatedAction,
+        crate::limiter::RequestClass::AuthenticatedAction,
         "/actions/1",
         None,
     );

@@ -392,6 +392,7 @@ pub(super) fn query_form(
     out: &mut Buffer,
     m: &Manifest,
     form: &noxide_protocol::query::QueryForm,
+    mut checkpoint: fn() -> Result<()>,
 ) -> Result<()> {
     use crate::manifest::ParameterField;
     ensure!(
@@ -433,10 +434,7 @@ pub(super) fn query_form(
             ParameterField::Search => {
                 if let Some(value) = value {
                     field.validate(value)?;
-                    let canonical = crate::search::canonical_query(
-                        value,
-                        &mut crate::database::lifecycle::RequestScope::checkpoint_current,
-                    )?;
+                    let canonical = crate::search::canonical_query(value, &mut checkpoint)?;
                     values.insert(name.clone(), canonical.tokens().join(" "));
                 }
             }
@@ -566,7 +564,7 @@ mod query_form_tests {
     fn query_form_uses_escaped_native_get_controls_without_cursor() {
         let (m, form) = fixture();
         let mut out = Buffer(String::new());
-        query_form(&mut out, &m, &form).unwrap();
+        query_form(&mut out, &m, &form, super::no_budget).unwrap();
         assert!(out.0.starts_with("<form method=\"get\" action=\"/search\""));
         assert!(
             out.0
@@ -588,23 +586,31 @@ mod query_form_tests {
         bad.destination
             .params
             .insert("cursor".into(), "forged".into());
-        assert!(query_form(&mut Buffer(String::new()), &m, &bad).is_err());
+        assert!(query_form(&mut Buffer(String::new()), &m, &bad, super::no_budget).is_err());
         bad = form.clone();
         bad.destination.params.clear();
-        assert!(query_form(&mut Buffer(String::new()), &m, &bad).is_err());
+        assert!(query_form(&mut Buffer(String::new()), &m, &bad, super::no_budget).is_err());
         bad = form.clone();
         bad.destination.target = Some(1);
-        assert!(query_form(&mut Buffer(String::new()), &m, &bad).is_err());
+        assert!(query_form(&mut Buffer(String::new()), &m, &bad, super::no_budget).is_err());
         bad = form.clone();
         bad.search_label = "x".repeat(129);
-        assert!(query_form(&mut Buffer(String::new()), &m, &bad).is_err());
+        assert!(query_form(&mut Buffer(String::new()), &m, &bad, super::no_budget).is_err());
         bad = form.clone();
         bad.destination
             .params
             .insert("public".into(), "TRUE".into());
-        assert!(query_form(&mut Buffer(String::new()), &m, &bad).is_err());
+        assert!(query_form(&mut Buffer(String::new()), &m, &bad, super::no_budget).is_err());
         let mut bad_manifest = m.clone();
         bad_manifest.routes[0].path = "//foreign.example".into();
-        assert!(query_form(&mut Buffer(String::new()), &bad_manifest, &form).is_err());
+        assert!(
+            query_form(
+                &mut Buffer(String::new()),
+                &bad_manifest,
+                &form,
+                super::no_budget
+            )
+            .is_err()
+        );
     }
 }

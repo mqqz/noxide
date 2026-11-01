@@ -226,7 +226,8 @@ pub(super) fn check(bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{MAX_COMPONENT_DEPTH, MAX_EXPANDED_INSTANCES, check};
-    use crate::runtime::{Limits, Runtime};
+    use crate::Limits;
+    type Runtime = crate::Runtime<crate::NoHostCalls>;
 
     const HANDLE: &str = r#"
         (core module $m (func (export "handle")))

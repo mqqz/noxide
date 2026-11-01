@@ -21,13 +21,11 @@ mod job_worker;
 use crate::{
     Database, HostKeys, auth,
     database::{Transaction, retryable},
+    limiter::{AdmissionLimits, HashPermits},
     manifest,
     render::{self, FormCredentials, RenderContext, Rendered},
     repository::{self, Effects, StoredRecord},
-    runtime::{
-        Limits, Runtime,
-        limiter::{AdmissionLimits, HashPermits},
-    },
+    runtime::Limits,
     security::{self, RecordTarget, Token, TokenKind},
 };
 use anyhow::{Result, ensure};
@@ -312,7 +310,7 @@ pub struct Application {
     database: Database,
     jobs: Option<job_worker::JobRuntime>,
     effects: Option<effect_worker::EffectRuntime>,
-    runtime: Runtime,
+    runtime: noxide_sandbox::Runtime<Effects>,
     contract: String,
     deployment: String,
     generation: OnceLock<String>,
@@ -367,11 +365,11 @@ impl Application {
     }
     pub(crate) fn http_request_scope(
         &self,
-        class: crate::runtime::limiter::RequestClass,
+        class: crate::limiter::RequestClass,
         path: &str,
-        outer: Option<crate::http::TransportDeadline>,
+        outer: Option<crate::limiter::TransportDeadline>,
     ) -> RequestScope {
-        use crate::runtime::limiter::RequestClass;
+        use crate::limiter::RequestClass;
         let cap = if matches!(class, RequestClass::PasswordHash) {
             std::time::Duration::from_secs(3)
         } else if path == self.presentation.login_path
@@ -757,7 +755,7 @@ impl Application {
         identity.update(Sha256::digest(component));
         let deployment = URL_SAFE_NO_PAD.encode(identity.finalize());
         let concurrency = limits.concurrency;
-        let runtime = Runtime::compile(component, limits)?;
+        let runtime = noxide_sandbox::Runtime::compile(component, limits)?;
         let admission_limits = AdmissionLimits::new(
             25,
             m.routes
@@ -1662,6 +1660,7 @@ impl Application {
             let mut rendered = render::render(
                 &response,
                 &RenderContext {
+                    checkpoint: RequestScope::checkpoint_current,
                     presentation: &self.presentation,
                     assets: &self.assets,
                     manifest: Some(&self.manifest),

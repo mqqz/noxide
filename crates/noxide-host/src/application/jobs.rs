@@ -318,7 +318,7 @@ impl Application {
         let rows = self
             .load_job_target_rows(tx, candidates, &mut BTreeMap::new(), calls)
             .await?;
-        let principal = auth::Principal::from_locked_job_grant(locked);
+        let principal = crate::jobs::locked_grant_principal(locked);
         let mut authority = self.authority_context(Some(time))?;
         self.seal_job_target_rows(
             &mut repository::ReadContext {
@@ -402,7 +402,7 @@ impl Application {
         );
         ensure!(
             context.principal.authority_key()
-                == auth::Principal::from_locked_job_grant(locked).authority_key()
+                == crate::jobs::locked_grant_principal(locked).authority_key()
                 && std::ptr::eq(context.manifest, self.manifest.as_ref()),
             repository::ReferenceUnavailable
         );
@@ -600,7 +600,7 @@ impl Application {
                     &mut effects.calls,
                 )
                 .await?;
-            let principal = auth::Principal::from_locked_job_grant(locked);
+            let principal = crate::jobs::locked_grant_principal(locked);
             let mut authority = self.authority_context(Some(time))?;
             let targets = self
                 .seal_job_target_rows(

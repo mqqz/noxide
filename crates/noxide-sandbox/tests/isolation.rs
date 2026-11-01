@@ -1,4 +1,5 @@
-use noxide_host::runtime::{Limits, Runtime};
+use noxide_sandbox::{Limits, NoHostCalls};
+type Runtime = noxide_sandbox::Runtime<NoHostCalls>;
 use noxide_protocol::{RequestKind, RequestView, VERSION};
 
 fn request() -> RequestView {

@@ -2,6 +2,7 @@ use super::*;
 mod membership;
 mod query_indexes;
 mod search_indexes;
+pub(crate) use search_indexes::replace_postings;
 
 impl Database {
     /// Reconcile operation-derived indexes under the operator maintenance lock.
@@ -596,7 +597,7 @@ impl Transaction {
         self.store_schema(&target.resources, &history).await?;
         self.execute(
             "UPDATE nx_deployment SET generation=$1",
-            &[crate::security::random_id()?.into()],
+            &[crate::ids::random_id()?.into()],
         )
         .await?;
         Ok(())

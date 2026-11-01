@@ -4,7 +4,9 @@ use crate::{
     auth::User,
     lifecycle_clock::{self, Freshness},
 };
+use crate::{auth::Principal, authority::witnesses::Witnesses, database::Transaction};
 use noxide_protocol::{AccountScope, ChoiceVariant};
+use std::collections::BTreeMap;
 use std::{
     sync::atomic::AtomicI64,
     time::{Duration, Instant},
@@ -528,7 +530,7 @@ async fn contract(db: Database) {
             MAX_BATCH
         );
     }
-    assert_eq!(witnesses.values.len(), MAX_WITNESSES);
+    assert_eq!(witnesses.len(), MAX_WITNESSES);
     assert_eq!(bounded_calls, 0);
     assert!(
         witnesses
@@ -588,7 +590,7 @@ async fn contract(db: Database) {
 
     // The provider rejects historical duplicates when the index is introduced.
     let mut tx = transaction(&db).await;
-    let ddl = unique_index_sql(&tx, &resources[1], 10, &unique()).unwrap();
+    let ddl = unique_index_sql(tx.query_provider().unwrap(), &resources[1], 10, &unique()).unwrap();
     assert!(tx.execute(&ddl, &[]).await.is_err());
     tx.rollback().await.unwrap();
     let mut tx = transaction(&db).await;

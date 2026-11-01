@@ -6,11 +6,11 @@
 //! expiry declarations/enforcement are separate and remain unavailable.
 #[cfg(test)]
 use crate::database::Database;
-use crate::{database::Transaction, security};
+use crate::database::{Param, Transaction};
+pub(crate) use crate::temporal::{AttemptTime, TemporalUnavailable};
 use anyhow::{Result, ensure};
 use noxide_protocol::time::Timestamp;
 use std::{
-    fmt,
     sync::{Arc, Mutex, atomic::AtomicI64},
     time::{Duration, Instant, SystemTime},
 };
@@ -66,9 +66,8 @@ async fn tick_sampled(
     // Reuse the existing seconds clock's persisted + process rollback checks.
     // Its effective seconds may include read-only credential observations. They
     // do not advance lifecycle time: only this sampled wall and durable history do.
-    let seconds =
-        security::observe_clock_read(tx, wall.unix_seconds_floor(), credential_memory).await?;
-    let seconds = security::observe_clock(tx, seconds).await?;
+    let seconds = observe_clock_read(tx, wall.unix_seconds_floor(), credential_memory).await?;
+    let seconds = observe_clock(tx, seconds).await?;
     Timestamp::from_unix_seconds(seconds)?;
 
     let previous = read(tx).await?;
@@ -118,25 +117,6 @@ impl HeartbeatObservation {
         Ok(Self { clock, started })
     }
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TemporalUnavailable {
-    NotStarted,
-    Stale,
-    Inconsistent,
-    Quarantined,
-}
-impl fmt::Display for TemporalUnavailable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::NotStarted => "lifecycle maintenance has not established freshness",
-            Self::Stale => "lifecycle maintenance heartbeat is stale",
-            Self::Inconsistent => "lifecycle clock regressed or observation is out of order",
-            Self::Quarantined => "lifecycle maintenance cleanup is unconfirmed",
-        })
-    }
-}
-impl std::error::Error for TemporalUnavailable {}
 
 #[derive(Default)]
 struct State {
@@ -261,7 +241,7 @@ impl Freshness {
             .iter()
             .any(|tick| tick.clock == clock && recent(tick.started, now));
         ensure!(current || earlier, TemporalUnavailable::Inconsistent);
-        Ok(AttemptTime(clock.watermark))
+        Ok(AttemptTime::from_durable(clock.watermark))
     }
 }
 
@@ -292,14 +272,96 @@ fn validate_progress(
     Ok(())
 }
 
-/// Transaction-local lifecycle UTC milliseconds. Capture a new value for a new
-/// attempt, keep this exact value through every operation within that attempt.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct AttemptTime(Timestamp);
-impl AttemptTime {
-    pub(crate) const fn timestamp(self) -> Timestamp {
-        self.0
+/// A small wall-clock correction may delay expiry, but must never revive it.
+/// Every caller uses the returned high-water time, including token verification.
+pub(crate) const CLOCK_ROLLBACK_TOLERANCE: i64 = 60;
+
+pub(crate) async fn observe_clock(tx: &mut Transaction, now: i64) -> Result<i64> {
+    let rows = tx
+        .fetch::<1>(
+            "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
+            &[],
+        )
+        .await?;
+    let previous: i64 = rows
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("clock missing"))?[0]
+        .parse()?;
+    ensure!(now >= 0 && previous >= 0, "invalid clock");
+    ensure!(
+        previous.saturating_sub(now) <= CLOCK_ROLLBACK_TOLERANCE,
+        "clock moved backwards beyond tolerance; use recover-clock with a fresh host key"
+    );
+    if now > previous {
+        tx.execute(
+            "UPDATE nx_clock SET observed=$1 WHERE singleton=1 AND observed<$1",
+            &[Param::Number(now)],
+        )
+        .await?;
     }
+    Ok(now.max(previous))
+}
+
+/// Gap beyond which a request persists the clock mark itself. The lifecycle tick
+/// persists it every second, so while the tick runs requests never write
+/// nx_clock and concurrent writes do not conflict on it. If the tick stalls,
+/// requests keep the persisted mark within this bound, as before.
+pub(crate) const CLOCK_PERSIST_LAG: i64 = 2;
+
+/// Request-path clock observation with rollback checks. It writes nx_clock only
+/// when the persisted mark is more than `CLOCK_PERSIST_LAG` seconds behind.
+pub(crate) async fn observe_clock_bounded(
+    tx: &mut Transaction,
+    now: i64,
+    memory: &std::sync::atomic::AtomicI64,
+) -> Result<i64> {
+    let rows = tx
+        .fetch::<1>(
+            "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
+            &[],
+        )
+        .await?;
+    let persisted: i64 = rows
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("clock missing"))?[0]
+        .parse()?;
+    let effective = observe_clock_read(tx, now, memory).await?;
+    if effective.saturating_sub(persisted) > CLOCK_PERSIST_LAG {
+        return observe_clock(tx, effective).await;
+    }
+    Ok(effective)
+}
+
+/// One clock tick's nonresetting budget, including connection, admission, COMMIT
+/// and confirmed cleanup. It must fit a networked database while staying below the
+/// one-second tick interval; requests never wait on it.
+pub(crate) const CLOCK_CHECKPOINT_BEGIN_DEADLINE: std::time::Duration =
+    std::time::Duration::from_millis(750);
+
+pub(crate) async fn observe_clock_read(
+    tx: &mut Transaction,
+    now: i64,
+    memory: &std::sync::atomic::AtomicI64,
+) -> Result<i64> {
+    use std::sync::atomic::Ordering;
+    let rows = tx
+        .fetch::<1>(
+            "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
+            &[],
+        )
+        .await?;
+    let previous: i64 = rows
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("clock missing"))?[0]
+        .parse()?;
+    ensure!(now >= 0 && previous >= 0, "invalid clock");
+    let prior = memory.fetch_max(now, Ordering::Relaxed);
+    let high = previous.max(prior);
+    ensure!(
+        high.saturating_sub(now) <= CLOCK_ROLLBACK_TOLERANCE,
+        "clock moved backwards beyond tolerance; use recover-clock with a fresh host key"
+    );
+    Ok(now.max(high))
 }
 
 #[cfg(test)]

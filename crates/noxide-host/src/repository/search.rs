@@ -1,6 +1,6 @@
 //! Search updates share the resource mutation and receipt transaction.
 use super::*;
-use crate::{database::lifecycle::RequestScope, query_plan::NativeProvider};
+use crate::database::{lifecycle::RequestScope, schema::replace_postings};
 
 impl Effects {
     pub(super) async fn update_search(
@@ -54,67 +54,4 @@ impl Effects {
         .await?;
         Ok(())
     }
-}
-
-/// Shared operator/runtime helper. Caller owns activation and the current transaction.
-pub(crate) async fn replace_postings(
-    tx: &mut Transaction,
-    storage: i64,
-    id: i64,
-    incarnation: &str,
-    revision: i64,
-    created_seq: i64,
-    prepared: &crate::search::PreparedPostings,
-) -> Result<()> {
-    ensure!(
-        storage > 0
-            && id > 0
-            && revision > 0
-            && created_seq > 0
-            && !incarnation.is_empty()
-            && incarnation.len() <= 64,
-        "posting metadata"
-    );
-    tx.execute(
-        "DELETE FROM nx_search_postings WHERE resource=$1 AND record_id=$2",
-        &[storage.into(), id.into()],
-    )
-    .await?;
-    if prepared.count() == 0 {
-        return Ok(());
-    }
-    let pair = match tx.query_provider()? {
-        NativeProvider::Sqlite => {
-            "SELECT CAST(json_extract(value,'$[0]') AS BIGINT),json_extract(value,'$[1]') FROM json_each($5)"
-        }
-        NativeProvider::Postgres => {
-            "SELECT CAST(value->>0 AS BIGINT),value->>1 FROM jsonb_array_elements(CAST($5 AS jsonb)) AS pair(value)"
-        }
-    };
-    let sql = format!(
-        "INSERT INTO nx_search_postings(resource,record_id,field,token,incarnation,revision,created_seq) SELECT $1,$2,p.field,p.token,$3,$4,$6 FROM ({pair}) AS p(field,token) JOIN nx_records r ON r.resource=$1 AND r.id=$2 AND r.incarnation=$3 AND r.revision=$4 AND r.created_seq=$6"
-    );
-    // SQLite does not accept derived-table column aliases.
-    let sql = match tx.query_provider()? {
-            NativeProvider::Sqlite => "INSERT INTO nx_search_postings(resource,record_id,field,token,incarnation,revision,created_seq) SELECT $1,$2,CAST(json_extract(p.value,'$[0]') AS BIGINT),json_extract(p.value,'$[1]'),$3,$4,$6 FROM json_each($5) p JOIN nx_records r ON r.resource=$1 AND r.id=$2 AND r.incarnation=$3 AND r.revision=$4 AND r.created_seq=$6".to_owned(),
-            NativeProvider::Postgres => sql,
-        };
-    let count = tx
-        .execute(
-            &sql,
-            &[
-                storage.into(),
-                id.into(),
-                incarnation.into(),
-                revision.into(),
-                prepared.payload().into(),
-                created_seq.into(),
-            ],
-        )
-        .await?;
-    ensure!(
-        count == u64::try_from(prepared.count())?,
-        "search posting mutation count"
-    );
-    Ok(())
 }

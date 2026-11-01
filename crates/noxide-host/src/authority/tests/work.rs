@@ -1,6 +1,7 @@
 //! Provider scan instrumentation for the exact specialized batch lookup SQL.
 use super::*;
-use crate::membership::{LookupScope, ProtectedRow, Witnesses};
+use crate::authority::witnesses::Witnesses;
+use crate::membership::{LookupScope, ProtectedRow};
 
 async fn work(database: Database) {
     database.initialize().await.unwrap();
@@ -96,7 +97,13 @@ async fn work(database: Database) {
         .collect::<Vec<_>>()
         .join(" UNION ALL ");
     let predicate = plan
-        .exists_sql(&tx, storage, &lookup, false, &mut params)
+        .exists_sql(
+            tx.query_provider().unwrap(),
+            storage,
+            &lookup,
+            false,
+            &mut params,
+        )
         .unwrap();
     let mut query = format!(
         "WITH requested AS ({requested}) SELECT reference_id,CASE WHEN {predicate} THEN '1' ELSE '0' END FROM requested LIMIT 64"

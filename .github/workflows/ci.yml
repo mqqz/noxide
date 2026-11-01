@@ -63,6 +63,8 @@ jobs:
         run: cargo build --workspace --locked --offline
       - name: Lint all framework targets
         run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+      - name: Check host layering
+        run: python3 tools/check_layers.py
       - name: Test build input validation
         run: |
           python3 tools/test_build_inputs.py

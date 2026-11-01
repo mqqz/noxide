@@ -2,11 +2,11 @@ mod blobs;
 mod transport;
 use crate::{
     Application, RequestError,
-    render::{CSP, Rendered},
-    runtime::limiter::{
+    limiter::{
         HEADER_READ_TIMEOUT, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_CIRCUIT, PROXY_LINE_MAX,
         PROXY_LINE_TIMEOUT,
     },
+    render::{CSP, Rendered},
 };
 use anyhow::{Result, ensure};
 use axum::{
@@ -25,11 +25,7 @@ use std::{
 use transport::*;
 pub use transport::{Listener, serve};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Peer {
-    Local,
-    Circuit(u32),
-}
+pub(crate) use crate::limiter::Peer;
 
 const BUSY_HTML: &str = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Service busy</title></head><body><main><h1>Service busy</h1><p>The service is busy. Retry this request.</p></main></body></html>";
 fn busy() -> Response {
@@ -85,8 +81,7 @@ impl Origin {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct TransportDeadline(pub(crate) tokio::time::Instant);
+pub(crate) use crate::limiter::TransportDeadline;
 
 struct Gateway {
     app: Arc<Application>,
@@ -346,7 +341,7 @@ fn registration_failed(presentation: &crate::Presentation) -> Response {
 }
 
 async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Response {
-    use crate::runtime::limiter::{AdmissionContext, AdmissionIdentity, RequestClass};
+    use crate::limiter::{AdmissionContext, AdmissionIdentity, RequestClass};
     let app = gateway.app.clone();
     let peer = request
         .extensions()

@@ -1,9 +1,11 @@
+//! The Wasmtime boundary. The linker below is the complete guest import surface;
+//! everything a guest can ask of the host passes through [`HostCalls`].
+#![forbid(unsafe_code)]
 mod admission;
-pub(crate) mod limiter;
 
 use anyhow::{Result, ensure};
 use noxide_protocol::*;
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 use tokio::{sync::Semaphore, time::Instant};
 use wasmtime::component::{Component, InstancePre, Linker};
 use wasmtime::{Config, Engine, ResourceLimiter, Store, StoreContextMut, WasmFeatures};
@@ -67,7 +69,39 @@ impl ResourceLimiter for MemoryBudget {
     }
 }
 
-pub(crate) struct State {
+/// Storage authority a host grants to one guest attempt. The sandbox only routes
+/// calls; authorization remains the implementor's, enforced outside the guest.
+pub trait HostCalls: Send + 'static {
+    /// Whether this attempt is in a phase that may import storage.
+    fn storage_allowed(&self) -> bool;
+    fn invoke(
+        &mut self,
+        operation: u32,
+        target: u64,
+    ) -> impl Future<Output = Result<Vec<u8>>> + Send;
+    fn follow_source(&mut self, resource: u32, id: u64) -> Result<()>;
+    fn follow(&mut self, operation: u32) -> impl Future<Output = Result<Vec<u8>>> + Send;
+}
+
+/// The grant of a guest with no storage authority. It has no values, so such a
+/// runtime cannot carry a repository at all.
+pub enum NoHostCalls {}
+impl HostCalls for NoHostCalls {
+    fn storage_allowed(&self) -> bool {
+        match *self {}
+    }
+    async fn invoke(&mut self, _: u32, _: u64) -> Result<Vec<u8>> {
+        match *self {}
+    }
+    fn follow_source(&mut self, _: u32, _: u64) -> Result<()> {
+        match *self {}
+    }
+    async fn follow(&mut self, _: u32) -> Result<Vec<u8>> {
+        match *self {}
+    }
+}
+
+struct State<H> {
     active: bool,
     memory: MemoryBudget,
     request: Vec<u8>,
@@ -75,10 +109,10 @@ pub(crate) struct State {
     result: Vec<u8>,
     calls: u32,
     deadline: Instant,
-    effects: Option<crate::repository::Effects>,
+    effects: Option<H>,
     failure: Option<anyhow::Error>,
 }
-impl State {
+impl<H> State<H> {
     fn charge(&mut self) -> wasmtime::Result<()> {
         wasmtime::ensure!(self.active, "capability unavailable in this phase");
         wasmtime::ensure!(
@@ -99,22 +133,31 @@ fn chunk(bytes: &[u8], offset: u32) -> wasmtime::Result<u64> {
     Ok(u64::from_le_bytes(value))
 }
 
-#[derive(Clone)]
-pub struct Runtime {
+pub struct Runtime<H: HostCalls> {
     engine: Engine,
-    instance: Arc<InstancePre<State>>,
+    instance: Arc<InstancePre<State<H>>>,
     limits: Limits,
     permits: Arc<Semaphore>,
 }
+impl<H: HostCalls> Clone for Runtime<H> {
+    fn clone(&self) -> Self {
+        Self {
+            engine: self.engine.clone(),
+            instance: self.instance.clone(),
+            limits: self.limits.clone(),
+            permits: self.permits.clone(),
+        }
+    }
+}
 
-pub(crate) struct Attempt {
+pub struct Attempt<H> {
     pub result: Result<ResponseIntent>,
-    pub effects: Option<crate::repository::Effects>,
+    pub effects: Option<H>,
     pub fuel_left: u64,
     pub calls_left: u32,
 }
 
-impl Runtime {
+impl<H: HostCalls> Runtime<H> {
     /// Admission accepts portable binary components only and bounds component
     /// expansion before invoking Wasmtime. Compilation is synchronous; run it
     /// before listening for requests, within the deployment's process limits.
@@ -164,13 +207,13 @@ impl Runtime {
                 "unapproved component import"
             );
         }
-        let mut linker: Linker<State> = Linker::new(&engine);
+        let mut linker: Linker<State<H>> = Linker::new(&engine);
         let mut host = linker
             .instance("noxide:application/host@0.1.0")
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         host.func_wrap(
             "request-length",
-            |mut cx: StoreContextMut<State>, (): ()| {
+            |mut cx: StoreContextMut<State<H>>, (): ()| {
                 let s = cx.data_mut();
                 s.charge()?;
                 Ok((s.request.len() as u32,))
@@ -179,7 +222,7 @@ impl Runtime {
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         host.func_wrap(
             "request-chunk",
-            |mut cx: StoreContextMut<State>, (offset,): (u32,)| {
+            |mut cx: StoreContextMut<State<H>>, (offset,): (u32,)| {
                 let s = cx.data_mut();
                 s.charge()?;
                 Ok((chunk(&s.request, offset)?,))
@@ -188,7 +231,7 @@ impl Runtime {
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         host.func_wrap(
             "emit",
-            |mut cx: StoreContextMut<State>, (word, length): (u64, u32)| {
+            |mut cx: StoreContextMut<State<H>>, (word, length): (u64, u32)| {
                 let s = cx.data_mut();
                 s.charge()?;
                 wasmtime::ensure!(
@@ -203,7 +246,7 @@ impl Runtime {
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         host.func_wrap(
             "result-chunk",
-            |mut cx: StoreContextMut<State>, (offset,): (u32,)| {
+            |mut cx: StoreContextMut<State<H>>, (offset,): (u32,)| {
                 let s = cx.data_mut();
                 s.charge()?;
                 Ok((chunk(&s.result, offset)?,))
@@ -212,17 +255,14 @@ impl Runtime {
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         host.func_wrap_async(
             "invoke",
-            |mut cx: StoreContextMut<State>, (operation, target): (u32, u64)| {
+            |mut cx: StoreContextMut<State<H>>, (operation, target): (u32, u64)| {
                 Box::new(async move {
                     let s = cx.data_mut();
                     s.charge()?;
                     let Some(effects) = s.effects.as_mut() else {
                         wasmtime::bail!("no repository grant")
                     };
-                    wasmtime::ensure!(
-                        matches!(effects.request.kind, RequestKind::Route(_)),
-                        "storage import during action"
-                    );
+                    wasmtime::ensure!(effects.storage_allowed(), "storage import during action");
                     match effects.invoke(operation, target).await {
                         Ok(bytes) => {
                             s.result = bytes;
@@ -239,17 +279,14 @@ impl Runtime {
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         host.func_wrap(
             "follow-source",
-            |mut cx: StoreContextMut<State>, (resource, id): (u32, u64)| {
+            |mut cx: StoreContextMut<State<H>>, (resource, id): (u32, u64)| {
                 let s = cx.data_mut();
                 s.charge()?;
                 let effects = s
                     .effects
                     .as_mut()
                     .ok_or_else(|| wasmtime::Error::msg("no repository grant"))?;
-                wasmtime::ensure!(
-                    matches!(effects.request.kind, RequestKind::Route(_)),
-                    "storage import during action"
-                );
+                wasmtime::ensure!(effects.storage_allowed(), "storage import during action");
                 effects
                     .follow_source(resource, id)
                     .map_err(|e| wasmtime::Error::msg(e.to_string()))?;
@@ -259,7 +296,7 @@ impl Runtime {
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         host.func_wrap_async(
             "follow",
-            |mut cx: StoreContextMut<State>, (operation,): (u32,)| {
+            |mut cx: StoreContextMut<State<H>>, (operation,): (u32,)| {
                 Box::new(async move {
                     let s = cx.data_mut();
                     s.charge()?;
@@ -267,10 +304,7 @@ impl Runtime {
                         .effects
                         .as_mut()
                         .ok_or_else(|| wasmtime::Error::msg("no repository grant"))?;
-                    wasmtime::ensure!(
-                        matches!(effects.request.kind, RequestKind::Route(_)),
-                        "storage import during action"
-                    );
+                    wasmtime::ensure!(effects.storage_allowed(), "storage import during action");
                     match effects.follow(operation).await {
                         Ok(bytes) => {
                             s.result = bytes;
@@ -308,18 +342,18 @@ impl Runtime {
         .result
     }
 
-    pub(crate) fn limits(&self) -> &Limits {
+    pub fn limits(&self) -> &Limits {
         &self.limits
     }
 
-    pub(crate) async fn run(
+    pub async fn run(
         &self,
         request: RequestView,
-        effects: Option<crate::repository::Effects>,
+        effects: Option<H>,
         fuel: u64,
         calls: u32,
         deadline: Instant,
-    ) -> Attempt {
+    ) -> Attempt<H> {
         let mut attempt = Attempt {
             result: Err(anyhow::anyhow!("runtime initialization")),
             effects,
@@ -333,7 +367,7 @@ impl Runtime {
     async fn run_inner(
         &self,
         request: RequestView,
-        attempt: &mut Attempt,
+        attempt: &mut Attempt<H>,
         deadline: Instant,
     ) -> Result<ResponseIntent> {
         let _permit = self

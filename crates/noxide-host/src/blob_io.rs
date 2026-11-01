@@ -30,10 +30,10 @@ impl sealed::Sealed for crate::blob_store::DurableObject {}
 impl IoOutput for crate::blob_store::DurableObject {}
 impl sealed::Sealed for () {}
 impl IoOutput for () {}
-impl sealed::Sealed for crate::application::blobs::InventoryBatch {}
-impl IoOutput for crate::application::blobs::InventoryBatch {}
-impl sealed::Sealed for crate::application::blobs::Snapshot {}
-impl IoOutput for crate::application::blobs::Snapshot {}
+impl sealed::Sealed for crate::blob_inspect::InventoryBatch {}
+impl IoOutput for crate::blob_inspect::InventoryBatch {}
+impl sealed::Sealed for crate::blob_inspect::Snapshot {}
+impl IoOutput for crate::blob_inspect::Snapshot {}
 impl sealed::Sealed for crate::blob_store::OpenedObject {}
 impl IoOutput for crate::blob_store::OpenedObject {}
 impl sealed::Sealed for crate::blob_store::PairObservation {}
