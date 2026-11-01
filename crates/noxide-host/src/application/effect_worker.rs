@@ -436,6 +436,32 @@ impl Application {
             })
             .await
     }
+    /// Best-effort return of a claim whose preflight failed; lease expiry
+    /// remains the fallback when this transaction cannot commit either.
+    async fn release_effect(
+        &self,
+        scope: &RequestScope,
+        physical: &PhysicalAttempt,
+        claim: &EffectClaim,
+        calls: &mut u32,
+    ) -> std::result::Result<(), RequestError> {
+        let admission = self.admit_effect_database(scope, physical).await?;
+        admission
+            .run(async {
+                let mut tx = self
+                    .database
+                    .begin(admission.work_deadline().into_std())
+                    .await
+                    .map_err(RequestError::database)?;
+                *calls = calls.checked_sub(1).ok_or(RequestError::Rejected)?;
+                OutboxContext { tx: &mut tx, calls }
+                    .release_unsent(claim)
+                    .await
+                    .map_err(RequestError::database)?;
+                Self::finish_commit(&mut tx, ()).await
+            })
+            .await
+    }
     async fn finalize_effect(
         &self,
         scope: &RequestScope,
@@ -481,10 +507,18 @@ impl Application {
                 };
                 let prepared = match self
                     .preflight_effect(&scope, &physical, &claim, &mut calls)
-                    .await?
+                    .await
                 {
-                    Preflight::Send(prepared) => prepared,
-                    Preflight::Settled(outcome) => return Ok(Some(outcome.into())),
+                    Ok(Preflight::Send(prepared)) => prepared,
+                    Ok(Preflight::Settled(outcome)) => return Ok(Some(outcome.into())),
+                    Err(error) => {
+                        // Nothing was sent. Without this, a transient failure such
+                        // as a serialization conflict strands the row for its lease.
+                        let _ = self
+                            .release_effect(&scope, &physical, &claim, &mut calls)
+                            .await;
+                        return Err(error);
+                    }
                 };
                 let runtime = self.effects.as_ref().ok_or(RequestError::Rejected)?;
                 let deadline = scope

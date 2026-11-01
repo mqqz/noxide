@@ -507,6 +507,46 @@ async fn retry_and_atomicity_contract(db: &Database) {
     .await
     .unwrap();
     assert_eq!(state(db, &lost.id().unwrap()).await, "dead");
+    // A preflight failure before any send returns the claim and its attempt.
+    let unsent = enqueue(db, "alpha", "preflight-unavailable").await;
+    let first = claim(db, 1000).await;
+    phase(db, async |tx: &mut Transaction| {
+        let mut calls = 16;
+        OutboxContext {
+            tx,
+            calls: &mut calls,
+        }
+        .release_unsent(&first)
+        .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(state(db, &unsent.id().unwrap()).await, "pending");
+    let second = claim(db, 1000).await;
+    assert_eq!(second.id, first.id);
+    let attempts = phase(db, async |tx: &mut Transaction| {
+        tx.fetch::<1>(
+            "SELECT CAST(attempts AS TEXT) FROM nx_outbox WHERE id=$1",
+            &[second.id.as_str().into()],
+        )
+        .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(attempts[0][0], "1", "the released attempt was refunded");
+    // A stale claim cannot release the newer one.
+    phase(db, async |tx: &mut Transaction| {
+        let mut calls = 16;
+        OutboxContext {
+            tx,
+            calls: &mut calls,
+        }
+        .release_unsent(&first)
+        .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(state(db, &unsent.id().unwrap()).await, "running");
     // A clock jump past the lease before any send requeues; it is not dead.
     let jumped = enqueue(db, "alpha", "lease-expired-before-send").await;
     let stale = claim(db, 1000).await;

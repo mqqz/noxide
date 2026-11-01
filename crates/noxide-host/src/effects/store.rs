@@ -249,9 +249,15 @@ impl OutboxContext<'_> {
             "effect runtime paused or approval changed"
         );
         // A restore fork re-binds the queue; a host on the old owner stops here.
-        let changed=self.tx.execute("UPDATE nx_effect_queue SET claim_seq=claim_seq+1 WHERE singleton=1 AND owner_directory=$1 AND claim_seq<9223372036854775807",&[owner_directory.into()]).await?;
         ensure!(
-            changed == 1,
+            !self
+                .tx
+                .fetch::<1>(
+                    "SELECT CAST(singleton AS TEXT) FROM nx_effect_queue WHERE singleton=1 AND owner_directory=$1",
+                    &[owner_directory.into()],
+                )
+                .await?
+                .is_empty(),
             "effect queue unavailable or owned by another directory"
         );
         let suffix = if matches!(self.tx.query_provider()?, NativeProvider::Postgres) {
@@ -260,9 +266,16 @@ impl OutboxContext<'_> {
             ""
         };
         let rows=self.tx.fetch::<4>(&format!("SELECT o.id,o.tenant,CAST(o.fence AS TEXT),CAST(o.attempts AS TEXT) FROM nx_outbox o JOIN nx_effect_tenants t ON t.deployment=o.deployment AND t.tenant=o.tenant WHERE o.deployment=$1 AND ((o.state='pending' AND o.eligible_ms<=$2) OR (o.state='running' AND o.lease_until_ms<=$2)) AND o.id<>$3 AND o.id<>$4 AND $5<(SELECT concurrency FROM nx_effect_queue WHERE singleton=1) ORDER BY t.claim_seq,o.eligible_ms,o.id LIMIT 1{suffix}"),&[generation.into(),now.unix_millis().into(),active.first().map(String::as_str).unwrap_or("").into(),active.get(1).map(String::as_str).unwrap_or("").into(),i64::try_from(active.len())?.into()]).await?;
+        // An empty poll writes nothing. Bumping the shared sequence on every poll
+        // made concurrent workers abort each other's preflight under SERIALIZABLE.
         let Some([id, tenant, fence, attempts]) = rows.first() else {
             return Ok(None);
         };
+        let changed=self.tx.execute("UPDATE nx_effect_queue SET claim_seq=claim_seq+1 WHERE singleton=1 AND owner_directory=$1 AND claim_seq<9223372036854775807",&[owner_directory.into()]).await?;
+        ensure!(
+            changed == 1,
+            "effect queue unavailable or owned by another directory"
+        );
         let exhausted = integer(attempts)? >= i64::from(MAX_EFFECT_ATTEMPTS);
         let fence = integer(fence)?
             .checked_add(1)
@@ -439,6 +452,14 @@ impl OutboxContext<'_> {
         Ok(Preflight::Send(Box::new(PreparedEffect {
             captured: row.capture,
         })))
+    }
+    /// Returns a claim whose preflight failed before any send. Only a row still
+    /// running under this exact fence changes, so a committed preflight
+    /// settlement or a newer claim is untouched. The attempt is refunded.
+    pub(crate) async fn release_unsent(&mut self, claim: &EffectClaim) -> Result<()> {
+        self.charge()?;
+        self.tx.execute("UPDATE nx_outbox SET state='pending',reason='preflight_unavailable',lease_until_ms=0,attempts=attempts-$1 WHERE id=$2 AND deployment=$3 AND tenant=$4 AND state='running' AND fence=$5",&[i64::from(!claim.exhausted).into(),claim.id.as_str().into(),claim.scope.deployment.as_str().into(),claim.scope.tenant.as_str().into(),claim.fence.into()]).await?;
+        Ok(())
     }
     /// An unknown acknowledgment is resolved by probing this fenced row later;
     /// it must never trigger a second POST in the same attempt.

@@ -134,9 +134,11 @@ Tenant scheduling is fair. A 60-second durable lease fences row updates, while
 the exclusive owner and retained physical slots bound actual live work. A lease
 that expires before preflight admits a send returns the row to Pending
 (`lease_expired`) under its already-charged attempt; after admission, expiry
-pauses the row because the send may have left. Each idle claim poll still
-writes the queue sequence row, so an idle server performs about one database
-write per worker per second.
+pauses the row because the send may have left. A claim writes the queue
+sequence row only when it takes a row, so idle polls are read-only and do not
+conflict with another worker's preflight. If preflight fails before any send,
+the claim is returned to Pending with its attempt refunded
+(`preflight_unavailable`); lease expiry remains the fallback.
 
 Automatic retries allow five attempts within 24 hours of first eligibility.
 The window check uses the fixed durable lifecycle timestamp of the preflight
