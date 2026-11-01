@@ -44,8 +44,8 @@ pub use security::HostKeys;
 mod application;
 mod repository;
 pub use application::{
-    ActionRejection, Application, EffectRunOutcome, JobRunOutcome, LoginChallenge, RequestError,
-    ValidatedActionRejection,
+    ActionRejection, Application, EffectDelivery, EffectRunOutcome, JobRunOutcome, LoginChallenge,
+    RequestError, ValidatedActionRejection,
 };
 pub mod http;
 

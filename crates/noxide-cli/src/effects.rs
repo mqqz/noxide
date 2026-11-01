@@ -24,11 +24,16 @@ pub async fn run(args: &[OsString]) -> Result<()> {
         "usage: noxide effects inspect CONFIG [AFTER] | cancel CONFIG ID | retry CONFIG ID | resume CONFIG ID | grant CONFIG TENANT ENDPOINT | revoke CONFIG TENANT ENDPOINT | grant-secret CONFIG SLOT | revoke-secret CONFIG SLOT | worker-once CONFIG"
     );
     let path = text(args, 1)?;
-    let app = load(Path::new(&path)).await?;
     if command == "worker-once" {
-        println!("{}", serde_json::to_string(&app.run_effect_once().await?)?);
+        let delivery = super::effect_delivery(Path::new(&path))?;
+        delivery.activate().await?;
+        println!(
+            "{}",
+            serde_json::to_string(&delivery.run_effect_once().await?)?
+        );
         return Ok(());
     }
+    let app = load(Path::new(&path)).await?;
     let operation = match command.as_str() {
         "inspect" => Command::Inspect {
             after: args

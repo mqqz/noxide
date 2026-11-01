@@ -1,3 +1,4 @@
+mod config;
 mod deps;
 mod effects;
 mod jobs;
@@ -5,190 +6,13 @@ mod lifecycle;
 mod project;
 mod roles;
 mod scaffold;
+mod supervisor;
 mod workflow;
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use noxide_host::{
-    Application, Database, HostKeys,
-    http::{self, Listener, Origin},
-    runtime::Limits,
-};
-use serde::Deserialize;
-use std::{
-    io::{Read, Write},
-    path::{Path, PathBuf},
-    sync::Arc,
-};
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Config {
-    database: DatabaseConfig,
-    keys: PathBuf,
-    component: PathBuf,
-    manifest: PathBuf,
-    #[serde(default)]
-    assets: Option<PathBuf>,
-    #[serde(default)]
-    blobs: Option<noxide_host::BlobDeployment>,
-    #[serde(default)]
-    jobs: Option<noxide_host::JobDeployment>,
-    #[serde(default)]
-    effects: Option<noxide_host::EffectDeployment>,
-    approved_contract: String,
-    origin: String,
-    listen: ListenConfig,
-    #[serde(
-        default = "default_signed_in_reserve",
-        deserialize_with = "signed_in_reserve"
-    )]
-    signed_in_reserve: u8,
-    #[serde(
-        default = "default_database_statement_limit",
-        deserialize_with = "database_statement_limit"
-    )]
-    database_statement_limit: u16,
-    #[serde(default)]
-    registration: noxide_host::Registration,
-    #[serde(default)]
-    presentation: noxide_host::Presentation,
-}
-impl Config {
-    /// Resolve only host-owned resources after pure approval. Paths and secret
-    /// material are excluded from capability summaries and deployment identity.
-    fn effect_deployment(&self, base: &Path) -> Option<noxide_host::EffectDeployment> {
-        self.effects.clone().map(|mut effects| {
-            for secret in &mut effects.secrets {
-                secret.path = base.join(&secret.path);
-            }
-            let keys = base.join(&self.keys);
-            effects.with_runtime_directory(keys.parent().unwrap_or(base).to_owned())
-        })
-    }
-    fn approval(
-        &self,
-        manifest: &noxide::__private::Manifest,
-    ) -> Result<noxide_host::deployment::DeploymentApproval> {
-        noxide_host::deployment::approval(
-            manifest,
-            self.blobs.as_ref().map(|blobs| &blobs.ceilings),
-            self.jobs.as_ref(),
-            self.effects.as_ref(),
-        )
-    }
-}
-fn default_signed_in_reserve() -> u8 {
-    25
-}
-fn signed_in_reserve<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<u8, D::Error> {
-    let value = u8::deserialize(deserializer)?;
-    if value > 50 {
-        return Err(serde::de::Error::custom(
-            "signed_in_reserve must be between 0 and 50",
-        ));
-    }
-    Ok(value)
-}
-fn default_database_statement_limit() -> u16 {
-    256
-}
-fn database_statement_limit<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<u16, D::Error> {
-    let value = u16::deserialize(deserializer)?;
-    if !(1..=256).contains(&value) {
-        return Err(serde::de::Error::custom(
-            "database_statement_limit must be between 1 and 256",
-        ));
-    }
-    Ok(value)
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-enum DatabaseConfig {
-    Sqlite(PathBuf),
-    Postgres(String),
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-enum ListenConfig {
-    Tcp(std::net::SocketAddr),
-    Unix(PathBuf),
-    TorUnix { path: PathBuf, tor_gid: u32 },
-}
-
-fn read(path: &Path, limit: u64) -> Result<Vec<u8>> {
-    let file =
-        std::fs::File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-    let metadata = file.metadata()?;
-    ensure!(metadata.is_file() && metadata.len() <= limit, "file limit");
-    let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() as u64 <= limit, "file limit");
-    Ok(bytes)
-}
-fn host_keys(path: &Path) -> Result<HostKeys> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        ensure!(
-            std::fs::metadata(path)?.permissions().mode() & 0o077 == 0,
-            "host key file must be private (mode 0600)"
-        );
-    }
-    Ok(serde_json::from_slice(&read(path, 16_384)?)?)
-}
-
-fn create(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(if secret { 0o600 } else { 0o644 });
-    }
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-fn config(path: &Path) -> Result<(Config, PathBuf)> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let base = std::fs::canonicalize(parent).context("configuration directory unavailable")?;
-    Ok((serde_json::from_slice(&read(path, 16_384)?)?, base))
-}
-fn database(config: &DatabaseConfig, base: &Path) -> Result<Database> {
-    match config {
-        DatabaseConfig::Sqlite(path) => Ok(Database::sqlite(base.join(path))),
-        DatabaseConfig::Postgres(url) => Database::postgres(url),
-    }
-}
-
-fn shutdown_signal() -> Result<impl std::future::Future<Output = ()>> {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        // Register before binding so both signals are handled as soon as the
-        // listener exists, including while deployment activation is pending.
-        let mut interrupt = signal(SignalKind::interrupt())?;
-        let mut terminate = signal(SignalKind::terminate())?;
-        Ok(async move {
-            tokio::select! {
-                _ = interrupt.recv() => {},
-                _ = terminate.recv() => {},
-            }
-        })
-    }
-    #[cfg(not(unix))]
-    Ok(async {
-        let _ = tokio::signal::ctrl_c().await;
-    })
-}
+pub(crate) use config::*;
+use noxide_host::{HostKeys, runtime::Limits};
+use std::path::Path;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -221,7 +45,7 @@ async fn main() -> Result<()> {
         }
         "help" | "--help" | "-h" => {
             println!(
-                "Noxide {}\n\nCommands:\n  new NEW_DIRECTORY\n  setup [--kernel FILE] [--toolchain DIRECTORY]\n  dev [BUILD_OPTIONS]\n  approve [--dev] CONTRACT_DIGEST\n  check|test|build [--app APP] [--name CRATE] [--output NEW_DIR] [--isolated --kernel KERNEL --toolchain TOOLCHAIN] [--framework CHECKOUT]\n  deps check [--app APP] [BUILD_ENVIRONMENT_OPTIONS]\n  deps resolve [--app APP] --output NEW_DIRECTORY [BUILD_ENVIRONMENT_OPTIONS]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  schema indexes CONFIG\n  init CONFIG.json\n  account CONFIG.json LOGIN PASSWORD_FILE [TENANT]\n  account-lookup CONFIG.json LOGIN\n  account-disable|account-enable|account-delete CONFIG.json ACCOUNT_ID\n  role grant|revoke CONFIG.json USER ROLE (--global | --tenant TENANT)\n  role list CONFIG.json USER\n  contract-hash MANIFEST.json\n  deployment-hash CONFIG.json\n  jobs inspect CONFIG [AFTER] | cancel|reconcile CONFIG ID\n  jobs grant|revoke CONFIG TENANT WORKER | fork|worker-once CONFIG\n  effects inspect CONFIG [AFTER] | cancel|retry|resume CONFIG ID\n  effects grant|revoke CONFIG TENANT ENDPOINT | grant-secret|revoke-secret CONFIG SLOT\n  effects worker-once CONFIG\n  component CORE.wasm COMPONENT.wasm\n  serve [CONFIG.json]\n  maintain CONFIG.json\n  recover-clock CONFIG.json (stop serving first; configure a fresh host key)\n  keygen NEW_KEYS.json\n  edit-key-rotate KEYS.json\n  invite CONFIG.json [--expires-days N]\n\nBUILD_ENVIRONMENT_OPTIONS: --framework CHECKOUT, --cargo-home DIRECTORY, --toolchain DIRECTORY, --seconds N, --isolated [--kernel FILE]. Dependency commands resolve offline without compiling or approving; resolve emits a candidate lock for review.\n\nApplication builds run locally with host access. Use --isolated for untrusted apps or dependencies. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
+                "Noxide {}\n\nCommands:\n  new NEW_DIRECTORY\n  setup [--kernel FILE] [--toolchain DIRECTORY]\n  dev [BUILD_OPTIONS]\n  approve [--dev] CONTRACT_DIGEST\n  check|test|build [--app APP] [--name CRATE] [--output NEW_DIR] [--isolated --kernel KERNEL --toolchain TOOLCHAIN] [--framework CHECKOUT]\n  deps check [--app APP] [BUILD_ENVIRONMENT_OPTIONS]\n  deps resolve [--app APP] --output NEW_DIRECTORY [BUILD_ENVIRONMENT_OPTIONS]\n  schema diff OLD_MANIFEST NEW_MANIFEST NEW_MIGRATION\n  schema check|apply CONFIG MIGRATION\n  schema indexes CONFIG\n  init CONFIG.json\n  account CONFIG.json LOGIN PASSWORD_FILE [TENANT]\n  account-lookup CONFIG.json LOGIN\n  account-disable|account-enable|account-delete CONFIG.json ACCOUNT_ID\n  role grant|revoke CONFIG.json USER ROLE (--global | --tenant TENANT)\n  role list CONFIG.json USER\n  contract-hash MANIFEST.json\n  deployment-hash CONFIG.json\n  jobs inspect CONFIG [AFTER] | cancel|reconcile CONFIG ID\n  jobs grant|revoke CONFIG TENANT WORKER | fork|worker-once CONFIG\n  effects inspect CONFIG [AFTER] | cancel|retry|resume CONFIG ID\n  effects grant|revoke CONFIG TENANT ENDPOINT | grant-secret|revoke-secret CONFIG SLOT\n  effects worker-once CONFIG\n  component CORE.wasm COMPONENT.wasm\n  serve [CONFIG.json]\n  assets-compile CONFIG.json\n  maintain CONFIG.json\n  recover-clock CONFIG.json (stop serving first; configure a fresh host key)\n  keygen NEW_KEYS.json\n  edit-key-rotate KEYS.json\n  invite CONFIG.json [--expires-days N]\n\nBUILD_ENVIRONMENT_OPTIONS: --framework CHECKOUT, --cargo-home DIRECTORY, --toolchain DIRECTORY, --seconds N, --isolated [--kernel FILE]. Dependency commands resolve offline without compiling or approving; resolve emits a candidate lock for review.\n\nApplication builds run locally with host access. Use --isolated for untrusted apps or dependencies. Configuration paths are relative to the configuration file. init creates a new host key file; existing keys are never overwritten.",
                 env!("CARGO_PKG_VERSION")
             );
         }
@@ -390,91 +214,12 @@ async fn main() -> Result<()> {
                 .await?;
             println!("{id}");
         }
-        "serve" | "validate" => {
-            ensure!(args.len() <= 2, "usage: noxide serve [CONFIG.json]");
-            let _lock = if args.len() == 1 {
-                Some(project::lock(&project::state(
-                    &project::discover(&std::env::current_dir()?)?,
-                    false,
-                )?)?)
-            } else {
-                None
-            };
-            let path = if args.len() == 2 {
-                PathBuf::from(&args[1])
-            } else {
-                lifecycle::prepare(&project::discover(&std::env::current_dir()?)?, false, None)
-                    .await?
-            };
-            let (config, base) = config(&path)?;
-            let keys = host_keys(&base.join(&config.keys))?;
-            let approved: [u8; 32] = URL_SAFE_NO_PAD
-                .decode(&config.approved_contract)?
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("invalid approved contract digest"))?;
-            let declarations = read(&base.join(&config.manifest), 32_768)?;
-            let manifest = noxide_host::manifest::parse(&declarations)?;
-            ensure!(
-                config.approval(&manifest)?.digest == approved,
-                "deployment did not approve this contract and effective policy"
-            );
-            let assets = match &config.assets {
-                Some(path) => noxide_asset_admission::from_pack(
-                    &manifest.assets,
-                    &read(
-                        &base.join(path),
-                        noxide_host::assets::MAX_ASSET_PACK_BYTES as u64,
-                    )?,
-                )?,
-                None => noxide_host::assets::AssetBundle::default(),
-            };
-            let app = Arc::new(
-                Application::new(
-                    &read(&base.join(&config.component), 2 * 1024 * 1024)?,
-                    &declarations,
-                    approved,
-                    database(&config.database, &base)?,
-                    keys,
-                    Limits::default(),
-                    noxide_host::DeploymentResources {
-                        effects: config.effect_deployment(&base),
-                        jobs: config.jobs.clone(),
-                        assets,
-                        blobs: config.blobs.as_ref().map(|deployment| {
-                            noxide_host::BlobDeployment {
-                                directory: base.join(&deployment.directory),
-                                ceilings: deployment.ceilings.clone(),
-                            }
-                        }),
-                    },
-                )?
-                .with_presentation(config.presentation)?
-                .with_signed_in_reserve(config.signed_in_reserve)?
-                .with_database_statement_limit(config.database_statement_limit)?
-                .with_registration(config.registration),
-            );
-            if command == "validate" {
-                app.activate().await?;
-                return Ok(());
-            }
-            let origin = Origin::parse(&config.origin)?;
-            let shutdown = shutdown_signal()?;
-            let listener = match config.listen {
-                ListenConfig::Tcp(address) => Listener::loopback(address).await?,
-                #[cfg(unix)]
-                ListenConfig::Unix(path) => Listener::unix(&base.join(path))?,
-                #[cfg(unix)]
-                ListenConfig::TorUnix { path, tor_gid } => {
-                    Listener::tor_unix(&base.join(path), tor_gid)?
-                }
-                #[cfg(not(unix))]
-                ListenConfig::Unix(_) | ListenConfig::TorUnix { .. } => {
-                    bail!("Unix sockets require Unix")
-                }
-            };
-            app.activate().await?;
-            println!("Runtime listening with the approved application contract.");
-            http::serve(listener, app, origin, shutdown).await?;
+        "serve" | "validate" => supervisor::run(command, &args).await?,
+        "assets-compile" => {
+            ensure!(args.len() == 2, "usage: noxide assets-compile CONFIG.json");
+            let digest = supervisor::compile_assets(Path::new(&args[1]))?
+                .context("configuration declares no assets")?;
+            println!("{digest}");
         }
         _ => bail!("unknown command; run noxide --help"),
     }

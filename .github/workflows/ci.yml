@@ -61,6 +61,8 @@ jobs:
           done
       - name: Build workspace
         run: cargo build --workspace --locked --offline
+      - name: Check deployed binary authority
+        run: python3 tools/check_binaries.py
       - name: Lint all framework targets
         run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
       - name: Check host layering

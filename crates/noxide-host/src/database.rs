@@ -847,6 +847,20 @@ impl Transaction {
         .await?;
         Ok(candidate)
     }
+    /// Read the generation of a deployment another process activated.
+    pub(crate) async fn deployment_generation(&mut self, contract: &str) -> Result<String> {
+        let rows = self
+            .fetch::<2>(
+                "SELECT contract,generation FROM nx_deployment WHERE singleton=1",
+                &[],
+            )
+            .await?;
+        let [stored, generation] = rows
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("deployment missing"))?;
+        ensure!(stored == contract, "deployment was superseded");
+        Ok(generation.clone())
+    }
     pub(crate) fn field_expression(&self, field: &str) -> Result<String> {
         ensure!(crate::manifest::identifier(field), "invalid field");
         Ok(match self.backend {

@@ -4,12 +4,13 @@ use super::*;
 use crate::{
     application::effects::tests::{Case, declarations},
     effect_deployment::{EffectDeployment, EffectGrant, EffectLimits, EffectSecret},
+    effects::{DeliveryResult, Preflight},
 };
 use std::{
     future::Future,
     net::SocketAddr,
     task::Poll,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -216,7 +217,7 @@ async fn shutdown_contract(database: Option<Database>) {
         tls.flush().await.unwrap();
         let _ = tls.shutdown().await;
     });
-    let service = case.app.start_effect_service().unwrap().unwrap();
+    let service = case.app.start_effect_service().await.unwrap().unwrap();
     let request = acknowledged(at_receiver).await;
     let initial = outbox(&case).await;
     assert_eq!(initial.len(), 1);
@@ -239,9 +240,9 @@ async fn shutdown_contract(database: Option<Database>) {
     .await;
     let physical = Arc::downgrade(
         case.app
-            .effects
-            .as_ref()
-            .unwrap()
+            .effect_delivery()
+            .await
+            .runtime
             .owner
             .lock()
             .unwrap()
@@ -271,7 +272,7 @@ async fn shutdown_contract(database: Option<Database>) {
     assert_eq!(rows[0][2], "1");
     let (records, receipts, captures, _) = case.state().await;
     assert_eq!((records, receipts, captures.len()), (1, 1, 1));
-    assert!(case.app.start_effect_service().is_err());
+    assert!(case.app.start_effect_service().await.is_err());
     case.close().await;
 }
 async fn ambiguous_receiver_contract(database: Option<Database>) {
@@ -352,21 +353,20 @@ async fn lost_database_ack_contract(database: Option<Database>) {
         let _ = tls.shutdown().await;
         request
     });
-    let runtime = case.app.effects.as_ref().unwrap();
+    let delivery = case.app.effect_delivery().await;
+    let runtime = &delivery.runtime;
     let owner = runtime.delivery_owner().unwrap();
-    let scope = case.app.effect_request_scope().unwrap();
+    let scope = delivery.effect_request_scope().unwrap();
     let physical = owner.try_attempt(scope.deadline()).unwrap();
     scope
         .run(async {
             let mut calls = 16;
-            let claim = case
-                .app
+            let claim = delivery
                 .claim_effect(&scope, &physical, &owner, &mut calls)
                 .await
                 .unwrap()
                 .unwrap();
-            let Preflight::Send(prepared) = case
-                .app
+            let Preflight::Send(prepared) = delivery
                 .preflight_effect(&scope, &physical, &claim, &mut calls)
                 .await
                 .unwrap()
@@ -398,7 +398,7 @@ async fn lost_database_ack_contract(database: Option<Database>) {
                 effects::worker::classify(result),
                 DeliveryResult::Delivered
             ));
-            let result = crate::failure_tests::lose_commit_ack(case.app.finalize_effect(
+            let result = crate::failure_tests::lose_commit_ack(delivery.finalize_effect(
                 &scope,
                 &physical,
                 &claim,
@@ -436,23 +436,11 @@ async fn sqlite_known_delivery_lost_database_ack_is_probed_without_repost() {
     lost_database_ack_contract(None).await;
 }
 #[tokio::test]
-async fn http_accept_error_waits_for_actual_effect_socket_and_provider_drain() {
+async fn serving_process_never_delivers_effects() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut case = case(None, listener.local_addr().unwrap(), false).await;
     case.create("ready").await;
     case.stop_clock().await;
-    let (reached, at_receiver) = oneshot::channel();
-    let (release, wait) = oneshot::channel();
-    let receiver = tokio::spawn(async move {
-        let (mut tls, request) = receive(&listener).await;
-        reached.send(request).ok().unwrap();
-        wait.await.unwrap();
-        tls.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
-            .await
-            .unwrap();
-        tls.flush().await.unwrap();
-        let _ = tls.shutdown().await;
-    });
     let accept_error = Arc::new(tokio::sync::Notify::new());
     let http = crate::http::Listener::test_accept_error(accept_error.clone());
     let mut serving = Box::pin(crate::http::serve(
@@ -466,46 +454,25 @@ async fn http_accept_error_waits_for_actual_effect_socket_and_provider_drain() {
         Poll::Ready(())
     })
     .await;
-    let request = acknowledged(at_receiver).await;
-    let owner = Arc::downgrade(
-        case.app
-            .effects
-            .as_ref()
-            .unwrap()
-            .owner
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap(),
-    );
-    assert_eq!(owner.upgrade().unwrap().active_claims(), [request.key]);
+    // Longer than the delivery service's one-second poll.
+    let contacted = tokio::time::timeout(Duration::from_millis(1_500), listener.accept()).await;
+    assert!(contacted.is_err(), "serving process contacted the proxy");
+    assert_eq!(outbox(&case).await[0][1], "pending");
     accept_error.notify_one();
-    // This poll consumes the ready accept error. The old early-? path would
-    // return Err here; the repaired server must await its admitted POST first.
-    std::future::poll_fn(|cx| {
-        assert!(serving.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
-    })
-    .await;
-    release.send(()).unwrap();
     assert!(
         tokio::time::timeout(Duration::from_secs(5), serving)
             .await
             .unwrap()
             .is_err()
     );
-    receiver.await.unwrap();
-    assert!(owner.upgrade().is_none());
-    assert_eq!(outbox(&case).await[0][1], "delivered");
-    let (records, receipts, _, _) = case.state().await;
-    assert_eq!((records, receipts), (1, 1));
     case.close().await;
 }
 
 #[tokio::test]
 async fn claim_mutex_wait_uses_original_delivery_deadline() {
     let case = case(None, "127.0.0.1:9050".parse().unwrap(), false).await;
-    let runtime = case.app.effects.as_ref().unwrap();
+    let delivery = case.app.effect_delivery().await;
+    let runtime = &delivery.runtime;
     let owner = runtime.delivery_owner().unwrap();
     let held = owner.claim_lock.lock().await;
     tokio::time::pause();
@@ -514,7 +481,7 @@ async fn claim_mutex_wait_uses_original_delivery_deadline() {
     let physical = owner.try_attempt(scope.deadline()).unwrap();
     let mut calls = 16;
     let mut claiming =
-        Box::pin(scope.run(case.app.claim_effect(&scope, &physical, &owner, &mut calls)));
+        Box::pin(scope.run(delivery.claim_effect(&scope, &physical, &owner, &mut calls)));
     std::future::poll_fn(|cx| {
         assert!(claiming.as_mut().poll(cx).is_pending());
         Poll::Ready(())

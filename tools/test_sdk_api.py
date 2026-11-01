@@ -481,8 +481,7 @@ def main():
         for folder in ("src", "wit"):
             if (crate / folder).is_dir():
                 source_files(image, crate / folder, f"src/crates/{name}/{folder}")
-    workspace = (ROOT / "Cargo.toml").read_text().replace(
-        '    "crates/noxide-cli",\n', '').replace('    "crates/noxide-host",\n', '')
+    workspace = re.sub(r'    "crates/(?!noxide"|noxide-protocol"|noxide-macros")[^"]+",\n', '', (ROOT / "Cargo.toml").read_text())
     image.add("src/Cargo.toml", workspace.encode())
     image.add("src/README.md", (ROOT / "README.md").read_bytes())
     source = ROOT / "examples/task-board"

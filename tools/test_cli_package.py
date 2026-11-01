@@ -20,7 +20,7 @@ def main():
     subprocess.run(['python3', str(ROOT / 'tools/package_build_kit.py')], check=True)
     subprocess.run(['cargo', 'package', '--workspace', '--no-verify', '--allow-dirty', '--offline', '--target-dir', str(root / 'archives')], cwd=ROOT, check=True)
     version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version']
-    packages = ['noxide-macros', 'noxide-protocol', 'noxide', 'noxide-host', 'noxide-cli']
+    packages = ['noxide-macros', 'noxide-protocol', 'noxide', 'noxide-assets', 'noxide-asset-admission', 'noxide-confine', 'noxide-keys', 'noxide-sandbox', 'noxide-host', 'noxide-cli']
     sources = root / 'sources'
     sources.mkdir()
     for name in packages:
@@ -34,7 +34,8 @@ def main():
     subprocess.run(command, cwd=root, check=True)
     subprocess.run(command + ['--locked'], cwd=root, check=True)
     detached = root / 'noxide'
-    shutil.copy2(root / 'target/debug/noxide', detached)
+    for binary in ('noxide', 'noxide-server', 'noxide-effects-worker', 'noxide-keyd'):
+        shutil.copy2(root / 'target/debug' / binary, root / binary)
     sources.rename(root / 'unavailable-source-checkouts')
     if options.lifecycle:
         subprocess.run(['python3', str(ROOT / 'tools/test_lifecycle.py'),

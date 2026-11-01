@@ -66,7 +66,6 @@ impl Application {
             let outcome = lifecycle_clock::tick(tx, &self.clock).await;
             lease.finish().await?;
             let tick = outcome?;
-            self.activate_effect_delivery(deadline.into_std()).await?;
             self.activate_blobs(deadline).await?;
             // No process readiness on a failed/unknown commit acknowledgement.
             ensure!(

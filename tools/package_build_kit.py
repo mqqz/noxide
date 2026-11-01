@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Package authoritative SDK sources and checksum-verified approved dependencies."""
+import re
 import argparse
 from build_catalog import catalog_packages
 import hashlib
@@ -20,7 +21,7 @@ def entries():
     for path in sorted(paths):
         data = path.read_bytes()
         if path == ROOT / 'Cargo.toml':
-            data = data.replace(b'    "crates/noxide-cli",\n', b'').replace(b'    "crates/noxide-host",\n', b'')
+            data = re.sub(rb'    "crates/(?!noxide"|noxide-protocol"|noxide-macros")[^"]+",\n', b'', data)
         yield path.relative_to(ROOT).as_posix(), data
     packages = catalog_packages((ROOT / 'Cargo.lock').read_bytes())
     cargo = Path(os.environ.get('CARGO_HOME', str(Path.home() / '.cargo')))
