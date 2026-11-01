@@ -402,8 +402,41 @@ pub(crate) async fn observe_clock(tx: &mut Transaction, now: i64) -> Result<i64>
     Ok(now.max(previous))
 }
 
+/// Gap beyond which a request persists the clock mark itself. The lifecycle tick
+/// persists it every second, so while the tick runs requests never write
+/// nx_clock and concurrent writes do not conflict on it. If the tick stalls,
+/// requests keep the persisted mark within this bound, as before.
+pub(crate) const CLOCK_PERSIST_LAG: i64 = 2;
+
+/// Request-path clock observation with rollback checks. It writes nx_clock only
+/// when the persisted mark is more than `CLOCK_PERSIST_LAG` seconds behind.
+pub(crate) async fn observe_clock_bounded(
+    tx: &mut Transaction,
+    now: i64,
+    memory: &std::sync::atomic::AtomicI64,
+) -> Result<i64> {
+    let rows = tx
+        .fetch::<1>(
+            "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
+            &[],
+        )
+        .await?;
+    let persisted: i64 = rows
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("clock missing"))?[0]
+        .parse()?;
+    let effective = observe_clock_read(tx, now, memory).await?;
+    if effective.saturating_sub(persisted) > CLOCK_PERSIST_LAG {
+        return observe_clock(tx, effective).await;
+    }
+    Ok(effective)
+}
+
+/// One clock tick's nonresetting budget, including connection, admission, COMMIT
+/// and confirmed cleanup. It must fit a networked database while staying below the
+/// one-second tick interval; requests never wait on it.
 pub(crate) const CLOCK_CHECKPOINT_BEGIN_DEADLINE: std::time::Duration =
-    std::time::Duration::from_millis(200);
+    std::time::Duration::from_millis(750);
 
 pub(crate) async fn observe_clock_read(
     tx: &mut Transaction,

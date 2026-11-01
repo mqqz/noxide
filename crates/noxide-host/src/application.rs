@@ -683,9 +683,8 @@ impl Application {
 
     async fn observe_clock_write(&self, tx: &mut Transaction, now: i64) -> Result<i64> {
         // Check raw wall time against both watermarks before substituting the
-        // effective time. Persist read-only advances with the write itself.
-        let effective = security::observe_clock_read(tx, now, &self.clock).await?;
-        let effective = security::observe_clock(tx, effective).await?;
+        // effective time. Only the clock tick persists the mark.
+        let effective = security::observe_clock_bounded(tx, now, &self.clock).await?;
         self.clock.fetch_max(effective, Ordering::Relaxed);
         Ok(effective)
     }
@@ -1900,18 +1899,22 @@ mod clock_tests {
                 .await
                 .is_err()
         );
+        // Writes leave a read watermark within the persist lag to the clock tick,
+        // so concurrent writes do not contend on nx_clock.
+        let lag = security::CLOCK_PERSIST_LAG;
         app.submit(&session, 1, &submission, &csrf, input.clone())
             .await
             .unwrap();
-        assert_eq!(stored_clock(&db).await, high + 1);
-        read_advance(&app, high + 2).await;
+        assert_eq!(stored_clock(&db).await, high);
+        read_advance(&app, high + lag).await;
         app.recover_form(&session, 1, &submission, &csrf, &input, true)
             .await
             .unwrap();
-        assert_eq!(stored_clock(&db).await, high + 2);
-        read_advance(&app, high + 3).await;
+        assert_eq!(stored_clock(&db).await, high);
+        // Beyond the lag (the tick is not persisting), the write persists it.
+        read_advance(&app, high + lag + 1).await;
         app.logout(&session, &csrf).await.unwrap();
-        assert_eq!(stored_clock(&db).await, high + 3);
+        assert_eq!(stored_clock(&db).await, high + lag + 1);
 
         // The exact boundary is evaluated against raw wall time, not an
         // already-substituted effective time, even if durable time lags.
@@ -1920,13 +1923,13 @@ mod clock_tests {
             .await
             .unwrap();
         assert_eq!(
-            app.observe_clock_write(&mut tx, high + 3 - 60)
+            app.observe_clock_write(&mut tx, high + lag + 1 - 60)
                 .await
                 .unwrap(),
-            high + 3
+            high + lag + 1
         );
         assert_eq!(
-            app.observe_clock_write(&mut tx, high + 3 - 61)
+            app.observe_clock_write(&mut tx, high + lag + 1 - 61)
                 .await
                 .unwrap_err()
                 .to_string(),

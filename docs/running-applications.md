@@ -583,6 +583,9 @@ Expiry is authenticated, so deleting a receipt cannot authorize an old token.
 The persisted clock high-water mark tolerates backward corrections of up to
 60 seconds. Requests and maintenance use the greater of wall time and the
 persisted mark for all token issuance, verification, and expiry collection.
+The lifecycle clock tick persists the mark each second; a request writes it only
+if the mark is more than two seconds behind, so concurrent writes do not contend
+on it.
 Time never moves backwards within that authority. A single correction can extend
 a token's wall-time lifetime by up to 60 seconds. Request execution deadlines
 continue to use monotonic elapsed time.
