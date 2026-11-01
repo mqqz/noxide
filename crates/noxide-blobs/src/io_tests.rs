@@ -1,5 +1,5 @@
 use super::*;
-use crate::blob_state::{Commitment, Metadata, Quota, SubjectUsage, UploadBinding};
+use crate::state::{Commitment, Metadata, Quota, SubjectUsage, UploadBinding};
 use noxide_protocol::{
     blobs::{BlobLimits, BlobRef, UploadHandle},
     time::Timestamp,
@@ -183,7 +183,7 @@ async fn failed_upload_cleanup_needs_matching_stopped_generation() {
     let (claiming, claim) = metadata
         .claim_stopped_upload(metadata.generation, Timestamp::UNIX_EPOCH, &proof)
         .unwrap();
-    assert_eq!(claiming.next.state, crate::blob_state::State::Deleting);
+    assert_eq!(claiming.next.state, crate::state::State::Deleting);
     assert_eq!(
         Quota {
             reserved: 100,

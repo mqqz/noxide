@@ -31,20 +31,20 @@ const DIR_FLAGS: OFlags = OFlags::RDONLY
 const FILE_FLAGS: OFlags = OFlags::NOFOLLOW
     .union(OFlags::CLOEXEC)
     .union(OFlags::NONBLOCK);
-pub(crate) const SCAN_BATCH: usize = 64;
+pub const SCAN_BATCH: usize = 64;
 
 /// Host-generated storage identity, never a guest filename or public BlobRef.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct ObjectKey(String);
+pub struct ObjectKey(String);
 impl ObjectKey {
-    pub(crate) fn random() -> Result<Self> {
+    pub fn random() -> Result<Self> {
         let mut bytes = [0; 32];
         OsRng
             .try_fill_bytes(&mut bytes)
             .context("blob randomness unavailable")?;
         Self::parse(hex(&bytes))
     }
-    pub(crate) fn parse(value: String) -> Result<Self> {
+    pub fn parse(value: String) -> Result<Self> {
         ensure!(
             value.len() == 64
                 && value
@@ -54,7 +54,7 @@ impl ObjectKey {
         );
         Ok(Self(value))
     }
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -75,18 +75,18 @@ fn hex(bytes: &[u8]) -> String {
 
 /// A request's monotonic bound. Never used for lifecycle expiry or GC grace.
 #[derive(Clone)]
-pub(crate) struct IoGuard {
+pub struct IoGuard {
     deadline: Instant,
     cancelled: Arc<AtomicBool>,
 }
 impl IoGuard {
-    pub(crate) fn new(deadline: Instant, cancelled: Arc<AtomicBool>) -> Self {
+    pub fn new(deadline: Instant, cancelled: Arc<AtomicBool>) -> Self {
         Self {
             deadline,
             cancelled,
         }
     }
-    pub(crate) fn check(&self) -> Result<()> {
+    pub fn check(&self) -> Result<()> {
         ensure!(
             !self.cancelled.load(Ordering::Acquire) && Instant::now() < self.deadline,
             "blob transfer cancelled or expired"
@@ -103,13 +103,13 @@ struct Inner {
     identity: ObjectKey,
 }
 #[derive(Clone)]
-pub(crate) struct BlobStore(Arc<Inner>);
+pub struct BlobStore(Arc<Inner>);
 
 impl BlobStore {
     /// Requires an absolute operator path with no symlink components. Only its
     /// final directory may be created; existing directories must be private and
     /// owned by this process's effective user. One process owns a store at once.
-    pub(crate) fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Path) -> Result<Self> {
         let (parent, name) = parent(path)?;
         let root = private_dir(&parent, &name)?;
         let lease = fs::openat(
@@ -161,18 +161,13 @@ impl BlobStore {
             identity,
         })))
     }
-    pub(crate) fn identity(&self) -> &ObjectKey {
+    pub fn identity(&self) -> &ObjectKey {
         &self.0.identity
     }
 
     /// The caller must commit quota reservation and Uploading metadata first.
     /// Create-new prevents replacing even another failed upload's partial file.
-    pub(crate) fn begin(
-        &self,
-        key: ObjectKey,
-        limit: u64,
-        guard: IoGuard,
-    ) -> Result<PendingObject> {
+    pub fn begin(&self, key: ObjectKey, limit: u64, guard: IoGuard) -> Result<PendingObject> {
         guard.check()?;
         ensure!(
             (1..=MAX_UPLOAD_BYTES).contains(&limit),
@@ -201,7 +196,7 @@ impl BlobStore {
     /// Caller holds current resource/field authority in its short transaction.
     /// Capture this descriptor before releasing that transaction. A missing,
     /// replaced, linked, writable or wrong-size object is an error, never a 200.
-    pub(crate) fn open_object(
+    pub fn open_object(
         &self,
         key: &ObjectKey,
         expected: u64,
@@ -228,7 +223,7 @@ impl BlobStore {
 
     /// Only a fenced metadata GC claimant calls this. Idempotent across crash
     /// after unlink. The transaction has been released before these syscalls.
-    pub(crate) fn remove(&self, key: &ObjectKey, guard: &IoGuard) -> Result<()> {
+    pub fn remove(&self, key: &ObjectKey, guard: &IoGuard) -> Result<()> {
         for directory in [&self.0.partial, &self.0.objects] {
             guard.check()?;
             match fs::unlinkat(directory, key.as_str(), AtFlags::empty()) {
@@ -241,7 +236,7 @@ impl BlobStore {
         Ok(())
     }
 
-    pub(crate) fn scan(&self, location: ObjectLocation) -> Result<ObjectScan> {
+    pub fn scan(&self, location: ObjectLocation) -> Result<ObjectScan> {
         let directory = match location {
             ObjectLocation::Partial => &self.0.partial,
             ObjectLocation::Final => &self.0.objects,
@@ -254,7 +249,7 @@ impl BlobStore {
     }
 }
 
-pub(crate) struct PendingObject {
+pub struct PendingObject {
     store: BlobStore,
     key: ObjectKey,
     file: File,
@@ -264,7 +259,7 @@ pub(crate) struct PendingObject {
     guard: IoGuard,
 }
 impl PendingObject {
-    pub(crate) fn write_chunk(&mut self, bytes: &[u8]) -> Result<()> {
+    pub fn write_chunk(&mut self, bytes: &[u8]) -> Result<()> {
         self.guard.check()?;
         ensure!(bytes.len() <= TRANSFER_BUFFER_BYTES, "upload buffer limit");
         let total = self
@@ -289,7 +284,7 @@ impl PendingObject {
     /// A DurableObject is constructible only after data and both rename
     /// directories have been synced. A deadline/error leaves an unclaimable
     /// partial or finalized orphan for metadata-driven bounded reconciliation.
-    pub(crate) fn finalize(self) -> Result<DurableObject> {
+    pub fn finalize(self) -> Result<DurableObject> {
         self.finalize_observed(|_| Ok(()))
     }
     fn finalize_observed(
@@ -335,24 +330,24 @@ enum FinalizePoint {
 }
 
 /// Evidence for the metadata transition to Staged; never serialized to a guest.
-pub(crate) struct DurableObject {
+pub struct DurableObject {
     key: ObjectKey,
     bytes: u64,
     sha256: [u8; 32],
 }
 impl DurableObject {
-    pub(crate) fn key(&self) -> &ObjectKey {
+    pub fn key(&self) -> &ObjectKey {
         &self.key
     }
-    pub(crate) fn bytes(&self) -> u64 {
+    pub fn bytes(&self) -> u64 {
         self.bytes
     }
-    pub(crate) fn sha256(&self) -> [u8; 32] {
+    pub fn sha256(&self) -> [u8; 32] {
         self.sha256
     }
 }
 
-pub(crate) struct OpenedObject {
+pub struct OpenedObject {
     file: File,
     remaining: u64,
     guard: IoGuard,
@@ -361,7 +356,7 @@ pub(crate) struct OpenedObject {
 impl OpenedObject {
     /// The caller uses one reusable <=64KiB buffer. A captured descriptor stays
     /// valid through later GC unlink; this grants no authority to a new stream.
-    pub(crate) fn read_chunk(&mut self, buffer: &mut [u8]) -> Result<usize> {
+    pub fn read_chunk(&mut self, buffer: &mut [u8]) -> Result<usize> {
         self.guard.check()?;
         ensure!(
             !buffer.is_empty() && buffer.len() <= TRANSFER_BUFFER_BYTES,
@@ -386,11 +381,11 @@ impl OpenedObject {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ObjectLocation {
+pub enum ObjectLocation {
     Partial,
     Final,
 }
-pub(crate) struct ObjectScan {
+pub struct ObjectScan {
     directory: fs::Dir,
     location: ObjectLocation,
     _store: BlobStore,
@@ -398,10 +393,7 @@ pub(crate) struct ObjectScan {
 impl ObjectScan {
     /// Reads at most 64 directory entries, including dot entries. Retain this
     /// scanner between worker batches; restarting it per batch can starve GC.
-    pub(crate) fn next_batch(
-        &mut self,
-        guard: &IoGuard,
-    ) -> Result<Vec<(ObjectLocation, ObjectKey)>> {
+    pub fn next_batch(&mut self, guard: &IoGuard) -> Result<Vec<(ObjectLocation, ObjectKey)>> {
         let mut out = Vec::new();
         for _ in 0..SCAN_BATCH {
             guard.check()?;
@@ -507,22 +499,20 @@ fn identity(root: &OwnedFd) -> Result<ObjectKey> {
     }
 }
 
-#[path = "blob_pairing.rs"]
+#[path = "pairing.rs"]
 mod pairing;
-pub(crate) use pairing::{
-    DurablePairMarker, PairId, PairObservation, PairPhase, PairRecord, PairStep,
-};
+pub use pairing::{DurablePairMarker, PairId, PairObservation, PairPhase, PairRecord, PairStep};
 
 #[cfg(test)]
-#[path = "blob_store_tests.rs"]
+#[path = "store_tests.rs"]
 mod tests;
 
 impl BlobStore {
-    pub(crate) fn snapshot(
+    pub fn snapshot(
         &self,
         key: &ObjectKey,
         guard: &IoGuard,
-    ) -> Result<Option<crate::blob_inspect::PhysicalSnapshot>> {
+    ) -> Result<Option<crate::inspect::PhysicalSnapshot>> {
         let mut sizes = [None, None];
         for (index, directory) in [&self.0.partial, &self.0.objects].iter().enumerate() {
             guard.check()?;
@@ -550,7 +540,7 @@ impl BlobStore {
         if sizes.iter().all(Option::is_none) {
             return Ok(None);
         }
-        Ok(Some(crate::blob_inspect::PhysicalSnapshot {
+        Ok(Some(crate::inspect::PhysicalSnapshot {
             key: key.clone(),
             partial: sizes[0],
             finalized: sizes[1],
@@ -558,7 +548,7 @@ impl BlobStore {
     }
 }
 impl OpenedObject {
-    pub(crate) fn verify_digest(&mut self, expected: [u8; 32]) -> Result<()> {
+    pub fn verify_digest(&mut self, expected: [u8; 32]) -> Result<()> {
         use std::io::{Seek, SeekFrom};
         let length = self.remaining;
         let mut digest = Sha256::new();
@@ -580,7 +570,7 @@ impl OpenedObject {
 }
 
 #[derive(Debug)]
-pub(crate) struct PhysicalMismatch;
+pub struct PhysicalMismatch;
 impl std::fmt::Display for PhysicalMismatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("blob store needs operator reconciliation")
@@ -588,12 +578,12 @@ impl std::fmt::Display for PhysicalMismatch {
 }
 impl std::error::Error for PhysicalMismatch {}
 /// Retains the exclusive flock; identity is generated here, never caller-picked.
-pub(crate) struct ProcessFence {
+pub struct ProcessFence {
     store: BlobStore,
     process: ObjectKey,
 }
 impl BlobStore {
-    pub(crate) fn claim_process(&self) -> Result<ProcessFence> {
+    pub fn claim_process(&self) -> Result<ProcessFence> {
         Ok(ProcessFence {
             store: self.clone(),
             process: ObjectKey::random()?,
@@ -601,10 +591,10 @@ impl BlobStore {
     }
 }
 impl ProcessFence {
-    pub(crate) fn process(&self) -> &ObjectKey {
+    pub fn process(&self) -> &ObjectKey {
         &self.process
     }
-    pub(crate) fn store(&self) -> &ObjectKey {
+    pub fn store(&self) -> &ObjectKey {
         self.store.identity()
     }
 }

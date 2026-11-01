@@ -1418,6 +1418,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "noxide-blobs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "noxide-admission",
+ "noxide-protocol",
+ "noxide-sql",
+ "noxide-store",
+ "noxide-test-support",
+ "rand",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "noxide-cli"
 version = "0.1.0"
 dependencies = [
@@ -1509,6 +1529,7 @@ dependencies = [
  "noxide-admission",
  "noxide-asset-admission",
  "noxide-assets",
+ "noxide-blobs",
  "noxide-effect-delivery",
  "noxide-effects",
  "noxide-keys",

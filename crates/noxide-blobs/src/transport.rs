@@ -6,18 +6,18 @@ use noxide_protocol::blobs::{
 };
 use std::time::{Duration, Instant};
 
-pub(crate) const CONTENT_TYPE: &str = "application/octet-stream";
-pub(crate) const CACHE_CONTROL: &str = "no-store";
-pub(crate) const NOSNIFF: &str = "nosniff";
-pub(crate) const CSP: &str = "default-src 'none'; sandbox";
+pub const CONTENT_TYPE: &str = "application/octet-stream";
+pub const CACHE_CONTROL: &str = "no-store";
+pub const NOSNIFF: &str = "nosniff";
+pub const CSP: &str = "default-src 'none'; sandbox";
 const MAX_RAW_FILENAME_BYTES: usize = 255;
 const MAX_FILENAME_BYTES: usize = 80;
 
 /// A display label only; it must never be passed to any filesystem API.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AttachmentName(String);
+pub struct AttachmentName(String);
 impl AttachmentName {
-    pub(crate) fn normalize(input: &str) -> Result<Self> {
+    pub fn normalize(input: &str) -> Result<Self> {
         ensure!(
             input.len() <= MAX_RAW_FILENAME_BYTES,
             "upload filename limit"
@@ -41,12 +41,12 @@ impl AttachmentName {
             label.into()
         }))
     }
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
     /// Contains only ASCII letters, digits, dot, underscore and hyphen inside a
     /// quoted filename. No untrusted quote, separator, Unicode or header byte.
-    pub(crate) fn disposition(&self) -> String {
+    pub fn disposition(&self) -> String {
         format!("attachment; filename=\"{}\"", self.0)
     }
 }
@@ -54,13 +54,13 @@ impl AttachmentName {
 /// Transport adapters must actually enforce these deadlines while waiting for
 /// body/network progress, including when no further body poll occurs. Merely
 /// checking on the next poll is insufficient to release a stalled stream.
-pub(crate) struct TransferBudget {
+pub struct TransferBudget {
     total: Instant,
     idle: Instant,
     remaining: u64,
 }
 impl TransferBudget {
-    pub(crate) fn new(now: Instant, request_deadline: Instant, bytes: u64) -> Result<Self> {
+    pub fn new(now: Instant, request_deadline: Instant, bytes: u64) -> Result<Self> {
         ensure!(bytes <= MAX_UPLOAD_BYTES, "download byte limit");
         let total = request_deadline.min(
             now.checked_add(Duration::from_millis(TRANSFER_TOTAL_MILLIS))
@@ -77,10 +77,10 @@ impl TransferBudget {
             remaining: bytes,
         })
     }
-    pub(crate) fn deadline(&self) -> Instant {
+    pub fn deadline(&self) -> Instant {
         self.total.min(self.idle)
     }
-    pub(crate) fn check(&self, now: Instant) -> Result<()> {
+    pub fn check(&self, now: Instant) -> Result<()> {
         ensure!(
             now < self.deadline(),
             "blob transfer idle or total deadline"
@@ -89,7 +89,7 @@ impl TransferBudget {
     }
     /// Called after nonempty progress, never for empty polls or keepalives.
     /// This is exact byte accounting, not permission to send bytes before auth.
-    pub(crate) fn progress(&mut self, now: Instant, bytes: usize) -> Result<()> {
+    pub fn progress(&mut self, now: Instant, bytes: usize) -> Result<()> {
         self.check(now)?;
         ensure!(
             bytes > 0 && bytes <= TRANSFER_BUFFER_BYTES,
@@ -105,7 +105,7 @@ impl TransferBudget {
         );
         Ok(())
     }
-    pub(crate) fn complete(&self) -> bool {
+    pub fn complete(&self) -> bool {
         self.remaining == 0
     }
 }

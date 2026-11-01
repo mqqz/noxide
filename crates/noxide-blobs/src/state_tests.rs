@@ -1,5 +1,5 @@
 use super::*;
-use crate::blob_store::{BlobStore, IoGuard};
+use crate::store::{BlobStore, IoGuard};
 use std::{
     sync::{Arc, atomic::AtomicBool},
     time::{Duration as WallDuration, Instant},

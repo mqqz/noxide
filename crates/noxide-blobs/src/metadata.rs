@@ -3,15 +3,15 @@
 //! perform no filesystem work and mint no acknowledged-commit proof.
 use crate::sql::{JoinSql, Sql, sql};
 use crate::{
-    blob_state::{
+    database::{Param, Transaction},
+    state::{
         Association, Commitment, GcClaim, Generation, Metadata, State, Transition, UploadBinding,
     },
-    blob_store::{
+    store::{
         DurableObject, DurablePairMarker, IoGuard, ObjectKey, PairId, PairObservation, PairPhase,
         PairRecord, PairStep,
     },
-    blob_transport::AttachmentName,
-    database::{Param, Transaction},
+    transport::AttachmentName,
 };
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::{
@@ -22,8 +22,8 @@ use noxide_protocol::{
     time::{Duration, Timestamp},
 };
 
-pub(crate) struct MetadataContext<'a> {
-    pub(crate) tx: &'a mut Transaction,
+pub struct MetadataContext<'a> {
+    pub tx: &'a mut Transaction,
 }
 impl MetadataContext<'_> {
     async fn execute(&mut self, sql: impl Into<Sql>, params: &[Param]) -> Result<u64> {
@@ -40,10 +40,7 @@ impl MetadataContext<'_> {
     /// this transaction under the retained exclusive store lease. A newly
     /// inserted PENDING record MUST commit with known acknowledgement before
     /// the runtime follows this data proposal with any filesystem marker write.
-    pub(crate) async fn prepare_pair(
-        &mut self,
-        observation: &PairObservation,
-    ) -> Result<PairPreparation> {
+    pub async fn prepare_pair(&mut self, observation: &PairObservation) -> Result<PairPreparation> {
         if let Some(record) = self.pair_record().await? {
             let step = observation.decide(Some(&record))?;
             return Ok(PairPreparation {
@@ -150,7 +147,7 @@ impl MetadataContext<'_> {
     /// Marker evidence proves file+directory durability, not this transaction's
     /// eventual commit. The caller still requires authoritative acknowledgement
     /// and final healthy lifecycle activation before serving or starting GC.
-    pub(crate) async fn acknowledge_pair(&mut self, marker: &DurablePairMarker) -> Result<()> {
+    pub async fn acknowledge_pair(&mut self, marker: &DurablePairMarker) -> Result<()> {
         let changed=self.execute("UPDATE nx_blob_store SET pair_state='paired',serial=serial+1 WHERE singleton=1 AND identity=$1 AND pair_id=$2 AND pair_state='pending' AND serial<9223372036854775807 AND reserved_bytes=0 AND used_bytes=0 AND objects=0 AND anonymous_reserved_bytes=0 AND anonymous_used_bytes=0 AND NOT EXISTS(SELECT 1 FROM nx_blobs) AND NOT EXISTS(SELECT 1 FROM nx_blob_subjects) AND NOT EXISTS(SELECT 1 FROM nx_blob_orphans)",&[marker.store().as_str().into(),marker.pair().as_str().into()]).await?;
         if changed == 0 {
             let row = self.pair_record().await?.context("store pairing missing")?;
@@ -165,16 +162,16 @@ impl MetadataContext<'_> {
         }
         Ok(())
     }
-    pub(crate) async fn slot(&mut self, slot: &Commitment) -> Result<Option<BlobRow>> {
+    pub async fn slot(&mut self, slot: &Commitment) -> Result<Option<BlobRow>> {
         self.load("slot", slot.as_str()).await
     }
-    pub(crate) async fn reference(&mut self, reference: &BlobRef) -> Result<Option<BlobRow>> {
+    pub async fn reference(&mut self, reference: &BlobRef) -> Result<Option<BlobRow>> {
         self.load("blob_ref", reference.as_str()).await
     }
-    pub(crate) async fn object(&mut self, key: &ObjectKey) -> Result<Option<BlobRow>> {
+    pub async fn object(&mut self, key: &ObjectKey) -> Result<Option<BlobRow>> {
         self.load("object_key", key.as_str()).await
     }
-    pub(crate) async fn page(&mut self, after: &str) -> Result<Vec<BlobRow>> {
+    pub async fn page(&mut self, after: &str) -> Result<Vec<BlobRow>> {
         let columns = self.row_columns();
         self.fetch::<22>(
             &sql!("SELECT {columns} FROM nx_blobs WHERE slot>$1 ORDER BY slot LIMIT 16"),
@@ -255,7 +252,7 @@ impl MetadataContext<'_> {
     /// Caller has already verified origin/CSRF/session/submission/upload ticket,
     /// probed the existing semantic receipt and serialized the stable nonce.
     /// Existing slot is returned WITHOUT a fresh charge or file rewrite.
-    pub(crate) async fn reserve(&mut self, request: Reservation<'_>) -> Result<ReservationOutcome> {
+    pub async fn reserve(&mut self, request: Reservation<'_>) -> Result<ReservationOutcome> {
         request
             .policy
             .validate_limits()
@@ -336,7 +333,7 @@ impl MetadataContext<'_> {
     /// Actual I/O completion is not publication authority by itself. Caller
     /// checks current request/worker/process ownership and treats unknown commit
     /// as unknown, never as an aborted stage or permission to release quota.
-    pub(crate) async fn publish(
+    pub async fn publish(
         &mut self,
         row: &BlobRow,
         object: DurableObject,
@@ -377,7 +374,7 @@ impl MetadataContext<'_> {
     /// MUST run only after existing core receipt claim/recovery, in its SAME tx.
     /// SQL locks the actual current stage; the returned token cannot authorize a
     /// different nonce/session/form/field or stand in for current action policy.
-    pub(crate) async fn lock_stage(
+    pub async fn lock_stage(
         &mut self,
         handle: &UploadHandle,
         binding: &UploadBinding,
@@ -393,7 +390,7 @@ impl MetadataContext<'_> {
         let row = BlobRow::parse(rows.into_iter().next().unwrap())?;
         Ok(LockedStage(row))
     }
-    pub(crate) async fn associate(
+    pub async fn associate(
         &mut self,
         locked: LockedStage,
         association: Association,
@@ -413,7 +410,7 @@ impl MetadataContext<'_> {
         Ok(row.metadata.blob)
     }
     /// Same resource deletion tx. No filesystem work or physical charge release.
-    pub(crate) async fn detach_resource(
+    pub async fn detach_resource(
         &mut self,
         resource: i64,
         id: i64,
@@ -470,7 +467,7 @@ impl MetadataContext<'_> {
     }
     /// Claim only an expired Staged or Unreferenced row. The returned pure claim
     /// is not dispatch authority until the enclosing transaction is ACKED.
-    pub(crate) async fn claim_collectable(
+    pub async fn claim_collectable(
         &mut self,
         row: &BlobRow,
         process: &ObjectKey,
@@ -483,12 +480,12 @@ impl MetadataContext<'_> {
     /// A matching completed worker is mandatory for this process's Uploading
     /// rows. Prior-process recovery uses a separate exclusive-store fence path;
     /// an arbitrary process identifier must never substitute for that proof.
-    pub(crate) async fn claim_stopped_upload(
+    pub async fn claim_stopped_upload(
         &mut self,
         row: &BlobRow,
         process: &ObjectKey,
         now: Timestamp,
-        stopped: &crate::blob_io::StoppedIo,
+        stopped: &crate::io::StoppedIo,
     ) -> Result<(BlobRow, GcClaim)> {
         ensure!(&row.process == process, "foreign blob upload process");
         let (transition, claim) =
@@ -527,7 +524,7 @@ impl MetadataContext<'_> {
     }
     /// Only after acknowledged directory-fsynced unlink under a committed GC
     /// claim. Unknown acknowledgement never authorizes another decrement.
-    pub(crate) async fn deleted(
+    pub async fn deleted(
         &mut self,
         row: &BlobRow,
         claim: &GcClaim,
@@ -562,37 +559,37 @@ impl MetadataContext<'_> {
     }
 }
 
-pub(crate) struct Reservation<'a> {
-    pub(crate) binding: UploadBinding,
-    pub(crate) filename: AttachmentName,
-    pub(crate) limit: u64,
-    pub(crate) now: Timestamp,
-    pub(crate) policy: &'a BlobPolicy,
-    pub(crate) capability: Option<AnonymousCapabilityQuota>,
-    pub(crate) store: &'a ObjectKey,
-    pub(crate) process: &'a ObjectKey,
+pub struct Reservation<'a> {
+    pub binding: UploadBinding,
+    pub filename: AttachmentName,
+    pub limit: u64,
+    pub now: Timestamp,
+    pub policy: &'a BlobPolicy,
+    pub capability: Option<AnonymousCapabilityQuota>,
+    pub store: &'a ObjectKey,
+    pub process: &'a ObjectKey,
 }
-pub(crate) enum ReservationOutcome {
+pub enum ReservationOutcome {
     Created(BlobRow),
     Existing(BlobRow),
 }
-pub(crate) struct LockedStage(BlobRow);
+pub struct LockedStage(BlobRow);
 impl LockedStage {
-    pub(crate) fn blob(&self) -> &BlobRef {
+    pub fn blob(&self) -> &BlobRef {
         &self.0.metadata.blob
     }
-    pub(crate) fn row(&self) -> &BlobRow {
+    pub fn row(&self) -> &BlobRow {
         &self.0
     }
 }
 #[derive(Clone)]
-pub(crate) struct BlobRow {
-    pub(crate) metadata: Metadata,
-    pub(crate) anonymous: bool,
-    pub(crate) filename: AttachmentName,
-    pub(crate) created: Timestamp,
-    pub(crate) claimed: Timestamp,
-    pub(crate) process: ObjectKey,
+pub struct BlobRow {
+    pub metadata: Metadata,
+    pub anonymous: bool,
+    pub filename: AttachmentName,
+    pub created: Timestamp,
+    pub claimed: Timestamp,
+    pub process: ObjectKey,
 }
 impl BlobRow {
     fn parse(row: [String; 22]) -> Result<Self> {
@@ -831,19 +828,19 @@ fn counter_predicate(table: CounterTable) -> Sql {
 }
 
 // This is a transaction proposal, never a commit acknowledgement or Ready token.
-pub(crate) struct PairPreparation {
-    pub(crate) record: PairRecord,
-    pub(crate) step: PairStep,
-    pub(crate) pending_inserted: bool,
+pub struct PairPreparation {
+    pub record: PairRecord,
+    pub step: PairStep,
+    pub pending_inserted: bool,
 }
 
 impl MetadataContext<'_> {
     /// Caller retains this process's exclusive store lease. A prior process can
     /// no longer have a file descriptor or native worker on that store.
-    pub(crate) async fn recover_prior_upload(
+    pub async fn recover_prior_upload(
         &mut self,
         row: &BlobRow,
-        fence: &crate::blob_store::ProcessFence,
+        fence: &crate::store::ProcessFence,
         now: Timestamp,
     ) -> Result<(BlobRow, GcClaim)> {
         let process = fence.process();
@@ -860,12 +857,12 @@ impl MetadataContext<'_> {
         let next = self.persist_claim(row, &transition, process, now).await?;
         Ok((next, claim))
     }
-    pub(crate) async fn resume_deletion(
+    pub async fn resume_deletion(
         &mut self,
         row: &BlobRow,
-        fence: &crate::blob_store::ProcessFence,
+        fence: &crate::store::ProcessFence,
         now: Timestamp,
-        stopped: Option<&crate::blob_io::StoppedIo>,
+        stopped: Option<&crate::io::StoppedIo>,
     ) -> Result<(BlobRow, GcClaim)> {
         let process = fence.process();
         let paired = self.fetch::<1>("SELECT identity FROM nx_blob_store WHERE singleton=1 AND identity=$1 AND pair_state='paired'", &[fence.store().as_str().into()]).await?;
@@ -884,7 +881,7 @@ impl MetadataContext<'_> {
         let next = self.persist_claim(row, &transition, process, now).await?;
         Ok((next, claim))
     }
-    pub(crate) async fn quarantine_unknown(
+    pub async fn quarantine_unknown(
         &mut self,
         key: &ObjectKey,
         bytes: u64,
@@ -906,7 +903,7 @@ impl MetadataContext<'_> {
 impl MetadataContext<'_> {
     /// Upload prefix and core attempts take this existing paired row before
     /// receipt probe/claim, then stage rows. Transport runs after its commit.
-    pub(crate) async fn lock_form(&mut self, store: &ObjectKey) -> Result<()> {
+    pub async fn lock_form(&mut self, store: &ObjectKey) -> Result<()> {
         let changed=self.execute("UPDATE nx_blob_store SET serial=serial WHERE singleton=1 AND identity=$1 AND pair_state='paired'",&[store.as_str().into()]).await?;
         ensure!(changed == 1, "blob store pairing unavailable");
         Ok(())

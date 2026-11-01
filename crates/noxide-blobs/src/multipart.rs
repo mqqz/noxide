@@ -2,7 +2,7 @@
 //! Prefix decoding stops EXACTLY before the first file byte. The HTTP adapter
 //! must authenticate these values and commit quota/slot reservation before it
 //! calls into_body or polls more body data. This parser grants no authority.
-use crate::blob_transport::AttachmentName;
+use crate::transport::AttachmentName;
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::blobs::{MAX_UPLOAD_BYTES, TRANSFER_BUFFER_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,11 +13,11 @@ const FIELD_BYTES: usize = 32_768;
 const MAX_FIELDS: usize = 39; // three host controls, 32 inputs, four target handles
 
 #[derive(Clone)]
-pub(crate) struct Boundary(Vec<u8>);
+pub struct Boundary(Vec<u8>);
 impl Boundary {
     /// Native browsers use token boundaries. Also accept one quoted token;
     /// no escapes, extra parameters, whitespace within, or ambiguous duplicates.
-    pub(crate) fn content_type(value: &str) -> Result<Self> {
+    pub fn content_type(value: &str) -> Result<Self> {
         ensure!(value.len() <= 256, "multipart content type limit");
         let mut parts = value.split(';');
         ensure!(
@@ -64,24 +64,19 @@ impl Boundary {
     }
 }
 
-pub(crate) struct ScalarPart {
-    pub(crate) name: String,
-    pub(crate) max_bytes: usize,
-    pub(crate) required: bool,
+pub struct ScalarPart {
+    pub name: String,
+    pub max_bytes: usize,
+    pub required: bool,
 }
-pub(crate) struct PrefixSpec {
+pub struct PrefixSpec {
     fields: Vec<ScalarPart>,
     file: String,
     optional: bool,
     limit: u64,
 }
 impl PrefixSpec {
-    pub(crate) fn new(
-        fields: Vec<ScalarPart>,
-        file: String,
-        optional: bool,
-        limit: u64,
-    ) -> Result<Self> {
+    pub fn new(fields: Vec<ScalarPart>, file: String, optional: bool, limit: u64) -> Result<Self> {
         ensure!(
             (3..=MAX_FIELDS).contains(&fields.len()) && (1..=MAX_UPLOAD_BYTES).contains(&limit),
             "invalid multipart schema"
@@ -126,7 +121,7 @@ enum PrefixPhase {
     Ready,
     Poisoned,
 }
-pub(crate) struct PrefixDecoder {
+pub struct PrefixDecoder {
     boundary: Boundary,
     spec: PrefixSpec,
     phase: PrefixPhase,
@@ -135,13 +130,13 @@ pub(crate) struct PrefixDecoder {
     field: usize,
     total: usize,
 }
-pub(crate) struct PrefixProgress {
-    pub(crate) consumed: usize,
-    pub(crate) ready: Option<ReadyPrefix>,
+pub struct PrefixProgress {
+    pub consumed: usize,
+    pub ready: Option<ReadyPrefix>,
 }
-pub(crate) struct ReadyPrefix {
-    pub(crate) values: BTreeMap<String, String>,
-    pub(crate) filename: Option<AttachmentName>,
+pub struct ReadyPrefix {
+    pub values: BTreeMap<String, String>,
+    pub filename: Option<AttachmentName>,
     boundary: Boundary,
     limit: u64,
 }
@@ -149,12 +144,12 @@ impl ReadyPrefix {
     /// The caller must first validate origin/CSRF/submission/ticket/schema and
     /// resolve replay/commit reservation. Even an already buffered input chunk
     /// must stay unconsumed until that succeeds. Optional no-file has limit0.
-    pub(crate) fn into_body(self) -> FileDecoder {
+    pub fn into_body(self) -> FileDecoder {
         FileDecoder::new(&self.boundary, self.limit)
     }
 }
 impl PrefixDecoder {
-    pub(crate) fn new(boundary: Boundary, spec: PrefixSpec) -> Self {
+    pub fn new(boundary: Boundary, spec: PrefixSpec) -> Self {
         Self {
             boundary,
             spec,
@@ -165,7 +160,7 @@ impl PrefixDecoder {
             total: 0,
         }
     }
-    pub(crate) fn push(&mut self, input: &[u8]) -> Result<PrefixProgress> {
+    pub fn push(&mut self, input: &[u8]) -> Result<PrefixProgress> {
         let result = self.push_inner(input);
         if result.is_err() {
             self.phase = PrefixPhase::Poisoned;
@@ -288,7 +283,7 @@ impl PrefixDecoder {
             ready: None,
         })
     }
-    pub(crate) fn finish(&self) -> Result<()> {
+    pub fn finish(&self) -> Result<()> {
         ensure!(
             matches!(self.phase, PrefixPhase::Ready),
             "truncated multipart prefix"
@@ -473,7 +468,7 @@ enum FilePhase {
     Done,
     Poisoned,
 }
-pub(crate) struct FileDecoder {
+pub struct FileDecoder {
     matcher: Matcher,
     phase: FilePhase,
     limit: u64,
@@ -491,11 +486,7 @@ impl FileDecoder {
         }
     }
     /// One reusable output buffer, at most64KiB. Sink failure poisons this body.
-    pub(crate) fn push(
-        &mut self,
-        input: &[u8],
-        mut sink: impl FnMut(&[u8]) -> Result<()>,
-    ) -> Result<()> {
+    pub fn push(&mut self, input: &[u8], mut sink: impl FnMut(&[u8]) -> Result<()>) -> Result<()> {
         let result = self.push_inner(input, &mut sink);
         if result.is_err() {
             self.phase = FilePhase::Poisoned;
@@ -567,7 +558,7 @@ impl FileDecoder {
         }
         Ok(())
     }
-    pub(crate) fn finish(self) -> Result<u64> {
+    pub fn finish(self) -> Result<u64> {
         ensure!(
             matches!(self.phase, FilePhase::Done),
             "truncated multipart file"
@@ -577,5 +568,5 @@ impl FileDecoder {
 }
 
 #[cfg(test)]
-#[path = "blob_multipart_tests.rs"]
+#[path = "multipart_tests.rs"]
 mod tests;

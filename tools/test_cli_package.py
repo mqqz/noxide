@@ -20,7 +20,7 @@ def main():
     subprocess.run(['python3', str(ROOT / 'tools/package_build_kit.py')], check=True)
     subprocess.run(['cargo', 'package', '--workspace', '--no-verify', '--allow-dirty', '--offline', '--target-dir', str(root / 'archives')], cwd=ROOT, check=True)
     version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version']
-    packages = ['noxide-macros', 'noxide-protocol', 'noxide', 'noxide-sql-macros', 'noxide-sql', 'noxide-assets', 'noxide-asset-admission', 'noxide-admission', 'noxide-render', 'noxide-confine', 'noxide-keys', 'noxide-sandbox', 'noxide-test-support', 'noxide-store', 'noxide-effects', 'noxide-effect-delivery', 'noxide-host', 'noxide-cli']
+    packages = ['noxide-macros', 'noxide-protocol', 'noxide', 'noxide-sql-macros', 'noxide-sql', 'noxide-assets', 'noxide-asset-admission', 'noxide-admission', 'noxide-render', 'noxide-confine', 'noxide-keys', 'noxide-sandbox', 'noxide-test-support', 'noxide-store', 'noxide-blobs', 'noxide-effects', 'noxide-effect-delivery', 'noxide-host', 'noxide-cli']
     sources = root / 'sources'
     sources.mkdir()
     for name in packages:

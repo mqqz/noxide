@@ -13,6 +13,7 @@ noxide-sandbox.workspace = true
 noxide-keys.workspace = true
 noxide-sql.workspace = true
 noxide-store.workspace = true
+noxide-blobs.workspace = true
 noxide-effects.workspace = true
 noxide-assets.workspace = true
 noxide-admission.workspace = true
@@ -35,6 +36,7 @@ url = "2"
 query-metrics = ["noxide-store/query-metrics"]
 
 [dev-dependencies]
+noxide-blobs = { workspace = true, features = ["test-support"] }
 noxide-effect-delivery = { workspace = true, features = ["test-support"] }
 rustls.workspace = true
 tokio-rustls.workspace = true

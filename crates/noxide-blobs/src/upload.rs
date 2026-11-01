@@ -1,22 +1,22 @@
 //! One verified upload authority bound to a request. Repository execution holds
 //! it to consume staged objects; the application layer creates it at admission.
 use crate::{
-    blob_io::IoPool, blob_metadata::MetadataContext, blob_state::UploadBinding,
-    blob_store::BlobStore, database::Transaction,
+    database::Transaction, io::IoPool, metadata::MetadataContext, state::UploadBinding,
+    store::BlobStore,
 };
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::time::Timestamp;
 use std::sync::{Arc, atomic::AtomicBool};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
-pub(crate) struct Barrier {
-    pub(crate) entered: tokio::sync::Notify,
-    pub(crate) release: tokio::sync::Notify,
+pub struct Barrier {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Barrier {
-    pub(crate) async fn wait(&self) {
+    pub async fn wait(&self) {
         self.entered.notify_one();
         self.release.notified().await;
     }
@@ -24,17 +24,17 @@ impl Barrier {
 
 /// Sealed at verified web admission. It contains no guest-selected identity.
 #[derive(Clone)]
-pub(crate) struct UploadScope {
-    pub(crate) store: BlobStore,
-    pub(crate) binding: UploadBinding,
+pub struct UploadScope {
+    pub store: BlobStore,
+    pub binding: UploadBinding,
     verify: Arc<IoPool>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     barrier: Option<Arc<Barrier>>,
 }
 #[derive(Clone)]
-pub(crate) struct UploadContext {
+pub struct UploadContext {
     scope: UploadScope,
-    pub(crate) now: Timestamp,
+    pub now: Timestamp,
 }
 impl std::ops::Deref for UploadContext {
     type Target = UploadScope;
@@ -43,21 +43,21 @@ impl std::ops::Deref for UploadContext {
     }
 }
 impl UploadScope {
-    pub(crate) fn new(
-        store: BlobStore,
-        verify: Arc<IoPool>,
-        #[cfg(test)] barrier: Option<Arc<Barrier>>,
-        binding: UploadBinding,
-    ) -> Self {
+    pub fn new(store: BlobStore, verify: Arc<IoPool>, binding: UploadBinding) -> Self {
         Self {
             store,
             binding,
             verify,
-            #[cfg(test)]
-            barrier,
+            #[cfg(any(test, feature = "test-support"))]
+            barrier: None,
         }
     }
-    pub(crate) fn at(self, time: crate::lifecycle_clock::AttemptTime) -> UploadContext {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_barrier(mut self, barrier: Option<Arc<Barrier>>) -> Self {
+        self.barrier = barrier;
+        self
+    }
+    pub fn at(self, time: crate::lifecycle_clock::AttemptTime) -> UploadContext {
         UploadContext {
             scope: self,
             now: time.timestamp(),
@@ -65,7 +65,7 @@ impl UploadScope {
     }
 }
 impl UploadContext {
-    pub(crate) async fn verify(&self, row: &crate::blob_metadata::BlobRow) -> Result<()> {
+    pub async fn verify(&self, row: &crate::metadata::BlobRow) -> Result<()> {
         let deadline = crate::database::lifecycle::RequestScope::current_work_deadline()
             .context("upload outside request")?;
         let store = self.store.clone();
@@ -85,13 +85,13 @@ impl UploadContext {
             )?
             .finish()
             .await?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(barrier) = &self.barrier {
             barrier.wait().await;
         }
         Ok(())
     }
-    pub(crate) async fn absent(&self, tx: &mut Transaction) -> Result<()> {
+    pub async fn absent(&self, tx: &mut Transaction) -> Result<()> {
         ensure!(
             MetadataContext { tx }
                 .slot(&self.binding.slot)
@@ -99,7 +99,7 @@ impl UploadContext {
                 .is_none(),
             crate::action_contract::ReferenceUnavailable
         );
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(barrier) = &self.barrier {
             barrier.wait().await;
         }

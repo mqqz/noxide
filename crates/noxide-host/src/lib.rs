@@ -4,14 +4,15 @@ pub use noxide_admission::{Presentation, assets, manifest, schema};
 pub(crate) use noxide_admission::{
     action_contract, expiry, ids, membership, policy, principal, query_plan, routing, search, sql,
 };
+pub(crate) use noxide_blobs::{
+    inspect as blob_inspect, io as blob_io, metadata as blob_metadata, multipart as blob_multipart,
+    state as blob_state, store as blob_store, transport as blob_transport, upload as blob_upload,
+};
 pub(crate) use noxide_effects as effects;
 pub use noxide_effects::effect_deployment;
 pub use noxide_render as render;
 #[cfg(test)]
 use noxide_test_support as test_support;
-mod blob_inspect;
-mod blob_io;
-mod blob_upload;
 pub mod deployment;
 #[cfg(test)]
 mod effects_tests;
@@ -30,11 +31,6 @@ pub use effect_deployment::{EffectDeployment, EffectGrant, EffectLimits, EffectS
 pub use effects::{EffectOperatorCommand, EffectOperatorResult, EffectSummary};
 pub use job_deployment::{JobDeployment, JobGrant, JobLimits};
 pub use jobs::{JobOperatorCommand, JobOperatorResult, JobSummary};
-mod blob_metadata;
-mod blob_multipart;
-mod blob_state;
-mod blob_store;
-mod blob_transport;
 mod jobs;
 pub mod runtime {
     pub use noxide_sandbox::Limits;

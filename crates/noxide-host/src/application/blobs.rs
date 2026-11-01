@@ -175,11 +175,9 @@ impl Application {
             )?,
         };
         let binding_id = binding.to_string();
-        Ok(Some(UploadScope::new(
+        let scope = UploadScope::new(
             blobs.store.clone(),
             blobs.uploads.clone(),
-            #[cfg(test)]
-            blobs.verification.lock().unwrap().clone(),
             UploadBinding {
                 slot: commitment("noxide/upload-slot/v1", &[&self.deployment, nonce])?,
                 subject,
@@ -189,7 +187,10 @@ impl Application {
                 )?,
                 input: commitment("noxide/upload-input/v1", &[&upload.input])?,
             },
-        )))
+        );
+        #[cfg(test)]
+        let scope = scope.with_barrier(blobs.verification.lock().unwrap().clone());
+        Ok(Some(scope))
     }
     pub(crate) fn upload_ticket(&self, binding: u32, submission: &str) -> Result<String> {
         self.keys.csrf(&format!(

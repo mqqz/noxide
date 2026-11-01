@@ -2,8 +2,8 @@
 //! work, but its permit remains inside the actual worker until that worker exits.
 //! Kernel I/O may block beyond a deadline: capacity then stays quarantined.
 use crate::{
-    blob_state::Generation,
-    blob_store::{IoGuard, ObjectKey},
+    state::Generation,
+    store::{IoGuard, ObjectKey},
 };
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::blobs::{MAX_CONCURRENT_DOWNLOADS, MAX_CONCURRENT_UPLOADS};
@@ -25,30 +25,30 @@ mod sealed {
 }
 /// A completed upload worker cannot return a writable descriptor or partial
 /// upload to be resumed after its stopped witness has been published.
-pub(crate) trait IoOutput: sealed::Sealed + Send + 'static {}
-impl sealed::Sealed for crate::blob_store::DurableObject {}
-impl IoOutput for crate::blob_store::DurableObject {}
+pub trait IoOutput: sealed::Sealed + Send + 'static {}
+impl sealed::Sealed for crate::store::DurableObject {}
+impl IoOutput for crate::store::DurableObject {}
 impl sealed::Sealed for () {}
 impl IoOutput for () {}
-impl sealed::Sealed for crate::blob_inspect::InventoryBatch {}
-impl IoOutput for crate::blob_inspect::InventoryBatch {}
-impl sealed::Sealed for crate::blob_inspect::Snapshot {}
-impl IoOutput for crate::blob_inspect::Snapshot {}
-impl sealed::Sealed for crate::blob_store::OpenedObject {}
-impl IoOutput for crate::blob_store::OpenedObject {}
-impl sealed::Sealed for crate::blob_store::PairObservation {}
-impl IoOutput for crate::blob_store::PairObservation {}
-impl sealed::Sealed for crate::blob_store::DurablePairMarker {}
-impl IoOutput for crate::blob_store::DurablePairMarker {}
+impl sealed::Sealed for crate::inspect::InventoryBatch {}
+impl IoOutput for crate::inspect::InventoryBatch {}
+impl sealed::Sealed for crate::inspect::Snapshot {}
+impl IoOutput for crate::inspect::Snapshot {}
+impl sealed::Sealed for crate::store::OpenedObject {}
+impl IoOutput for crate::store::OpenedObject {}
+impl sealed::Sealed for crate::store::PairObservation {}
+impl IoOutput for crate::store::PairObservation {}
+impl sealed::Sealed for crate::store::DurablePairMarker {}
+impl IoOutput for crate::store::DurablePairMarker {}
 
-pub(crate) struct IoPool {
+pub struct IoPool {
     permits: Arc<Semaphore>,
 }
 impl IoPool {
-    pub(crate) fn uploads(count: u8) -> Result<Self> {
+    pub fn uploads(count: u8) -> Result<Self> {
         Self::new(count, MAX_CONCURRENT_UPLOADS)
     }
-    pub(crate) fn downloads(count: u8) -> Result<Self> {
+    pub fn downloads(count: u8) -> Result<Self> {
         Self::new(count, MAX_CONCURRENT_DOWNLOADS)
     }
     fn new(count: u8, ceiling: u8) -> Result<Self> {
@@ -59,7 +59,7 @@ impl IoPool {
     }
     /// No waiting admission queue. Acquire before submitting to Tokio's native
     /// worker pool, bounding even work queued behind unrelated blocking tasks.
-    pub(crate) fn try_start<T: IoOutput>(
+    pub fn try_start<T: IoOutput>(
         &self,
         key: ObjectKey,
         generation: Generation,
@@ -117,12 +117,12 @@ struct Completion {
     changed: tokio::sync::Notify,
 }
 #[derive(Clone)]
-pub(crate) struct IoWitness(Arc<Completion>);
-pub(crate) struct StoppedIo(Arc<Completion>);
+pub struct IoWitness(Arc<Completion>);
+pub struct StoppedIo(Arc<Completion>);
 impl IoWitness {
     /// Absence of a database row is insufficient. This proof is minted only
     /// after the worker (including unwind) has released all owned file objects.
-    pub(crate) fn stopped(&self) -> Option<StoppedIo> {
+    pub fn stopped(&self) -> Option<StoppedIo> {
         self.0
             .stopped
             .load(Ordering::Acquire)
@@ -130,13 +130,13 @@ impl IoWitness {
     }
 }
 impl StoppedIo {
-    pub(crate) fn key(&self) -> &ObjectKey {
+    pub fn key(&self) -> &ObjectKey {
         &self.0.key
     }
-    pub(crate) fn generation(&self) -> Generation {
+    pub fn generation(&self) -> Generation {
         self.0.generation
     }
-    pub(crate) fn failed_or_cancelled(&self) -> bool {
+    pub fn failed_or_cancelled(&self) -> bool {
         self.0.cancelled.load(Ordering::Acquire)
             || self.0.outcome.load(Ordering::Acquire) != SUCCEEDED
     }
@@ -149,7 +149,7 @@ impl Drop for StopGuard {
     }
 }
 
-pub(crate) struct IoJob<T> {
+pub struct IoJob<T> {
     handle: JoinHandle<Result<T>>,
     witness: IoWitness,
     cancelled: Arc<AtomicBool>,
@@ -157,10 +157,10 @@ pub(crate) struct IoJob<T> {
     finished: bool,
 }
 impl<T> IoJob<T> {
-    pub(crate) fn witness(&self) -> IoWitness {
+    pub fn witness(&self) -> IoWitness {
         self.witness.clone()
     }
-    pub(crate) async fn finish(mut self) -> Result<T> {
+    pub async fn finish(mut self) -> Result<T> {
         let result = tokio::time::timeout_at(self.deadline.into(), &mut self.handle)
             .await
             .context("blob I/O deadline")?
@@ -181,13 +181,13 @@ impl<T> Drop for IoJob<T> {
 }
 
 #[cfg(test)]
-#[path = "blob_io_tests.rs"]
+#[path = "io_tests.rs"]
 mod tests;
 
 impl IoWitness {
     /// A host reservation exists but its owner has not dispatched native I/O.
     /// The reservation lease must remain live until dispatch or mark this stopped.
-    pub(crate) fn pending(key: ObjectKey, generation: Generation) -> Self {
+    pub fn pending(key: ObjectKey, generation: Generation) -> Self {
         Self(Arc::new(Completion {
             key,
             generation,
@@ -197,16 +197,16 @@ impl IoWitness {
             changed: tokio::sync::Notify::new(),
         }))
     }
-    pub(crate) fn stop_unstarted(&self) {
+    pub fn stop_unstarted(&self) {
         self.0.cancelled.store(true, Ordering::Release);
         self.0.stopped.store(true, Ordering::Release);
         self.0.changed.notify_waiters();
     }
-    pub(crate) fn cancel(&self) {
+    pub fn cancel(&self) {
         self.0.cancelled.store(true, Ordering::Release);
     }
-    #[cfg(test)]
-    pub(crate) async fn wait_stopped(&self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn wait_stopped(&self) {
         loop {
             let changed = self.0.changed.notified();
             tokio::pin!(changed);

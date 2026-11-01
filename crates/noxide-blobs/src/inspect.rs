@@ -1,37 +1,37 @@
 //! Bounded reconciliation plans, not deletion/authorization tokens. A runtime
 //! executor must reload/fence current metadata and prove committed claims before
 //! I/O. Completely unknown objects NEVER produce an automatic cleanup action.
-use crate::{blob_io::StoppedIo, blob_metadata::BlobRow, blob_state::State, blob_store::ObjectKey};
+use crate::{io::StoppedIo, metadata::BlobRow, state::State, store::ObjectKey};
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::{blobs::MAX_UPLOAD_BYTES, time::Timestamp};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
-pub(crate) const INSPECTION_PAGE: usize = 16;
+pub const INSPECTION_PAGE: usize = 16;
 /// Facts collected through the private descriptor-relative store API, outside
 /// the metadata transaction. Neither a filename nor a guest content type.
-pub(crate) struct PhysicalSnapshot {
-    pub(crate) key: ObjectKey,
-    pub(crate) partial: Option<u64>,
-    pub(crate) finalized: Option<u64>,
+pub struct PhysicalSnapshot {
+    pub key: ObjectKey,
+    pub partial: Option<u64>,
+    pub finalized: Option<u64>,
 }
 /// One bounded physical inventory page, produced by a stopped I/O worker.
-pub(crate) struct InventoryBatch {
-    pub(crate) items: Vec<(ObjectKey, Option<PhysicalSnapshot>)>,
-    pub(crate) complete: bool,
+pub struct InventoryBatch {
+    pub items: Vec<(ObjectKey, Option<PhysicalSnapshot>)>,
+    pub complete: bool,
 }
 /// One physical object observation, produced by a stopped I/O worker.
-pub(crate) struct Snapshot(pub(crate) Option<PhysicalSnapshot>);
-pub(crate) struct SnapshotItem {
-    pub(crate) key: ObjectKey,
-    pub(crate) physical: Option<PhysicalSnapshot>,
-    pub(crate) metadata: Option<BlobRow>,
+pub struct Snapshot(pub Option<PhysicalSnapshot>);
+pub struct SnapshotItem {
+    pub key: ObjectKey,
+    pub physical: Option<PhysicalSnapshot>,
+    pub metadata: Option<BlobRow>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum FindingKind {
+pub enum FindingKind {
     RetainKnown,
     RetainActiveOrUncertainUpload,
     ClaimExpiredStage,
@@ -47,7 +47,7 @@ pub(crate) enum FindingKind {
     PhysicalMetadataMismatch,
 }
 impl FindingKind {
-    pub(crate) fn requires_operator(self) -> bool {
+    pub fn requires_operator(self) -> bool {
         matches!(
             self,
             Self::QuarantineUnknown
@@ -55,7 +55,7 @@ impl FindingKind {
                 | Self::PhysicalMetadataMismatch
         )
     }
-    pub(crate) fn recoverable_hint(self) -> bool {
+    pub fn recoverable_hint(self) -> bool {
         matches!(
             self,
             Self::ClaimExpiredStage
@@ -69,25 +69,25 @@ impl FindingKind {
     }
 }
 #[derive(Debug, Serialize)]
-pub(crate) struct Finding {
-    pub(crate) object: String,
-    pub(crate) slot: Option<String>,
-    pub(crate) generation: Option<i64>,
-    pub(crate) physical_bytes: u64,
-    pub(crate) physical_paths: u8,
-    pub(crate) kind: FindingKind,
+pub struct Finding {
+    pub object: String,
+    pub slot: Option<String>,
+    pub generation: Option<i64>,
+    pub physical_bytes: u64,
+    pub physical_paths: u8,
+    pub kind: FindingKind,
 }
 #[derive(Serialize)]
-pub(crate) struct InspectionPage {
-    pub(crate) store_identity: String,
-    pub(crate) observed: Timestamp,
-    pub(crate) findings: Vec<Finding>,
+pub struct InspectionPage {
+    pub store_identity: String,
+    pub observed: Timestamp,
+    pub findings: Vec<Finding>,
 }
 impl InspectionPage {
     /// Store identity/process come from the retained EXCLUSIVE store owner and
     /// verified pairing, not user input. Metadata absence must be rechecked in a
     /// fresh tx before quarantine accounting; a scan snapshot can lag reserve.
-    pub(crate) fn plan(
+    pub fn plan(
         store: &ObjectKey,
         process: &ObjectKey,
         items: &[SnapshotItem],
@@ -207,7 +207,7 @@ impl InspectionPage {
             findings,
         })
     }
-    pub(crate) fn digest(&self) -> Result<[u8; 32]> {
+    pub fn digest(&self) -> Result<[u8; 32]> {
         let bytes = serde_json::to_vec(self)?;
         ensure!(bytes.len() <= 65_536, "inspection output limit");
         let mut hash = Sha256::new();
@@ -221,8 +221,8 @@ impl InspectionPage {
 mod tests {
     use super::*;
     use crate::{
-        blob_state::{Association, Commitment, Generation, Metadata, UploadBinding},
-        blob_transport::AttachmentName,
+        state::{Association, Commitment, Generation, Metadata, UploadBinding},
+        transport::AttachmentName,
     };
     use noxide_protocol::blobs::{BlobRef, UploadHandle};
     fn key(c: char) -> ObjectKey {

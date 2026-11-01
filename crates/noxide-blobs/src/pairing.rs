@@ -3,15 +3,15 @@
 use super::*;
 
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct PairId(ObjectKey);
+pub struct PairId(ObjectKey);
 impl PairId {
-    pub(crate) fn random() -> Result<Self> {
+    pub fn random() -> Result<Self> {
         Ok(Self(ObjectKey::random()?))
     }
-    pub(crate) fn parse(value: String) -> Result<Self> {
+    pub fn parse(value: String) -> Result<Self> {
         Ok(Self(ObjectKey::parse(value)?))
     }
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
 }
@@ -21,35 +21,35 @@ impl fmt::Debug for PairId {
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PairPhase {
+pub enum PairPhase {
     Pending,
     Paired,
 }
 #[derive(Clone, Debug)]
-pub(crate) struct PairRecord {
-    pub(crate) store: ObjectKey,
-    pub(crate) pair: PairId,
-    pub(crate) phase: PairPhase,
-    pub(crate) empty_metadata: bool,
+pub struct PairRecord {
+    pub store: ObjectKey,
+    pub pair: PairId,
+    pub phase: PairPhase,
+    pub empty_metadata: bool,
 }
-pub(crate) struct PairObservation {
+pub struct PairObservation {
     store: BlobStore,
     marker: Option<PairId>,
     pending: Option<Vec<u8>>,
     empty: bool,
 }
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum PairStep {
+pub enum PairStep {
     CreatePending,
     InstallMarker(PairId),
     Acknowledge(PairId),
     Ready(PairId),
 }
 impl PairObservation {
-    pub(crate) fn store_identity(&self) -> &ObjectKey {
+    pub fn store_identity(&self) -> &ObjectKey {
         self.store.identity()
     }
-    pub(crate) fn decide(&self, record: Option<&PairRecord>) -> Result<PairStep> {
+    pub fn decide(&self, record: Option<&PairRecord>) -> Result<PairStep> {
         match record {
             None => {
                 ensure!(
@@ -99,22 +99,22 @@ impl PairObservation {
 }
 /// File and root directory have both been fsynced. Matching DB paired
 /// acknowledgement and healthy lifecycle activation are still required.
-pub(crate) struct DurablePairMarker {
+pub struct DurablePairMarker {
     store: BlobStore,
     pair: PairId,
 }
 impl DurablePairMarker {
-    pub(crate) fn store(&self) -> &ObjectKey {
+    pub fn store(&self) -> &ObjectKey {
         self.store.identity()
     }
-    pub(crate) fn pair(&self) -> &PairId {
+    pub fn pair(&self) -> &PairId {
         &self.pair
     }
 }
 impl BlobStore {
     /// One bounded entry batch per directory proves empty/nonempty. Unknown
     /// name/type errors refuse pairing; no object is removed or adopted.
-    pub(crate) fn observe_pair(&self, guard: &IoGuard) -> Result<PairObservation> {
+    pub fn observe_pair(&self, guard: &IoGuard) -> Result<PairObservation> {
         guard.check()?;
         let marker = read_marker(&self.0._root, "pair", false)?
             .map(|bytes| PairId::parse(String::from_utf8(bytes)?))
@@ -138,11 +138,7 @@ impl BlobStore {
     }
     /// ONLY after authoritative durable pending DB acknowledgement/recovery.
     /// This low-level helper does not prove that commit or delete unknown data.
-    pub(crate) fn install_pair(
-        &self,
-        record: &PairRecord,
-        guard: &IoGuard,
-    ) -> Result<DurablePairMarker> {
+    pub fn install_pair(&self, record: &PairRecord, guard: &IoGuard) -> Result<DurablePairMarker> {
         self.install_pair_observed(record, guard, |_| Ok(()))
     }
     fn install_pair_observed(
@@ -253,5 +249,5 @@ fn read_marker(root: &OwnedFd, name: &str, partial: bool) -> Result<Option<Vec<u
 }
 
 #[cfg(test)]
-#[path = "blob_pairing_tests.rs"]
+#[path = "pairing_tests.rs"]
 mod tests;

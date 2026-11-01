@@ -1,24 +1,26 @@
 //! Pure metadata transitions. Persist each candidate with its quota delta and
 //! expected generation in ONE database transaction; these methods do not lock,
 //! commit, authorize a principal, or recover an uncertain semantic receipt.
-use crate::blob_store::{DurableObject, ObjectKey};
+use crate::store::{DurableObject, ObjectKey};
 use anyhow::{Context, Result, ensure};
-#[cfg(test)]
-use noxide_protocol::{
-    blobs::{BlobLimits, MAX_LIVE_STAGES, STAGE_LIFETIME_MILLIS},
-    time::Duration,
-};
+#[cfg(any(test, feature = "test-support"))]
+use noxide_protocol::blobs::BlobLimits;
 use noxide_protocol::{
     blobs::{BlobRef, MAX_UPLOAD_BYTES, UploadHandle},
     time::Timestamp,
+};
+#[cfg(test)]
+use noxide_protocol::{
+    blobs::{MAX_LIVE_STAGES, STAGE_LIFETIME_MILLIS},
+    time::Duration,
 };
 use sha2::{Digest, Sha256};
 use std::fmt;
 
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct Commitment(String);
+pub struct Commitment(String);
 impl Commitment {
-    pub(crate) fn parse(value: String) -> Result<Self> {
+    pub fn parse(value: String) -> Result<Self> {
         ensure!(
             value.len() == 64
                 && value
@@ -28,7 +30,7 @@ impl Commitment {
         );
         Ok(Self(value))
     }
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -44,22 +46,22 @@ impl fmt::Debug for Commitment {
 /// identifies the NAMED UploadHandle input, never canonical scalar/selection
 /// values: the existing serialized semantic receipt claim owns those values.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct UploadBinding {
-    pub(crate) slot: Commitment,
-    pub(crate) subject: Commitment,
-    pub(crate) context: Commitment,
-    pub(crate) input: Commitment,
+pub struct UploadBinding {
+    pub slot: Commitment,
+    pub subject: Commitment,
+    pub context: Commitment,
+    pub input: Commitment,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Association {
-    pub(crate) resource: i64,
-    pub(crate) id: i64,
-    pub(crate) incarnation: String,
-    pub(crate) field: String,
+pub struct Association {
+    pub resource: i64,
+    pub id: i64,
+    pub incarnation: String,
+    pub field: String,
 }
 impl Association {
-    pub(crate) fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         ensure!(
             self.resource > 0
                 && self.id > 0
@@ -82,7 +84,7 @@ impl Association {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum State {
+pub enum State {
     Uploading,
     Staged,
     Attached,
@@ -93,13 +95,13 @@ pub(crate) enum State {
 
 /// Monotonic database fencing generation, never reused after a transition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Generation(i64);
+pub struct Generation(i64);
 impl Generation {
-    pub(crate) fn parse(value: i64) -> Result<Self> {
+    pub fn parse(value: i64) -> Result<Self> {
         ensure!(value > 0, "invalid blob generation");
         Ok(Self(value))
     }
-    pub(crate) fn value(self) -> i64 {
+    pub fn value(self) -> i64 {
         self.0
     }
     fn next(self) -> Result<Self> {
@@ -108,36 +110,36 @@ impl Generation {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Metadata {
-    pub(crate) blob: BlobRef,
-    pub(crate) handle: UploadHandle,
-    pub(crate) key: ObjectKey,
-    pub(crate) binding: UploadBinding,
-    pub(crate) state: State,
-    pub(crate) generation: Generation,
-    pub(crate) expires: Timestamp,
-    pub(crate) reserved: u64,
-    pub(crate) bytes: u64,
-    pub(crate) digest: Option<[u8; 32]>,
-    pub(crate) association: Option<Association>,
+pub struct Metadata {
+    pub blob: BlobRef,
+    pub handle: UploadHandle,
+    pub key: ObjectKey,
+    pub binding: UploadBinding,
+    pub state: State,
+    pub generation: Generation,
+    pub expires: Timestamp,
+    pub reserved: u64,
+    pub bytes: u64,
+    pub digest: Option<[u8; 32]>,
+    pub association: Option<Association>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(test)]
-pub(crate) struct Quota {
-    pub(crate) reserved: u64,
-    pub(crate) used: u64,
-    pub(crate) objects: u64,
+#[cfg(any(test, feature = "test-support"))]
+pub struct Quota {
+    pub reserved: u64,
+    pub used: u64,
+    pub objects: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct QuotaDelta {
+pub struct QuotaDelta {
     reserved: i64,
     used: i64,
     objects: i64,
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Quota {
-    pub(crate) fn apply(self, delta: QuotaDelta, limits: BlobLimits) -> Result<Self> {
+    pub fn apply(self, delta: QuotaDelta, limits: BlobLimits) -> Result<Self> {
         limits.validate().map_err(anyhow::Error::msg)?;
         fn add(value: u64, delta: i64) -> Result<u64> {
             value
@@ -180,34 +182,34 @@ impl Quota {
 
 /// Read while the app counter is write-locked. An anonymous capability supplies
 /// explicitly lower per-cap limits; accounts retain the default 4 live stages.
-#[cfg(test)]
-pub(crate) struct SubjectUsage {
-    pub(crate) live_stages: u64,
-    pub(crate) held_bytes: u64,
-    pub(crate) stage_limit: u8,
-    pub(crate) byte_limit: u64,
+#[cfg(any(test, feature = "test-support"))]
+pub struct SubjectUsage {
+    pub live_stages: u64,
+    pub held_bytes: u64,
+    pub stage_limit: u8,
+    pub byte_limit: u64,
 }
 
 /// Candidate plus expected old generation. Applying it is conditional in SQL;
 /// a rollback discards it and leaves the original Staged row reusable.
-pub(crate) struct Transition {
-    pub(crate) expected: Generation,
-    pub(crate) next: Metadata,
-    pub(crate) quota: QuotaDelta,
+pub struct Transition {
+    pub expected: Generation,
+    pub next: Metadata,
+    pub quota: QuotaDelta,
 }
 
 /// A committed GC claim is required before calling the store's deletion API.
 /// This token must not be dispatched to an I/O worker until claim commit is known.
 #[derive(Clone, Debug)]
-pub(crate) struct GcClaim {
+pub struct GcClaim {
     key: ObjectKey,
     generation: Generation,
 }
 impl GcClaim {
-    pub(crate) fn key(&self) -> &ObjectKey {
+    pub fn key(&self) -> &ObjectKey {
         &self.key
     }
-    pub(crate) fn generation(&self) -> Generation {
+    pub fn generation(&self) -> Generation {
         self.generation
     }
 }
@@ -218,7 +220,7 @@ impl Metadata {
         clippy::too_many_arguments,
         reason = "test-only quota/state reference model"
     )]
-    pub(crate) fn reserve(
+    pub fn reserve(
         blob: BlobRef,
         pending_handle: UploadHandle,
         key: ObjectKey,
@@ -300,7 +302,7 @@ impl Metadata {
         );
         Ok(())
     }
-    pub(crate) fn stage(
+    pub fn stage(
         &self,
         expected: Generation,
         object: DurableObject,
@@ -336,7 +338,7 @@ impl Metadata {
     fn finalized_handle(&self, object: &DurableObject) -> Result<UploadHandle> {
         self.expected_handle(object.bytes(), object.sha256())
     }
-    pub(crate) fn expected_handle(&self, bytes: u64, sha256: [u8; 32]) -> Result<UploadHandle> {
+    pub fn expected_handle(&self, bytes: u64, sha256: [u8; 32]) -> Result<UploadHandle> {
         let mut digest = Sha256::new();
         digest.update(b"noxide/finalized-upload/v1\0");
         digest.update(self.binding.slot.as_str().as_bytes());
@@ -353,7 +355,7 @@ impl Metadata {
         }
         UploadHandle::parse(token).map_err(anyhow::Error::msg)
     }
-    pub(crate) fn attach(
+    pub fn attach(
         &self,
         expected: Generation,
         now: Timestamp,
@@ -383,8 +385,8 @@ impl Metadata {
         Ok(transition)
     }
     /// The owning resource deletion and this transition share the receipt tx.
-    #[cfg(test)]
-    pub(crate) fn unreference(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn unreference(
         &self,
         expected: Generation,
         association: &Association,
@@ -405,11 +407,7 @@ impl Metadata {
     }
     /// Uploading rows are deliberately excluded. A stopped worker/startup
     /// reconciler must fence their completion before a separate abandon path.
-    pub(crate) fn claim(
-        &self,
-        expected: Generation,
-        now: Timestamp,
-    ) -> Result<(Transition, GcClaim)> {
+    pub fn claim(&self, expected: Generation, now: Timestamp) -> Result<(Transition, GcClaim)> {
         ensure!(
             self.state == State::Unreferenced
                 || (self.state == State::Staged && now >= self.expires),
@@ -434,11 +432,11 @@ impl Metadata {
     /// successful but unpublished completion must first reach stage expiry.
     /// Startup recovery needs a separate process-fence proof from exclusive
     /// store ownership; it must never fabricate a completed worker witness.
-    pub(crate) fn claim_stopped_upload(
+    pub fn claim_stopped_upload(
         &self,
         expected: Generation,
         now: Timestamp,
-        stopped: &crate::blob_io::StoppedIo,
+        stopped: &crate::io::StoppedIo,
     ) -> Result<(Transition, GcClaim)> {
         ensure!(
             self.state == State::Uploading
@@ -463,7 +461,7 @@ impl Metadata {
         Ok((transition, claim))
     }
     /// Call only after idempotent unlink AND directory fsync succeeded.
-    pub(crate) fn deleted(&self, claim: &GcClaim) -> Result<Transition> {
+    pub fn deleted(&self, claim: &GcClaim) -> Result<Transition> {
         ensure!(
             self.state == State::Deleting
                 && self.key == claim.key
@@ -486,11 +484,11 @@ impl Metadata {
 }
 
 #[cfg(test)]
-#[path = "blob_state_tests.rs"]
+#[path = "state_tests.rs"]
 mod tests;
 
 impl Metadata {
-    pub(crate) fn recover_prior_upload(&self) -> Result<(Transition, GcClaim)> {
+    pub fn recover_prior_upload(&self) -> Result<(Transition, GcClaim)> {
         ensure!(
             self.state == State::Uploading,
             "not an uploading reservation"
@@ -510,7 +508,7 @@ impl Metadata {
         };
         Ok((transition, claim))
     }
-    pub(crate) fn resume_deletion(&self) -> Result<(Transition, GcClaim)> {
+    pub fn resume_deletion(&self) -> Result<(Transition, GcClaim)> {
         ensure!(self.state == State::Deleting, "not a deletion claim");
         let transition = self.candidate(
             self.generation,
@@ -530,7 +528,7 @@ impl Metadata {
 }
 
 impl Transition {
-    pub(crate) fn quota_delta(&self) -> (i64, i64, i64) {
+    pub fn quota_delta(&self) -> (i64, i64, i64) {
         (self.quota.reserved, self.quota.used, self.quota.objects)
     }
 }
