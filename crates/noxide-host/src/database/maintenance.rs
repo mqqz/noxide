@@ -122,7 +122,10 @@ impl Control {
         Ok(())
     }
     pub(super) async fn stopped(&mut self, deadline: Instant) -> Result<()> {
-        for _ in 0..16 {
+        // A closed backend can take tens of milliseconds to leave
+        // pg_stat_activity on a networked server. The same 16 metered checks
+        // back off up to 64ms each; `configure` still enforces the deadline.
+        for attempt in 0..16u32 {
             self.configure(deadline).await?;
             self.charge()?;
             let present: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid=$1 AND application_name=$2 AND CAST(backend_start AS TEXT)=$3 AND datname=pg_catalog.current_database() AND usename=current_user)")
@@ -130,7 +133,13 @@ impl Control {
             if !present {
                 return Ok(());
             }
-            tokio::time::sleep(Duration::from_millis(1)).await;
+            let pause = Duration::from_millis(1 << attempt.min(6));
+            tokio::time::sleep_until(
+                (Instant::now() + pause)
+                    .min(deadline.checked_sub(CLEANUP_RESERVE).unwrap_or(deadline))
+                    .into(),
+            )
+            .await;
         }
         anyhow::bail!("maintenance backend termination unconfirmed")
     }
