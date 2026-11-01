@@ -7,7 +7,10 @@ On main, merge groups and manual/scheduled runs:
 
 - Runtime runs non-host framework tests with two test threads. Executor shutdown
   runs separately; host/provider tests remain serial because they combine short
-  production deadlines with contention and stress. Crash workers are invoked by
+  production deadlines with contention and stress. `rerun_failed_tests.py`
+  retries each failed host test once in isolation, because shared runners can
+  exceed those deadlines under load; the first failure stays in the log, and a
+  test that fails twice fails the job. Crash workers are invoked by
   their parent tests; browser fixtures run in the SDK job.
 - Query index work has a separate job and cache for `query-metrics` and
   `SQLITE_ENABLE_STMT_SCANSTATUS` builds.
