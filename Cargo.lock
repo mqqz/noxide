@@ -1412,14 +1412,13 @@ dependencies = [
  "argon2",
  "axum",
  "base64",
- "chacha20poly1305",
  "cssparser",
- "hmac",
  "httparse",
  "hyper",
  "hyper-util",
  "image",
  "libsqlite3-sys",
+ "noxide-keys",
  "noxide-protocol",
  "noxide-sandbox",
  "rand",
@@ -1438,6 +1437,20 @@ dependencies = [
  "url",
  "wat",
  "webpki-roots",
+]
+
+[[package]]
+name = "noxide-keys"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chacha20poly1305",
+ "hmac",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

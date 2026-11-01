@@ -873,7 +873,10 @@ impl Application {
                             &mut tx,
                             LoginChallenge {
                                 cookie,
-                                csrf: self.keys.csrf(&token.nonce),
+                                csrf: self
+                                    .keys
+                                    .csrf(&token.nonce)
+                                    .map_err(|_| RequestError::Busy)?,
                             },
                         )
                         .await
@@ -1176,12 +1179,13 @@ impl Application {
                     .iter()
                     .any(|u| u.web_binding == action.id)
             })
-            .map(|_| self.upload_ticket(action.id, &submission));
+            .map(|_| self.upload_ticket(action.id, &submission))
+            .transpose()?;
         Ok(FormCredentials {
             upload_ticket,
             selections: Default::default(),
             selected: Default::default(),
-            csrf: self.keys.csrf(&session.nonce),
+            csrf: self.keys.csrf(&session.nonce)?,
             submission,
             values,
         })
@@ -1667,7 +1671,9 @@ impl Application {
                     forms,
                     logout_csrf: session
                         .as_ref()
-                        .map(|session| self.keys.csrf(&session.nonce)),
+                        .map(|session| self.keys.csrf(&session.nonce))
+                        .transpose()
+                        .map_err(|_| RequestError::Busy)?,
                     next_page,
                     preview_links: effects.see_all.clone(),
                     downloads: self.download_links(&effects, session.as_ref(), now).map_err(RequestError::database)?,
@@ -1855,7 +1861,7 @@ mod clock_tests {
         assert!(matches!(
             app.login(
                 &signed,
-                &app.keys.csrf(&expired_challenge.nonce),
+                &app.keys.csrf(&expired_challenge.nonce).unwrap(),
                 "alice",
                 "clock regression password"
             )

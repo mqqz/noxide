@@ -6,33 +6,25 @@ pub(crate) use crate::lifecycle_clock::{
 };
 use anyhow::{Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chacha20poly1305::{
-    KeyInit, XChaCha20Poly1305, XNonce,
-    aead::{Aead, Payload},
-};
-use hmac::{Hmac, Mac};
-use rand::{RngCore, rngs::OsRng};
+use noxide_keys::{KeyMaterial, Keys, TokenDomain};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 
-type HmacSha256 = Hmac<Sha256>;
-
+/// Host keys, held locally or behind the key service. Everything here is token
+/// and capability logic over key operations; no key bytes reach this crate.
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostKeys {
-    key: [u8; 32],
-    incarnation: String,
-    #[serde(default)]
-    edit_keys: Vec<EditKey>,
+#[serde(transparent)]
+pub struct HostKeys(Keys);
+
+/// Constant-time comparison, without trusting supplied MAC length.
+fn verify_mac(expected: &[u8; 32], supplied: &[u8]) -> bool {
+    supplied.len() == expected.len()
+        && expected
+            .iter()
+            .zip(supplied)
+            .fold(0, |difference, (a, b)| difference | (a ^ b))
+            == 0
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EditKey {
-    id: u32,
-    key: [u8; 32],
-    signing: bool,
-}
 pub(crate) const ANONYMOUS_TTL: i64 = 900;
 pub(crate) const MAX_TOKEN_BYTES: usize = 2048;
 
@@ -105,67 +97,23 @@ pub(crate) struct Token {
 
 impl HostKeys {
     pub(crate) fn incarnation(&self) -> &str {
-        &self.incarnation
+        self.0.incarnation()
     }
     pub fn generate() -> Result<Self> {
-        let mut key = [0; 32];
-        OsRng
-            .try_fill_bytes(&mut key)
-            .map_err(|_| anyhow::anyhow!("entropy unavailable"))?;
-        let mut keys = Self {
-            key,
-            incarnation: random_id()?,
-            edit_keys: Vec::new(),
-        };
-        keys.rotate_edit_key()?;
-        Ok(keys)
+        Ok(Self(Keys::Local(KeyMaterial::generate()?)))
+    }
+    /// Operate through a running key service.
+    pub fn remote(client: noxide_keys::KeyClient) -> Self {
+        Self(Keys::Remote(client))
     }
     pub fn rotate_edit_key(&mut self) -> Result<()> {
-        let id = self
-            .edit_keys
-            .iter()
-            .map(|k| k.id)
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("edit key id exhausted"))?;
-        let mut key = [0; 32];
-        OsRng
-            .try_fill_bytes(&mut key)
-            .map_err(|_| anyhow::anyhow!("entropy unavailable"))?;
-        for old in &mut self.edit_keys {
-            old.signing = false;
+        match &mut self.0 {
+            Keys::Local(material) => material.rotate_edit_key(),
+            Keys::Remote(_) => anyhow::bail!("rotate keys in the key file"),
         }
-        self.edit_keys.push(EditKey {
-            id,
-            key,
-            signing: true,
-        });
-        Ok(())
     }
     pub(crate) fn signing_edit_key(&self) -> Result<u32> {
-        let mut ids = std::collections::BTreeSet::new();
-        ensure!(
-            self.edit_keys.iter().all(|k| ids.insert(k.id)),
-            "duplicate edit key id"
-        );
-        let keys: Vec<_> = self.edit_keys.iter().filter(|k| k.signing).collect();
-        ensure!(keys.len() == 1, "one signing edit key required");
-        Ok(keys[0].id)
-    }
-    fn edit_mac(&self, key_id: u32, resource: u32, id: u64, version: u64) -> Result<HmacSha256> {
-        let key = self
-            .edit_keys
-            .iter()
-            .find(|k| k.id == key_id)
-            .ok_or_else(|| anyhow::anyhow!("unknown edit key"))?;
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(&key.key).expect("fixed HMAC key length");
-        mac.update(b"noxide/edit/v1");
-        mac.update(&[0]);
-        mac.update(&resource.to_be_bytes());
-        mac.update(&id.to_be_bytes());
-        mac.update(&version.to_be_bytes());
-        Ok(mac)
+        self.0.signing_edit_key()
     }
     pub(crate) fn edit_secret(
         &self,
@@ -177,11 +125,7 @@ impl HostKeys {
         ensure!(version > 0, "invalid capability version");
         Ok(format!(
             "nxc1.{key_id}.{version}.{}",
-            URL_SAFE_NO_PAD.encode(
-                self.edit_mac(key_id, resource, id, version)?
-                    .finalize()
-                    .into_bytes()
-            )
+            URL_SAFE_NO_PAD.encode(self.0.edit_mac(key_id, resource, id, version)?)
         ))
     }
     pub(crate) fn verify_edit(
@@ -200,9 +144,14 @@ impl HostKeys {
         let key: u32 = parts[1].parse()?;
         let supplied: u64 = parts[2].parse()?;
         ensure!(supplied == version as u64, "revoked edit secret");
-        self.edit_mac(key, resource, id, supplied)?
-            .verify_slice(&URL_SAFE_NO_PAD.decode(parts[3])?)
-            .map_err(|_| anyhow::anyhow!("invalid edit secret"))
+        ensure!(
+            verify_mac(
+                &self.0.edit_mac(key, resource, id, supplied)?,
+                &URL_SAFE_NO_PAD.decode(parts[3])?
+            ),
+            "invalid edit secret"
+        );
+        Ok(())
     }
     pub(crate) fn anonymous(&self, cookie: &str, now: i64) -> Result<Token> {
         let token = self.verify(cookie, now)?;
@@ -213,14 +162,6 @@ impl HostKeys {
             "invalid anonymous cookie"
         );
         Ok(token)
-    }
-    fn mac(&self, domain: &[u8], bytes: &[u8]) -> HmacSha256 {
-        let mut mac =
-            <HmacSha256 as Mac>::new_from_slice(&self.key).expect("fixed HMAC key length");
-        mac.update(domain);
-        mac.update(&[0]);
-        mac.update(bytes);
-        mac
     }
     pub(crate) fn issue(
         &self,
@@ -241,42 +182,16 @@ impl HostKeys {
             expires: now
                 .checked_add(ttl)
                 .ok_or_else(|| anyhow::anyhow!("clock overflow"))?,
-            incarnation: self.incarnation.clone(),
+            incarnation: self.incarnation().to_owned(),
         };
         let cursor = matches!(token.kind, TokenKind::Cursor { .. });
         let bytes = serde_json::to_vec(&token)?;
-        // Use a domain-separated encryption key. CSRF authentication continues
-        // to use the existing HMAC domains; token plaintext never leaves the host.
-        let key = self
-            .mac(
-                if cursor {
-                    b"noxide/cursor/encryption/v1"
-                } else {
-                    b"noxide/token/encryption/v2"
-                },
-                &[],
-            )
-            .finalize()
-            .into_bytes();
-        let cipher = XChaCha20Poly1305::new(&key);
-        let mut nonce = [0; 24];
-        OsRng
-            .try_fill_bytes(&mut nonce)
-            .map_err(|_| anyhow::anyhow!("entropy unavailable"))?;
-        let ciphertext = cipher
-            .encrypt(
-                XNonce::from_slice(&nonce),
-                Payload {
-                    msg: &bytes,
-                    aad: b"noxide/token/v2",
-                },
-            )
-            .map_err(|_| anyhow::anyhow!("token encryption failed"))?;
-        // Version, independent random encryption nonce, ciphertext and AEAD tag.
-        let mut envelope = Vec::with_capacity(25 + ciphertext.len());
-        envelope.push(2);
-        envelope.extend_from_slice(&nonce);
-        envelope.extend_from_slice(&ciphertext);
+        let domain = if cursor {
+            TokenDomain::Cursor
+        } else {
+            TokenDomain::Token
+        };
+        let envelope = self.0.seal(domain, &bytes)?;
         let encoded = URL_SAFE_NO_PAD.encode(envelope);
         ensure!(encoded.len() <= MAX_TOKEN_BYTES, "token limit");
         Ok((token, encoded))
@@ -305,31 +220,15 @@ impl HostKeys {
     ) -> Result<Token> {
         ensure!(encoded.len() <= MAX_TOKEN_BYTES, "token limit");
         let envelope = URL_SAFE_NO_PAD.decode(encoded)?;
-        ensure!(envelope.len() >= 41 && envelope[0] == 2, "invalid token");
-        let key = self
-            .mac(
-                if cursor {
-                    b"noxide/cursor/encryption/v1"
-                } else {
-                    b"noxide/token/encryption/v2"
-                },
-                &[],
-            )
-            .finalize()
-            .into_bytes();
-        let cipher = XChaCha20Poly1305::new(&key);
-        let plaintext = cipher
-            .decrypt(
-                XNonce::from_slice(&envelope[1..25]),
-                Payload {
-                    msg: &envelope[25..],
-                    aad: b"noxide/token/v2",
-                },
-            )
-            .map_err(|_| anyhow::anyhow!("invalid token"))?;
+        let domain = if cursor {
+            TokenDomain::Cursor
+        } else {
+            TokenDomain::Token
+        };
+        let plaintext = self.0.open(domain, &envelope)?;
         let token: Token = serde_json::from_slice(&plaintext)?;
         ensure!(
-            token.incarnation == self.incarnation
+            token.incarnation == self.incarnation()
                 && token.issued >= 0
                 && token.issued < token.expires
                 && token.issued <= now
@@ -340,18 +239,16 @@ impl HostKeys {
         );
         Ok(token)
     }
-    pub(crate) fn csrf(&self, subject: &str) -> String {
-        URL_SAFE_NO_PAD.encode(
-            self.mac(b"noxide/csrf/v1", subject.as_bytes())
-                .finalize()
-                .into_bytes(),
-        )
+    pub(crate) fn csrf(&self, subject: &str) -> Result<String> {
+        Ok(URL_SAFE_NO_PAD.encode(self.0.csrf(subject)?))
     }
     pub(crate) fn verify_csrf(&self, subject: &str, value: &str) -> Result<()> {
         ensure!(value.len() <= 64, "csrf length");
-        self.mac(b"noxide/csrf/v1", subject.as_bytes())
-            .verify_slice(&URL_SAFE_NO_PAD.decode(value)?)
-            .map_err(|_| anyhow::anyhow!("csrf mismatch"))
+        ensure!(
+            verify_mac(&self.0.csrf(subject)?, &URL_SAFE_NO_PAD.decode(value)?),
+            "csrf mismatch"
+        );
+        Ok(())
     }
 }
 
@@ -393,7 +290,7 @@ mod tests {
                 b"expires",
                 b"1800000000",
                 b"private-subject",
-                keys.incarnation.as_bytes(),
+                keys.incarnation().as_bytes(),
             ] {
                 assert!(!envelope.windows(marker.len()).any(|part| part == marker));
             }
@@ -451,7 +348,10 @@ mod tests {
             keys.verify(std::str::from_utf8(&forged).unwrap(), 100)
                 .is_err()
         );
-        assert!(keys.verify_csrf("alice", &keys.csrf("bob")).is_err());
+        assert!(
+            keys.verify_csrf("alice", &keys.csrf("bob").unwrap())
+                .is_err()
+        );
     }
 }
 
@@ -460,15 +360,12 @@ mod edit_tests {
     use super::*;
     #[test]
     fn edit_mac_is_domain_bound_and_old_versions_fail_under_every_key() {
-        let mut keys = HostKeys {
-            key: [8; 32],
-            incarnation: "test".into(),
-            edit_keys: vec![EditKey {
-                id: 5,
-                key: [7; 32],
-                signing: true,
-            }],
-        };
+        let mut keys: HostKeys = serde_json::from_value(serde_json::json!({
+            "key": vec![8; 32],
+            "incarnation": "test",
+            "edit_keys": [{"id": 5, "key": vec![7; 32], "signing": true}],
+        }))
+        .unwrap();
         let old = keys.edit_secret(5, 3, 9, 1).unwrap();
         assert!(old == "nxc1.5.1.4fXgQvbcLyudujGVDF26-Anw47Dx4qtZ3UIBmv5Pr34");
         assert!(keys.verify_edit(&old, 3, 9, 1).is_ok());

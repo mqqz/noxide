@@ -191,7 +191,7 @@ impl Application {
             },
         )))
     }
-    pub(crate) fn upload_ticket(&self, binding: u32, submission: &str) -> String {
+    pub(crate) fn upload_ticket(&self, binding: u32, submission: &str) -> Result<String> {
         self.keys.csrf(&format!(
             "noxide/upload-ticket/v1:{}:{binding}:{submission}",
             self.submission_contract()
@@ -761,7 +761,7 @@ impl Application {
                     .iter()
                     .any(|u| u.web_binding == binding)
             })
-            .map(|_| self.upload_ticket(binding, submission))
+            .and_then(|_| self.upload_ticket(binding, submission).ok())
     }
 }
 

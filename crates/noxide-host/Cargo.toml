@@ -10,6 +10,7 @@ description = "Trusted Noxide application runtime"
 [dependencies]
 noxide-protocol.workspace = true
 noxide-sandbox.workspace = true
+noxide-keys.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -29,8 +30,6 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
 argon2 = "0.5"
-hmac = "0.12"
-chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
 rand = "0.8"
 base64 = "0.22"
 url = "2"

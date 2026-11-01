@@ -1,0 +1,18 @@
+[package]
+name = "noxide-keys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Noxide host key material and the key service that keeps it out of the serving process"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+base64 = "0.22"
+hmac = "0.12"
+chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
+rand = "0.8"

@@ -127,7 +127,10 @@ impl Application {
                                     upload_ticket: None,
                                     selections: Default::default(),
                                     selected: Default::default(),
-                                    csrf: self.keys.csrf(&anonymous.nonce),
+                                    csrf: self
+                                        .keys
+                                        .csrf(&anonymous.nonce)
+                                        .map_err(|_| RequestError::Busy)?,
                                     submission,
                                     values: Fields::new(),
                                 },
