@@ -519,6 +519,89 @@ async fn postgres(label: &str) -> Database {
 }
 #[tokio::test]
 #[ignore = "requires disposable NOXIDE_TEST_POSTGRES with CREATE DATABASE"]
+async fn postgres_worker_role_delivers_without_reaching_application_data() {
+    use sqlx::Connection;
+    let base = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let (prefix, _) = base.rsplit_once('/').unwrap();
+    let name = format!(
+        "nx_worker_{}",
+        crate::ids::random_id()
+            .unwrap()
+            .replace('-', "a")
+            .replace('_', "b")
+            .to_lowercase()
+    );
+    let role = format!("{name}_role");
+    let mut admin = sqlx::PgConnection::connect(&base).await.unwrap();
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    sqlx::query(&format!("CREATE ROLE {role} LOGIN"))
+        .execute(&mut admin)
+        .await
+        .unwrap();
+    let owner_url = format!("{prefix}/{name}");
+    let owner = Database::postgres(&owner_url).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let case = case(Some(owner), listener.local_addr().unwrap(), false).await;
+    case.create("ready").await;
+    let mut own = sqlx::PgConnection::connect(&owner_url).await.unwrap();
+    for grant in crate::POSTGRES_WORKER_GRANTS {
+        sqlx::query(&grant.replace("ROLE", &role))
+            .execute(&mut own)
+            .await
+            .unwrap();
+    }
+    // The role reaches delivery state and nothing the application stores.
+    let mut restricted = sqlx::PgConnection::connect(&format!(
+        "{}://{role}@{}/{name}",
+        prefix.split_once("://").unwrap().0,
+        prefix.split_once('@').unwrap().1,
+    ))
+    .await
+    .unwrap();
+    for table in ["nx_records", "nx_accounts", "nx_blobs"] {
+        assert!(
+            sqlx::query(&format!("SELECT 1 FROM {table} LIMIT 1"))
+                .fetch_optional(&mut restricted)
+                .await
+                .is_err(),
+            "{table}"
+        );
+    }
+    restricted.close().await.unwrap();
+    let delivery = Arc::new(
+        super::super::effect_delivery::EffectDelivery::from_test_parts(
+            &case.app,
+            Database::postgres(&format!(
+                "{}://{role}@{}/{name}",
+                prefix.split_once("://").unwrap().0,
+                prefix.split_once('@').unwrap().1,
+            ))
+            .unwrap(),
+        ),
+    );
+    delivery.activate().await.unwrap();
+    let receiver = tokio::spawn(async move {
+        let (mut tls, request) = receive(&listener).await;
+        tls.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        let _ = tls.shutdown().await;
+        request
+    });
+    assert_eq!(
+        delivery.run_effect_once().await.unwrap(),
+        Some(EffectRunOutcome::Delivered)
+    );
+    receiver.await.unwrap();
+    assert_eq!(outbox(&case).await[0][1], "delivered");
+    case.close().await;
+}
+#[tokio::test]
+#[ignore = "requires disposable NOXIDE_TEST_POSTGRES with CREATE DATABASE"]
 async fn postgres_real_tor_tls_worker_and_shutdown_wait_for_inflight_post() {
     shutdown_contract(Some(postgres("shutdown").await)).await;
 }

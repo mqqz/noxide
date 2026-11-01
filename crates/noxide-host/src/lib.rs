@@ -50,7 +50,7 @@ mod application;
 mod repository;
 pub use application::{
     ActionRejection, Application, EffectDelivery, EffectRunOutcome, JobRunOutcome, LoginChallenge,
-    RequestError, ValidatedActionRejection,
+    POSTGRES_WORKER_GRANTS, RequestError, ValidatedActionRejection,
 };
 pub mod http;
 

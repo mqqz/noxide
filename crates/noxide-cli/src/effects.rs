@@ -12,6 +12,18 @@ fn text(args: &[OsString], index: usize) -> Result<String> {
 }
 pub async fn run(args: &[OsString]) -> Result<()> {
     let command = text(args, 0)?;
+    if command == "worker-grants" {
+        ensure!(args.len() == 2, "usage: noxide effects worker-grants ROLE");
+        let role = text(args, 1)?;
+        ensure!(
+            noxide_protocol::identifier(&role),
+            "role must be a lowercase identifier"
+        );
+        for grant in noxide_host::POSTGRES_WORKER_GRANTS {
+            println!("{};", grant.replace("ROLE", &role));
+        }
+        return Ok(());
+    }
     let count = match command.as_str() {
         "inspect" => 2..=3,
         "cancel" | "retry" | "resume" | "grant-secret" | "revoke-secret" => 3..=3,

@@ -12,7 +12,7 @@ mod capabilities;
 mod clock;
 mod effect_delivery;
 mod effect_worker;
-pub use effect_delivery::EffectDelivery;
+pub use effect_delivery::{EffectDelivery, POSTGRES_WORKER_GRANTS};
 pub use effect_worker::EffectRunOutcome;
 mod effects;
 mod jobs;

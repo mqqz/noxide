@@ -231,6 +231,27 @@ impl Application {
         };
         DirectoryPreparation::prepare(&runtime.directory, &runtime.effective, deadline).await
     }
+    #[cfg(test)]
+    pub(super) fn effect_test_parts(
+        &self,
+    ) -> (
+        Arc<Manifest>,
+        String,
+        String,
+        EffectiveEffectDeployment,
+        u16,
+        Option<rustls::RootCertStore>,
+    ) {
+        let runtime = self.effects.as_ref().expect("effect runtime");
+        (
+            self.manifest.clone(),
+            self.deployment.clone(),
+            self.contract.clone(),
+            runtime.effective.clone(),
+            self.database_statement_limit,
+            runtime.test_roots.lock().unwrap().clone(),
+        )
+    }
     /// One delivery context per test application, standing in for the worker process.
     #[cfg(test)]
     pub(crate) async fn effect_delivery(&self) -> Arc<EffectDelivery> {
@@ -238,16 +259,8 @@ impl Application {
         runtime
             .delivery
             .get_or_init(|| async {
-                let delivery = Arc::new(EffectDelivery::from_parts(
-                    self.database.clone(),
-                    self.manifest.clone(),
-                    self.deployment.clone(),
-                    self.contract.clone(),
-                    runtime.effective.clone(),
-                    self.database_statement_limit,
-                ));
-                *delivery.runtime.test_roots.lock().unwrap() =
-                    runtime.test_roots.lock().unwrap().clone();
+                let delivery =
+                    Arc::new(EffectDelivery::from_test_parts(self, self.database.clone()));
                 delivery.activate().await.expect("activate effect delivery");
                 delivery
             })

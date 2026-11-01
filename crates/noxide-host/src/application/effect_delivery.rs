@@ -100,6 +100,18 @@ impl DeliveryRuntime {
     }
 }
 
+/// What a PostgreSQL role needs to run delivery, for `ROLE` in these templates.
+/// It excludes accounts, records, sessions, blobs and jobs. SQLite has no roles:
+/// a worker on SQLite can read the whole database file.
+pub const POSTGRES_WORKER_GRANTS: &[&str] = &[
+    "GRANT SELECT ON nx_storage,nx_schema_definition,nx_resource_catalog,nx_deployment,nx_job_runtime,nx_effect_grants,nx_effect_secrets TO ROLE",
+    // A shared row lock needs UPDATE on some column. `singleton` is fixed by a check;
+    // rewriting a grant's `deployment` can only make that grant stop matching.
+    "GRANT UPDATE (singleton) ON nx_job_runtime,nx_deployment TO ROLE",
+    "GRANT UPDATE (deployment) ON nx_effect_grants,nx_effect_secrets TO ROLE",
+    "GRANT SELECT,UPDATE ON nx_clock,nx_effect_queue,nx_effect_tenants,nx_outbox TO ROLE",
+];
+
 /// The delivery half of an approved deployment.
 pub struct EffectDelivery {
     database: Database,
@@ -138,6 +150,13 @@ impl EffectDelivery {
             effective,
             256,
         ))
+    }
+    #[cfg(test)]
+    pub(super) fn from_test_parts(app: &Application, database: Database) -> Self {
+        let (manifest, deployment, contract, effective, limit, roots) = app.effect_test_parts();
+        let delivery = Self::from_parts(database, manifest, deployment, contract, effective, limit);
+        *delivery.runtime.test_roots.lock().unwrap() = roots;
+        delivery
     }
     pub(super) fn from_parts(
         database: Database,
