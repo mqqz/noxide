@@ -460,6 +460,16 @@ async fn hundred_thousand_case(db: Database) {
         .begin(Instant::now() + Duration::from_secs(30))
         .await
         .unwrap();
+    // Bulk seeding is fixture work, not a request: lift the request statement
+    // limit for this transaction only so slow disks can load 100,000 rows.
+    if matches!(
+        tx.query_provider().unwrap(),
+        crate::query_plan::NativeProvider::Postgres
+    ) {
+        tx.execute("SET LOCAL statement_timeout = '30s'", &[])
+            .await
+            .unwrap();
+    }
     tx.execute(
         "UPDATE nx_records SET created_seq=created_seq+200000 WHERE resource=$1",
         &[storage.into()],

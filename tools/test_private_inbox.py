@@ -155,6 +155,12 @@ def main():
                         fill("input[name=username]", name)
                         fill("input[name=password]", "Private inbox test password")
                         click("button")
+                        # WebDriver may return before the POST completes; a later
+                        # navigation would abort it. Wait for the signed-in redirect.
+                        deadline = time.monotonic() + 15
+                        while call(session + "/url").endswith("/login"):
+                            assert time.monotonic() < deadline, "browser sign-in did not complete"
+                            time.sleep(0.05)
                     browser_login("alice")
                     navigate("/account")
                     assert ids["alice"] in call(session + "/source")
