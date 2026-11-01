@@ -10,6 +10,8 @@ pub(crate) use noxide_blobs::{
 };
 pub(crate) use noxide_effects as effects;
 pub use noxide_effects::effect_deployment;
+pub(crate) use noxide_jobs as jobs;
+pub use noxide_jobs::job_deployment;
 pub use noxide_render as render;
 #[cfg(test)]
 use noxide_test_support as test_support;
@@ -18,7 +20,6 @@ pub mod deployment;
 mod effects_tests;
 #[cfg(test)]
 mod job_admission_tests;
-pub mod job_deployment;
 mod limiter;
 #[cfg(test)]
 mod membership_tests;
@@ -31,7 +32,6 @@ pub use effect_deployment::{EffectDeployment, EffectGrant, EffectLimits, EffectS
 pub use effects::{EffectOperatorCommand, EffectOperatorResult, EffectSummary};
 pub use job_deployment::{JobDeployment, JobGrant, JobLimits};
 pub use jobs::{JobOperatorCommand, JobOperatorResult, JobSummary};
-mod jobs;
 pub mod runtime {
     pub use noxide_sandbox::Limits;
     /// A guest with no storage grant, for admission checks outside an application.

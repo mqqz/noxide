@@ -10,7 +10,7 @@ use noxide_protocol::{
 };
 use std::collections::BTreeMap;
 
-pub(crate) struct RecurrenceCursor {
+pub struct RecurrenceCursor {
     pub(super) scope: JobScope,
     pub(super) name: String,
     pub(super) version: i64,
@@ -18,7 +18,7 @@ pub(crate) struct RecurrenceCursor {
     pub(super) cutoff_seq: i64,
     pub(super) cursor: String,
 }
-pub(crate) struct RecurrenceBatch {
+pub struct RecurrenceBatch {
     pub(super) position: RecurrenceCursor,
     pub(super) declaration: RecurringSchedule,
     pub(super) grant: Grant,
@@ -26,23 +26,23 @@ pub(crate) struct RecurrenceBatch {
     pub(super) now: Timestamp,
 }
 impl RecurrenceBatch {
-    pub(crate) fn cutoff(&self) -> Timestamp {
+    pub fn cutoff(&self) -> Timestamp {
         self.position.cutoff
     }
-    pub(crate) fn cutoff_seq(&self) -> i64 {
+    pub fn cutoff_seq(&self) -> i64 {
         self.position.cutoff_seq
     }
-    pub(crate) fn cursor(&self) -> Option<&str> {
+    pub fn cursor(&self) -> Option<&str> {
         (!self.position.cursor.is_empty()).then_some(self.position.cursor.as_str())
     }
-    pub(crate) fn remaining(&self) -> u8 {
+    pub fn remaining(&self) -> u8 {
         MAX_RECURRENCE_FANOUT - self.emitted
     }
 }
 
 /// Ordinary occurrences include the fixed scan cutoff; expiry repair deliberately
 /// excludes it, deduplicating by schedule/target incarnation/expiry/contract.
-pub(crate) fn occurrence_key(
+pub fn occurrence_key(
     scope: &JobScope,
     name: &str,
     cutoff: Timestamp,
@@ -79,7 +79,7 @@ impl QueueContext<'_> {
     /// Operator has installed this schedule row under the reviewed contract.
     /// Keep this transaction through query, enqueue and finish; cursor progress
     /// commits atomically with all jobs emitted by this bounded batch.
-    pub(crate) async fn begin_recurrence(
+    pub async fn begin_recurrence(
         &mut self,
         scope: &JobScope,
         declaration: &RecurringSchedule,
@@ -175,7 +175,7 @@ impl QueueContext<'_> {
     /// Caller has freshly authorized this query result and supplied its sealed
     /// target plus fixed literal canonical inputs. No picker tokens are accepted.
     /// A duplicate still consumes fanout work, preventing unbounded dedup scans.
-    pub(crate) async fn emit_recurrence(
+    pub async fn emit_recurrence(
         &mut self,
         batch: &mut RecurrenceBatch,
         action_version: u32,
@@ -260,7 +260,7 @@ impl QueueContext<'_> {
     /// `next_cursor` is a canonical INTERNAL query frontier, never a browser
     /// credential with an expiry. None completes this scan. A continued scan
     /// retains both cutoffs, even across arbitrarily many missed intervals.
-    pub(crate) async fn finish_recurrence(
+    pub async fn finish_recurrence(
         &mut self,
         batch: RecurrenceBatch,
         next_cursor: Option<&str>,
@@ -285,7 +285,7 @@ impl QueueContext<'_> {
     /// Give other due schedules a turn without changing its frontier/cutoffs or
     /// pretending that an occurrence completed. This is a scan-work retry, not
     /// a new recurring occurrence or an interval shorter than its declaration.
-    pub(crate) async fn defer_recurrence(&mut self, batch: RecurrenceBatch) -> Result<()> {
+    pub async fn defer_recurrence(&mut self, batch: RecurrenceBatch) -> Result<()> {
         self.charge()?;
         ensure!(
             !batch.position.cursor.is_empty(),

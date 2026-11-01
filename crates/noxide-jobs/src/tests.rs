@@ -348,7 +348,7 @@ async fn durable_contract(database: Database) {
             .unwrap();
             assert_eq!(calls, 14);
             assert!(
-                crate::failure_tests::lose_commit_ack(tx.commit())
+                crate::database::fault::lose_commit_ack(tx.commit())
                     .await
                     .is_err()
             );
@@ -1046,7 +1046,7 @@ async fn recurrence_contract(database: &Database) {
 }
 
 async fn terminal_rejection_contract(database: &Database) {
-    use crate::application::{ActionRejection, ValidatedActionRejection};
+    use crate::action_contract::{ActionRejection, ValidatedActionRejection};
     let job = captured(&grant("alpha"), "terminal_rejection", 0, 5);
     enqueue(database, &job).await;
     let claimed = claim(database, at(1000)).await.unwrap();
@@ -1132,7 +1132,7 @@ async fn terminal_rejection_contract(database: &Database) {
         panic!("expected structured terminal rejection")
     };
     assert!(result.as_rejection() == &rejection);
-    let column = tx.bounded_text("reason", crate::application::MAX_ACTION_REJECTION_BYTES);
+    let column = tx.bounded_text("reason", crate::action_contract::MAX_ACTION_REJECTION_BYTES);
     let rows = tx
         .fetch::<1>(
             &format!("SELECT {column} FROM nx_jobs WHERE id=$1"),

@@ -11,24 +11,24 @@ use noxide_protocol::{
     time::{Duration, Timestamp},
 };
 
-pub(crate) struct QueueContext<'a> {
-    pub(crate) tx: &'a mut Transaction,
-    pub(crate) calls: &'a mut u32,
+pub struct QueueContext<'a> {
+    pub tx: &'a mut Transaction,
+    pub calls: &'a mut u32,
 }
 
-pub(crate) enum Execution {
+pub enum Execution {
     Ready(Box<VerifiedJob>),
     /// Complete receipt has been validated by the existing semantic decoder.
     Recovered(String),
     Paused,
     Dead,
 }
-pub(crate) enum Failure {
+pub enum Failure {
     Transient,
     Rejected,
     BusinessRejected(ValidatedActionRejection),
 }
-pub(crate) enum FailureResult {
+pub enum FailureResult {
     Retrying(Timestamp),
     Rejected,
     BusinessRejected(ValidatedActionRejection),
@@ -39,11 +39,11 @@ pub(crate) enum FailureResult {
 
 /// An active enqueue grant read and locked in the originating transaction.
 /// It is not execution authority and cannot be constructed by an adapter.
-pub(crate) struct VerifiedScheduleGrant {
+pub struct VerifiedScheduleGrant {
     grant: Grant,
 }
 impl VerifiedScheduleGrant {
-    pub(crate) fn grant(&self) -> &Grant {
+    pub fn grant(&self) -> &Grant {
         &self.grant
     }
 }
@@ -282,7 +282,7 @@ impl QueueContext<'_> {
         Ok(())
     }
     /// Current operator intersection for a fixed admitted transactional schedule.
-    pub(crate) async fn schedule_grant(
+    pub async fn schedule_grant(
         &mut self,
         scope: &JobScope,
         worker: &str,
@@ -305,7 +305,7 @@ impl QueueContext<'_> {
     /// Caller has separately authorized the originating schedule declaration and
     /// evaluated/canonicalized every input and resolved target in this transaction.
     /// Enqueue and action mutations/receipt commit together. Never commits here.
-    pub(crate) async fn enqueue(
+    pub async fn enqueue(
         &mut self,
         job: &CapturedJob,
         now: Timestamp,
@@ -373,11 +373,7 @@ impl QueueContext<'_> {
     /// One fair bounded claim. Commit this short transaction before launching
     /// the existing executor. A lost claim acknowledgement is checked by the
     /// later execution lock; it never grants authority itself.
-    pub(crate) async fn claim(
-        &mut self,
-        deployment: &str,
-        now: Timestamp,
-    ) -> Result<Option<Claim>> {
+    pub async fn claim(&mut self, deployment: &str, now: Timestamp) -> Result<Option<Claim>> {
         self.charge()?;
         self.checkpoint()?;
         ensure!(opaque(deployment), "invalid job deployment");
@@ -430,7 +426,7 @@ impl QueueContext<'_> {
     /// Locks authoritative runtime/grant plus claimed row in this execution
     /// transaction. Restores/revocations take conflicting locks. No current
     /// authorization is inferred from a captured grant or record identity.
-    pub(crate) async fn lock_execution_with_time(
+    pub async fn lock_execution_with_time(
         &mut self,
         claim: &Claim,
         sample_time: impl AsyncFnOnce(&mut Transaction, &mut u32) -> Result<Timestamp>,
@@ -501,8 +497,8 @@ impl QueueContext<'_> {
             })),
         ))
     }
-    #[cfg(test)]
-    pub(crate) async fn lock_execution(
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn lock_execution(
         &mut self,
         claim: &Claim,
         now: Timestamp,
@@ -520,7 +516,7 @@ impl QueueContext<'_> {
 
     /// Existing executor must first persist a complete semantic receipt. This
     /// completion write participates in that exact same mutation transaction.
-    pub(crate) async fn succeed(
+    pub async fn succeed(
         &mut self,
         verified: &VerifiedJob,
         validate_receipt: impl Fn(&str) -> Result<()>,
@@ -553,7 +549,7 @@ impl QueueContext<'_> {
     /// Only call in a fresh short transaction after the prior transaction has
     /// terminated. Row locking and authoritative receipt recovery precede every
     /// retry/rejection. An uncertain COMMIT is never classified by its error.
-    pub(crate) async fn fail(
+    pub async fn fail(
         &mut self,
         claim: &Claim,
         now: Timestamp,

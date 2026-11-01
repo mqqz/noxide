@@ -40,7 +40,7 @@ pub struct JobSummary {
 }
 
 #[allow(async_fn_in_trait)]
-pub(crate) trait JobOperatorTransaction {
+pub trait JobOperatorTransaction {
     async fn inspect_jobs(&mut self, generation: &str, after: &str) -> Result<Vec<JobSummary>>;
     async fn apply_job_fork(&mut self, generation: &str) -> Result<()>;
     async fn fork_job_runtime(&mut self, generation: &str) -> Result<()>;
@@ -136,7 +136,7 @@ impl JobOperatorTransaction for Transaction {
             opaque(generation) && opaque(contract),
             "invalid job runtime identity"
         );
-        let epoch = crate::security::random_id()?;
+        let epoch = crate::ids::random_id()?;
         let limits = effective.map(|e| e.limits).unwrap_or_default();
         limits.validate()?;
         self.execute("INSERT INTO nx_job_runtime(singleton,deployment,contract,epoch,state,pending_limit,tenant_limit,concurrency) VALUES(1,$1,$2,$3,$4,$5,$6,$7) ON CONFLICT(singleton) DO NOTHING", &[generation.into(), contract.into(), epoch.into(), if effective.is_some() || effects_enabled { "active" } else { "paused" }.into(), i64::from(limits.pending_per_app).into(), i64::from(limits.pending_per_tenant).into(), i64::from(limits.worker_concurrency).into()]).await?;
@@ -185,7 +185,7 @@ impl JobOperatorTransaction for Transaction {
             );
         }
         let epoch = if changed {
-            crate::security::random_id()?
+            crate::ids::random_id()?
         } else {
             old_epoch.clone()
         };
@@ -352,7 +352,7 @@ impl JobOperatorTransaction for Transaction {
     /// Fork updates for a caller that already holds exclusive runtime authority:
     /// the operator lock above, or startup's clock-locked restore activation.
     async fn apply_job_fork(&mut self, generation: &str) -> Result<()> {
-        let epoch = crate::security::random_id()?;
+        let epoch = crate::ids::random_id()?;
         self.execute(
             "UPDATE nx_job_runtime SET epoch=$1,state='paused' WHERE singleton=1",
             &[epoch.into()],
@@ -421,7 +421,7 @@ impl super::QueueContext<'_> {
     /// The existing adapter has rechecked canonical inputs and current eligible
     /// target reads. Runtime/grant locks are retained through this insertion.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn enqueue_reconciled(
+    pub async fn enqueue_reconciled(
         &mut self,
         previous: &CapturedJob,
         current: &super::VerifiedScheduleGrant,

@@ -8,13 +8,13 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct JobScope {
+pub struct JobScope {
     /// Persisted nx_deployment.generation, not the application's display name.
-    pub(crate) deployment: String,
-    pub(crate) tenant: String,
+    pub deployment: String,
+    pub tenant: String,
 }
 impl JobScope {
-    pub(crate) fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         ensure!(opaque(&self.deployment), "invalid job deployment");
         ensure!(
             self.tenant.is_empty() || noxide_protocol::identifier(&self.tenant),
@@ -26,11 +26,11 @@ impl JobScope {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SealedTarget {
-    pub(crate) resource: u32,
-    pub(crate) id: u64,
-    pub(crate) incarnation: String,
-    pub(crate) revision: i64,
+pub struct SealedTarget {
+    pub resource: u32,
+    pub id: u64,
+    pub incarnation: String,
+    pub revision: i64,
 }
 impl SealedTarget {
     fn validate(&self) -> Result<()> {
@@ -50,15 +50,15 @@ impl SealedTarget {
 /// version, contract and runtime epoch, never this value alone, grant authority.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Grant {
-    pub(crate) scope: JobScope,
-    pub(crate) worker: Worker,
-    pub(crate) version: i64,
-    pub(crate) contract: String,
-    pub(crate) epoch: String,
+pub struct Grant {
+    pub scope: JobScope,
+    pub worker: Worker,
+    pub version: i64,
+    pub contract: String,
+    pub epoch: String,
 }
 impl Grant {
-    pub(crate) fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         self.scope.validate()?;
         ensure!(
             self.version > 0 && opaque(&self.contract) && opaque(&self.epoch),
@@ -85,7 +85,7 @@ impl Grant {
         }
         Ok(())
     }
-    pub(crate) fn permits(&self, job: &CapturedJob) -> Result<()> {
+    pub fn permits(&self, job: &CapturedJob) -> Result<()> {
         self.validate()?;
         ensure!(
             self.scope == job.scope
@@ -122,7 +122,7 @@ impl Grant {
 /// canonical input expressions and resolved authorized target seals once.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CapturedJob {
+pub struct CapturedJob {
     pub(super) scope: JobScope,
     pub(super) origin: String,
     pub(super) ordinal: u8,
@@ -141,7 +141,7 @@ pub(crate) struct CapturedJob {
 }
 impl CapturedJob {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn capture(
+    pub fn capture(
         declaration: &Schedule,
         origin: String,
         grant: &Grant,
@@ -183,7 +183,7 @@ impl CapturedJob {
         grant.permits(&job)?;
         Ok(job)
     }
-    pub(crate) fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         self.scope.validate()?;
         ensure!(
             self.reconciled_from.as_ref().is_none_or(|id| opaque(id)),
@@ -221,46 +221,46 @@ impl CapturedJob {
         );
         Ok(())
     }
-    pub(crate) fn id(&self) -> Result<String> {
+    pub fn id(&self) -> Result<String> {
         Ok(format!(
             "j1_{}",
             digest(&(1, "job", &self.scope.deployment, &self.origin, self.ordinal))?
         ))
     }
-    pub(crate) fn invocation_digest(&self) -> Result<String> {
+    pub fn invocation_digest(&self) -> Result<String> {
         // All captured fields, including canonical input, grant version and
         // immutable target seals, participate. Attempts/fences never do.
         digest(&(1, "service-invocation", self.id()?, self))
     }
-    pub(crate) fn receipt_subject(&self) -> Result<String> {
+    pub fn receipt_subject(&self) -> Result<String> {
         Ok(format!(
             "s1_{}",
             digest(&(1, "service", &self.scope, &self.worker))?
         ))
     }
-    #[cfg(test)]
-    pub(crate) fn input_digest(&self) -> Result<String> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn input_digest(&self) -> Result<String> {
         digest(&(1, "job-input", &self.input))
     }
-    pub(crate) fn input(&self) -> &Fields {
+    pub fn input(&self) -> &Fields {
         &self.input
     }
-    pub(crate) fn targets(&self) -> &BTreeMap<String, SealedTarget> {
+    pub fn targets(&self) -> &BTreeMap<String, SealedTarget> {
         &self.targets
     }
-    pub(crate) fn action(&self) -> (u32, u32) {
+    pub fn action(&self) -> (u32, u32) {
         (self.action, self.action_version)
     }
-    pub(crate) fn scope(&self) -> &JobScope {
+    pub fn scope(&self) -> &JobScope {
         &self.scope
     }
-    pub(crate) fn worker(&self) -> &str {
+    pub fn worker(&self) -> &str {
         &self.worker
     }
-    pub(crate) fn contract(&self) -> &str {
+    pub fn contract(&self) -> &str {
         &self.contract
     }
-    pub(crate) fn reconciled_from(&self) -> Option<&str> {
+    pub fn reconciled_from(&self) -> Option<&str> {
         self.reconciled_from.as_deref()
     }
     /// Operator-only fresh identity. The caller must have validated canonical
@@ -317,7 +317,7 @@ impl CapturedJob {
 /// A claim is not execution authority. Only locked, current grant/job/receipt
 /// admission inside the execution transaction produces VerifiedJob.
 #[derive(Clone, Debug)]
-pub(crate) struct Claim {
+pub struct Claim {
     pub(super) id: String,
     pub(super) scope: JobScope,
     pub(super) fence: i64,
@@ -325,57 +325,57 @@ pub(crate) struct Claim {
     pub(super) exhausted: bool,
 }
 impl Claim {
-    #[cfg(test)]
-    pub(crate) fn id(&self) -> &str {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn id(&self) -> &str {
         &self.id
     }
-    #[cfg(test)]
-    pub(crate) fn fence(&self) -> i64 {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fence(&self) -> i64 {
         self.fence
     }
 }
 
-pub(crate) struct VerifiedJob {
+pub struct VerifiedJob {
     pub(super) claim: Claim,
     pub(super) job: CapturedJob,
     pub(super) grant: Grant,
 }
 impl VerifiedJob {
-    pub(crate) fn captured(&self) -> &CapturedJob {
+    pub fn captured(&self) -> &CapturedJob {
         &self.job
     }
-    pub(crate) fn grant(&self) -> &Grant {
+    pub fn grant(&self) -> &Grant {
         &self.grant
     }
-    pub(crate) fn deployment(&self) -> &str {
+    pub fn deployment(&self) -> &str {
         &self.job.scope.deployment
     }
-    pub(crate) fn tenant(&self) -> &str {
+    pub fn tenant(&self) -> &str {
         &self.job.scope.tenant
     }
-    pub(crate) fn worker(&self) -> &str {
+    pub fn worker(&self) -> &str {
         &self.job.worker
     }
-    pub(crate) fn action(&self) -> (u32, u32) {
+    pub fn action(&self) -> (u32, u32) {
         self.job.action()
     }
-    pub(crate) fn input(&self) -> &Fields {
+    pub fn input(&self) -> &Fields {
         &self.job.input
     }
-    pub(crate) fn targets(&self) -> &BTreeMap<String, SealedTarget> {
+    pub fn targets(&self) -> &BTreeMap<String, SealedTarget> {
         &self.job.targets
     }
-    pub(crate) fn receipt_nonce(&self) -> Result<String> {
+    pub fn receipt_nonce(&self) -> Result<String> {
         self.job.id()
     }
-    pub(crate) fn receipt_subject(&self) -> Result<String> {
+    pub fn receipt_subject(&self) -> Result<String> {
         self.job.receipt_subject()
     }
-    pub(crate) fn invocation_digest(&self) -> Result<String> {
+    pub fn invocation_digest(&self) -> Result<String> {
         self.job.invocation_digest()
     }
-    #[cfg(test)]
-    pub(crate) fn fence(&self) -> i64 {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fence(&self) -> i64 {
         self.claim.fence
     }
 }

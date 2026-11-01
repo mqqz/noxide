@@ -13,7 +13,7 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parent.parent / "crates/noxide-host/src"
 LAYERS = [
     ["limiter", "security", "auth", "authority", "operator_roles"],
-    ["deployment", "job_deployment", "repository", "jobs"],
+    ["deployment", "repository"],
     ["application"],
     ["http"],
 ]

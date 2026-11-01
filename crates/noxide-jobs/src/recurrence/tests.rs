@@ -1,7 +1,7 @@
 //! Durable cursor deferral only; the selector owns canonical frontier contents.
 use super::*;
-use crate::Database;
 use noxide_protocol::jobs::{Worker, WorkerAction};
+use noxide_store::Database;
 use sqlx::Connection;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 

@@ -1532,6 +1532,7 @@ dependencies = [
  "noxide-blobs",
  "noxide-effect-delivery",
  "noxide-effects",
+ "noxide-jobs",
  "noxide-keys",
  "noxide-protocol",
  "noxide-render",
@@ -1552,6 +1553,26 @@ dependencies = [
  "tower",
  "url",
  "wat",
+]
+
+[[package]]
+name = "noxide-jobs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "noxide-admission",
+ "noxide-protocol",
+ "noxide-sql",
+ "noxide-store",
+ "noxide-test-support",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "url",
 ]
 
 [[package]]

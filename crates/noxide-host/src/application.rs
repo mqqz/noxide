@@ -6,8 +6,6 @@ mod authority;
 pub(crate) mod blobs;
 use crate::database::lifecycle::{AdmissionOwner, Registry, RequestScope};
 pub(crate) use action::ActionCore;
-#[cfg(test)]
-pub(crate) use action::MAX_ACTION_REJECTION_BYTES;
 pub use action::{ActionRejection, ValidatedActionRejection};
 use action::{CanonicalActionInput, ExecutionBudget};
 mod capabilities;

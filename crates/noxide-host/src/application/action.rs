@@ -8,8 +8,6 @@ mod membership_tests;
 mod targets;
 use super::{Application, EditReceipt, RequestError, navigation};
 pub(crate) use crate::action_contract::ActionCore;
-#[cfg(test)]
-pub(crate) use crate::action_contract::MAX_ACTION_REJECTION_BYTES;
 pub use crate::action_contract::{ActionRejection, ValidatedActionRejection};
 use crate::{
     auth,

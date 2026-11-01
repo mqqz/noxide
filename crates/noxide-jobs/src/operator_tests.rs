@@ -1,6 +1,6 @@
-use crate::jobs::JobOperatorTransaction as _;
+use crate::JobOperatorTransaction as _;
 use crate::{
-    Database,
+    database::Database,
     database::{
         Transaction,
         lifecycle::{AdmissionOwner, Registry, RequestScope},
@@ -256,22 +256,22 @@ async fn paused_generation_restart(
 ) {
     let (job_id, watermark) = operator_phase(database, async |tx: &mut Transaction| {
         let payload = tx.fetch::<1>("SELECT declaration FROM nx_job_grants WHERE deployment='generation'", &[]).await.unwrap();
-        let grant: crate::jobs::Grant = serde_json::from_str(&payload[0][0]).unwrap();
+        let grant: crate::Grant = serde_json::from_str(&payload[0][0]).unwrap();
         let schedule = noxide_protocol::jobs::Schedule { source_action: 1, ordinal: 0, worker: "repair".into(), action: 2, targets: Default::default(), inputs: Default::default(), due_at: noxide_protocol::Value::TransactionTime };
         let now = noxide_protocol::time::Timestamp::UNIX_EPOCH;
-        let job = crate::jobs::CapturedJob::capture(&schedule, "clock_recovery_pending".into(), &grant, 1, now, now, Default::default(), Default::default()).unwrap();
+        let job = crate::CapturedJob::capture(&schedule, "clock_recovery_pending".into(), &grant, 1, now, now, Default::default(), Default::default()).unwrap();
         let mut calls = 16;
-        assert!(crate::jobs::QueueContext { tx: &mut *tx, calls: &mut calls }.enqueue(&job, now, 1000).await.unwrap());
+        assert!(crate::QueueContext { tx: &mut *tx, calls: &mut calls }.enqueue(&job, now, 1000).await.unwrap());
         tx.execute("UPDATE nx_clock SET lifecycle_ms=123456,lifecycle_version=9 WHERE singleton=1", &[]).await.unwrap();
         let clock = tx.fetch::<2>("SELECT CAST(lifecycle_ms AS TEXT),CAST(lifecycle_version AS TEXT) FROM nx_clock WHERE singleton=1", &[]).await.unwrap()[0].clone();
         (job.id().unwrap(), clock)
     }).await;
     // Exercise the actual central clock recovery with a new key incarnation.
     // It retires the generation without resetting the observed lifecycle clock.
-    let keys = crate::HostKeys::generate().unwrap();
+
     let (owner, registry) = operator_admission();
     owner
-        .run(database.recover_clock(keys.incarnation()))
+        .run(database.recover_clock("fresh-incarnation"))
         .await
         .unwrap();
     registry.shutdown().await.unwrap();
@@ -324,7 +324,7 @@ async fn paused_generation_restart(
             );
             let mut calls = 16;
             assert!(
-                crate::jobs::QueueContext {
+                crate::QueueContext {
                     tx,
                     calls: &mut calls
                 }

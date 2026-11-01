@@ -1,0 +1,34 @@
+[package]
+name = "noxide-jobs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Noxide job queue, recurrence and operator commands. Runs no guest code"
+
+[dependencies]
+noxide-protocol.workspace = true
+noxide-admission.workspace = true
+noxide-store.workspace = true
+noxide-sql.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+base64 = "0.22"
+
+[features]
+# Test-only items for other crates' tests. Never enabled by a deployed binary;
+# tools/check_layers.py verifies the production feature set.
+test-support = ["noxide-store/test-support"]
+
+[dev-dependencies]
+noxide-store = { workspace = true, features = ["test-support"] }
+noxide-admission = { workspace = true, features = ["test-support"] }
+noxide-test-support.workspace = true
+sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"
+url = "2"
