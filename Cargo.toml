@@ -8,6 +8,9 @@ members = [
     "crates/noxide-sandbox",
     "crates/noxide-confine",
     "crates/noxide-keys",
+    "crates/noxide-admission",
+    "crates/noxide-render",
+    "crates/noxide-test-support",
     "crates/noxide-assets",
     "crates/noxide-asset-admission",
     "crates/noxide-host",
@@ -27,6 +30,9 @@ noxide-macros = { path = "crates/noxide-macros", version = "0.1.0" }
 noxide-protocol = { path = "crates/noxide-protocol", version = "0.1.0" }
 noxide-assets = { path = "crates/noxide-assets", version = "0.1.0" }
 noxide-asset-admission = { path = "crates/noxide-asset-admission", version = "0.1.0" }
+noxide-admission = { path = "crates/noxide-admission", version = "0.1.0" }
+noxide-render = { path = "crates/noxide-render", version = "0.1.0" }
+noxide-test-support = { path = "crates/noxide-test-support", version = "0.1.0" }
 noxide-keys = { path = "crates/noxide-keys", version = "0.1.0" }
 noxide-confine = { path = "crates/noxide-confine", version = "0.1.0" }
 noxide-sandbox = { path = "crates/noxide-sandbox", version = "0.1.0" }

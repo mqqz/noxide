@@ -1,6 +1,6 @@
-mod support;
 use noxide_host::{Application, Database, HostKeys, manifest, runtime::Limits};
 use noxide_protocol::Fields;
+use noxide_test_support as support;
 use sqlx::{Connection, Row};
 use std::sync::Arc;
 

@@ -1,17 +1,25 @@
 //! Trusted execution, rendering, and persistence for Noxide applications.
-mod action_contract;
-pub use noxide_assets as assets;
+pub use noxide_admission::{Presentation, assets, manifest, schema};
+pub(crate) use noxide_admission::{
+    action_contract, expiry, ids, membership, policy, principal, query_plan, routing, search, sql,
+    temporal,
+};
+pub use noxide_render as render;
+#[cfg(test)]
+use noxide_test_support as test_support;
 mod blob_inspect;
 mod blob_io;
 mod blob_upload;
 pub mod deployment;
 pub mod effect_deployment;
-mod ids;
+#[cfg(test)]
+mod job_admission_tests;
 pub mod job_deployment;
 mod limiter;
-mod principal;
-mod sql;
-mod temporal;
+#[cfg(test)]
+mod membership_tests;
+#[cfg(test)]
+mod policy_tests;
 pub use deployment::{BlobDeployment, DeploymentResources};
 pub use effect_deployment::{EffectDeployment, EffectGrant, EffectLimits, EffectSecret};
 pub use effects::{EffectOperatorCommand, EffectOperatorResult, EffectSummary};
@@ -26,14 +34,11 @@ mod database;
 mod effects;
 mod jobs;
 mod lifecycle_clock;
-pub mod manifest;
-pub mod render;
 pub mod runtime {
     pub use noxide_sandbox::Limits;
     /// A guest with no storage grant, for admission checks outside an application.
     pub type Runtime = noxide_sandbox::Runtime<noxide_sandbox::NoHostCalls>;
 }
-pub mod schema;
 pub use database::{Database, StoreResources};
 mod auth;
 mod operator_roles;
@@ -51,12 +56,6 @@ pub mod http;
 
 #[cfg(test)]
 mod failure_tests;
-#[cfg(test)]
-#[path = "../tests/support/mod.rs"]
-mod test_support;
-
-mod presentation;
-pub use presentation::Presentation;
 
 #[cfg(test)]
 mod public_tests;
@@ -68,11 +67,6 @@ mod anonymous_tests;
 mod registration_tests;
 
 mod authority;
-mod expiry;
-mod form_layout;
-mod membership;
-mod policy;
-mod routing;
 
 #[cfg(test)]
 mod parent_tests;
@@ -86,9 +80,6 @@ async fn test_account(db: &Database, login: &str) -> String {
         .await
         .unwrap_or_else(|_| "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into())
 }
-
-mod query_plan;
-mod search;
 
 #[cfg(test)]
 mod parameter_tests;

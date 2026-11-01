@@ -1,5 +1,3 @@
-#[allow(dead_code)]
-mod support;
 use noxide_asset_admission::AssetInput;
 use noxide_host::{
     Application, Database, HostKeys,
@@ -11,6 +9,7 @@ use noxide_protocol::{
     document::{ClassTokens, Element, PresentationNode},
     *,
 };
+use noxide_test_support as support;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tower::ServiceExt;

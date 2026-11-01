@@ -1,8 +1,6 @@
 #![cfg(unix)]
-#[allow(dead_code)]
-#[path = "../../noxide-host/tests/support/mod.rs"]
-mod support;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use noxide_test_support as support;
 use std::{
     fs,
     path::Path,

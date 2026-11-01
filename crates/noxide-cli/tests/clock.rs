@@ -1,6 +1,4 @@
-#[allow(dead_code)]
-#[path = "../../noxide-host/tests/support/mod.rs"]
-mod support;
+use noxide_test_support as support;
 
 use noxide_host::{Application, Database, HostKeys, manifest, runtime::Limits};
 use std::path::Path;

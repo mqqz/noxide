@@ -1377,6 +1377,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "noxide-admission"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "noxide-assets",
+ "noxide-protocol",
+ "noxide-test-support",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2",
+ "unicode-normalization",
+ "unicode-properties",
+ "url",
+]
+
+[[package]]
 name = "noxide-asset-admission"
 version = "0.1.0"
 dependencies = [
@@ -1411,6 +1429,7 @@ dependencies = [
  "noxide-host",
  "noxide-keys",
  "noxide-protocol",
+ "noxide-test-support",
  "rustix",
  "serde",
  "serde_json",
@@ -1444,11 +1463,14 @@ dependencies = [
  "hyper-util",
  "image",
  "libsqlite3-sys",
+ "noxide-admission",
  "noxide-asset-admission",
  "noxide-assets",
  "noxide-keys",
  "noxide-protocol",
+ "noxide-render",
  "noxide-sandbox",
+ "noxide-test-support",
  "rand",
  "rustix",
  "rustls",
@@ -1460,8 +1482,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower",
- "unicode-normalization",
- "unicode-properties",
  "url",
  "wat",
  "webpki-roots",
@@ -1501,6 +1521,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "noxide-render"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "noxide-admission",
+ "noxide-assets",
+ "noxide-protocol",
+ "noxide-test-support",
+ "serde_json",
+]
+
+[[package]]
 name = "noxide-sandbox"
 version = "0.1.0"
 dependencies = [
@@ -1510,6 +1542,15 @@ dependencies = [
  "tokio",
  "wasmparser 0.245.1",
  "wasmtime",
+ "wat",
+]
+
+[[package]]
+name = "noxide-test-support"
+version = "0.1.0"
+dependencies = [
+ "noxide-protocol",
+ "serde_json",
  "wat",
 ]
 

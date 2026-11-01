@@ -2,9 +2,7 @@ use noxide_host::render::{FormCredentials, RenderContext, render};
 use noxide_protocol::{Container, Document, Fields, Instruction, ResponseIntent};
 use std::collections::BTreeMap;
 
-#[allow(dead_code)]
-#[path = "support/record_actions.rs"]
-mod record_actions;
+use noxide_test_support::record_actions;
 
 #[test]
 fn textarea_preserves_browser_normalized_newlines() {

@@ -8,6 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub(crate) use crate::test_support::parent_declarations as declarations;
+
 fn boolean(name: &str) -> TextField {
     TextField {
         immutable: false,
@@ -18,100 +20,6 @@ fn boolean(name: &str) -> TextField {
         initial: None,
         max_bytes: 5,
     }
-}
-pub(crate) fn declarations() -> Manifest {
-    let mut m = fixture::manifest();
-    m.resources[0].fields.extend([
-        boolean("published"),
-        TextField {
-            immutable: false,
-            name: "thread".into(),
-            label: "Thread".into(),
-            max_bytes: 20,
-            optional: false,
-            initial: None,
-            kind: FieldKind::Reference {
-                resource: "threads".into(),
-            },
-        },
-    ]);
-    m.resources[0].gate = Some(Gate {
-        field: "thread".into(),
-        visible: Visibility {
-            field: "published".into(),
-            equals: "true".into(),
-        },
-        create_when: Visibility {
-            field: "locked".into(),
-            equals: "false".into(),
-        },
-    });
-    m.resources.push(Resource {
-        search: None,
-        expiry: None,
-        unique: Vec::new(),
-        gate: None,
-        id: 2,
-        name: "threads".into(),
-        fields: vec![boolean("published"), boolean("locked")],
-    });
-    for op in &mut m.operations {
-        op.policy.any = vec![vec![Predicate::Public]];
-        if op.kind != OperationKind::Create {
-            op.visibility = Some(Visibility {
-                field: "published".into(),
-                equals: "true".into(),
-            });
-            op.fields = Some(vec!["body".into()]);
-        }
-    }
-    m.operations.push(Operation {
-        maintenance: false,
-        query: None,
-        bind: Default::default(),
-        scope: None,
-        via: None,
-        filter: Vec::new(),
-        disclose: Vec::new(),
-        list: None,
-        id: 4,
-        resource: 2,
-        kind: OperationKind::Read,
-        policy: Policy {
-            any: vec![vec![Predicate::Public]],
-        },
-        visibility: Some(Visibility {
-            field: "published".into(),
-            equals: "true".into(),
-        }),
-        fields: Some(vec!["locked".into()]),
-    });
-    m.routes[0].operations.clear();
-    m.routes[0].forms.clear();
-    m.routes[0].access = Access::Public;
-    m.routes[1].access = Access::Public;
-    m.routes.push(Route {
-        params: Vec::new(),
-        id: 3,
-        path: "/threads/{thread}".into(),
-        resource: Some(2),
-        operations: vec![4, 1],
-        forms: vec![1],
-        access: Access::PublicOptional,
-    });
-    m.actions[0].targets = vec![fixture::page_target(2, vec![4], Revision::Exact)];
-    m.actions[0].steps[0].assign.push(Assignment {
-        field: "thread".into(),
-        change: Change::Set(Value::Target("target".into())),
-    });
-    m.operations[2].bind = ::std::collections::BTreeMap::from([("thread".into(), 4)]);
-    m.operations
-        .iter_mut()
-        .find(|op| op.kind == OperationKind::List)
-        .unwrap()
-        .scope = Some("thread".into());
-    crate::test_support::add_input(&mut m.actions[0], &m.resources[0], "published");
-    m
 }
 pub(crate) async fn seed(db: &Database, m: &Manifest) {
     if m.operations.iter().any(|op| !op.filter.is_empty()) {

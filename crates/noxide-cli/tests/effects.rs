@@ -1,13 +1,11 @@
 #![cfg(unix)]
-#[allow(dead_code)]
-#[path = "../../noxide-host/tests/support/mod.rs"]
-mod support;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use noxide_host::{
     Application, Database, DeploymentResources, EffectDeployment, EffectGrant, EffectLimits,
     EffectSecret, HostKeys, runtime::Limits,
 };
 use noxide_protocol::{effects::*, *};
+use noxide_test_support as support;
 use std::{collections::BTreeSet, path::Path};
 const PRIVATE_BODY: &str = "PRIVATE_CLI_EFFECT_BODY";
 const PRIVATE_SECRET: &str = "PRIVATE_CLI_EFFECT_TOKEN";

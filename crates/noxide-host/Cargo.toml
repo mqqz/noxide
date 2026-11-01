@@ -12,6 +12,8 @@ noxide-protocol.workspace = true
 noxide-sandbox.workspace = true
 noxide-keys.workspace = true
 noxide-assets.workspace = true
+noxide-admission.workspace = true
+noxide-render.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,8 +23,6 @@ tokio-rustls.workspace = true
 webpki-roots.workspace = true
 httparse.workspace = true
 rustix.workspace = true
-unicode-normalization.workspace = true
-unicode-properties.workspace = true
 tokio.workspace = true
 sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
@@ -37,6 +37,8 @@ url = "2"
 query-metrics = []
 
 [dev-dependencies]
+noxide-admission = { workspace = true, features = ["test-support"] }
+noxide-test-support.workspace = true
 noxide-asset-admission.workspace = true
 image.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
