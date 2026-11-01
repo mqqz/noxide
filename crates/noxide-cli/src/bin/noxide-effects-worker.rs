@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 #[path = "../config.rs"]
 mod config;
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use config::*;
 use std::{sync::Arc, time::Duration};
 
@@ -14,10 +14,15 @@ fn main() -> Result<()> {
         args.next()
             .context("usage: noxide-effects-worker CONFIG.json")?,
     );
-    ensure!(
-        args.next().is_none(),
-        "usage: noxide-effects-worker CONFIG.json"
-    );
+    match args
+        .next()
+        .as_deref()
+        .and_then(|argument| argument.to_str())
+    {
+        None => {}
+        Some("--supervised") => stop_with_parent()?,
+        Some(_) => anyhow::bail!("usage: noxide-effects-worker CONFIG.json [--supervised]"),
+    }
     let (config, base) = config(&path)?;
     let delivery = Arc::new(effect_delivery(&path)?);
     let store = database(&config.database, &base)?;
@@ -33,10 +38,11 @@ fn main() -> Result<()> {
         loop {
             match delivery.activate().await {
                 Err(_) if remaining > 0 => remaining -= 1,
-                result => return result,
+                result => break result,
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+        }?;
+        delivery.settled().await
     })?;
     drop(startup);
     let mut policy = store_policy(config.confinement, &store.confinement()?);

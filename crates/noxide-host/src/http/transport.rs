@@ -48,6 +48,22 @@ pub(super) enum ListenerKind {
         tor: bool,
     },
 }
+/// Remove a Unix socket left by a stopped server. A confined server cannot unlink
+/// its own socket: that right would also let it delete database sidecars. Only a
+/// socket nothing answers on is removed, never a live socket or another file.
+#[cfg(unix)]
+pub fn reclaim_stale_socket(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && metadata.file_type().is_socket()
+        && std::os::unix::net::UnixStream::connect(path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)
+    {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
 impl BoundListener {
     pub fn loopback(address: std::net::SocketAddr) -> Result<Self> {
         ensure!(address.ip().is_loopback(), "listener must bind loopback");

@@ -473,7 +473,7 @@ async fn provider(database: Database) {
             result
         })
         .await;
-    app.request_lifecycle().wait_idle_for_test().await.unwrap();
+    app.request_lifecycle().drain().await.unwrap();
     #[cfg(feature = "query-metrics")]
     {
         let mut tx = database
@@ -541,7 +541,7 @@ async fn provider(database: Database) {
         calls-=1;
         let jobs=tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_jobs",&[]).await.unwrap();assert_eq!(jobs[0][0],"2");tx.rollback().await.unwrap();eprintln!("recurring resume logical calls remaining={calls}");
     }).await;
-    app.request_lifecycle().wait_idle_for_test().await.unwrap();
+    app.request_lifecycle().drain().await.unwrap();
     request(&app)
         .run(async {
             let mut tx = database
@@ -582,7 +582,7 @@ async fn provider(database: Database) {
             tx.rollback().await.unwrap();
         })
         .await;
-    app.request_lifecycle().wait_idle_for_test().await.unwrap();
+    app.request_lifecycle().drain().await.unwrap();
     request(&app)
         .run(async {
             let mut tx = database
@@ -627,7 +627,7 @@ async fn provider(database: Database) {
             tx.rollback().await.unwrap();
         })
         .await;
-    app.request_lifecycle().wait_idle_for_test().await.unwrap();
+    app.request_lifecycle().drain().await.unwrap();
 
     // The other tenant is still due. Exercise the production worker adapter,
     // including its clock/due-row costs, over the same100k indexed corpus.
@@ -636,13 +636,7 @@ async fn provider(database: Database) {
         crate::database::lifecycle::observe_roots(app.run_recurrence_once()).await;
     result.unwrap();
     assert_eq!(roots.len(), 1);
-    app.jobs
-        .as_ref()
-        .unwrap()
-        .lifecycle
-        .wait_idle_for_test()
-        .await
-        .unwrap();
+    app.jobs.as_ref().unwrap().lifecycle.drain().await.unwrap();
     let (_, reserved, spent) = roots[0].statement_snapshot();
     assert_eq!(reserved, 0);
     assert!(spent <= 256);

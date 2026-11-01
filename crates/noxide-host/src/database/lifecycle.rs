@@ -76,8 +76,8 @@ impl Registry {
             stopped: false,
         })
     }
-    #[cfg(test)]
-    pub(crate) async fn wait_idle_for_test(&self) -> Result<()> {
+    /// Wait until no provider is active, without closing admission.
+    pub(crate) async fn drain(&self) -> Result<()> {
         loop {
             let changed = self.changed.notified();
             let deadline = {

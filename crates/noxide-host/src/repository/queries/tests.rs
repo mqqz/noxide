@@ -847,7 +847,7 @@ async fn four_step_receipts_case(db: Database) {
         .is_err(),
         "513 distinct tokens reject instead of truncating"
     );
-    app.request_lifecycle().wait_idle_for_test().await.unwrap();
+    app.request_lifecycle().drain().await.unwrap();
     let mut tx = begin(&db).await;
     let before=tx.fetch::<3>("SELECT CAST((SELECT revision FROM nx_records WHERE id=42) AS TEXT),CAST((SELECT COUNT(*) FROM nx_search_postings) AS TEXT),CAST((SELECT COUNT(*) FROM nx_receipts) AS TEXT)",&[]).await.unwrap();
     assert_eq!(
@@ -878,7 +878,7 @@ async fn four_step_receipts_case(db: Database) {
         ))
         .await;
     result.unwrap();
-    app.request_lifecycle().wait_idle_for_test().await.unwrap();
+    app.request_lifecycle().drain().await.unwrap();
     assert_eq!(roots.len(), 1, "four-step abort/retry retains one root");
     let (free, reserved, spent) = roots[0].statement_snapshot();
     assert_eq!(reserved, 0);

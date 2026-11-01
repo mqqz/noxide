@@ -871,7 +871,7 @@ impl Application {
                         let (token, cookie) = self
                             .keys
                             .issue(TokenKind::Login, "", now, 900)
-                            .map_err(|_| RequestError::Rejected)?;
+                            .map_err(|_| RequestError::Busy)?;
                         Self::finish_commit(
                             &mut tx,
                             LoginChallenge {

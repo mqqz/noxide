@@ -1760,7 +1760,7 @@ async fn sqlite_initial_fields_reject_clients_and_stale_contracts() {
         // A committed response may still own physical provider cleanup.
         // Reactivation here tests idle storage, not concurrent startup locking.
         for previous in &previous_lifecycles {
-            previous.wait_idle_for_test().await.unwrap();
+            previous.drain().await.unwrap();
         }
         app.activate().await.unwrap();
         previous_lifecycles.push(app.request_lifecycle());
@@ -1824,7 +1824,7 @@ async fn sqlite_initial_fields_reject_clients_and_stale_contracts() {
         // A committed response may still own physical provider cleanup.
         // Reactivation here tests idle storage, not concurrent startup locking.
         for previous in &previous_lifecycles {
-            previous.wait_idle_for_test().await.unwrap();
+            previous.drain().await.unwrap();
         }
         unchanged.activate().await.unwrap();
         previous_lifecycles.push(unchanged.request_lifecycle());
@@ -1863,7 +1863,7 @@ async fn sqlite_initial_fields_reject_clients_and_stale_contracts() {
         // A committed response may still own physical provider cleanup.
         // Reactivation here tests idle storage, not concurrent startup locking.
         for previous in &previous_lifecycles {
-            previous.wait_idle_for_test().await.unwrap();
+            previous.drain().await.unwrap();
         }
         changed.activate().await.unwrap();
         previous_lifecycles.push(changed.request_lifecycle());

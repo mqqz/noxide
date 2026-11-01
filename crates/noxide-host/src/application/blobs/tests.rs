@@ -322,7 +322,7 @@ async fn flow(db: Database) {
             .status(),
         StatusCode::NOT_FOUND
     );
-    app.request_lifecycle.wait_idle_for_test().await.unwrap();
+    app.request_lifecycle.drain().await.unwrap();
     let mut tx = db
         .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
         .await
@@ -477,11 +477,7 @@ impl Case {
         String::from_utf8(self.app.view(&self.session, 1, None).await.unwrap().body).unwrap()
     }
     async fn state(&self) -> (String, String, String, String, String) {
-        self.app
-            .request_lifecycle
-            .wait_idle_for_test()
-            .await
-            .unwrap();
+        self.app.request_lifecycle.drain().await.unwrap();
         let mut tx = self
             .db
             .begin((Instant::now() + std::time::Duration::from_secs(2)).into_std())
@@ -509,11 +505,7 @@ impl Case {
         )
     }
     async fn maintenance(&self) {
-        self.app
-            .request_lifecycle
-            .wait_idle_for_test()
-            .await
-            .unwrap();
+        self.app.request_lifecycle.drain().await.unwrap();
         self.app
             .reconcile_blobs(Instant::now() + std::time::Duration::from_secs(2))
             .await
@@ -982,11 +974,7 @@ async fn restart_after_finalize(db: Option<Database>, finalized: bool) {
         drop(pending);
     }
     drop(lease);
-    case.app
-        .request_lifecycle
-        .wait_idle_for_test()
-        .await
-        .unwrap();
+    case.app.request_lifecycle.drain().await.unwrap();
     let keys = serde_json::from_slice(&serde_json::to_vec(&*case.app.keys).unwrap()).unwrap();
     let Case {
         app,
@@ -1231,7 +1219,7 @@ async fn anonymous_handover(absent: bool) {
         to_bytes(response.into_body(), 65536).await.unwrap(),
         handover.as_bytes()
     );
-    app.request_lifecycle.wait_idle_for_test().await.unwrap();
+    app.request_lifecycle.drain().await.unwrap();
     let mut tx = db
         .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
         .await
@@ -1415,11 +1403,7 @@ async fn sqlite_download_slot_and_no_poll_watchdog_hold_until_actual_native_stop
         StatusCode::NOT_FOUND,
         "a completed native read still occupies the unconsumed stream slot"
     );
-    case.app
-        .request_lifecycle
-        .wait_idle_for_test()
-        .await
-        .unwrap();
+    case.app.request_lifecycle.drain().await.unwrap();
     tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_secs(16)).await;
     tokio::time::resume();
@@ -1731,11 +1715,7 @@ async fn sqlite_slow_prefix_and_file_enforce_original_root_and_idle_deadlines() 
         let router = case.router.clone();
         let task = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
         entered.await.unwrap();
-        case.app
-            .request_lifecycle
-            .wait_idle_for_test()
-            .await
-            .unwrap();
+        case.app.request_lifecycle.drain().await.unwrap();
         tokio::time::pause();
         tokio::time::advance(std::time::Duration::from_secs(3)).await;
         tokio::task::yield_now().await;
@@ -1931,11 +1911,7 @@ async fn lifecycle_clock_safety(db: Option<Database>) {
     tx.commit().await.unwrap();
     // The existing startup tick sees a lower wall sample and preserves the
     // durable watermark, including its subsecond precision.
-    case.app
-        .request_lifecycle
-        .wait_idle_for_test()
-        .await
-        .unwrap();
+    case.app.request_lifecycle.drain().await.unwrap();
     case.app.activate().await.unwrap();
     let original = case.page().await;
     let response = case
@@ -2017,11 +1993,7 @@ async fn lifecycle_clock_safety(db: Option<Database>) {
     assert_eq!(tx.fetch::<3>("SELECT CAST(observed AS TEXT),CAST(lifecycle_ms AS TEXT),CAST(lifecycle_version AS TEXT) FROM nx_clock",&[]).await.unwrap(),before,"GET and download must not write clock state");
     tx.commit().await.unwrap();
     let fresh = case.page().await;
-    case.app
-        .request_lifecycle
-        .wait_idle_for_test()
-        .await
-        .unwrap();
+    case.app.request_lifecycle.drain().await.unwrap();
     // This expires the existing freshness lease; it does not order a race.
     tokio::time::sleep(
         crate::lifecycle_clock::FRESHNESS_LIMIT + std::time::Duration::from_millis(50),

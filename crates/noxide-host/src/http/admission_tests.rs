@@ -136,7 +136,7 @@ async fn fill(
     app: &Application,
     permits: &BoundedPermits,
 ) -> Vec<tokio::sync::OwnedSemaphorePermit> {
-    app.request_lifecycle().wait_idle_for_test().await.unwrap();
+    app.request_lifecycle().drain().await.unwrap();
     let count = permits.available();
     let mut held = Vec::new();
     for _ in 0..count {
@@ -662,7 +662,7 @@ async fn verified_get_and_action_complete_with_every_anonymous_share_full() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    app.request_lifecycle().wait_idle_for_test().await.unwrap();
+    app.request_lifecycle().drain().await.unwrap();
     assert_eq!(app.admission_limits.verified.requests.available(), 16);
 }
 

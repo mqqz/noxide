@@ -239,6 +239,12 @@ pub fn decode_digest(encoded: &str) -> Result<[u8; 32]> {
         .map_err(|_| anyhow::anyhow!("invalid approved contract digest"))
 }
 
+/// Stop with the `noxide serve` supervisor rather than outlive it unobserved.
+pub fn stop_with_parent() -> Result<()> {
+    rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::TERM))?;
+    Ok(())
+}
+
 /// A binary installed beside the running executable.
 pub fn sibling(name: &str) -> Result<PathBuf> {
     let current = std::env::current_exe()?;

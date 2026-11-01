@@ -545,13 +545,9 @@ impl Case {
             self.stop_clock().await;
         }
         if let Some(jobs) = &self.app.jobs {
-            jobs.lifecycle.wait_idle_for_test().await.unwrap();
+            jobs.lifecycle.drain().await.unwrap();
         }
-        self.app
-            .request_lifecycle
-            .wait_idle_for_test()
-            .await
-            .unwrap();
+        self.app.request_lifecycle.drain().await.unwrap();
         assert!(self.path.is_dir());
     }
 }
@@ -569,11 +565,7 @@ async fn real_success(database: Option<Database>, lost_ack: bool) {
         ))
         .await;
         assert!(matches!(result, Err(RequestError::OutcomeUnknown)));
-        case.app
-            .request_lifecycle
-            .wait_idle_for_test()
-            .await
-            .unwrap();
+        case.app.request_lifecycle.drain().await.unwrap();
     } else {
         case.app
             .submit(&case.cookie, 1, &submission, &csrf, input.clone())
@@ -626,11 +618,7 @@ async fn real_rollback(database: Option<Database>) {
             .await
             .is_err()
     );
-    case.app
-        .request_lifecycle
-        .wait_idle_for_test()
-        .await
-        .unwrap();
+    case.app.request_lifecycle.drain().await.unwrap();
     let (records, receipts, outbox, _) = case.state().await;
     assert_eq!(
         (records, receipts, outbox.len()),
@@ -712,7 +700,7 @@ async fn real_combined_budget(database: Option<Database>) {
         roots[0].statement_snapshot()
     );
     if let Some(jobs) = &case.app.jobs {
-        jobs.lifecycle.wait_idle_for_test().await.unwrap();
+        jobs.lifecycle.drain().await.unwrap();
     }
     let (records, receipts, outbox, rows) = case.state().await;
     assert_eq!((records, receipts, outbox.len()), (1, 1, 0));

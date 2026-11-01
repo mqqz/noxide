@@ -21,7 +21,8 @@ struct Arguments {
     validate: bool,
 }
 fn arguments() -> Result<Arguments> {
-    const USAGE: &str = "usage: noxide-server CONFIG.json [--assets-digest DIGEST] [--validate]";
+    const USAGE: &str =
+        "usage: noxide-server CONFIG.json [--assets-digest DIGEST] [--validate] [--supervised]";
     let mut args = std::env::args_os().skip(1);
     let mut parsed = Arguments {
         config: args.next().context(USAGE)?.into(),
@@ -31,6 +32,7 @@ fn arguments() -> Result<Arguments> {
     while let Some(argument) = args.next() {
         match argument.to_str() {
             Some("--validate") => parsed.validate = true,
+            Some("--supervised") => stop_with_parent()?,
             Some("--assets-digest") => {
                 parsed.assets_digest = Some(
                     args.next()
@@ -111,23 +113,28 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
     if arguments.validate {
-        return startup.block_on(app.activate());
+        return startup.block_on(async {
+            app.activate().await?;
+            app.settled().await
+        });
     }
-    let mut socket_directory = None;
     let listener = match &config.listen {
         ListenConfig::Tcp(address) => BoundListener::loopback(*address)?,
         ListenConfig::Unix(path) => {
             let path = base.join(path);
-            socket_directory = path.parent().map(PathBuf::from);
+            http::reclaim_stale_socket(&path)?;
             BoundListener::unix(&path)?
         }
         ListenConfig::TorUnix { path, tor_gid } => {
             let path = base.join(path);
-            socket_directory = path.parent().map(PathBuf::from);
+            http::reclaim_stale_socket(&path)?;
             BoundListener::tor_unix(&path, *tor_gid)?
         }
     };
-    startup.block_on(app.activate())?;
+    startup.block_on(async {
+        app.activate().await?;
+        app.settled().await
+    })?;
     drop(startup);
     let mut policy = store_policy(config.confinement, &store.confinement()?);
     policy.writable.extend(
@@ -136,7 +143,6 @@ fn main() -> Result<()> {
             .as_ref()
             .map(|deployment| base.join(&deployment.directory)),
     );
-    policy.removable.extend(socket_directory);
     confine(&policy, "server")?;
     let origin = Origin::parse(&config.origin)?;
     tokio::runtime::Runtime::new()?.block_on(async move {

@@ -61,7 +61,7 @@ pub async fn run(command: &str, args: &[OsString]) -> Result<()> {
     };
     let digest = compile_assets(&path)?;
     let mut server = Command::new(sibling("noxide-server")?);
-    server.arg(&path).kill_on_drop(true);
+    server.arg(&path).arg("--supervised").kill_on_drop(true);
     if let Some(digest) = &digest {
         server.args(["--assets-digest", digest]);
     }
@@ -70,7 +70,13 @@ pub async fn run(command: &str, args: &[OsString]) -> Result<()> {
         ensure!(status.success(), "deployment validation failed");
         return Ok(());
     }
-    let (config, _) = config(&path)?;
+    let (config, base) = config(&path)?;
+    let socket = match &config.listen {
+        super::ListenConfig::Unix(socket) | super::ListenConfig::TorUnix { path: socket, .. } => {
+            Some(base.join(socket))
+        }
+        super::ListenConfig::Tcp(_) => None,
+    };
     let shutdown = shutdown_signal()?;
     let mut server = server.spawn().context("cannot start noxide-server")?;
     let mut worker = None;
@@ -78,6 +84,7 @@ pub async fn run(command: &str, args: &[OsString]) -> Result<()> {
         worker = Some(
             Command::new(sibling("noxide-effects-worker")?)
                 .arg(&path)
+                .arg("--supervised")
                 .kill_on_drop(true)
                 .spawn()
                 .context("cannot start noxide-effects-worker")?,
@@ -94,9 +101,12 @@ pub async fn run(command: &str, args: &[OsString]) -> Result<()> {
         Some(status) => status,
         None => {
             stop(&mut server).await?;
-            return Ok(());
+            server.wait().await?
         }
     };
+    if let Some(socket) = socket {
+        noxide_host::http::reclaim_stale_socket(&socket)?;
+    }
     ensure!(status.success(), "noxide-server stopped: {status}");
     Ok(())
 }

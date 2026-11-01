@@ -212,6 +212,11 @@ impl EffectDelivery {
         })
         .await?
     }
+    /// Wait for cleanup that startup transactions left running, so the runtime
+    /// that activated this delivery can stop without abandoning provider work.
+    pub async fn settled(&self) -> Result<()> {
+        self.runtime.lifecycle.drain().await
+    }
     fn publish_clock(&self, tick: lifecycle_clock::CommittedTick) -> Result<()> {
         let seconds = tick.credential_seconds;
         self.lifecycle_clock.committed(tick)?;

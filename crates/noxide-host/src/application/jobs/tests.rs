@@ -205,13 +205,9 @@ impl Case {
             clock.shutdown().await.unwrap();
         }
         if let Some(jobs) = &self.app.jobs {
-            jobs.lifecycle.wait_idle_for_test().await.unwrap();
+            jobs.lifecycle.drain().await.unwrap();
         }
-        self.app
-            .request_lifecycle
-            .wait_idle_for_test()
-            .await
-            .unwrap();
+        self.app.request_lifecycle.drain().await.unwrap();
         assert!(self.path.is_dir());
     }
     pub(in crate::application) async fn form(&self) -> (String, String) {
@@ -552,11 +548,7 @@ async fn lost_ack(database: Option<Database>) {
     let claim = case.claim(0).await.unwrap();
     let result = crate::failure_tests::lose_commit_ack(case.app.invoke_job(&claim)).await;
     assert!(matches!(result, Err(RequestError::OutcomeUnknown)));
-    case.app
-        .request_lifecycle
-        .wait_idle_for_test()
-        .await
-        .unwrap();
+    case.app.request_lifecycle.drain().await.unwrap();
     assert_eq!(
         case.stored(&job).await,
         ("succeeded".into(), "finished".into(), 1)
@@ -590,11 +582,7 @@ async fn enqueue_rollback(database: Option<Database>) {
             .await
             .is_err()
     );
-    case.app
-        .request_lifecycle
-        .wait_idle_for_test()
-        .await
-        .unwrap();
+    case.app.request_lifecycle.drain().await.unwrap();
     let mut tx = case
         .db
         .begin_read(std::time::Instant::now() + std::time::Duration::from_secs(2))
@@ -716,11 +704,7 @@ async fn exhausted_abort_budget(database: Option<Database>) {
         "three acknowledged aborts must use durable backoff within the original16"
     );
     assert_eq!(roots.len(), 1);
-    case.app
-        .request_lifecycle
-        .wait_idle_for_test()
-        .await
-        .unwrap();
+    case.app.request_lifecycle.drain().await.unwrap();
     assert_eq!(
         case.stored(&job).await,
         ("pending".into(), "ready".into(), 0),
@@ -803,11 +787,7 @@ async fn authoritative_limits(database: Option<Database>) {
             .await
             .is_err()
     );
-    case.app
-        .request_lifecycle
-        .wait_idle_for_test()
-        .await
-        .unwrap();
+    case.app.request_lifecycle.drain().await.unwrap();
     let claim = case.claim(0).await.unwrap();
     assert!(
         case.claim(0).await.is_none(),

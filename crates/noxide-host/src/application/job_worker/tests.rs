@@ -21,11 +21,7 @@ async fn background_worker_executes_real_action_and_drains() {
     .await
     .unwrap();
     service.shutdown().await.unwrap();
-    case.app
-        .request_lifecycle
-        .wait_idle_for_test()
-        .await
-        .unwrap();
+    case.app.request_lifecycle.drain().await.unwrap();
     assert_eq!(
         case.stored(&job).await,
         ("succeeded".into(), "finished".into(), 1)
@@ -75,7 +71,7 @@ async fn shutdown_waits_for_in_flight_effect_and_actual_provider_drain() {
     // Assert immediately after shutdown, before any extra await could mask an
     // early return while registered provider cleanup still owns capacity.
     {
-        let mut idle = std::pin::pin!(runtime.lifecycle.wait_idle_for_test());
+        let mut idle = std::pin::pin!(runtime.lifecycle.drain());
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(matches!(
             idle.as_mut().poll(&mut context),

@@ -32,8 +32,6 @@ pub struct Policy {
     pub writable: Vec<PathBuf>,
     /// Directories or files with read access.
     pub readable: Vec<PathBuf>,
-    /// Directories whose files may be unlinked but not read, written or created.
-    pub removable: Vec<PathBuf>,
     pub tcp_bind: Vec<u16>,
     pub tcp_connect: Vec<u16>,
 }
@@ -112,11 +110,6 @@ mod imp {
                     .with_context(|| format!("confinement path {}", path.display()))?;
                 rules = rules.add_rule(PathBeneath::new(fd, access))?;
             }
-        }
-        for path in &policy.removable {
-            let fd = PathFd::new(path)
-                .with_context(|| format!("confinement path {}", path.display()))?;
-            rules = rules.add_rule(PathBeneath::new(fd, AccessFs::RemoveFile))?;
         }
         for port in &policy.tcp_bind {
             rules = rules.add_rule(NetPort::new(*port, AccessNet::BindTcp))?;

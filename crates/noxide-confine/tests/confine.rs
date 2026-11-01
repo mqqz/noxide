@@ -15,7 +15,6 @@ fn policy(root: &str, tcp: bool) -> Policy {
         mode: Mode::Required,
         writable: vec![root.join("data")],
         readable: vec![root.join("public")],
-        removable: vec![root.join("run")],
         tcp_bind: if tcp { vec![48_731] } else { vec![] },
         tcp_connect: if tcp { vec![48_731] } else { vec![] },
     }
@@ -29,10 +28,6 @@ fn no_network(root: &str) {
     assert_eq!(fs::read(root.join("public/file")).unwrap(), b"public");
     assert!(fs::write(root.join("public/file"), b"changed").is_err());
     assert!(fs::read(root.join("secret")).is_err());
-    // A socket directory allows cleanup and nothing else.
-    assert!(fs::read(root.join("run/socket")).is_err());
-    assert!(fs::write(root.join("run/new"), b"x").is_err());
-    fs::remove_file(root.join("run/socket")).unwrap();
     assert!(fs::read("/etc/hostname").is_err() && fs::read_dir("/etc").is_err());
     // Threads still start; processes do not.
     std::thread::spawn(|| ()).join().unwrap();
@@ -97,8 +92,6 @@ fn main() {
         fs::create_dir_all(root.join("public")).unwrap();
         fs::write(root.join("public/file"), b"public").unwrap();
         fs::write(root.join("secret"), b"secret").unwrap();
-        fs::create_dir_all(root.join("run")).unwrap();
-        fs::write(root.join("run/socket"), b"s").unwrap();
         let status = Command::new(std::env::current_exe().unwrap())
             .arg(case)
             .arg(&root)

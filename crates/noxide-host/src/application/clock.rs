@@ -78,6 +78,16 @@ impl Application {
         .await?
     }
 
+    /// Wait for cleanup that startup transactions left running, so the runtime
+    /// that activated this application can stop without abandoning provider work.
+    pub async fn settled(&self) -> Result<()> {
+        self.request_lifecycle.drain().await?;
+        if let Some(jobs) = &self.jobs {
+            jobs.lifecycle.drain().await?;
+        }
+        Ok(())
+    }
+
     fn publish_clock(&self, tick: lifecycle_clock::CommittedTick) -> Result<()> {
         let seconds = tick.credential_seconds;
         self.lifecycle_clock.committed(tick)?;
