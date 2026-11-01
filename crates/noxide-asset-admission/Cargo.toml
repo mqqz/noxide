@@ -1,0 +1,19 @@
+[package]
+name = "noxide-asset-admission"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Validation and compilation of Noxide asset packs. Never linked by the server"
+
+[dependencies]
+noxide-assets.workspace = true
+anyhow.workspace = true
+cssparser.workspace = true
+image.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+noxide-protocol.workspace = true
+serde_json.workspace = true

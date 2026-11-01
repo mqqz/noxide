@@ -1,235 +1,147 @@
-//! Independent admission for immutable public package assets.
+//! Independent admission for immutable public package assets. Runs at approval;
+//! the server only loads the compiled result. Parses hostile CSS and image headers,
+//! so it never shares a process with host keys.
 //!
 //! No path here opens a file. Callers pass snapshotted bytes from the selected
 //! build executor; hostile source trees must use the disposable build VM.
-#[path = "assets/css.rs"]
+#![forbid(unsafe_code)]
 mod css;
-pub(crate) static EMPTY: std::sync::LazyLock<AssetBundle> =
-    std::sync::LazyLock::new(AssetBundle::default);
-#[path = "assets/document.rs"]
-pub mod document;
 use anyhow::{Result, ensure};
 use image::{ImageFormat, ImageReader, Limits};
-pub use noxide_protocol::assets::*;
+use noxide_assets::*;
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, io::Cursor, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Cursor,
+};
 
 #[derive(Clone, Debug)]
 pub struct AssetInput {
     pub declaration: AssetDeclaration,
     pub bytes: Vec<u8>,
 }
-#[derive(Clone, Debug)]
-pub struct PublicAsset {
-    declaration: AssetDeclaration,
-    bytes: Arc<[u8]>,
-    served_digest: String,
-    dimensions: Option<(u32, u32)>,
-}
-impl PublicAsset {
-    pub fn declaration(&self) -> &AssetDeclaration {
-        &self.declaration
-    }
-    pub fn shared_bytes(&self) -> Arc<[u8]> {
-        self.bytes.clone()
-    }
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-    pub fn dimensions(&self) -> Option<(u32, u32)> {
-        self.dimensions
-    }
-    pub fn path(&self) -> String {
-        asset_path(&self.served_digest).expect("admitted digest")
-    }
-}
-/// Manifest admission without trusting transported byte content.
-pub fn validate_declarations(declarations: &[AssetDeclaration]) -> Result<()> {
-    ensure!(declarations.len() <= MAX_ASSETS, "asset declaration count");
-    let mut names = std::collections::BTreeSet::new();
-    let mut digests = std::collections::BTreeSet::new();
-    for d in declarations {
+
+/// Atomically validate the complete bundle. No partially admitted state escapes.
+pub fn admit(inputs: Vec<AssetInput>) -> Result<AssetBundle> {
+    ensure!(inputs.len() <= MAX_ASSETS, "asset count limit");
+    let mut paths = BTreeMap::new();
+    let mut total = 0usize;
+    let mut urls = BTreeMap::new();
+    // Complete digest/MIME map first so CSS can only refer to declared entries.
+    for input in &inputs {
+        let d = &input.declaration;
         ensure!(
             valid_asset_name(&d.name) && valid_digest(&d.digest),
             "asset name or digest"
         );
         ensure!(
-            names.insert(&d.name) && digests.insert(&d.digest),
-            "duplicate asset name or digest"
+            !input.bytes.is_empty() && input.bytes.len() <= MAX_ASSET_BYTES,
+            "asset size limit"
+        );
+        total = total
+            .checked_add(input.bytes.len())
+            .ok_or_else(|| anyhow::anyhow!("asset total overflow"))?;
+        ensure!(total <= MAX_ASSET_TOTAL_BYTES, "asset total limit");
+        ensure!(
+            format!("{:x}", Sha256::digest(&input.bytes)) == d.digest,
+            "asset digest mismatch"
+        );
+        ensure!(
+            paths
+                .insert(asset_path(&d.digest).unwrap(), d.name.clone())
+                .is_none(),
+            "duplicate asset digest"
+        );
+        ensure!(
+            urls.insert(asset_path(&d.digest).unwrap(), d.media_type)
+                .is_none(),
+            "duplicate asset URL"
         );
     }
-    Ok(())
+    let mut names = BTreeSet::new();
+    let mut assets = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let d = input.declaration;
+        ensure!(names.insert(d.name.clone()), "duplicate asset name");
+        let dimensions = if d.media_type.is_image() {
+            Some(image_dimensions(&input.bytes, d.media_type)?)
+        } else {
+            None
+        };
+        let bytes = match d.media_type {
+            AssetMediaType::Css => css::validate(std::str::from_utf8(&input.bytes)?, &urls)?,
+            AssetMediaType::Woff2 => {
+                woff2(&input.bytes)?;
+                input.bytes
+            }
+            _ => input.bytes,
+        };
+        assets.push(PublicAsset::new(d, bytes, dimensions));
+    }
+    AssetBundle::from_assets(assets)
+}
+/// Parse the canonical executor transport without opening archive paths.
+/// Every transported entry must match exactly one approved declaration.
+pub fn from_pack(declarations: &[AssetDeclaration], pack: &[u8]) -> Result<AssetBundle> {
+    validate_declarations(declarations)?;
+    ensure!(
+        declarations.len() <= MAX_ASSETS && pack.len() <= MAX_ASSET_PACK_BYTES,
+        "asset pack byte limit"
+    );
+    ensure!(
+        pack.len() >= 10 && &pack[..8] == b"NXAS\x01\0\0\0",
+        "asset pack header"
+    );
+    let count = u16::from_le_bytes(pack[8..10].try_into().unwrap()) as usize;
+    ensure!(
+        count <= MAX_ASSETS && count == declarations.len(),
+        "asset pack declaration count"
+    );
+    let mut offset = 10usize;
+    let mut inputs = Vec::with_capacity(count);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut previous_name: Option<&str> = None;
+    for _ in 0..count {
+        let header = pack
+            .get(offset..offset + 6)
+            .ok_or_else(|| anyhow::anyhow!("truncated asset pack"))?;
+        let name_len = u16::from_le_bytes(header[..2].try_into().unwrap()) as usize;
+        let size = u32::from_le_bytes(header[2..6].try_into().unwrap()) as usize;
+        ensure!(
+            (1..=MAX_ASSET_NAME_BYTES).contains(&name_len) && (1..=MAX_ASSET_BYTES).contains(&size),
+            "asset pack entry limit"
+        );
+        offset += 6;
+        let name = std::str::from_utf8(
+            pack.get(offset..offset + name_len)
+                .ok_or_else(|| anyhow::anyhow!("truncated asset name"))?,
+        )?;
+        ensure!(
+            valid_asset_name(name) && seen.insert(name),
+            "unsafe or duplicate asset name"
+        );
+        ensure!(
+            previous_name.is_none_or(|previous| previous < name),
+            "noncanonical asset pack order"
+        );
+        previous_name = Some(name);
+        offset += name_len;
+        let declaration = declarations
+            .iter()
+            .find(|a| a.name == name)
+            .ok_or_else(|| anyhow::anyhow!("undeclared asset"))?
+            .clone();
+        let bytes = pack
+            .get(offset..offset + size)
+            .ok_or_else(|| anyhow::anyhow!("truncated asset bytes"))?
+            .to_vec();
+        offset += size;
+        inputs.push(AssetInput { declaration, bytes });
+    }
+    ensure!(offset == pack.len(), "trailing asset pack data");
+    admit(inputs)
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct AssetBundle {
-    names: BTreeMap<String, PublicAsset>,
-    paths: BTreeMap<String, String>,
-}
-impl AssetBundle {
-    /// Atomically validate the complete bundle. No partially admitted state escapes.
-    pub fn admit(inputs: Vec<AssetInput>) -> Result<Self> {
-        ensure!(inputs.len() <= MAX_ASSETS, "asset count limit");
-        let mut bundle = Self::default();
-        let mut total = 0usize;
-        let mut urls = BTreeMap::new();
-        // Complete digest/MIME map first so CSS can only refer to declared entries.
-        for input in &inputs {
-            let d = &input.declaration;
-            ensure!(
-                valid_asset_name(&d.name) && valid_digest(&d.digest),
-                "asset name or digest"
-            );
-            ensure!(
-                !input.bytes.is_empty() && input.bytes.len() <= MAX_ASSET_BYTES,
-                "asset size limit"
-            );
-            total = total
-                .checked_add(input.bytes.len())
-                .ok_or_else(|| anyhow::anyhow!("asset total overflow"))?;
-            ensure!(total <= MAX_ASSET_TOTAL_BYTES, "asset total limit");
-            ensure!(
-                format!("{:x}", Sha256::digest(&input.bytes)) == d.digest,
-                "asset digest mismatch"
-            );
-            ensure!(
-                bundle
-                    .paths
-                    .insert(asset_path(&d.digest).unwrap(), d.name.clone())
-                    .is_none(),
-                "duplicate asset digest"
-            );
-            ensure!(
-                urls.insert(asset_path(&d.digest).unwrap(), d.media_type)
-                    .is_none(),
-                "duplicate asset URL"
-            );
-        }
-        for input in inputs {
-            let d = input.declaration;
-            ensure!(!bundle.names.contains_key(&d.name), "duplicate asset name");
-            let dimensions = if d.media_type.is_image() {
-                Some(image_dimensions(&input.bytes, d.media_type)?)
-            } else {
-                None
-            };
-            let bytes = match d.media_type {
-                AssetMediaType::Css => css::validate(std::str::from_utf8(&input.bytes)?, &urls)?,
-                AssetMediaType::Woff2 => {
-                    woff2(&input.bytes)?;
-                    input.bytes
-                }
-                _ => input.bytes,
-            };
-            let served_digest = format!("{:x}", Sha256::digest(&bytes));
-            bundle.names.insert(
-                d.name.clone(),
-                PublicAsset {
-                    declaration: d,
-                    served_digest,
-                    bytes: bytes.into(),
-                    dimensions,
-                },
-            );
-        }
-        ensure!(
-            bundle.names.values().map(|a| a.bytes.len()).sum::<usize>() <= MAX_ASSET_TOTAL_BYTES,
-            "compiled asset total limit"
-        );
-        bundle.paths = bundle
-            .names
-            .values()
-            .map(|a| (a.path(), a.declaration.name.clone()))
-            .collect();
-        Ok(bundle)
-    }
-    /// Parse the canonical executor transport without opening archive paths.
-    /// Every transported entry must match exactly one approved declaration.
-    pub fn from_pack(declarations: &[AssetDeclaration], pack: &[u8]) -> Result<Self> {
-        validate_declarations(declarations)?;
-        ensure!(
-            declarations.len() <= MAX_ASSETS && pack.len() <= MAX_ASSET_PACK_BYTES,
-            "asset pack byte limit"
-        );
-        ensure!(
-            pack.len() >= 10 && &pack[..8] == b"NXAS\x01\0\0\0",
-            "asset pack header"
-        );
-        let count = u16::from_le_bytes(pack[8..10].try_into().unwrap()) as usize;
-        ensure!(
-            count <= MAX_ASSETS && count == declarations.len(),
-            "asset pack declaration count"
-        );
-        let mut offset = 10usize;
-        let mut inputs = Vec::with_capacity(count);
-        let mut seen = std::collections::BTreeSet::new();
-        let mut previous_name: Option<&str> = None;
-        for _ in 0..count {
-            let header = pack
-                .get(offset..offset + 6)
-                .ok_or_else(|| anyhow::anyhow!("truncated asset pack"))?;
-            let name_len = u16::from_le_bytes(header[..2].try_into().unwrap()) as usize;
-            let size = u32::from_le_bytes(header[2..6].try_into().unwrap()) as usize;
-            ensure!(
-                (1..=MAX_ASSET_NAME_BYTES).contains(&name_len)
-                    && (1..=MAX_ASSET_BYTES).contains(&size),
-                "asset pack entry limit"
-            );
-            offset += 6;
-            let name = std::str::from_utf8(
-                pack.get(offset..offset + name_len)
-                    .ok_or_else(|| anyhow::anyhow!("truncated asset name"))?,
-            )?;
-            ensure!(
-                valid_asset_name(name) && seen.insert(name),
-                "unsafe or duplicate asset name"
-            );
-            ensure!(
-                previous_name.is_none_or(|previous| previous < name),
-                "noncanonical asset pack order"
-            );
-            previous_name = Some(name);
-            offset += name_len;
-            let declaration = declarations
-                .iter()
-                .find(|a| a.name == name)
-                .ok_or_else(|| anyhow::anyhow!("undeclared asset"))?
-                .clone();
-            let bytes = pack
-                .get(offset..offset + size)
-                .ok_or_else(|| anyhow::anyhow!("truncated asset bytes"))?
-                .to_vec();
-            offset += size;
-            inputs.push(AssetInput { declaration, bytes });
-        }
-        ensure!(offset == pack.len(), "trailing asset pack data");
-        Self::admit(inputs)
-    }
-    /// Recheck exact manifest binding at Application construction/restore.
-    pub fn verify_declarations(&self, declarations: &[AssetDeclaration]) -> Result<()> {
-        validate_declarations(declarations)?;
-        ensure!(
-            declarations.len() == self.names.len()
-                && declarations
-                    .iter()
-                    .all(|d| self.get(&d.name).is_some_and(|a| a.declaration() == d)),
-            "asset bundle contract mismatch"
-        );
-        Ok(())
-    }
-    pub fn get(&self, name: &str) -> Option<&PublicAsset> {
-        self.names.get(name)
-    }
-    pub fn at_path(&self, path: &str) -> Option<&PublicAsset> {
-        self.paths.get(path).and_then(|n| self.names.get(n))
-    }
-    pub fn declarations(&self) -> impl Iterator<Item = &AssetDeclaration> {
-        self.names.values().map(|a| &a.declaration)
-    }
-    pub fn is_empty(&self) -> bool {
-        self.names.is_empty()
-    }
-}
 fn image_dimensions(bytes: &[u8], kind: AssetMediaType) -> Result<(u32, u32)> {
     if kind == AssetMediaType::Webp {
         ensure!(
@@ -324,10 +236,10 @@ mod tests {
             pack.extend_from_slice(&(input.bytes.len() as u32).to_le_bytes());
             pack.extend_from_slice(name.as_bytes());
             pack.extend_from_slice(&input.bytes);
-            let admitted = AssetBundle::admit(vec![input.clone()]);
+            let admitted = admit(vec![input.clone()]);
             assert_eq!(admitted.is_ok(), bytes <= MAX_ASSET_NAME_BYTES);
             assert_eq!(
-                AssetBundle::from_pack(std::slice::from_ref(&input.declaration), &pack).is_ok(),
+                from_pack(std::slice::from_ref(&input.declaration), &pack).is_ok(),
                 bytes <= MAX_ASSET_NAME_BYTES
             );
             if let Ok(bundle) = admitted {
@@ -344,7 +256,7 @@ mod tests {
     }
     #[test]
     fn immutable_scoped_css_and_exact_lookup() {
-        let bundle = AssetBundle::admit(vec![input(
+        let bundle = admit(vec![input(
             "site.css",
             AssetMediaType::Css,
             b"p, .card > strong { color: #123; margin: 2rem auto }".to_vec(),
@@ -438,18 +350,18 @@ mod tests {
     fn forged_names_hashes_duplicates_and_limits() {
         let css = b"p{color:red}".to_vec();
         let mut bad = input("../x", AssetMediaType::Css, css.clone());
-        assert!(AssetBundle::admit(vec![bad.clone()]).is_err());
+        assert!(admit(vec![bad.clone()]).is_err());
         bad.declaration.name = "x".into();
         bad.declaration.digest = "0".repeat(64);
-        assert!(AssetBundle::admit(vec![bad]).is_err());
+        assert!(admit(vec![bad]).is_err());
         let a = input("x", AssetMediaType::Css, css);
-        assert!(AssetBundle::admit(vec![a.clone(), a]).is_err());
+        assert!(admit(vec![a.clone(), a]).is_err());
         let a = input("x", AssetMediaType::Css, vec![b'x'; MAX_CSS_BYTES + 1]);
-        assert!(AssetBundle::admit(vec![a]).is_err());
+        assert!(admit(vec![a]).is_err());
         let a = input("x", AssetMediaType::Png, vec![0; MAX_ASSET_BYTES + 1]);
-        assert!(AssetBundle::admit(vec![a]).is_err());
+        assert!(admit(vec![a]).is_err());
         assert!(
-            AssetBundle::admit(
+            admit(
                 (0..129)
                     .map(|i| input(
                         &format!("x{i}"),
@@ -470,7 +382,7 @@ mod tests {
             AssetMediaType::Woff2,
         ] {
             for bytes in [vec![], vec![0; 48], b"\x89PNG\r\n\x1a\n".to_vec()] {
-                assert!(AssetBundle::admit(vec![input("x", kind, bytes)]).is_err());
+                assert!(admit(vec![input("x", kind, bytes)]).is_err());
             }
         }
     }
@@ -485,7 +397,7 @@ mod tests {
         image::codecs::webp::WebPEncoder::new_lossless(&mut webp)
             .write_image(&[255, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
             .unwrap();
-        let bundle = AssetBundle::admit(vec![
+        let bundle = admit(vec![
             input("pixel.jpg", AssetMediaType::Jpeg, jpeg.clone()),
             input("pixel.webp", AssetMediaType::Webp, webp.clone()),
         ])
@@ -496,8 +408,7 @@ mod tests {
         for (kind, bytes) in [(AssetMediaType::Jpeg, jpeg), (AssetMediaType::Webp, webp)] {
             for n in 0..bytes.len().min(30) {
                 assert!(
-                    AssetBundle::admit(vec![input("truncated", kind, bytes[..n].to_vec())])
-                        .is_err(),
+                    admit(vec![input("truncated", kind, bytes[..n].to_vec())]).is_err(),
                     "{kind:?} prefix {n}"
                 );
             }
@@ -511,12 +422,7 @@ mod tests {
                 )
             })
             .collect();
-        assert!(
-            AssetBundle::admit(excessive)
-                .unwrap_err()
-                .to_string()
-                .contains("total")
-        );
+        assert!(admit(excessive).unwrap_err().to_string().contains("total"));
     }
     #[test]
     fn image_dimensions_checked_without_full_decode() {
@@ -525,16 +431,12 @@ mod tests {
         image::codecs::png::PngEncoder::new(&mut png)
             .write_image(&[0, 0, 0, 0], 1, 1, image::ExtendedColorType::Rgba8)
             .unwrap();
-        let a =
-            AssetBundle::admit(vec![input("pixel.png", AssetMediaType::Png, png.clone())]).unwrap();
+        let a = admit(vec![input("pixel.png", AssetMediaType::Png, png.clone())]).unwrap();
         assert_eq!(a.get("pixel.png").unwrap().dimensions(), Some((1, 1)));
-        assert!(
-            AssetBundle::admit(vec![input("pixel.jpg", AssetMediaType::Jpeg, png.clone())])
-                .is_err()
-        );
+        assert!(admit(vec![input("pixel.jpg", AssetMediaType::Jpeg, png.clone())]).is_err());
         for n in 0..33 {
             assert!(
-                AssetBundle::admit(vec![input(
+                admit(vec![input(
                     "pixel.png",
                     AssetMediaType::Png,
                     png[..n].to_vec()
@@ -560,7 +462,7 @@ mod tests {
             }
             modified[29..33].copy_from_slice(&(!crc).to_be_bytes());
             assert_eq!(
-                AssetBundle::admit(vec![input("large.png", AssetMediaType::Png, modified)]).is_ok(),
+                admit(vec![input("large.png", AssetMediaType::Png, modified)]).is_ok(),
                 accepted,
                 "{w}x{h}"
             );
@@ -575,15 +477,13 @@ mod tests {
         pack.extend_from_slice(&(a.bytes.len() as u32).to_le_bytes());
         pack.extend_from_slice(b"site.css");
         pack.extend_from_slice(&a.bytes);
-        AssetBundle::from_pack(std::slice::from_ref(&a.declaration), &pack).unwrap();
+        from_pack(std::slice::from_ref(&a.declaration), &pack).unwrap();
         for n in 0..pack.len() {
-            assert!(
-                AssetBundle::from_pack(std::slice::from_ref(&a.declaration), &pack[..n]).is_err()
-            );
+            assert!(from_pack(std::slice::from_ref(&a.declaration), &pack[..n]).is_err());
         }
-        assert!(AssetBundle::from_pack(&[], &pack).is_err());
+        assert!(from_pack(&[], &pack).is_err());
         pack.push(0);
-        assert!(AssetBundle::from_pack(&[a.declaration], &pack).is_err());
+        assert!(from_pack(&[a.declaration], &pack).is_err());
     }
     #[test]
     fn tokens_rules_and_nesting_are_bounded() {
@@ -617,7 +517,7 @@ mod tests {
                 .unwrap();
         let declarations: Vec<AssetDeclaration> = serde_json::from_slice(&declarations).unwrap();
         let pack = std::fs::read(path).unwrap();
-        let bundle = AssetBundle::from_pack(&declarations, &pack).unwrap();
+        let bundle = from_pack(&declarations, &pack).unwrap();
         assert_eq!(bundle.get("pixel.png").unwrap().dimensions(), Some((1, 1)));
         assert!(
             std::str::from_utf8(bundle.get("site.css").unwrap().bytes())

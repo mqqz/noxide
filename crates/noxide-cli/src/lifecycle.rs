@@ -43,7 +43,7 @@ pub async fn prepare(project: &Path, development: bool, approval: Option<&str>) 
     let bytes = super::read(&manifest_path, 32768)?;
     let manifest = noxide_host::manifest::parse(&bytes)?;
     let asset_path = bundle.join("assets.pack");
-    noxide_host::assets::AssetBundle::from_pack(
+    noxide_asset_admission::from_pack(
         &manifest.assets,
         &super::read(
             &asset_path,

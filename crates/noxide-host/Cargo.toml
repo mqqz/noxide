@@ -11,12 +11,11 @@ description = "Trusted Noxide application runtime"
 noxide-protocol.workspace = true
 noxide-sandbox.workspace = true
 noxide-keys.workspace = true
+noxide-assets.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-cssparser.workspace = true
-image.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true
@@ -38,6 +37,8 @@ url = "2"
 query-metrics = []
 
 [dev-dependencies]
+noxide-asset-admission.workspace = true
+image.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 libsqlite3-sys = "0.30.1"
 tempfile = "3"

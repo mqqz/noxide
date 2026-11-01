@@ -1,5 +1,6 @@
 #[allow(dead_code)]
 mod support;
+use noxide_asset_admission::AssetInput;
 use noxide_host::{
     Application, Database, HostKeys,
     assets::*,
@@ -24,7 +25,7 @@ fn input(name: &str, media_type: AssetMediaType, bytes: Vec<u8>) -> AssetInput {
     }
 }
 fn fixture() -> (Manifest, AssetBundle) {
-    let bundle = AssetBundle::admit(vec![
+    let bundle = noxide_asset_admission::admit(vec![
         input("site.css", AssetMediaType::Css, b"p{color:red}".to_vec()),
         input("other.css", AssetMediaType::Css, b"p{color:blue}".to_vec()),
     ])

@@ -10,7 +10,7 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "crates/noxide-host/src"
 LAYERS = [
-    ["action_contract", "ids", "principal", "schema", "sql", "temporal", "assets"],
+    ["action_contract", "ids", "principal", "schema", "sql", "temporal"],
     ["manifest", "routing", "form_layout", "expiry", "membership", "query_plan", "policy",
      "presentation", "search"],
     ["render"],

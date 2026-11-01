@@ -1,0 +1,13 @@
+[package]
+name = "noxide-assets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Compiled public assets served by Noxide. Parses no CSS, images or fonts"
+
+[dependencies]
+noxide-protocol.workspace = true
+anyhow.workspace = true
+sha2.workspace = true

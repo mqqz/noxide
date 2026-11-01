@@ -156,7 +156,7 @@ pub async fn build(command: &str, args: &[OsString]) -> Result<()> {
     );
     let contract = manifest::parse(&super::read(&output.join("manifest.json"), 32768)?)?;
     let digest = manifest::digest(&contract)?;
-    let assets = noxide_host::assets::AssetBundle::from_pack(
+    let assets = noxide_asset_admission::from_pack(
         &contract.assets,
         &super::read(
             &output.join("assets.pack"),

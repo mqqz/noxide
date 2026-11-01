@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """NoJS rich-document browser regression with an all-attempt recording proxy.
 
-The fixture must come from assets::document::tests::browser_fixture. This checks
+The fixture must come from noxide-asset-admission --test browser_fixture. This checks
 rendered fixture output, not the integrated Application HTTP path.
 """
 import argparse

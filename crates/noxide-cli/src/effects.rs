@@ -78,7 +78,7 @@ async fn load(path: &Path) -> Result<Application> {
         "deployment did not approve this contract and effective policy"
     );
     let assets = match &config.assets {
-        Some(path) => noxide_host::assets::AssetBundle::from_pack(
+        Some(path) => noxide_asset_admission::from_pack(
             &manifest.assets,
             &super::read(
                 &base.join(path),

@@ -1377,12 +1377,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "noxide-asset-admission"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cssparser",
+ "image",
+ "noxide-assets",
+ "noxide-protocol",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "noxide-assets"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "noxide-protocol",
+ "sha2",
+]
+
+[[package]]
 name = "noxide-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
  "noxide",
+ "noxide-asset-admission",
  "noxide-host",
  "noxide-protocol",
  "serde",
@@ -1412,12 +1435,13 @@ dependencies = [
  "argon2",
  "axum",
  "base64",
- "cssparser",
  "httparse",
  "hyper",
  "hyper-util",
  "image",
  "libsqlite3-sys",
+ "noxide-asset-admission",
+ "noxide-assets",
  "noxide-keys",
  "noxide-protocol",
  "noxide-sandbox",

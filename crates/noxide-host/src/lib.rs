@@ -1,6 +1,6 @@
 //! Trusted execution, rendering, and persistence for Noxide applications.
 mod action_contract;
-pub mod assets;
+pub use noxide_assets as assets;
 mod blob_inspect;
 mod blob_io;
 mod blob_upload;
