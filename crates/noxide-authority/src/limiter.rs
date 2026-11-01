@@ -14,19 +14,19 @@ use tokio::{
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Peer {
+pub enum Peer {
     Local,
     Circuit(u32),
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct TransportDeadline(pub(crate) tokio::time::Instant);
+pub struct TransportDeadline(pub tokio::time::Instant);
 
-pub(crate) const MAX_CONNECTIONS: usize = 256;
-pub(crate) const MAX_CONNECTIONS_PER_CIRCUIT: usize = 4;
-pub(crate) const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
-pub(crate) const PROXY_LINE_MAX: usize = 107;
-pub(crate) const PROXY_LINE_TIMEOUT: Duration = Duration::from_secs(2);
+pub const MAX_CONNECTIONS: usize = 256;
+pub const MAX_CONNECTIONS_PER_CIRCUIT: usize = 4;
+pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
+pub const PROXY_LINE_MAX: usize = 107;
+pub const PROXY_LINE_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUESTS: usize = 64;
 const REQUEST_WAITING: usize = 64;
 const REQUEST_WAIT: Duration = Duration::from_secs(2);
@@ -44,10 +44,10 @@ const ANONYMOUS_WRITES: usize = 1;
 const ANONYMOUS_WRITE_WAITING: usize = 4;
 const ANONYMOUS_WRITE_WAIT: Duration = Duration::from_secs(1);
 const ANONYMOUS_WRITES_PER_MINUTE: u32 = 30;
-pub(crate) const INVITE_DEFAULT_EXPIRY: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+pub const INVITE_DEFAULT_EXPIRY: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[derive(Debug)]
-pub(crate) struct Busy;
+pub struct Busy;
 impl std::fmt::Display for Busy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("service busy")
@@ -55,7 +55,7 @@ impl std::fmt::Display for Busy {
 }
 impl std::error::Error for Busy {}
 
-pub(crate) struct BoundedPermits {
+pub struct BoundedPermits {
     sem: Arc<Semaphore>,
     waiting: AtomicUsize,
     max_waiting: usize,
@@ -70,7 +70,7 @@ impl BoundedPermits {
             max_wait,
         }
     }
-    pub(crate) async fn acquire(&self) -> Result<OwnedSemaphorePermit, Busy> {
+    pub async fn acquire(&self) -> Result<OwnedSemaphorePermit, Busy> {
         self.waiting
             .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |n| {
                 (n < self.max_waiting).then(|| n + 1)
@@ -92,7 +92,7 @@ impl BoundedPermits {
             .map_err(|_| Busy)?
             .map_err(|_| Busy)
     }
-    pub(crate) async fn request(&self) -> Result<Arc<OwnedSemaphorePermit>, Busy> {
+    pub async fn request(&self) -> Result<Arc<OwnedSemaphorePermit>, Busy> {
         if let Some(permit) = REQUEST
             .try_with(|request| {
                 Arc::ptr_eq(&request.owner, &self.sem).then(|| request.permit.clone())
@@ -104,8 +104,8 @@ impl BoundedPermits {
         }
         self.acquire().await.map(Arc::new)
     }
-    #[cfg(test)]
-    pub(crate) fn available(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn available(&self) -> usize {
         self.sem.available_permits()
     }
 }
@@ -116,7 +116,7 @@ struct Request {
 }
 tokio::task_local! { static REQUEST: Request; }
 
-pub(crate) struct RateWindow {
+pub struct RateWindow {
     per_minute: u32,
     state: Mutex<RateState>,
 }
@@ -135,7 +135,7 @@ impl RateWindow {
             }),
         }
     }
-    pub(crate) fn allow(&self) -> bool {
+    pub fn allow(&self) -> bool {
         self.at(Instant::now())
     }
     fn at(&self, now: Instant) -> bool {
@@ -157,18 +157,18 @@ impl RateWindow {
     }
 }
 
-pub(crate) struct AdmissionContext {
+pub struct AdmissionContext {
     pub peer: Peer,
     pub identity: AdmissionIdentity,
     pub class: RequestClass,
 }
-pub(crate) enum AdmissionIdentity {
+pub enum AdmissionIdentity {
     Anonymous,
     Candidate,
     Verified { principal: String },
 }
 #[derive(Clone, Copy)]
-pub(crate) enum RequestClass {
+pub enum RequestClass {
     Get,
     AuthenticatedAction,
     AnonymousAction,
@@ -273,7 +273,7 @@ impl<K: Clone + Eq + Hash> Buckets<K> {
     }
 }
 
-pub(crate) struct Lane {
+pub struct Lane {
     pub requests: BoundedPermits,
     pub database: BoundedPermits,
     pub wasm: BoundedPermits,
@@ -308,7 +308,7 @@ struct ScopedContext {
 }
 tokio::task_local! { static CONTEXT: ScopedContext; }
 
-pub(crate) struct AdmissionLimits {
+pub struct AdmissionLimits {
     partitioned: bool,
     reserve: u8,
     pub requests: BoundedPermits,
@@ -322,7 +322,7 @@ pub(crate) struct AdmissionLimits {
     pub anonymous_write_attempts: RateWindow,
     pub argon2: BoundedPermits,
     pub argon2_attempts: RateWindow,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub hash_gate: Mutex<Option<Arc<HashGate>>>,
 }
 impl Default for AdmissionLimits {
@@ -331,7 +331,7 @@ impl Default for AdmissionLimits {
     }
 }
 impl AdmissionLimits {
-    pub(crate) fn new(reserve: u8, authenticated: bool) -> Self {
+    pub fn new(reserve: u8, authenticated: bool) -> Self {
         let (requests, sr, vr) = shares(REQUESTS, 4, reserve, authenticated);
         let (database, sd, vd) = shares(DATABASE, 1, reserve, authenticated);
         let (wasm, sw, vw) = shares(WASM, 0, reserve, authenticated);
@@ -365,13 +365,13 @@ impl AdmissionLimits {
             anonymous_write_attempts: RateWindow::new(ANONYMOUS_WRITES_PER_MINUTE),
             argon2: BoundedPermits::new(ARGON2, ARGON2_WAITING, ARGON2_WAIT),
             argon2_attempts: RateWindow::new(ARGON2_PER_MINUTE),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             hash_gate: Mutex::new(None),
         }
     }
 }
 impl AdmissionLimits {
-    pub(crate) fn with_wasm_capacity(mut self, concurrency: usize) -> Self {
+    pub fn with_wasm_capacity(mut self, concurrency: usize) -> Self {
         let total = WASM.min(concurrency);
         let (anonymous, _, verified) = shares(total, 0, self.reserve, true);
         if anonymous == 0 || verified == 0 {
@@ -393,42 +393,42 @@ impl AdmissionLimits {
                 })
                 .unwrap_or(false)
     }
-    pub(crate) fn requests(&self) -> &BoundedPermits {
+    pub fn requests(&self) -> &BoundedPermits {
         if self.is_verified() {
             &self.verified.requests
         } else {
             &self.requests
         }
     }
-    pub(crate) fn database(&self) -> &BoundedPermits {
+    pub fn database(&self) -> &BoundedPermits {
         if self.is_verified() && self.verified.database.max_waiting != 0 {
             &self.verified.database
         } else {
             &self.database
         }
     }
-    pub(crate) fn wasm(&self) -> &BoundedPermits {
+    pub fn wasm(&self) -> &BoundedPermits {
         if self.is_verified() && self.verified.wasm.max_waiting != 0 {
             &self.verified.wasm
         } else {
             &self.wasm
         }
     }
-    pub(crate) fn session_requests(&self) -> &BoundedPermits {
+    pub fn session_requests(&self) -> &BoundedPermits {
         if self.partitioned {
             &self.session_check.requests
         } else {
             &self.requests
         }
     }
-    pub(crate) fn session_database(&self) -> &BoundedPermits {
+    pub fn session_database(&self) -> &BoundedPermits {
         if self.partitioned {
             &self.session_check.database
         } else {
             &self.database
         }
     }
-    pub(crate) fn charge_circuit(&self, peer: Peer, class: RequestClass) -> bool {
+    pub fn charge_circuit(&self, peer: Peer, class: RequestClass) -> bool {
         match peer {
             Peer::Local => true,
             Peer::Circuit(id) => {
@@ -437,20 +437,20 @@ impl AdmissionLimits {
             }
         }
     }
-    pub(crate) fn failed_session(&self, peer: Peer) {
+    pub fn failed_session(&self, peer: Peer) {
         if let Peer::Circuit(id) = peer {
             self.circuits.charge(id, 20_000, true, Instant::now());
         }
     }
-    #[cfg(test)]
-    pub(crate) fn circuit_millitokens(&self, id: u32) -> u64 {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn circuit_millitokens(&self, id: u32) -> u64 {
         self.circuits.table.lock().unwrap().entries[&id].millitokens
     }
-    pub(crate) fn principal_action(&self, principal: &str) -> bool {
+    pub fn principal_action(&self, principal: &str) -> bool {
         self.principals
             .charge(principal.to_owned(), 1000, false, Instant::now())
     }
-    pub(crate) async fn context<T>(
+    pub async fn context<T>(
         &self,
         context: AdmissionContext,
         future: impl Future<Output = T>,
@@ -465,7 +465,7 @@ impl AdmissionLimits {
             )
             .await
     }
-    pub(crate) async fn scope<T>(
+    pub async fn scope<T>(
         &self,
         permit: Arc<OwnedSemaphorePermit>,
         future: impl Future<Output = T>,
@@ -482,28 +482,45 @@ impl AdmissionLimits {
     }
 }
 
-pub(crate) struct HashPermits {
+pub struct HashPermits {
     pub _argon2: OwnedSemaphorePermit,
     pub _request: Arc<OwnedSemaphorePermit>,
     pub _database: Arc<OwnedSemaphorePermit>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub gate: Option<Arc<HashGate>>,
 }
+impl AdmissionLimits {
+    /// Bundle the admitted hashing, request and database permits.
+    pub fn hash_permits(
+        &self,
+        argon2: OwnedSemaphorePermit,
+        request: Arc<OwnedSemaphorePermit>,
+        database: Arc<OwnedSemaphorePermit>,
+    ) -> HashPermits {
+        HashPermits {
+            _argon2: argon2,
+            _request: request,
+            _database: database,
+            #[cfg(any(test, feature = "test-support"))]
+            gate: self.hash_gate.lock().unwrap().clone(),
+        }
+    }
+}
 impl HashPermits {
-    pub(crate) fn enter(&self) {
-        #[cfg(test)]
+    pub fn enter(&self) {
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(gate) = &self.gate {
             gate.wait();
         }
     }
 }
 
-#[cfg(test)]
-pub(crate) struct HashGate {
+#[cfg(any(test, feature = "test-support"))]
+pub struct HashGate {
     pub entered: tokio::sync::Notify,
     finished: (Mutex<bool>, std::sync::Condvar),
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl HashGate {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {

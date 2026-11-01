@@ -1,7 +1,7 @@
 //! Row decisions and generated SQL agree against a real provider.
 use crate::auth::User;
 use crate::policy::*;
-use crate::{principal::Principal, sql::Param};
+use crate::{auth::Principal, sql::Param};
 use noxide_protocol::{Policy, Predicate};
 use sqlx::{Connection, Row};
 

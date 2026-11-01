@@ -21,7 +21,7 @@ mod job_worker;
 use crate::{
     Database, HostKeys, auth,
     database::{Transaction, retryable},
-    limiter::{AdmissionLimits, HashPermits},
+    limiter::AdmissionLimits,
     manifest,
     render::{self, FormCredentials, RenderContext, Rendered},
     repository::{self, Effects, StoredRecord},
@@ -436,13 +436,11 @@ impl Application {
                                 .acquire()
                                 .await
                                 .map_err(|_| RequestError::deadline())?;
-                            let permits = HashPermits {
-                                _argon2: permit,
-                                _request: request.clone(),
-                                _database: database.clone(),
-                                #[cfg(test)]
-                                gate: self.admission_limits.hash_gate.lock().unwrap().clone(),
-                            };
+                            let permits = self.admission_limits.hash_permits(
+                                permit,
+                                request.clone(),
+                                database.clone(),
+                            );
                             auth::register(
                                 &mut tx,
                                 self.registration,
@@ -895,13 +893,11 @@ impl Application {
                                 .acquire()
                                 .await
                                 .map_err(|_| RequestError::deadline())?;
-                            let permits = HashPermits {
-                                _argon2: permit,
-                                _request: request.clone(),
-                                _database: database.clone(),
-                                #[cfg(test)]
-                                gate: self.admission_limits.hash_gate.lock().unwrap().clone(),
-                            };
+                            let permits = self.admission_limits.hash_permits(
+                                permit,
+                                request.clone(),
+                                database.clone(),
+                            );
                             let signed = auth::login(
                                 &mut tx, &self.keys, username, password, now, permits,
                             )

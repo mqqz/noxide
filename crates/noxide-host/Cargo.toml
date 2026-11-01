@@ -10,11 +10,11 @@ description = "Trusted Noxide application runtime"
 [dependencies]
 noxide-protocol.workspace = true
 noxide-sandbox.workspace = true
-noxide-keys.workspace = true
 noxide-sql.workspace = true
 noxide-store.workspace = true
 noxide-blobs.workspace = true
 noxide-jobs.workspace = true
+noxide-authority.workspace = true
 noxide-effects.workspace = true
 noxide-assets.workspace = true
 noxide-admission.workspace = true
@@ -28,7 +28,6 @@ tokio.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
-argon2 = "0.5"
 rand = "0.8"
 base64 = "0.22"
 url = "2"
@@ -37,6 +36,7 @@ url = "2"
 query-metrics = ["noxide-store/query-metrics"]
 
 [dev-dependencies]
+noxide-authority = { workspace = true, features = ["test-support"] }
 noxide-jobs = { workspace = true, features = ["test-support"] }
 noxide-blobs = { workspace = true, features = ["test-support"] }
 noxide-effect-delivery = { workspace = true, features = ["test-support"] }

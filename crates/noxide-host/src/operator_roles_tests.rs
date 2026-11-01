@@ -1,8 +1,10 @@
-use super::*;
+use crate::Database;
 use crate::auth::AccountAdmin as _;
+use crate::operator_roles::*;
 use crate::{Application, HostKeys, auth, policy, runtime::Limits, test_support as fixture};
 use noxide_protocol::{Fields, Policy, Predicate};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 async fn seed(db: &Database, count: usize) {
     let mut tx = db
@@ -476,12 +478,7 @@ async fn postgres_roles() {
             .unwrap();
     }
 }
-tokio::task_local! { static READ_BARRIER: Arc<tokio::sync::Barrier>; }
-pub(super) async fn after_assignments() {
-    if let Ok(gate) = READ_BARRIER.try_with(Clone::clone) {
-        gate.wait().await;
-    }
-}
+use crate::operator_roles::READ_BARRIER;
 async fn predicate_race(db: &Database) {
     db.initialize().await.unwrap();
     db.create_account("alice", "private test password", "")

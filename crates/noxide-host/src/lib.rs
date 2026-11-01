@@ -2,8 +2,9 @@
 #![forbid(unsafe_code)]
 pub use noxide_admission::{Presentation, assets, manifest, schema};
 pub(crate) use noxide_admission::{
-    action_contract, expiry, ids, membership, policy, principal, query_plan, routing, search, sql,
+    action_contract, expiry, membership, policy, query_plan, routing, search, sql,
 };
+pub(crate) use noxide_authority::{auth, authority, limiter, operator_roles, security};
 pub(crate) use noxide_blobs::{
     inspect as blob_inspect, io as blob_io, metadata as blob_metadata, multipart as blob_multipart,
     state as blob_state, store as blob_store, transport as blob_transport, upload as blob_upload,
@@ -15,14 +16,17 @@ pub use noxide_jobs::job_deployment;
 pub use noxide_render as render;
 #[cfg(test)]
 use noxide_test_support as test_support;
+#[cfg(test)]
+mod authority_tests;
 pub mod deployment;
 #[cfg(test)]
 mod effects_tests;
 #[cfg(test)]
 mod job_admission_tests;
-mod limiter;
 #[cfg(test)]
 mod membership_tests;
+#[cfg(test)]
+mod operator_roles_tests;
 #[cfg(test)]
 mod policy_tests;
 #[cfg(test)]
@@ -37,13 +41,10 @@ pub mod runtime {
     /// A guest with no storage grant, for admission checks outside an application.
     pub type Runtime = noxide_sandbox::Runtime<noxide_sandbox::NoHostCalls>;
 }
+pub use auth::{AccountAdmin, Registration, account_id};
 pub use noxide_store::{Database, StoreResources};
 pub(crate) use noxide_store::{database, lifecycle_clock};
-mod auth;
-mod operator_roles;
-pub use auth::{AccountAdmin, Registration, account_id};
 pub use operator_roles::{RoleAdmin, RoleAssignment, RoleScope};
-mod security;
 pub use security::HostKeys;
 mod application;
 mod repository;
@@ -64,8 +65,6 @@ mod anonymous_tests;
 
 #[cfg(test)]
 mod registration_tests;
-
-mod authority;
 
 #[cfg(test)]
 mod parent_tests;

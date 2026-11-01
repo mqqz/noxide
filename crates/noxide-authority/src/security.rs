@@ -1,7 +1,7 @@
-pub(crate) use crate::ids::{now, random_id, record_id};
-#[cfg(test)]
-pub(crate) use crate::lifecycle_clock::CLOCK_PERSIST_LAG;
-pub(crate) use crate::lifecycle_clock::{
+pub use crate::ids::{now, random_id, record_id};
+#[cfg(any(test, feature = "test-support"))]
+pub use crate::lifecycle_clock::CLOCK_PERSIST_LAG;
+pub use crate::lifecycle_clock::{
     CLOCK_CHECKPOINT_BEGIN_DEADLINE, observe_clock, observe_clock_bounded, observe_clock_read,
 };
 use anyhow::{Result, ensure};
@@ -25,12 +25,12 @@ fn verify_mac(expected: &[u8; 32], supplied: &[u8]) -> bool {
             == 0
 }
 
-pub(crate) const ANONYMOUS_TTL: i64 = 900;
-pub(crate) const MAX_TOKEN_BYTES: usize = 2048;
+pub const ANONYMOUS_TTL: i64 = 900;
+pub const MAX_TOKEN_BYTES: usize = 2048;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum TokenKind {
+pub enum TokenKind {
     Cursor {
         scope: String,
         after: noxide_protocol::query::CursorKey,
@@ -75,7 +75,7 @@ pub(crate) enum TokenKind {
 /// Private, authenticated scope. Guest-supplied record values never construct it.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RecordTarget {
+pub struct RecordTarget {
     pub resource: u32,
     pub id: u64,
     pub incarnation: String,
@@ -86,7 +86,7 @@ pub(crate) struct RecordTarget {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Token {
+pub struct Token {
     pub kind: TokenKind,
     pub subject: String,
     pub nonce: String,
@@ -112,29 +112,17 @@ impl HostKeys {
             Keys::Remote(_) => anyhow::bail!("rotate keys in the key file"),
         }
     }
-    pub(crate) fn signing_edit_key(&self) -> Result<u32> {
+    pub fn signing_edit_key(&self) -> Result<u32> {
         self.0.signing_edit_key()
     }
-    pub(crate) fn edit_secret(
-        &self,
-        key_id: u32,
-        resource: u32,
-        id: u64,
-        version: u64,
-    ) -> Result<String> {
+    pub fn edit_secret(&self, key_id: u32, resource: u32, id: u64, version: u64) -> Result<String> {
         ensure!(version > 0, "invalid capability version");
         Ok(format!(
             "nxc1.{key_id}.{version}.{}",
             URL_SAFE_NO_PAD.encode(self.0.edit_mac(key_id, resource, id, version)?)
         ))
     }
-    pub(crate) fn verify_edit(
-        &self,
-        secret: &str,
-        resource: u32,
-        id: u64,
-        version: i64,
-    ) -> Result<()> {
+    pub fn verify_edit(&self, secret: &str, resource: u32, id: u64, version: i64) -> Result<()> {
         ensure!(secret.len() <= 128 && version > 0, "invalid edit secret");
         let parts: Vec<_> = secret.split('.').collect();
         ensure!(
@@ -153,7 +141,7 @@ impl HostKeys {
         );
         Ok(())
     }
-    pub(crate) fn anonymous(&self, cookie: &str, now: i64) -> Result<Token> {
+    pub fn anonymous(&self, cookie: &str, now: i64) -> Result<Token> {
         let token = self.verify(cookie, now)?;
         ensure!(
             token.kind == TokenKind::Anonymous
@@ -163,7 +151,7 @@ impl HostKeys {
         );
         Ok(token)
     }
-    pub(crate) fn issue(
+    pub fn issue(
         &self,
         kind: TokenKind,
         subject: &str,
@@ -196,14 +184,14 @@ impl HostKeys {
         ensure!(encoded.len() <= MAX_TOKEN_BYTES, "token limit");
         Ok((token, encoded))
     }
-    pub(crate) fn verify(&self, encoded: &str, now: i64) -> Result<Token> {
+    pub fn verify(&self, encoded: &str, now: i64) -> Result<Token> {
         self.verify_domain(encoded, now, false, false)
     }
-    pub(crate) fn verify_cursor(&self, encoded: &str, now: i64) -> Result<Token> {
+    pub fn verify_cursor(&self, encoded: &str, now: i64) -> Result<Token> {
         self.verify_domain(encoded, now, true, false)
     }
     /// Only selection proof verification defers expiry until after receipt lookup.
-    pub(crate) fn verify_selection(&self, encoded: &str, now: i64) -> Result<Token> {
+    pub fn verify_selection(&self, encoded: &str, now: i64) -> Result<Token> {
         let token = self.verify_domain(encoded, now, false, true)?;
         ensure!(
             matches!(token.kind, TokenKind::Selection { .. }),
@@ -239,10 +227,10 @@ impl HostKeys {
         );
         Ok(token)
     }
-    pub(crate) fn csrf(&self, subject: &str) -> Result<String> {
+    pub fn csrf(&self, subject: &str) -> Result<String> {
         Ok(URL_SAFE_NO_PAD.encode(self.0.csrf(subject)?))
     }
-    pub(crate) fn verify_csrf(&self, subject: &str, value: &str) -> Result<()> {
+    pub fn verify_csrf(&self, subject: &str, value: &str) -> Result<()> {
         ensure!(value.len() <= 64, "csrf length");
         ensure!(
             verify_mac(&self.0.csrf(subject)?, &URL_SAFE_NO_PAD.decode(value)?),

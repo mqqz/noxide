@@ -21,7 +21,7 @@ struct WitnessScope {
 
 /// A request attempt owns this object and discards it on retry. It cannot be
 /// shared across principals, attempts, or requests. No serialized cache exists.
-pub(crate) struct Witnesses {
+pub struct Witnesses {
     account: String,
     tenant: String,
     attempt_time: AttemptTime,
@@ -29,12 +29,15 @@ pub(crate) struct Witnesses {
 }
 
 impl Witnesses {
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.values.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
     }
     /// Requiring typed attempt time fails closed when temporal freshness cannot
     /// be established. This alone does not implement resource expiry.
-    pub(crate) fn new(principal: &Principal, attempt_time: AttemptTime) -> Result<Self> {
+    pub fn new(principal: &Principal, attempt_time: AttemptTime) -> Result<Self> {
         let user = principal.user()?;
         ensure!(
             !user.tenant.is_empty() && noxide_protocol::account_id(&user.id),
@@ -50,14 +53,14 @@ impl Witnesses {
 
     /// Call after EVERY mutation step, including steps affecting accounts,
     /// membership status, or protected records. Retry constructs a new object.
-    pub(crate) fn invalidate(&mut self) {
+    pub fn invalidate(&mut self) {
         self.values.clear();
     }
 
     /// One provider call for all uncached distinct keys, never one call per row.
     /// Caller passes the existing nonresetting request database-call allowance.
     /// No membership rows or role values cross the database boundary.
-    pub(crate) async fn lookup(
+    pub async fn lookup(
         &mut self,
         tx: &mut Transaction,
         deployment: &Deployment<'_>,

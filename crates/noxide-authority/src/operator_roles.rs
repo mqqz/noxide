@@ -45,7 +45,7 @@ async fn account(tx: &mut Transaction, user: &str) -> Result<String> {
     Ok(tenant.clone())
 }
 
-pub(crate) async fn assignments(tx: &mut Transaction, user: &str) -> Result<Vec<RoleAssignment>> {
+pub async fn assignments(tx: &mut Transaction, user: &str) -> Result<Vec<RoleAssignment>> {
     let name = tx.bounded_text("name", 32);
     let tenant = tx.bounded_text("tenant", 32);
     let rows = tx.fetch::<2>(&sql!("SELECT {name},{tenant} FROM nx_roles WHERE principal=$1 ORDER BY name,tenant LIMIT {}", MAX_ROLES + 1), &[user.into()]).await?;
@@ -85,8 +85,8 @@ impl RoleAdmin for Database {
             "tenant grant must match the account tenant"
         );
         let roles = assignments(&mut tx, user).await?;
-        #[cfg(test)]
-        tests::after_assignments().await;
+        #[cfg(any(test, feature = "test-support"))]
+        after_assignments().await;
         let changed = !roles.iter().any(|r| r.name == role && r.tenant == tenant);
         if changed {
             ensure!(roles.len() < MAX_ROLES, "role assignment limit reached");
@@ -139,5 +139,11 @@ impl RoleAdmin for Database {
     }
 }
 
-#[cfg(test)]
-mod tests;
+#[cfg(any(test, feature = "test-support"))]
+tokio::task_local! { pub static READ_BARRIER: std::sync::Arc<tokio::sync::Barrier>; }
+#[cfg(any(test, feature = "test-support"))]
+async fn after_assignments() {
+    if let Ok(gate) = READ_BARRIER.try_with(Clone::clone) {
+        gate.wait().await;
+    }
+}

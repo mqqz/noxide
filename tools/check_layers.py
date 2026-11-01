@@ -12,13 +12,12 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "crates/noxide-host/src"
 LAYERS = [
-    ["limiter", "security", "auth", "authority", "operator_roles"],
     ["deployment", "repository"],
     ["application"],
     ["http"],
 ]
 RANK = {module: rank for rank, modules in enumerate(LAYERS) for module in modules}
-SKIP = re.compile(r"(_tests\.rs|/tests\.rs|/tests/|/test_support|/test_account)")
+SKIP = re.compile(r"(_tests\.rs|_tests/|/tests\.rs|/tests/|/test_support|/test_account)")
 
 
 def production(text):
@@ -70,7 +69,7 @@ RESTRICTED = {
     "webpki-roots": {"noxide-effect-delivery"},
     "httparse": {"noxide-effect-delivery"},
     "noxide-effect-delivery": {"noxide-cli"},
-    "argon2": {"noxide-host"},
+    "argon2": {"noxide-authority"},
     "wasmtime": {"noxide-sandbox"},
     "wasmparser": {"noxide-sandbox"},
     "cssparser": {"noxide-asset-admission"},

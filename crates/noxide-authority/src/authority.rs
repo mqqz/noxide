@@ -11,12 +11,12 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::{Fields, Manifest, Operation, membership::ExistsRelated};
 use std::collections::BTreeMap;
-pub(crate) mod projection;
-pub(crate) mod witnesses;
+pub mod projection;
+pub mod witnesses;
 use witnesses::Witnesses;
 
 #[derive(Clone)]
-pub(crate) struct DeploymentScope {
+pub struct DeploymentScope {
     pub contract: String,
     pub incarnation: String,
     pub generation: String,
@@ -33,7 +33,7 @@ impl DeploymentScope {
 }
 
 #[derive(Default)]
-pub(crate) struct Authority {
+pub struct Authority {
     time: Option<AttemptTime>,
     deployment: Option<DeploymentScope>,
     storage: BTreeMap<String, i64>,
@@ -43,14 +43,14 @@ pub(crate) struct Authority {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct Row<'a> {
+pub struct Row<'a> {
     pub id: u64,
     pub owner: &'a str,
     pub tenant: &'a str,
     pub fields: &'a Fields,
 }
 
-pub(crate) fn uses_time(manifest: &Manifest) -> bool {
+pub fn uses_time(manifest: &Manifest) -> bool {
     manifest.jobs.is_some()
         || manifest.blobs.is_some()
         || manifest.resources.iter().any(|resource| {
@@ -70,24 +70,24 @@ pub(crate) fn uses_time(manifest: &Manifest) -> bool {
 }
 
 impl Authority {
-    pub(crate) fn new(time: Option<AttemptTime>, deployment: DeploymentScope) -> Self {
+    pub fn new(time: Option<AttemptTime>, deployment: DeploymentScope) -> Self {
         Self {
             time,
             deployment: Some(deployment),
             ..Self::default()
         }
     }
-    pub(crate) fn contract(&self) -> Result<&str> {
+    pub fn contract(&self) -> Result<&str> {
         Ok(&self
             .deployment
             .as_ref()
             .context("query deployment missing")?
             .contract)
     }
-    pub(crate) fn time(&self) -> Option<AttemptTime> {
+    pub fn time(&self) -> Option<AttemptTime> {
         self.time
     }
-    pub(crate) fn invalidate(&mut self) {
+    pub fn invalidate(&mut self) {
         self.projection_epoch = std::sync::Arc::new(());
         self.clear_witnesses();
     }
@@ -123,7 +123,7 @@ impl Authority {
     /// this transaction until mutation, principal change or bounded eviction.
     /// Principal changes (including anonymous picker evaluation) cannot
     /// inherit witnesses prepared for an authenticated principal.
-    pub(crate) async fn authorize(
+    pub async fn authorize(
         &mut self,
         tx: &mut Transaction,
         manifest: &Manifest,
@@ -285,7 +285,7 @@ impl Authority {
     /// Full SQL filtering uses the same specialized clause as direct witnesses.
     /// Bounded residual candidate scans intentionally use their relaxed base
     /// policy and authorize the loaded candidates with `authorize` afterwards.
-    pub(crate) async fn sql(
+    pub async fn sql(
         &mut self,
         tx: &mut Transaction,
         manifest: &Manifest,
@@ -344,6 +344,3 @@ impl Authority {
             .collect())
     }
 }
-
-#[cfg(test)]
-mod tests;

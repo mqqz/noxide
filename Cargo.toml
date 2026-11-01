@@ -9,6 +9,7 @@ members = [
     "crates/noxide-confine",
     "crates/noxide-keys",
     "crates/noxide-store",
+    "crates/noxide-authority",
     "crates/noxide-jobs",
     "crates/noxide-blobs",
     "crates/noxide-effects",
@@ -46,6 +47,7 @@ noxide-effects = { path = "crates/noxide-effects", version = "0.1.0" }
 noxide-effect-delivery = { path = "crates/noxide-effect-delivery", version = "0.1.0" }
 noxide-blobs = { path = "crates/noxide-blobs", version = "0.1.0" }
 noxide-jobs = { path = "crates/noxide-jobs", version = "0.1.0" }
+noxide-authority = { path = "crates/noxide-authority", version = "0.1.0" }
 noxide-store = { path = "crates/noxide-store", version = "0.1.0" }
 noxide-keys = { path = "crates/noxide-keys", version = "0.1.0" }
 noxide-confine = { path = "crates/noxide-confine", version = "0.1.0" }

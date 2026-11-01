@@ -1,6 +1,6 @@
 #[cfg(test)]
 use crate::operator_roles::RoleAdmin as _;
-pub(crate) use crate::principal::{Principal, PrincipalKey, User};
+pub use crate::principal::{Principal, PrincipalKey, User};
 use crate::sql::sql;
 use crate::{
     Database,
@@ -13,7 +13,7 @@ use argon2::{
     password_hash::{PasswordHash, SaltString, rand_core::OsRng},
 };
 
-pub(crate) const MAX_ROLES: usize = 32;
+pub const MAX_ROLES: usize = 32;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -155,7 +155,7 @@ impl AccountAdmin for Database {
     }
 }
 
-pub(crate) async fn login(
+pub async fn login(
     tx: &mut Transaction,
     keys: &HostKeys,
     login_name: &str,
@@ -212,7 +212,7 @@ pub(crate) async fn login(
 }
 
 #[derive(Debug)]
-pub(crate) enum AuthError {
+pub enum AuthError {
     Invalid,
     Unavailable,
 }
@@ -226,7 +226,7 @@ impl std::fmt::Display for AuthError {
 }
 impl std::error::Error for AuthError {}
 
-pub(crate) async fn authenticate(
+pub async fn authenticate(
     tx: &mut Transaction,
     keys: &HostKeys,
     cookie: &str,
@@ -267,7 +267,7 @@ fn invite_hash(code: &str) -> [u8; 32] {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn register(
+pub async fn register(
     tx: &mut Transaction,
     mode: Registration,
     login_name: &str,
@@ -345,7 +345,7 @@ mod identity_tests {
         assert!(account_id(&id));
         assert_ne!(id, "alice");
         assert_eq!(db.account_id("alice").await.unwrap(), id);
-        db.grant_role(&id, "writer", crate::RoleScope::Global)
+        db.grant_role(&id, "writer", crate::operator_roles::RoleScope::Global)
             .await
             .unwrap();
         let mut tx = db

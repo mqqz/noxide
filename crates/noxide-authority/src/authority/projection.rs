@@ -13,10 +13,10 @@ struct Shape {
     resource: Resource,
     fields: Vec<TextField>,
 }
-pub(crate) struct Spec(Arc<Shape>);
+pub struct Spec(Arc<Shape>);
 /// Native protected columns are supplied by a bounded internal SQL projection.
 /// Guest record fields cannot substitute owner, tenant or row identity.
-pub(crate) struct NativeFacts {
+pub struct NativeFacts {
     pub id: u64,
     pub owner: String,
     pub tenant: String,
@@ -24,7 +24,7 @@ pub(crate) struct NativeFacts {
     pub revision: i64,
     pub created_sequence: u64,
 }
-pub(crate) struct InternalFacts {
+pub struct InternalFacts {
     shape: Arc<Shape>,
     epoch: Arc<()>,
     principal: crate::auth::PrincipalKey,
@@ -32,19 +32,15 @@ pub(crate) struct InternalFacts {
     fields: Fields,
 }
 impl InternalFacts {
-    pub(crate) fn native(&self) -> &NativeFacts {
+    pub fn native(&self) -> &NativeFacts {
         &self.native
     }
-    pub(crate) fn selected(&self) -> &Fields {
+    pub fn selected(&self) -> &Fields {
         &self.fields
     }
 }
 impl Spec {
-    pub(crate) fn aggregate(
-        manifest: &Manifest,
-        consumer: &Operation,
-        contract: &str,
-    ) -> Result<Self> {
+    pub fn aggregate(manifest: &Manifest, consumer: &Operation, contract: &str) -> Result<Self> {
         ensure!(
             consumer.kind == OperationKind::Aggregate,
             "aggregate facts purpose"
@@ -63,12 +59,8 @@ impl Spec {
         };
         Self::build(manifest, consumer, source, contract, operand)
     }
-    #[cfg(test)]
-    pub(crate) fn candidates(
-        manifest: &Manifest,
-        source: &Operation,
-        contract: &str,
-    ) -> Result<Self> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn candidates(manifest: &Manifest, source: &Operation, contract: &str) -> Result<Self> {
         let extended = source
             .query
             .as_ref()
@@ -157,10 +149,10 @@ impl Spec {
             fields,
         })))
     }
-    pub(crate) fn fields(&self) -> &[TextField] {
+    pub fn fields(&self) -> &[TextField] {
         &self.0.fields
     }
-    pub(crate) fn validate(
+    pub fn validate(
         &self,
         authority: &Authority,
         principal: &Principal,
@@ -261,7 +253,7 @@ fn principal_key(principal: &Principal) -> crate::auth::PrincipalKey {
 impl Authority {
     /// Policy+expiry only: caller still needs fresh visibility/gate/scope/selection
     /// before touching an approved operand or producing output. No Record exists.
-    pub(crate) async fn candidate_policy(
+    pub async fn candidate_policy(
         &mut self,
         tx: &mut Transaction,
         manifest: &Manifest,
@@ -318,7 +310,7 @@ mod tests {
         }
     }
     fn fixture() -> (Manifest, Operation, Fields) {
-        let mut m = crate::test_support::manifest();
+        let mut m = noxide_test_support::manifest();
         m.resources[0].fields = vec![
             field("body", FieldKind::Text, false),
             field(
