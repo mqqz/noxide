@@ -1,4 +1,5 @@
 pub(crate) use crate::principal::{Principal, PrincipalKey, User};
+use crate::sql::sql;
 use crate::{
     Database,
     database::{Param, Transaction},
@@ -141,7 +142,7 @@ pub(crate) async fn authenticate(
     let row = rows.first().ok_or(AuthError::Invalid)?;
     let roles = tx
         .fetch::<2>(
-            &format!(
+            &sql!(
                 "SELECT name,tenant FROM nx_roles WHERE principal=$1 LIMIT {}",
                 MAX_ROLES + 1
             ),
@@ -377,7 +378,7 @@ mod identity_tests {
         );
         for table in ["nx_roles", "nx_sessions"] {
             assert_eq!(
-                tx.fetch::<1>(&format!("SELECT CAST(COUNT(*) AS TEXT) FROM {table}"), &[])
+                tx.fetch::<1>(&sql!("SELECT CAST(COUNT(*) AS TEXT) FROM {table}"), &[])
                     .await
                     .unwrap()[0][0],
                 "0"

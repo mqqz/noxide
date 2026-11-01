@@ -1,5 +1,9 @@
 //! Principal binding is shared by row checks and parameterized query filtering.
-use crate::{principal::Principal, query_plan::NativeProvider, sql::Param};
+use crate::{
+    principal::Principal,
+    query_plan::NativeProvider,
+    sql::{Param, Sql, sql},
+};
 use noxide_protocol::{Policy, Predicate};
 
 #[derive(Debug)]
@@ -173,9 +177,11 @@ pub fn sql(
     policy: &Policy,
     principal: &Principal,
     params: &mut Vec<Param>,
-) -> Vec<String> {
-    sql_with(provider, policy, principal, params, |_, _| Ok("1=0".into()))
-        .expect("infallible base policy")
+) -> Vec<Sql> {
+    sql_with(provider, policy, principal, params, |_, _| {
+        Ok(Sql::statement("1=0"))
+    })
+    .expect("infallible base policy")
 }
 
 pub fn sql_with(
@@ -186,17 +192,17 @@ pub fn sql_with(
     mut related: impl FnMut(
         &noxide_protocol::membership::ExistsRelated,
         &mut Vec<Param>,
-    ) -> anyhow::Result<String>,
-) -> anyhow::Result<Vec<String>> {
+    ) -> anyhow::Result<Sql>,
+) -> anyhow::Result<Vec<Sql>> {
     if policy.any.is_empty() {
-        return Ok(vec!["1=0".into()]);
+        return Ok(vec![Sql::statement("1=0")]);
     }
     policy
         .any
         .iter()
         .map(|rule| {
             if rule.is_empty() {
-                return Ok("1=0".into());
+                return Ok(Sql::statement("1=0"));
             }
             let terms: Vec<_> = rule
                 .iter()
@@ -205,7 +211,7 @@ pub fn sql_with(
                         Condition::Related(predicate) => return related(predicate, params),
                         Condition::Account { field, id } => {
                             params.push(id.into());
-                            format!(
+                            sql!(
                                 "{}=${}",
                                 provider
                                     .field_expression(field)
@@ -213,8 +219,8 @@ pub fn sql_with(
                                 params.len()
                             )
                         }
-                        Condition::Allow => "1=1".into(),
-                        Condition::Deny => "1=0".into(),
+                        Condition::Allow => Sql::statement("1=1"),
+                        Condition::Deny => Sql::statement("1=0"),
                         condition => {
                             let (column, value) = match condition {
                                 Condition::Owner(value) => ("owner", value),
@@ -222,12 +228,12 @@ pub fn sql_with(
                                 _ => unreachable!(),
                             };
                             params.push(value.into());
-                            format!("{column}=${}", params.len())
+                            sql!("{column}=${}", params.len())
                         }
                     })
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
-            Ok(format!("({})", terms.join(" AND ")))
+            Ok(sql!("({})", Sql::join(&terms, " AND ")))
         })
         .collect()
 }

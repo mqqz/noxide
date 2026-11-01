@@ -1,3 +1,4 @@
+use crate::sql::{JoinSql, Sql, sql};
 mod authority;
 mod computation;
 pub(crate) mod queries;
@@ -177,7 +178,7 @@ pub(crate) async fn load(
 ) -> Result<Option<StoredRecord>> {
     ensure!(id > 0 && id <= i64::MAX as u64, "invalid resource target");
     let storage_resource = tx.storage_resource(m, resource).await?;
-    let sql = format!(
+    let sql = sql!(
         "SELECT COALESCE(owner,''),tenant,{}, {},CAST(revision AS TEXT),COALESCE(CAST(cap_version AS TEXT),'') FROM nx_records WHERE resource=$1 AND id=$2",
         tx.bounded_text("fields", 20_000),
         tx.bounded_text("incarnation", 64)
@@ -852,7 +853,7 @@ impl Effects {
                 {
                     let storage = self.tx.storage_resource(&self.manifest, child.id).await?;
                     let expression = self.tx.field_expression(&field.name)?;
-                    let rows = self.tx.fetch::<1>(&format!("SELECT CAST(id AS TEXT) FROM nx_records WHERE resource={storage} AND {expression}=$1 LIMIT 1"), &[stored.record.id.to_string().into()]).await?;
+                    let rows = self.tx.fetch::<1>(&sql!("SELECT CAST(id AS TEXT) FROM nx_records WHERE resource={storage} AND {expression}=$1 LIMIT 1"), &[stored.record.id.to_string().into()]).await?;
                     ensure!(rows.is_empty(), "parent has children");
                 }
             }
@@ -960,7 +961,7 @@ impl Effects {
         let mut params = vec![Param::Number(storage_resource)];
         let clauses = self.authority_sql(op, &mut params).await?;
         let visibility = self.visibility_clause(op, &mut params)?;
-        let mut parent_clause = String::new();
+        let mut parent_clause = Sql::empty();
         if let Some(scope) = &plan.scope {
             let id = self
                 .request
@@ -969,7 +970,7 @@ impl Effects {
             params.push(id.to_string().into());
             // A catalog-derived constant lets PostgreSQL's generic plans
             // prove the partial-index predicate despite resource=$1.
-            parent_clause = format!(
+            parent_clause = sql!(
                 " AND resource={storage_resource} AND {}=${}",
                 self.tx.field_expression(scope)?,
                 params.len()
@@ -986,10 +987,10 @@ impl Effects {
             let batch = (size - records.len()).min(3);
             let mut page_params = params.clone();
             let keyset = plan.keyset(last.as_ref(), &mut page_params)?;
-            let sql = format!(
+            let sql = sql!(
                 "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({}){visibility}{parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT {batch}",
                 self.tx.bounded_text("fields", 20_000),
-                clauses.join(" OR ")
+                clauses.joined(" OR ")
             );
             self.charge_list_calls(1)?;
             let rows = self.tx.fetch::<5>(&sql, &page_params).await?;
@@ -1037,7 +1038,7 @@ impl Effects {
             let mut page_params = params.clone();
             let keyset = plan.keyset(last.as_ref(), &mut page_params)?;
             self.charge_list_calls(1)?;
-            let next=self.tx.fetch::<1>(&format!("SELECT CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({}){visibility}{parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT 1",clauses.join(" OR ")),&page_params).await?;
+            let next=self.tx.fetch::<1>(&sql!("SELECT CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({}){visibility}{parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT 1",clauses.joined(" OR ")),&page_params).await?;
             if !next.is_empty() {
                 self.truncated = true;
                 self.more = last.clone();
@@ -1072,20 +1073,20 @@ impl Effects {
                 &self.principal,
                 &mut scan_params,
             )
-            .join(" OR ");
+            .joined(" OR ");
             let selection = plan.selection_sql(
                 self.tx.query_provider()?,
                 &mut scan_params,
                 &self.request.params,
             )?;
-            let mut parent_clause = String::new();
+            let mut parent_clause = Sql::empty();
             if let Some(parent) = &plan.scope {
                 let target = self
                     .request
                     .target
                     .ok_or_else(|| anyhow::anyhow!("missing parent target"))?;
                 scan_params.push(target.to_string().into());
-                parent_clause = format!(
+                parent_clause = sql!(
                     " AND {}=${}",
                     self.tx.field_expression(parent)?,
                     scan_params.len()
@@ -1098,7 +1099,7 @@ impl Effects {
             } else {
                 (256 / op.policy.any.len()).min(64)
             };
-            let sql = format!(
+            let sql = sql!(
                 "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({clause}){visibility}{parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT {limit}"
             );
             self.charge_list_calls(1)?;
@@ -1206,9 +1207,9 @@ impl Effects {
         Ok(serde_json::to_vec(&records)?)
     }
 
-    fn visibility_clause(&self, op: &Operation, params: &mut Vec<Param>) -> Result<String> {
+    fn visibility_clause(&self, op: &Operation, params: &mut Vec<Param>) -> Result<Sql> {
         if !manifest::is_public(op) {
-            return Ok(String::new());
+            return Ok(Sql::empty());
         }
         let visibility = op
             .visibility
@@ -1216,7 +1217,7 @@ impl Effects {
             .ok_or_else(|| anyhow::anyhow!("missing public visibility"))?;
         let expression = self.tx.field_expression(&visibility.field)?;
         params.push(visibility.equals.as_str().into());
-        Ok(format!(" AND ({expression} = ${})", params.len()))
+        Ok(sql!(" AND ({expression} = ${})", params.len()))
     }
 
     fn visible_fields(&self, op: &Operation, mut fields: Fields) -> Result<Fields> {
@@ -1295,12 +1296,12 @@ impl Effects {
             let mut slots = Vec::new();
             for id in unique {
                 params.push(Param::Number(id as i64));
-                slots.push(format!("${}", params.len()));
+                slots.push(sql!("${}", params.len()));
             }
-            let sql = format!(
+            let sql = sql!(
                 "SELECT CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND id IN ({})",
                 self.tx.bounded_text("fields", 20_000),
-                slots.join(",")
+                slots.joined(",")
             );
             let rows = self.tx.fetch::<4>(&sql, &params).await?;
             // Gate target reads are batched separately below; no per-record round trips.
@@ -1361,14 +1362,14 @@ impl Effects {
                 let mut slots = Vec::new();
                 for record in &candidates {
                     params.push(Param::Number(record.fields[&gate.field].parse()?));
-                    slots.push(format!("${}", params.len()));
+                    slots.push(sql!("${}", params.len()));
                 }
                 let mut visible = std::collections::BTreeSet::new();
                 if !slots.is_empty() {
-                    let sql = format!(
+                    let sql = sql!(
                         "SELECT CAST(id AS TEXT),{} FROM nx_records WHERE resource=$1 AND id IN ({})",
                         self.tx.bounded_text("fields", 20_000),
-                        slots.join(",")
+                        slots.joined(",")
                     );
                     for [id, fields] in self.tx.fetch::<2>(&sql, &params).await? {
                         let fields = serde_json::from_str(&fields)?;

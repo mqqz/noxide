@@ -1,4 +1,5 @@
 //! Trusted operator APIs. These are deliberately absent from the guest interface.
+use crate::sql::sql;
 use crate::{Database, auth::MAX_ROLES, database::Transaction, manifest::identifier};
 use anyhow::{Context, Result, ensure};
 use std::time::{Duration, Instant};
@@ -32,7 +33,7 @@ async fn account(tx: &mut Transaction, user: &str) -> Result<String> {
     let tenant = tx.bounded_text("tenant", 32);
     let rows = tx
         .fetch::<1>(
-            &format!("SELECT {tenant} FROM nx_accounts WHERE id=$1 AND state<>'deleted'"),
+            &sql!("SELECT {tenant} FROM nx_accounts WHERE id=$1 AND state<>'deleted'"),
             &[user.into()],
         )
         .await?;
@@ -47,7 +48,7 @@ async fn account(tx: &mut Transaction, user: &str) -> Result<String> {
 pub(crate) async fn assignments(tx: &mut Transaction, user: &str) -> Result<Vec<RoleAssignment>> {
     let name = tx.bounded_text("name", 32);
     let tenant = tx.bounded_text("tenant", 32);
-    let rows = tx.fetch::<2>(&format!("SELECT {name},{tenant} FROM nx_roles WHERE principal=$1 ORDER BY name,tenant LIMIT {}", MAX_ROLES + 1), &[user.into()]).await?;
+    let rows = tx.fetch::<2>(&sql!("SELECT {name},{tenant} FROM nx_roles WHERE principal=$1 ORDER BY name,tenant LIMIT {}", MAX_ROLES + 1), &[user.into()]).await?;
     rows.into_iter()
         .map(|[name, tenant]| {
             ensure!(

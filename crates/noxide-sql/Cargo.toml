@@ -1,0 +1,17 @@
+[package]
+name = "noxide-sql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SQL text built only from literals, checked identifiers and numbers"
+
+[dependencies]
+noxide-sql-macros.workspace = true
+anyhow.workspace = true
+
+[features]
+# Lets tests run statements built at runtime. Never enabled by a deployed binary;
+# tools/check_binaries.py verifies the production feature set.
+test-support = []

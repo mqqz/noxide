@@ -162,7 +162,7 @@ async fn native_contract(db: &Database) {
 async fn forged_startup(db: &Database, statements: &[&str]) {
     let mut tx = db.begin(deadline()).await.unwrap();
     for sql in statements {
-        tx.execute(sql, &[]).await.unwrap();
+        tx.execute(sql.to_string(), &[]).await.unwrap();
     }
     tx.commit().await.unwrap();
     assert!(

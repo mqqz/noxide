@@ -295,7 +295,7 @@ impl Application {
         ))?));
         let claimed = tx.execute("INSERT INTO nx_receipts(nonce,subject,contract,action,input,outcome,expires) VALUES($1,$2,$3,0,$4,'',$5) ON CONFLICT(nonce) DO NOTHING", &[token.nonce.as_str().into(), anonymous.nonce.as_str().into(), self.contract.as_str().into(), input.as_str().into(), token.expires.into()]).await?;
         if claimed == 0 {
-            let sql = format!(
+            let sql = sql!(
                 "SELECT subject,contract,input,{} FROM nx_receipts WHERE nonce=$1",
                 tx.bounded_text("outcome", 1024)
             );

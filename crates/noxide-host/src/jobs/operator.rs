@@ -1,6 +1,7 @@
 //! Operator changes share the execution lock order: clock (when held), runtime,
 //! grant, job. No operation commits its caller's transaction.
 use super::types::*;
+use crate::sql::sql;
 use crate::{database::Transaction, job_deployment::EffectiveJobDeployment};
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::{jobs::JobContract, time::Timestamp};
@@ -48,7 +49,7 @@ impl Transaction {
         let payload = self.bounded_text("payload", noxide_protocol::jobs::MAX_JOB_BYTES);
         let rows = self
             .fetch::<3>(
-                &format!("SELECT {payload},payload_digest,state FROM nx_jobs WHERE id=$1"),
+                &sql!("SELECT {payload},payload_digest,state FROM nx_jobs WHERE id=$1"),
                 &[id.into()],
             )
             .await?;

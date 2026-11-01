@@ -81,7 +81,7 @@ pub(crate) struct Transaction {
     ordinary: Option<lifecycle::Ordinary>,
 }
 
-pub(crate) use crate::sql::Param;
+pub(crate) use crate::sql::{Param, Sql, sql};
 
 macro_rules! bound_query {
     ($sql:expr,$params:expr) => {{
@@ -366,18 +366,19 @@ impl Database {
                 } else {
                     "pg_try_advisory_lock_shared(5642817467268123)"
                 };
-                let row = sqlx::query(&format!(
+                let settings = sql!(
                     "SELECT current_setting('fsync'),current_setting('full_page_writes'),\
                      set_config('synchronous_commit','on',false),\
                      set_config('statement_timeout',$1,false),\
                      set_config('lock_timeout',$2,false),\
                      set_config('idle_in_transaction_session_timeout',$3,false),{lock}"
-                ))
-                .bind(&statement_timeout)
-                .bind(lock_timeout)
-                .bind(idle_timeout)
-                .fetch_one(&mut cx)
-                .await?;
+                );
+                let row = sqlx::query(settings.as_str())
+                    .bind(&statement_timeout)
+                    .bind(lock_timeout)
+                    .bind(idle_timeout)
+                    .fetch_one(&mut cx)
+                    .await?;
                 ensure!(
                     row.try_get::<String, _>(0)? == "on" && row.try_get::<String, _>(1)? == "on",
                     "unsafe PostgreSQL durability"
@@ -440,7 +441,7 @@ impl Database {
                 .chain(jobs_layout::INDEXES.iter().map(|(_, sql)| sql))
                 .chain(effects_layout::INDEXES.iter().map(|(_, sql)| sql))
             {
-                tx.execute(sql, &[]).await?;
+                tx.execute(Sql::statement(sql), &[]).await?;
             }
             match tx.backend {
                 Backend::Closed => unreachable!("closed maintenance transaction"),
@@ -570,16 +571,16 @@ impl Transaction {
         {
             let columns = columns
                 .iter()
-                .map(|(name, _)| format!("CAST({name} AS TEXT)"))
-                .collect::<Vec<_>>()
-                .join(",");
+                .map(|(name, _)| sql!("CAST({name} AS TEXT)"))
+                .collect::<Vec<_>>();
+            let columns = Sql::join(&columns, ",");
             let json = match self.backend {
                 Backend::Closed => unreachable!("closed maintenance transaction"),
-                Backend::Sqlite(_) => format!("json_array({columns})"),
-                Backend::Postgres(_) => format!("CAST(json_build_array({columns}) AS TEXT)"),
+                Backend::Sqlite(_) => sql!("json_array({columns})"),
+                Backend::Postgres(_) => sql!("CAST(json_build_array({columns}) AS TEXT)"),
             };
             let mut rows = self
-                .fetch::<1>(&format!("SELECT {json} FROM {table}"), &[])
+                .fetch::<1>(&sql!("SELECT {json} FROM {table}"), &[])
                 .await?;
             rows.sort();
             tables.push((table.into(), rows));
@@ -861,28 +862,23 @@ impl Transaction {
         ensure!(stored == contract, "deployment was superseded");
         Ok(generation.clone())
     }
-    pub(crate) fn field_expression(&self, field: &str) -> Result<String> {
-        ensure!(crate::manifest::identifier(field), "invalid field");
-        Ok(match self.backend {
-            Backend::Closed => unreachable!("closed maintenance transaction"),
-            Backend::Sqlite(_) => format!("json_extract(fields, '$.\"{field}\"')"),
-            Backend::Postgres(_) => format!("(fields::jsonb ->> '{field}')"),
-        })
+    pub(crate) fn field_expression(&self, field: &str) -> Result<Sql> {
+        self.query_provider()?.field_expression(field)
     }
 
-    pub(crate) fn bounded_text(&self, column: &str, maximum: usize) -> String {
-        // Names and limits come only from trusted code. NULL rejects oversized
-        // stored values before their contents cross the SQL driver.
+    pub(crate) fn bounded_text(&self, column: impl crate::sql::SqlArg, maximum: usize) -> Sql {
+        // NULL rejects oversized stored values before their contents cross the
+        // SQL driver.
         let size = match self.backend {
             Backend::Closed => unreachable!("closed maintenance transaction"),
-            Backend::Sqlite(_) => format!("length(CAST({column} AS BLOB))"),
-            Backend::Postgres(_) => format!("octet_length({column})"),
+            Backend::Sqlite(_) => sql!("length(CAST({column} AS BLOB))"),
+            Backend::Postgres(_) => sql!("octet_length({column})"),
         };
-        format!("CASE WHEN {size}<={maximum} THEN {column} ELSE NULL END")
+        sql!("CASE WHEN {size}<={maximum} THEN {column} ELSE NULL END")
     }
-    pub(crate) async fn execute(&mut self, sql: &str, params: &[Param]) -> Result<u64> {
+    pub(crate) async fn execute(&mut self, sql: impl Into<Sql>, params: &[Param]) -> Result<u64> {
         ensure!(!self.read_only, "read-only transaction");
-        self.execute_internal(sql, params).await
+        self.execute_internal(sql.into().as_str(), params).await
     }
     async fn prepare_statement(&mut self) -> Result<()> {
         self.maintenance_timeout().await?;
@@ -915,9 +911,11 @@ impl Transaction {
     // rules out of the semantic repository and receipt contracts.
     pub(crate) async fn fetch<const N: usize>(
         &mut self,
-        sql: &str,
+        sql: impl Into<Sql>,
         params: &[Param],
     ) -> Result<Vec<[String; N]>> {
+        let sql = sql.into();
+        let sql = sql.as_str();
         self.maintenance_timeout().await?;
         self.ordinary_timeout().await?;
         self.ordinary_charge()?;

@@ -24,11 +24,27 @@ pub enum NativeProvider {
     Postgres,
 }
 impl NativeProvider {
-    pub fn field_expression(self, field: &str) -> Result<String> {
+    pub fn field_expression(self, field: &str) -> Result<Sql> {
+        self.field_on("fields", field)
+    }
+    /// A field of a row under a host-owned table alias.
+    pub fn qualified_field(self, alias: &str, field: &str) -> Result<Sql> {
+        ensure!(manifest::identifier(alias), "invalid table alias");
+        self.field_on(&format!("{alias}.fields"), field)
+    }
+    fn field_on(self, column: &str, field: &str) -> Result<Sql> {
         ensure!(manifest::identifier(field), "invalid field");
+        let field = Sql::identifier(field)?;
+        let column = Sql::join(
+            column
+                .split('.')
+                .map(Sql::identifier)
+                .collect::<Result<Vec<_>>>()?,
+            ".",
+        );
         Ok(match self {
-            Self::Sqlite => format!("json_extract(fields, '$.\"{field}\"')"),
-            Self::Postgres => format!("(fields::jsonb ->> '{field}')"),
+            Self::Sqlite => sql!("json_extract({column}, '$.\"{field}\"')"),
+            Self::Postgres => sql!("({column}::jsonb ->> '{field}')"),
         })
     }
     pub fn binary_collation(self) -> &'static str {
@@ -92,7 +108,7 @@ impl IndexRequirement {
             IndexTable::Records => format!("nx_q_{storage:x}_{}", self.shape_hash()),
         }
     }
-    pub fn native_sql(&self, provider: NativeProvider, storage: i64) -> Result<String> {
+    pub fn native_sql(&self, provider: NativeProvider, storage: i64) -> Result<Sql> {
         self.sql_with(
             storage,
             |field| provider.field_expression(field),
@@ -102,52 +118,52 @@ impl IndexRequirement {
     fn sql_with(
         &self,
         storage: i64,
-        field_expression: impl Fn(&str) -> Result<String>,
-        binary_collation: &str,
-    ) -> Result<String> {
+        field_expression: impl Fn(&str) -> Result<Sql>,
+        binary_collation: &'static str,
+    ) -> Result<Sql> {
         ensure!(storage > 0, "invalid storage identity");
         if self.table == IndexTable::Postings {
             ensure!(
                 self.columns.is_empty() && self.order == IndexOrder::Created,
                 "unsupported posting index shape"
             );
-            return Ok(format!(
+            return Ok(sql!(
                 "CREATE INDEX nx_search_tokens ON {}(resource,field,token,created_seq,record_id)",
                 self.table.name()
             ));
         }
-        let mut columns = vec!["resource".to_owned()];
+        let mut columns = vec![Sql::statement("resource")];
         for column in &self.columns {
             columns.push(match column {
-                IndexColumn::Owner => "owner".into(),
-                IndexColumn::Tenant => "tenant".into(),
-                IndexColumn::Field(field) => format!("({})", field_expression(field)?),
+                IndexColumn::Owner => Sql::statement("owner"),
+                IndexColumn::Tenant => Sql::statement("tenant"),
+                IndexColumn::Field(field) => sql!("({})", field_expression(field)?),
                 IndexColumn::Timestamp(field) => {
-                    format!("(CAST({} AS BIGINT))", field_expression(field)?)
+                    sql!("(CAST({} AS BIGINT))", field_expression(field)?)
                 }
             });
         }
         columns.push(match &self.order {
-            IndexOrder::Created => "created_seq".into(),
+            IndexOrder::Created => Sql::statement("created_seq"),
             IndexOrder::Scalar {
                 field,
                 representation,
             } => {
                 let expression = field_expression(field)?;
                 match representation {
-                    ScalarRepresentation::Numeric => format!("(CAST({expression} AS BIGINT))"),
+                    ScalarRepresentation::Numeric => sql!("(CAST({expression} AS BIGINT))"),
                     ScalarRepresentation::Binary => {
-                        format!("(({expression}) COLLATE {})", binary_collation)
+                        sql!("(({expression}) COLLATE {})", binary_collation)
                     }
                 }
             }
         });
-        columns.push("id".into());
-        Ok(format!(
+        columns.push(Sql::statement("id"));
+        Ok(sql!(
             "CREATE INDEX {} ON {}({}) WHERE resource={storage}",
-            self.name(storage),
+            Sql::identifier(&self.name(storage))?,
             self.table.name(),
-            columns.join(",")
+            Sql::join(&columns, ",")
         ))
     }
 }

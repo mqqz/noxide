@@ -8,7 +8,7 @@ impl Transaction {
     async fn search_states(&mut self) -> Result<BTreeMap<i64, (String, SearchIndex, String)>> {
         let tokenizer = self.bounded_text("tokenizer", 256);
         let declaration = self.bounded_text("declaration", 4096);
-        let rows = self.fetch::<5>(&format!("SELECT CAST(resource AS TEXT),{tokenizer},{declaration},CAST(version AS TEXT),state FROM nx_search_state ORDER BY resource LIMIT 17"), &[]).await?;
+        let rows = self.fetch::<5>(&sql!("SELECT CAST(resource AS TEXT),{tokenizer},{declaration},CAST(version AS TEXT),state FROM nx_search_state ORDER BY resource LIMIT 17"), &[]).await?;
         ensure!(rows.len() <= 16, "search state limit");
         let mut states = BTreeMap::new();
         for [resource, tokenizer, declaration, version, state] in rows {
@@ -117,7 +117,7 @@ impl Transaction {
                 let id = id.parse::<i64>()?;
                 let fields = self.bounded_text("fields", 32768);
                 let incarnation = self.bounded_text("incarnation", 64);
-                let rows = self.fetch::<4>(&format!("SELECT {fields},{incarnation},CAST(revision AS TEXT),CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND id=$2"), &[storage.into(), id.into()]).await?;
+                let rows = self.fetch::<4>(&sql!("SELECT {fields},{incarnation},CAST(revision AS TEXT),CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND id=$2"), &[storage.into(), id.into()]).await?;
                 let [fields, incarnation, revision, created_seq] = rows
                     .into_iter()
                     .next()
@@ -190,14 +190,16 @@ pub(crate) async fn replace_postings(
             "SELECT CAST(value->>0 AS BIGINT),value->>1 FROM jsonb_array_elements(CAST($5 AS jsonb)) AS pair(value)"
         }
     };
-    let sql = format!(
+    let sql = sql!(
         "INSERT INTO nx_search_postings(resource,record_id,field,token,incarnation,revision,created_seq) SELECT $1,$2,p.field,p.token,$3,$4,$6 FROM ({pair}) AS p(field,token) JOIN nx_records r ON r.resource=$1 AND r.id=$2 AND r.incarnation=$3 AND r.revision=$4 AND r.created_seq=$6"
     );
     // SQLite does not accept derived-table column aliases.
     let sql = match tx.query_provider()? {
-            NativeProvider::Sqlite => "INSERT INTO nx_search_postings(resource,record_id,field,token,incarnation,revision,created_seq) SELECT $1,$2,CAST(json_extract(p.value,'$[0]') AS BIGINT),json_extract(p.value,'$[1]'),$3,$4,$6 FROM json_each($5) p JOIN nx_records r ON r.resource=$1 AND r.id=$2 AND r.incarnation=$3 AND r.revision=$4 AND r.created_seq=$6".to_owned(),
-            NativeProvider::Postgres => sql,
-        };
+        NativeProvider::Sqlite => Sql::statement(
+            "INSERT INTO nx_search_postings(resource,record_id,field,token,incarnation,revision,created_seq) SELECT $1,$2,CAST(json_extract(p.value,'$[0]') AS BIGINT),json_extract(p.value,'$[1]'),$3,$4,$6 FROM json_each($5) p JOIN nx_records r ON r.resource=$1 AND r.id=$2 AND r.incarnation=$3 AND r.revision=$4 AND r.created_seq=$6",
+        ),
+        NativeProvider::Postgres => sql,
+    };
     let count = tx
         .execute(
             &sql,

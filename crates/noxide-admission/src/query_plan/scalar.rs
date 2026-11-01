@@ -1,6 +1,6 @@
 //! Typed stable-key SQL for the existing record query executor.
 use super::{NativeProvider, ScalarRepresentation};
-use crate::sql::Param;
+use crate::sql::{Param, Sql, sql};
 use anyhow::{Result, ensure};
 use noxide_protocol::{
     FieldKind, Fields, Operand, TextField,
@@ -75,12 +75,12 @@ impl Scalar {
         self.validate_key(&key)?;
         Ok(key)
     }
-    pub fn expression(&self, provider: NativeProvider) -> Result<String> {
+    pub fn expression(&self, provider: NativeProvider) -> Result<Sql> {
         let field = provider.field_expression(&self.field.name)?;
         Ok(match self.representation {
-            ScalarRepresentation::Numeric => format!("CAST({field} AS BIGINT)"),
+            ScalarRepresentation::Numeric => sql!("CAST({field} AS BIGINT)"),
             ScalarRepresentation::Binary => {
-                format!("({field}) COLLATE {}", provider.binary_collation())
+                sql!("({field}) COLLATE {}", provider.binary_collation())
             }
         })
     }
@@ -90,9 +90,9 @@ impl Scalar {
             Direction::Descending => "DESC",
         }
     }
-    pub fn order_sql(&self, provider: NativeProvider) -> Result<String> {
+    pub fn order_sql(&self, provider: NativeProvider) -> Result<Sql> {
         let direction = self.direction();
-        Ok(format!(
+        Ok(sql!(
             "{} {direction},id {direction}",
             self.expression(provider)?
         ))
@@ -102,7 +102,7 @@ impl Scalar {
         provider: NativeProvider,
         key: &CursorKey,
         params: &mut Vec<Param>,
-    ) -> Result<String> {
+    ) -> Result<Sql> {
         self.validate_key(key)?;
         let CursorKey::Scalar { value, record } = key else {
             unreachable!()
@@ -116,9 +116,7 @@ impl Scalar {
         let scalar = params.len();
         params.push((*record as i64).into());
         let id = params.len();
-        Ok(format!(
-            " AND ({expression},id){comparison}(${scalar},${id})"
-        ))
+        Ok(sql!(" AND ({expression},id){comparison}(${scalar},${id})"))
     }
     pub fn range_sql(
         &self,
@@ -126,7 +124,7 @@ impl Scalar {
         range: &Range,
         values: &Fields,
         params: &mut Vec<Param>,
-    ) -> Result<String> {
+    ) -> Result<Sql> {
         ensure!(range.field == self.field.name, "range/order mismatch");
         ensure!(
             range.lower.is_some() || range.upper.is_some(),
@@ -162,18 +160,18 @@ impl Scalar {
             );
         }
         let expression = self.expression(provider)?;
-        let mut sql = String::new();
+        let mut clause = Sql::empty();
         for (bound, value, comparison) in [(&range.lower, lower, ">"), (&range.upper, upper, "<")] {
             if let (Some(bound), Some(value)) = (bound, value) {
                 params.push(parameter(&value));
-                sql.push_str(&format!(
+                clause.push(sql!(
                     " AND ({expression}){comparison}{}${}",
                     if bound.inclusive { "=" } else { "" },
                     params.len()
                 ));
             }
         }
-        Ok(sql)
+        Ok(clause)
     }
 }
 fn parameter(value: &CursorValue) -> Param {
@@ -240,6 +238,7 @@ mod tests {
             descending
                 .keyset_sql(NativeProvider::Sqlite, &key, &mut vec![])
                 .unwrap()
+                .as_str()
                 .contains(",id)<($1,$2)")
         );
         let binary = Scalar::new(&field(FieldKind::Text), Direction::Ascending).unwrap();

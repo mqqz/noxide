@@ -104,7 +104,9 @@ impl Transaction {
         storage: i64,
         actual: &Definition,
     ) -> Result<()> {
-        let mut expected = requirement.native_sql(self.query_provider()?, storage)?;
+        let mut expected = requirement
+            .native_sql(self.query_provider()?, storage)?
+            .to_string();
         if !actual.namespace.is_empty() {
             // Namespace formatting is native, but the expected owning table is
             // fixed by the approved registry, never inferred from actual DDL.
@@ -206,7 +208,8 @@ impl Transaction {
         }
         for name in existing.keys().filter(|name| name.starts_with("nx_q_")) {
             if !required.contains(name) {
-                self.execute(&format!("DROP INDEX {name}"), &[]).await?;
+                self.execute(&sql!("DROP INDEX {}", Sql::identifier(name)?), &[])
+                    .await?;
             }
         }
         self.validate_query_indexes(manifest).await

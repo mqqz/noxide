@@ -10,6 +10,7 @@ description = "Pure Noxide contract admission and query planning"
 [dependencies]
 noxide-protocol.workspace = true
 noxide-assets.workspace = true
+noxide-sql.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -435,7 +435,7 @@ async fn provider(database: Database) {
         .fetch::<1>(
             &format!(
                 "SELECT CAST(id AS TEXT) FROM nx_records WHERE resource=$1 AND ({}) ORDER BY id",
-                sql.join(" OR ")
+                crate::sql::Sql::join(&sql, " OR ")
             ),
             &params,
         )

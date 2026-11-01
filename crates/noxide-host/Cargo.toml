@@ -11,6 +11,7 @@ description = "Trusted Noxide application runtime"
 noxide-protocol.workspace = true
 noxide-sandbox.workspace = true
 noxide-keys.workspace = true
+noxide-sql.workspace = true
 noxide-assets.workspace = true
 noxide-admission.workspace = true
 noxide-render.workspace = true
@@ -37,6 +38,7 @@ url = "2"
 query-metrics = []
 
 [dev-dependencies]
+noxide-sql = { workspace = true, features = ["test-support"] }
 noxide-admission = { workspace = true, features = ["test-support"] }
 noxide-test-support.workspace = true
 noxide-asset-admission.workspace = true

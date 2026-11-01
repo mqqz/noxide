@@ -8,6 +8,8 @@ members = [
     "crates/noxide-sandbox",
     "crates/noxide-confine",
     "crates/noxide-keys",
+    "crates/noxide-sql",
+    "crates/noxide-sql-macros",
     "crates/noxide-admission",
     "crates/noxide-render",
     "crates/noxide-test-support",
@@ -33,6 +35,8 @@ noxide-asset-admission = { path = "crates/noxide-asset-admission", version = "0.
 noxide-admission = { path = "crates/noxide-admission", version = "0.1.0" }
 noxide-render = { path = "crates/noxide-render", version = "0.1.0" }
 noxide-test-support = { path = "crates/noxide-test-support", version = "0.1.0" }
+noxide-sql = { path = "crates/noxide-sql", version = "0.1.0" }
+noxide-sql-macros = { path = "crates/noxide-sql-macros", version = "0.1.0" }
 noxide-keys = { path = "crates/noxide-keys", version = "0.1.0" }
 noxide-confine = { path = "crates/noxide-confine", version = "0.1.0" }
 noxide-sandbox = { path = "crates/noxide-sandbox", version = "0.1.0" }

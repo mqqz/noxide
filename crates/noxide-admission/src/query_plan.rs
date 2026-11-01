@@ -1,6 +1,7 @@
 use crate::{
     manifest,
     policy::{self, ListStrategy},
+    sql::{Param, Sql, sql},
 };
 use anyhow::{Result, ensure};
 use noxide_protocol::{ListOrder, Manifest, Operation, OperationKind};
@@ -121,10 +122,20 @@ impl ListPlan {
     pub fn keyset(
         &self,
         after: Option<&noxide_protocol::query::CursorKey>,
-        params: &mut Vec<crate::sql::Param>,
-    ) -> Result<String> {
+        params: &mut Vec<Param>,
+    ) -> Result<Sql> {
+        self.keyset_on(after, params, "created_seq", "id")
+    }
+    /// The created-order keyset over host-named columns.
+    pub fn keyset_on(
+        &self,
+        after: Option<&noxide_protocol::query::CursorKey>,
+        params: &mut Vec<Param>,
+        created: &'static str,
+        id: &'static str,
+    ) -> Result<Sql> {
         let Some(key) = after else {
-            return Ok(String::new());
+            return Ok(Sql::empty());
         };
         let noxide_protocol::query::CursorKey::Created { sequence, record } = key else {
             anyhow::bail!("created cursor required")
@@ -141,7 +152,7 @@ impl ListPlan {
         params.push((*record as i64).into());
         let record = params.len();
         let cmp = if self.descending() { "<" } else { ">" };
-        Ok(format!(" AND (created_seq,id){cmp}(${sequence},${record})"))
+        Ok(sql!(" AND ({created},{id}){cmp}(${sequence},${record})"))
     }
 }
 
@@ -149,20 +160,20 @@ impl ListPlan {
     pub fn selection_sql(
         &self,
         provider: NativeProvider,
-        params: &mut Vec<crate::sql::Param>,
+        params: &mut Vec<Param>,
         values: &noxide_protocol::Fields,
-    ) -> Result<String> {
-        let mut sql = String::new();
+    ) -> Result<Sql> {
+        let mut clause = Sql::empty();
         for condition in &self.selection {
             let value = operand_value(&condition.equals, values)?;
             params.push(value.as_str().into());
-            sql.push_str(&format!(
+            clause.push(sql!(
                 " AND {}=${}",
                 provider.field_expression(&condition.field)?,
                 params.len()
             ));
         }
-        Ok(sql)
+        Ok(clause)
     }
     pub fn check_selection(
         &self,

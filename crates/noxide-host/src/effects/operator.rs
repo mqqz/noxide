@@ -3,6 +3,7 @@ use super::{
     store::{OutboxContext, checkpoint, integer},
     types::*,
 };
+use crate::sql::sql;
 use crate::{
     database::Transaction,
     effect_deployment::{EffectiveEffectDeployment, EffectiveEffectGrant},
@@ -311,7 +312,7 @@ impl Transaction {
         let payload = self.bounded_text("payload", MAX_CAPTURE_BYTES);
         let rows = self
             .fetch::<2>(
-                &format!("SELECT {payload},payload_digest FROM nx_outbox WHERE id=$1"),
+                &sql!("SELECT {payload},payload_digest FROM nx_outbox WHERE id=$1"),
                 &[id.into()],
             )
             .await?;

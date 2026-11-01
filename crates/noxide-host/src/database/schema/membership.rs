@@ -74,7 +74,7 @@ impl Transaction {
         // prefix. The first row is always returned (NULL if oversized), so
         // malformed data cannot masquerade as end-of-stream. Include 20
         // bytes per id below the driver's 64 KiB total-result limit.
-        let sql = format!(
+        let sql = sql!(
             "WITH page AS (SELECT id,fields,{size} AS bytes FROM nx_records WHERE resource=$1 AND id>$2 ORDER BY id LIMIT 64), costed AS (SELECT id,fields,SUM(bytes+20) OVER(ORDER BY id ROWS UNBOUNDED PRECEDING) AS total,ROW_NUMBER() OVER(ORDER BY id) AS position FROM page) SELECT CAST(id AS TEXT),{fields} FROM costed WHERE total<=60000 OR position=1 ORDER BY id"
         );
         loop {
@@ -153,9 +153,11 @@ impl Transaction {
                     )
                 })?;
                 let expected = if table.is_empty() {
-                    expected
+                    expected.to_string()
                 } else {
-                    expected.replace(" ON nx_records(", &format!(" ON {table} USING btree ("))
+                    expected
+                        .as_str()
+                        .replace(" ON nx_records(", &format!(" ON {table} USING btree ("))
                 };
                 // pg_get_indexdef quotes BIGINT constants beyond INT4 range.
                 let definition =
@@ -179,7 +181,8 @@ impl Transaction {
                 name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'),
                 "invalid membership index name"
             );
-            self.execute(&format!("DROP INDEX {name}"), &[]).await?;
+            self.execute(&sql!("DROP INDEX {}", Sql::identifier(&name)?), &[])
+                .await?;
         }
         Ok(())
     }

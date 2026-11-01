@@ -1,6 +1,7 @@
 //! Provider-portable blob metadata. Every statement uses the existing
 //! transaction-owned root statement meter; no independent upload allowance. Caller owns commit/rollback/unknown-outcome recovery. These methods
 //! perform no filesystem work and mint no acknowledged-commit proof.
+use crate::sql::{JoinSql, Sql, sql};
 use crate::{
     blob_state::{
         Association, Commitment, GcClaim, Generation, Metadata, State, Transition, UploadBinding,
@@ -25,12 +26,12 @@ pub(crate) struct MetadataContext<'a> {
     pub(crate) tx: &'a mut Transaction,
 }
 impl MetadataContext<'_> {
-    async fn execute(&mut self, sql: &str, params: &[Param]) -> Result<u64> {
+    async fn execute(&mut self, sql: impl Into<Sql>, params: &[Param]) -> Result<u64> {
         self.tx.execute(sql, params).await
     }
     async fn fetch<const N: usize>(
         &mut self,
-        sql: &str,
+        sql: impl Into<Sql>,
         params: &[Param],
     ) -> Result<Vec<[String; N]>> {
         self.tx.fetch(sql, params).await
@@ -76,7 +77,7 @@ impl MetadataContext<'_> {
             .iter()
             .map(|(name, max)| self.tx.bounded_text(name, *max))
             .collect::<Vec<_>>()
-            .join(",");
+            .joined(",");
         let counters = [
             "serial",
             "reserved_bytes",
@@ -86,10 +87,10 @@ impl MetadataContext<'_> {
             "anonymous_used_bytes",
         ]
         .iter()
-        .map(|name| self.tx.bounded_text(&format!("CAST({name} AS TEXT)"), 20))
+        .map(|name| self.tx.bounded_text(&sql!("CAST({name} AS TEXT)"), 20))
         .collect::<Vec<_>>()
-        .join(",");
-        let rows=self.fetch::<10>(&format!("SELECT {text},{counters},CASE WHEN EXISTS(SELECT 1 FROM nx_blobs) OR EXISTS(SELECT 1 FROM nx_blob_subjects) OR EXISTS(SELECT 1 FROM nx_blob_orphans) THEN '0' ELSE '1' END FROM nx_blob_store WHERE singleton=1"),&[]).await?;
+        .joined(",");
+        let rows=self.fetch::<10>(&sql!("SELECT {text},{counters},CASE WHEN EXISTS(SELECT 1 FROM nx_blobs) OR EXISTS(SELECT 1 FROM nx_blob_subjects) OR EXISTS(SELECT 1 FROM nx_blob_orphans) THEN '0' ELSE '1' END FROM nx_blob_store WHERE singleton=1"),&[]).await?;
         ensure!(rows.len() <= 1, "duplicate store pairing");
         let Some(
             [
@@ -176,7 +177,7 @@ impl MetadataContext<'_> {
     pub(crate) async fn page(&mut self, after: &str) -> Result<Vec<BlobRow>> {
         let columns = self.row_columns();
         self.fetch::<22>(
-            &format!("SELECT {columns} FROM nx_blobs WHERE slot>$1 ORDER BY slot LIMIT 16"),
+            &sql!("SELECT {columns} FROM nx_blobs WHERE slot>$1 ORDER BY slot LIMIT 16"),
             &[after.into()],
         )
         .await?
@@ -184,7 +185,7 @@ impl MetadataContext<'_> {
         .map(BlobRow::parse)
         .collect()
     }
-    async fn load(&mut self, column: &str, value: &str) -> Result<Option<BlobRow>> {
+    async fn load(&mut self, column: &'static str, value: &str) -> Result<Option<BlobRow>> {
         ensure!(
             matches!(column, "slot" | "blob_ref" | "object_key"),
             "invalid metadata lookup"
@@ -192,14 +193,14 @@ impl MetadataContext<'_> {
         let select = self.row_columns();
         let rows = self
             .fetch::<22>(
-                &format!("SELECT {select} FROM nx_blobs WHERE {column}=$1"),
+                &sql!("SELECT {select} FROM nx_blobs WHERE {column}=$1"),
                 &[value.into()],
             )
             .await?;
         ensure!(rows.len() <= 1, "duplicate blob identity");
         rows.into_iter().next().map(BlobRow::parse).transpose()
     }
-    fn row_columns(&self) -> String {
+    fn row_columns(&self) -> Sql {
         const TEXT: &[(&str, usize)] = &[
             ("slot", 64),
             ("blob_ref", 67),
@@ -245,11 +246,11 @@ impl MetadataContext<'_> {
                 if let Some((_, maximum)) = TEXT.iter().find(|(name, _)| name == column) {
                     self.tx.bounded_text(column, *maximum)
                 } else {
-                    self.tx.bounded_text(&format!("CAST({column} AS TEXT)"), 20)
+                    self.tx.bounded_text(&sql!("CAST({column} AS TEXT)"), 20)
                 }
             })
             .collect::<Vec<_>>()
-            .join(",")
+            .joined(",")
     }
     /// Caller has already verified origin/CSRF/session/submission/upload ticket,
     /// probed the existing semantic receipt and serialized the stable nonce.
@@ -289,10 +290,10 @@ impl MetadataContext<'_> {
             None => (1, 1, request.policy.limits.live_stages, u64::MAX),
         };
         let stages = cap_stages.min(request.policy.limits.live_stages);
-        let changed=self.fetch::<1>(&format!("UPDATE nx_blob_store SET reserved_bytes=reserved_bytes+$2,objects=objects+1,anonymous_reserved_bytes=anonymous_reserved_bytes+$3,serial=serial+1 WHERE singleton=1 AND identity=$1 AND pair_state='paired' AND NOT EXISTS(SELECT 1 FROM nx_blob_orphans) AND serial<9223372036854775807 AND reserved_bytes<=$4-used_bytes-$2 AND objects<$5 AND ($6=0 OR anonymous_reserved_bytes<=$7-anonymous_used_bytes-$2) AND (SELECT COUNT(*) FROM (SELECT slot FROM nx_blobs WHERE subject=$8 AND state IN ('uploading','staged') LIMIT 5) subject_stages)<$9 AND ($6=0 OR (SELECT COUNT(*) FROM (SELECT slot FROM nx_blobs WHERE anonymous=1 AND state IN ('uploading','staged') LIMIT 17) deployment_stages)<$10) AND {} RETURNING CAST(serial AS TEXT)", counter_predicate(CounterTable::Store)),&[
+        let changed=self.fetch::<1>(&sql!("UPDATE nx_blob_store SET reserved_bytes=reserved_bytes+$2,objects=objects+1,anonymous_reserved_bytes=anonymous_reserved_bytes+$3,serial=serial+1 WHERE singleton=1 AND identity=$1 AND pair_state='paired' AND NOT EXISTS(SELECT 1 FROM nx_blob_orphans) AND serial<9223372036854775807 AND reserved_bytes<=$4-used_bytes-$2 AND objects<$5 AND ($6=0 OR anonymous_reserved_bytes<=$7-anonymous_used_bytes-$2) AND (SELECT COUNT(*) FROM (SELECT slot FROM nx_blobs WHERE subject=$8 AND state IN ('uploading','staged') LIMIT 5) subject_stages)<$9 AND ($6=0 OR (SELECT COUNT(*) FROM (SELECT slot FROM nx_blobs WHERE anonymous=1 AND state IN ('uploading','staged') LIMIT 17) deployment_stages)<$10) AND {} RETURNING CAST(serial AS TEXT)", counter_predicate(CounterTable::Store)),&[
             request.store.as_str().into(),number(request.limit)?,number(anon_bytes)?,number(request.policy.limits.app_bytes)?,i64::from(request.policy.limits.objects).into(),i64::from(anonymous).into(),number(deployment_bytes)?,request.binding.subject.as_str().into(),i64::from(stages).into(),i64::from(deployment_stages).into()]).await?;
         ensure!(changed.len() == 1, "blob app quota unavailable");
-        let changed=self.fetch::<1>(&format!("INSERT INTO nx_blob_subjects(subject,anonymous,reserved_bytes,used_bytes,objects) VALUES($1,$2,$3,0,1) ON CONFLICT(subject) DO UPDATE SET reserved_bytes=nx_blob_subjects.reserved_bytes+$3,objects=nx_blob_subjects.objects+1 WHERE nx_blob_subjects.anonymous=$2 AND nx_blob_subjects.objects<65536 AND ($2=0 OR nx_blob_subjects.reserved_bytes<=$4-nx_blob_subjects.used_bytes-$3) AND {} RETURNING subject", counter_predicate(CounterTable::Subject)),&[
+        let changed=self.fetch::<1>(&sql!("INSERT INTO nx_blob_subjects(subject,anonymous,reserved_bytes,used_bytes,objects) VALUES($1,$2,$3,0,1) ON CONFLICT(subject) DO UPDATE SET reserved_bytes=nx_blob_subjects.reserved_bytes+$3,objects=nx_blob_subjects.objects+1 WHERE nx_blob_subjects.anonymous=$2 AND nx_blob_subjects.objects<65536 AND ($2=0 OR nx_blob_subjects.reserved_bytes<=$4-nx_blob_subjects.used_bytes-$3) AND {} RETURNING subject", counter_predicate(CounterTable::Subject)),&[
             request.binding.subject.as_str().into(),i64::from(anonymous).into(),number(request.limit)?,number(cap_bytes.min(i64::MAX as u64))?]).await?;
         ensure!(changed.len() == 1, "blob subject quota unavailable");
         let key = ObjectKey::random()?;
@@ -358,10 +359,10 @@ impl MetadataContext<'_> {
             "upload quota transition mismatch"
         );
         let anonymous = i64::from(row.anonymous);
-        let changed=self.execute(&format!("UPDATE nx_blob_store SET reserved_bytes=reserved_bytes-$2,used_bytes=used_bytes+$3,anonymous_reserved_bytes=anonymous_reserved_bytes-$2*$4,anonymous_used_bytes=anonymous_used_bytes+$3*$4,serial=serial+1 WHERE singleton=1 AND identity=$1 AND pair_state='paired' AND reserved_bytes>=$2 AND anonymous_reserved_bytes>=$2*$4 AND objects>0 AND serial<9223372036854775807 AND used_bytes<=9223372036854775807-$3 AND anonymous_used_bytes<=9223372036854775807-$3*$4 AND {}", counter_predicate(CounterTable::Store)),&[store.as_str().into(),number(row.metadata.reserved)?,number(next.bytes)?,anonymous.into()]).await?;
+        let changed=self.execute(&sql!("UPDATE nx_blob_store SET reserved_bytes=reserved_bytes-$2,used_bytes=used_bytes+$3,anonymous_reserved_bytes=anonymous_reserved_bytes-$2*$4,anonymous_used_bytes=anonymous_used_bytes+$3*$4,serial=serial+1 WHERE singleton=1 AND identity=$1 AND pair_state='paired' AND reserved_bytes>=$2 AND anonymous_reserved_bytes>=$2*$4 AND objects>0 AND serial<9223372036854775807 AND used_bytes<=9223372036854775807-$3 AND anonymous_used_bytes<=9223372036854775807-$3*$4 AND {}", counter_predicate(CounterTable::Store)),&[store.as_str().into(),number(row.metadata.reserved)?,number(next.bytes)?,anonymous.into()]).await?;
         ensure!(changed == 1, "blob app reservation mismatch");
         guard.check()?;
-        let changed=self.execute(&format!("UPDATE nx_blob_subjects SET reserved_bytes=reserved_bytes-$2,used_bytes=used_bytes+$3 WHERE subject=$1 AND anonymous=$4 AND reserved_bytes>=$2 AND objects>0 AND used_bytes<=9223372036854775807-$3 AND {}", counter_predicate(CounterTable::Subject)),&[row.metadata.binding.subject.as_str().into(),number(row.metadata.reserved)?,number(next.bytes)?,anonymous.into()]).await?;
+        let changed=self.execute(&sql!("UPDATE nx_blob_subjects SET reserved_bytes=reserved_bytes-$2,used_bytes=used_bytes+$3 WHERE subject=$1 AND anonymous=$4 AND reserved_bytes>=$2 AND objects>0 AND used_bytes<=9223372036854775807-$3 AND {}", counter_predicate(CounterTable::Subject)),&[row.metadata.binding.subject.as_str().into(),number(row.metadata.reserved)?,number(next.bytes)?,anonymous.into()]).await?;
         ensure!(changed == 1, "blob subject reservation mismatch");
         guard.check()?;
         let changed=self.execute("UPDATE nx_blobs SET state='staged',generation=$2,reserved_bytes=0,actual_bytes=$3,sha256=$4,upload_handle=$5 WHERE slot=$1 AND state='uploading' AND generation=$6 AND owner_process=$7 AND expires_ms>$8 AND subject=$9 AND context=$10 AND input=$11",&[
@@ -383,7 +384,7 @@ impl MetadataContext<'_> {
         now: Timestamp,
     ) -> Result<LockedStage> {
         let columns = self.row_columns();
-        let rows=self.fetch::<22>(&format!("UPDATE nx_blobs SET generation=generation WHERE upload_handle=$1 AND state='staged' AND slot=$2 AND subject=$3 AND context=$4 AND input=$5 AND expires_ms>$6 RETURNING {columns}"),&[
+        let rows=self.fetch::<22>(&sql!("UPDATE nx_blobs SET generation=generation WHERE upload_handle=$1 AND state='staged' AND slot=$2 AND subject=$3 AND context=$4 AND input=$5 AND expires_ms>$6 RETURNING {columns}"),&[
             handle.as_str().into(),binding.slot.as_str().into(),binding.subject.as_str().into(),binding.context.as_str().into(),binding.input.as_str().into(),now.unix_millis().into()]).await?;
         ensure!(
             rows.len() == 1,
@@ -434,7 +435,7 @@ impl MetadataContext<'_> {
         // Bound the selected keys BEFORE any UPDATE, including malformed owners
         // with extra associations. Returning fewer than expected also rejects.
         let limit = expected.len() + 1;
-        let rows=self.fetch::<4>(&format!("SELECT {slot},{field},{reference},{generation} FROM nx_blobs WHERE state='attached' AND owner_resource=$1 AND owner_id=$2 AND owner_incarnation=$3 ORDER BY slot LIMIT {limit}"),&[resource.into(),id.into(),incarnation.into()]).await?;
+        let rows=self.fetch::<4>(&sql!("SELECT {slot},{field},{reference},{generation} FROM nx_blobs WHERE state='attached' AND owner_resource=$1 AND owner_id=$2 AND owner_incarnation=$3 ORDER BY slot LIMIT {limit}"),&[resource.into(),id.into(),incarnation.into()]).await?;
         ensure!(
             rows.len() == expected.len(),
             "blob detachment association mismatch"
@@ -455,12 +456,12 @@ impl MetadataContext<'_> {
             let first = params.len() + 1;
             params.push(slot.as_str().into());
             params.push(generation.value().into());
-            selected.push(format!("(slot=${first} AND generation=${})", first + 1));
+            selected.push(sql!("(slot=${first} AND generation=${})", first + 1));
         }
         if selected.is_empty() {
             return Ok(());
         }
-        let changed=self.execute(&format!("UPDATE nx_blobs SET state='unreferenced',generation=generation+1 WHERE state='attached' AND owner_resource=$1 AND owner_id=$2 AND owner_incarnation=$3 AND ({})",selected.join(" OR ")),&params).await?;
+        let changed=self.execute(&sql!("UPDATE nx_blobs SET state='unreferenced',generation=generation+1 WHERE state='attached' AND owner_resource=$1 AND owner_id=$2 AND owner_incarnation=$3 AND ({})",selected.joined(" OR ")),&params).await?;
         ensure!(
             changed == expected.len() as u64,
             "blob detachment fence rejected"
@@ -546,13 +547,13 @@ impl MetadataContext<'_> {
         let r = number(row.metadata.reserved)?;
         let u = number(row.metadata.bytes)?;
         let anonymous = i64::from(row.anonymous);
-        let changed=self.execute(&format!("UPDATE nx_blob_store SET reserved_bytes=reserved_bytes-$2,used_bytes=used_bytes-$3,objects=objects-1,anonymous_reserved_bytes=anonymous_reserved_bytes-$2*$4,anonymous_used_bytes=anonymous_used_bytes-$3*$4,serial=serial+1 WHERE singleton=1 AND identity=$1 AND pair_state='paired' AND reserved_bytes>=$2 AND used_bytes>=$3 AND objects>0 AND anonymous_reserved_bytes>=$2*$4 AND anonymous_used_bytes>=$3*$4 AND serial<9223372036854775807 AND {}", counter_predicate(CounterTable::Store)),&[store.as_str().into(),r.clone(),u.clone(),anonymous.into()]).await?;
+        let changed=self.execute(&sql!("UPDATE nx_blob_store SET reserved_bytes=reserved_bytes-$2,used_bytes=used_bytes-$3,objects=objects-1,anonymous_reserved_bytes=anonymous_reserved_bytes-$2*$4,anonymous_used_bytes=anonymous_used_bytes-$3*$4,serial=serial+1 WHERE singleton=1 AND identity=$1 AND pair_state='paired' AND reserved_bytes>=$2 AND used_bytes>=$3 AND objects>0 AND anonymous_reserved_bytes>=$2*$4 AND anonymous_used_bytes>=$3*$4 AND serial<9223372036854775807 AND {}", counter_predicate(CounterTable::Store)),&[store.as_str().into(),r.clone(),u.clone(),anonymous.into()]).await?;
         ensure!(changed == 1, "blob deletion app counter mismatch");
-        let changed=self.execute(&format!("UPDATE nx_blob_subjects SET reserved_bytes=reserved_bytes-$2,used_bytes=used_bytes-$3,objects=objects-1 WHERE subject=$1 AND anonymous=$4 AND reserved_bytes>=$2 AND used_bytes>=$3 AND objects>0 AND {}", counter_predicate(CounterTable::Subject)),&[row.metadata.binding.subject.as_str().into(),r,u,anonymous.into()]).await?;
+        let changed=self.execute(&sql!("UPDATE nx_blob_subjects SET reserved_bytes=reserved_bytes-$2,used_bytes=used_bytes-$3,objects=objects-1 WHERE subject=$1 AND anonymous=$4 AND reserved_bytes>=$2 AND used_bytes>=$3 AND objects>0 AND {}", counter_predicate(CounterTable::Subject)),&[row.metadata.binding.subject.as_str().into(),r,u,anonymous.into()]).await?;
         ensure!(changed == 1, "blob deletion subject counter mismatch");
         let changed=self.execute("UPDATE nx_blobs SET state='deleted',generation=$2,reserved_bytes=0,actual_bytes=0,claimed_ms=$3 WHERE slot=$1 AND state='deleting' AND generation=$4 AND owner_process=$5",&[row.metadata.binding.slot.as_str().into(),transition.next.generation.value().into(),now.unix_millis().into(),transition.expected.value().into(),row.process.as_str().into()]).await?;
         ensure!(changed == 1, "blob deletion fence rejected");
-        self.execute(&format!("DELETE FROM nx_blob_subjects WHERE subject=$1 AND reserved_bytes=0 AND used_bytes=0 AND objects=0 AND {}", counter_predicate(CounterTable::Subject)),&[row.metadata.binding.subject.as_str().into()]).await?;
+        self.execute(&sql!("DELETE FROM nx_blob_subjects WHERE subject=$1 AND reserved_bytes=0 AND used_bytes=0 AND objects=0 AND {}", counter_predicate(CounterTable::Subject)),&[row.metadata.binding.subject.as_str().into()]).await?;
         Ok(BlobRow {
             metadata: transition.next,
             claimed: now,
@@ -802,8 +803,8 @@ enum CounterTable {
     Store,
     Subject,
 }
-fn counter_predicate(table: CounterTable) -> String {
-    let (prefix, columns): (&str, &[&str]) = match table {
+fn counter_predicate(table: CounterTable) -> Sql {
+    let (prefix, columns): (&'static str, &[&'static str]) = match table {
         CounterTable::Store => (
             "nx_blob_store",
             &[
@@ -823,12 +824,10 @@ fn counter_predicate(table: CounterTable) -> String {
     columns
         .iter()
         .map(|column| {
-            format!(
-                "CAST({prefix}.{column} AS TEXT)=CAST(CAST({prefix}.{column} AS BIGINT) AS TEXT)"
-            )
+            sql!("CAST({prefix}.{column} AS TEXT)=CAST(CAST({prefix}.{column} AS BIGINT) AS TEXT)")
         })
         .collect::<Vec<_>>()
-        .join(" AND ")
+        .joined(" AND ")
 }
 
 // This is a transaction proposal, never a commit acknowledgement or Ready token.

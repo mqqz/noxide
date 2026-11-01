@@ -293,7 +293,7 @@ impl Authority {
         operation: &Operation,
         params: &mut Vec<Param>,
         calls: &mut usize,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<crate::sql::Sql>> {
         let mut plans = BTreeMap::new();
         for plan in membership::plans(manifest, operation)? {
             let storage = self.storage(tx, manifest, &plan, calls).await?;
@@ -328,7 +328,7 @@ impl Authority {
             if resource.expiry.is_some() {
                 self.time.ok_or(TemporalUnavailable::NotStarted)?;
             }
-            String::new()
+            crate::sql::Sql::empty()
         } else {
             expiry::sql(
                 tx.query_provider()?,
@@ -340,7 +340,7 @@ impl Authority {
         };
         Ok(clauses
             .into_iter()
-            .map(|clause| format!("({clause}){expires}"))
+            .map(|clause| crate::sql::sql!("({clause}){expires}"))
             .collect())
     }
 }

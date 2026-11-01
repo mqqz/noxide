@@ -238,7 +238,7 @@ async fn contract(db: Database, descending: bool) {
     for (column, id, index) in [
         ("owner".to_owned(), &alice, "nx_records_owner"),
         (
-            tx.field_expression("recipient").unwrap(),
+            tx.field_expression("recipient").unwrap().to_string(),
             &bob,
             "nx_a_1_recipient_i",
         ),

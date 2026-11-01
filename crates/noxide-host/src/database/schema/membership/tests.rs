@@ -401,7 +401,8 @@ async fn contract(db: Database) {
         1,
         tuple,
     )
-    .unwrap();
+    .unwrap()
+    .to_string();
     t.rollback().await.unwrap();
     for spoof in [
         native.replacen("CREATE UNIQUE INDEX", "CREATE INDEX", 1),

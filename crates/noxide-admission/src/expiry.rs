@@ -2,6 +2,7 @@
 use crate::{
     manifest,
     query_plan::NativeProvider,
+    sql::{Param, Sql, sql},
     temporal::{AttemptTime, TemporalUnavailable},
 };
 use anyhow::{Context, Result, ensure};
@@ -93,14 +94,12 @@ pub fn check_write(
     Ok(())
 }
 
-pub fn numeric_sql(provider: NativeProvider, field: &str, alias: &str) -> Result<String> {
+pub fn numeric_sql(provider: NativeProvider, field: &str, alias: &str) -> Result<Sql> {
     // Alias is a host-owned SQL identifier; fields are independently admitted.
     ensure!(manifest::identifier(alias), "invalid timestamp table alias");
-    Ok(format!(
+    Ok(sql!(
         "CAST({} AS BIGINT)",
-        provider
-            .field_expression(field)?
-            .replacen("fields", &format!("{alias}.fields"), 1)
+        provider.qualified_field(alias, field)?
     ))
 }
 
@@ -109,10 +108,10 @@ pub fn sql(
     resource: &Resource,
     time: Option<AttemptTime>,
     alias: &str,
-    params: &mut Vec<crate::sql::Param>,
-) -> Result<String> {
+    params: &mut Vec<Param>,
+) -> Result<Sql> {
     let Some(expiry) = &resource.expiry else {
-        return Ok(String::new());
+        return Ok(Sql::empty());
     };
     params.push(
         time.ok_or(TemporalUnavailable::NotStarted)?
@@ -120,7 +119,7 @@ pub fn sql(
             .unix_millis()
             .into(),
     );
-    Ok(format!(
+    Ok(sql!(
         " AND {}>${}",
         numeric_sql(provider, &expiry.field, alias)?,
         params.len()

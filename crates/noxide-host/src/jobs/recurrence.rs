@@ -1,6 +1,7 @@
 //! Resumable operator recurrence bookkeeping. Query execution/authorization uses
 //! the existing query adapter; this module stores its bounded internal frontier.
 use super::{store::QueueContext, types::*};
+use crate::sql::sql;
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::{
     Fields,
@@ -96,7 +97,7 @@ impl QueueContext<'_> {
         let changed = self.tx.execute("UPDATE nx_job_recurring SET version=version WHERE deployment=$1 AND tenant=$2 AND name=$3", &[scope.deployment.as_str().into(), scope.tenant.as_str().into(), declaration.name.as_str().into()]).await?;
         ensure!(changed == 1, "recurring schedule not installed");
         let cursor = self.tx.bounded_text("cursor", 4096);
-        let rows = self.tx.fetch::<9>(&format!("SELECT contract,epoch,CAST(grant_version AS TEXT),CAST(version AS TEXT),state,CAST(next_ms AS TEXT),CAST(cutoff_ms AS TEXT),CAST(cutoff_seq AS TEXT),{cursor} FROM nx_job_recurring WHERE deployment=$1 AND tenant=$2 AND name=$3"), &[scope.deployment.as_str().into(), scope.tenant.as_str().into(), declaration.name.as_str().into()]).await?;
+        let rows = self.tx.fetch::<9>(&sql!("SELECT contract,epoch,CAST(grant_version AS TEXT),CAST(version AS TEXT),state,CAST(next_ms AS TEXT),CAST(cutoff_ms AS TEXT),CAST(cutoff_seq AS TEXT),{cursor} FROM nx_job_recurring WHERE deployment=$1 AND tenant=$2 AND name=$3"), &[scope.deployment.as_str().into(), scope.tenant.as_str().into(), declaration.name.as_str().into()]).await?;
         let [
             stored_contract,
             stored_epoch,

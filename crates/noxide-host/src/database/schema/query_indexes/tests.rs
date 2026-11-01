@@ -26,7 +26,8 @@ async fn contract(db: Database) {
     let name = requirement.name(storage);
     let expected = requirement
         .native_sql(tx.query_provider().unwrap(), storage)
-        .unwrap();
+        .unwrap()
+        .to_string();
     tx.execute(&expected, &[]).await.unwrap();
     let definitions = tx.query_definitions().await.unwrap();
     tx.verify_query_definition(&requirement, storage, definitions.get(&name).unwrap())
@@ -58,7 +59,8 @@ async fn contract(db: Database) {
         tx.execute(
             &requirement
                 .native_sql(tx.query_provider().unwrap(), storage)
-                .unwrap(),
+                .unwrap()
+                .to_string(),
             &[],
         )
         .await
@@ -83,7 +85,8 @@ async fn contract(db: Database) {
             .unwrap();
         let mut sql = requirement
             .native_sql(tx.query_provider().unwrap(), storage)
-            .unwrap();
+            .unwrap()
+            .to_string();
         match defect {
             "table" => {
                 tx.execute(

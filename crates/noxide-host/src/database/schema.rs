@@ -72,9 +72,7 @@ impl Transaction {
         let history = self.bounded_text("history", 32_768);
         let rows = self
             .fetch::<2>(
-                &format!(
-                    "SELECT {definition},{history} FROM nx_schema_definition WHERE singleton=1"
-                ),
+                &sql!("SELECT {definition},{history} FROM nx_schema_definition WHERE singleton=1"),
                 &[],
             )
             .await?;
@@ -251,20 +249,25 @@ impl Transaction {
             {
                 let expression = self.field_expression(&field.name)?;
                 for (suffix, columns) in [("i", ""), ("t", "tenant,")] {
-                    self.execute(&format!("CREATE INDEX nx_a_{storage:x}_{}_{suffix} ON nx_records(resource, ({expression}), {columns}created_seq) WHERE resource={storage}", field.name), &[]).await?;
+                    let index =
+                        Sql::identifier(&format!("nx_a_{storage:x}_{}_{suffix}", field.name))?;
+                    self.execute(&sql!("CREATE INDEX {index} ON nx_records(resource, ({expression}), {columns}created_seq) WHERE resource={storage}"), &[]).await?;
                 }
             }
             for field in crate::manifest::reference_fields(resource) {
                 let storage = self.storage_key(&resource.name).await?;
                 let expression = self.field_expression(&field.name)?;
-                self.execute(&format!("CREATE INDEX nx_r_{storage:x}_{} ON nx_records(resource, ({expression}), created_seq) WHERE resource={storage}", field.name), &[]).await?;
+                let index = Sql::identifier(&format!("nx_r_{storage:x}_{}", field.name))?;
+                self.execute(&sql!("CREATE INDEX {index} ON nx_records(resource, ({expression}), created_seq) WHERE resource={storage}"), &[]).await?;
                 for column in ["owner", "tenant"].into_iter().filter(|_| {
                     resource
                         .gate
                         .as_ref()
                         .is_some_and(|gate| gate.field == field.name)
                 }) {
-                    self.execute(&format!("CREATE INDEX nx_r_{storage:x}_{}_{column} ON nx_records(resource, ({expression}), {column}, created_seq) WHERE resource={storage}", field.name),&[]).await?;
+                    let index =
+                        Sql::identifier(&format!("nx_r_{storage:x}_{}_{column}", field.name))?;
+                    self.execute(&sql!("CREATE INDEX {index} ON nx_records(resource, ({expression}), {column}, created_seq) WHERE resource={storage}"),&[]).await?;
                 }
             }
         }
@@ -283,7 +286,7 @@ impl Transaction {
                 let child_storage = self.storage_key(&child.name).await?;
                 let parent_storage = self.storage_key(parent).await?;
                 let expression = self.field_expression(&field.name)?;
-                let missing = self.fetch::<1>(&format!("SELECT CAST(child.id AS TEXT) FROM (SELECT id,{expression} AS parent_id FROM nx_records WHERE resource=$1) child WHERE NOT EXISTS (SELECT 1 FROM nx_records parent WHERE parent.resource=$2 AND CAST(parent.id AS TEXT)=child.parent_id) LIMIT 1"), &[child_storage.into(), parent_storage.into()]).await?;
+                let missing = self.fetch::<1>(&sql!("SELECT CAST(child.id AS TEXT) FROM (SELECT id,{expression} AS parent_id FROM nx_records WHERE resource=$1) child WHERE NOT EXISTS (SELECT 1 FROM nx_records parent WHERE parent.resource=$2 AND CAST(parent.id AS TEXT)=child.parent_id) LIMIT 1"), &[child_storage.into(), parent_storage.into()]).await?;
                 ensure!(missing.is_empty(), "migration would orphan a child record");
             }
         }
@@ -298,7 +301,7 @@ impl Transaction {
         let value = self.bounded_text("fields", 32_768);
         let rows = self
             .fetch::<1>(
-                &format!("SELECT {value} FROM nx_records WHERE resource=$1 AND id=$2"),
+                &sql!("SELECT {value} FROM nx_records WHERE resource=$1 AND id=$2"),
                 &[storage.into(), id.into()],
             )
             .await?;
@@ -414,7 +417,8 @@ impl Transaction {
                 name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'),
                 "invalid derived index name"
             );
-            self.execute(&format!("DROP INDEX {name}"), &[]).await?;
+            self.execute(&sql!("DROP INDEX {}", Sql::identifier(&name)?), &[])
+                .await?;
         }
         for resource in &source {
             let storage = self.storage_key(&resource.name).await?;
@@ -425,7 +429,10 @@ impl Transaction {
             {
                 for suffix in ["i", "t"] {
                     self.execute(
-                        &format!("DROP INDEX nx_a_{storage:x}_{}_{suffix}", field.name),
+                        &sql!(
+                            "DROP INDEX {}",
+                            Sql::identifier(&format!("nx_a_{storage:x}_{}_{suffix}", field.name))?
+                        ),
                         &[],
                     )
                     .await?;
@@ -440,13 +447,22 @@ impl Transaction {
                         .is_some_and(|gate| gate.field == field.name)
                 }) {
                     self.execute(
-                        &format!("DROP INDEX nx_r_{storage:x}_{}_{column}", field.name),
+                        &sql!(
+                            "DROP INDEX {}",
+                            Sql::identifier(&format!("nx_r_{storage:x}_{}_{column}", field.name))?
+                        ),
                         &[],
                     )
                     .await?;
                 }
-                self.execute(&format!("DROP INDEX nx_r_{storage:x}_{}", field.name), &[])
-                    .await?;
+                self.execute(
+                    &sql!(
+                        "DROP INDEX {}",
+                        Sql::identifier(&format!("nx_r_{storage:x}_{}", field.name))?
+                    ),
+                    &[],
+                )
+                .await?;
             }
         }
         let mut rebuild_search = std::collections::BTreeSet::new();

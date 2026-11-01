@@ -1,4 +1,5 @@
 //! Request-owned membership witnesses. Discarded on every retry and mutation.
+use crate::sql::{JoinSql, sql};
 use crate::{
     auth::Principal,
     database::Transaction,
@@ -105,7 +106,7 @@ impl Witnesses {
                 .iter()
                 .map(|key| {
                     params.push(key.clone().into());
-                    format!("SELECT ${} AS reference_id", params.len())
+                    sql!("SELECT ${} AS reference_id", params.len())
                 })
                 .collect();
             let lookup_scope = LookupScope {
@@ -121,9 +122,9 @@ impl Witnesses {
                 false,
                 &mut params,
             )?;
-            let sql = format!(
+            let sql = sql!(
                 "WITH requested AS ({}) SELECT reference_id,CASE WHEN {predicate} THEN '1' ELSE '0' END FROM requested LIMIT {}",
-                requested.join(" UNION ALL "),
+                requested.joined(" UNION ALL "),
                 MAX_BATCH
             );
             let witnesses = tx.fetch::<2>(&sql, &params).await?;

@@ -2,7 +2,12 @@
 //!
 //! This module grants no access until the integration in docs/membership.md is
 //! complete. In particular, ordinary resource expiry is not implemented here.
-use crate::{manifest, query_plan::NativeProvider, sql::Param, temporal::AttemptTime};
+use crate::{
+    manifest,
+    query_plan::NativeProvider,
+    sql::{Param, Sql, sql},
+    temporal::AttemptTime,
+};
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::{
     FieldKind, Fields, Resource, TextField,
@@ -213,7 +218,7 @@ impl Plan {
         scope: &LookupScope<'_>,
         protected_row: bool,
         params: &mut Vec<Param>,
-    ) -> Result<String> {
+    ) -> Result<Sql> {
         let LookupScope {
             account,
             tenant,
@@ -225,43 +230,39 @@ impl Plan {
             "membership scope unavailable"
         );
         params.push(account.into());
-        let account_parameter = format!("${}", params.len());
+        let account_parameter = params.len();
         params.push(tenant.into());
-        let tenant_parameter = format!("${}", params.len());
+        let tenant_parameter = params.len();
         let target = if protected_row {
             match &self.protected_reference {
-                Some(field) => provider.field_expression(&field.name)?.replacen(
-                    "fields",
-                    "nx_records.fields",
-                    1,
-                ),
-                None => "CAST(nx_records.id AS TEXT)".into(),
+                Some(field) => provider.qualified_field("nx_records", &field.name)?,
+                None => Sql::statement("CAST(nx_records.id AS TEXT)"),
             }
         } else {
-            "requested.reference_id".into()
+            Sql::statement("requested.reference_id")
         };
         let mut clauses = vec![
-            format!("m.resource={storage}"),
-            format!("m.tenant={tenant_parameter}"),
-            format!(
+            sql!("m.resource={storage}"),
+            sql!("m.tenant=${tenant_parameter}"),
+            sql!(
                 "{}={target}",
                 qualified_field(provider, &self.reference.name)?
             ),
-            format!(
-                "{}={account_parameter}",
+            sql!(
+                "{}=${account_parameter}",
                 qualified_field(provider, &self.account.name)?
             ),
         ];
         for (field, literal) in &self.declaration.conditions {
             params.push(literal_text(literal).into());
-            clauses.push(format!(
+            clauses.push(sql!(
                 "{}=${}",
                 qualified_field(provider, field)?,
                 params.len()
             ));
         }
         let expiry = crate::expiry::sql(provider, &self.resource, Some(time), "m", params)?;
-        clauses.push(format!("EXISTS(SELECT 1 FROM nx_accounts a WHERE a.id={account_parameter} AND a.tenant={tenant_parameter} AND a.state='active')"));
+        clauses.push(sql!("EXISTS(SELECT 1 FROM nx_accounts a WHERE a.id=${account_parameter} AND a.tenant=${tenant_parameter} AND a.state='active')"));
         let mut fence = Vec::new();
         for (column, value) in [
             ("contract", deployment.contract),
@@ -269,18 +270,18 @@ impl Plan {
             ("generation", deployment.generation),
         ] {
             params.push(value.into());
-            fence.push(format!("{column}=${}", params.len()));
+            fence.push(sql!("{column}=${}", params.len()));
         }
-        clauses.push(format!(
+        clauses.push(sql!(
             "EXISTS(SELECT 1 FROM nx_deployment WHERE singleton=1 AND {})",
-            fence.join(" AND ")
+            Sql::join(&fence, " AND ")
         ));
-        let exists = format!(
+        let exists = sql!(
             "EXISTS(SELECT 1 FROM nx_records m WHERE {}{expiry} LIMIT 1)",
-            clauses.join(" AND ")
+            Sql::join(&clauses, " AND ")
         );
         Ok(if protected_row {
-            format!("(nx_records.tenant={tenant_parameter} AND {exists})")
+            sql!("(nx_records.tenant=${tenant_parameter} AND {exists})")
         } else {
             exists
         })
@@ -345,10 +346,8 @@ pub struct LookupScope<'a> {
     pub time: AttemptTime,
 }
 
-fn qualified_field(provider: NativeProvider, field: &str) -> Result<String> {
-    Ok(provider
-        .field_expression(field)?
-        .replacen("fields", "m.fields", 1))
+fn qualified_field(provider: NativeProvider, field: &str) -> Result<Sql> {
+    provider.qualified_field("m", field)
 }
 
 /// Provider DDL for a declared immutable tuple. Schema integration must first
@@ -359,12 +358,12 @@ pub fn unique_index_sql(
     resource: &Resource,
     storage_resource: i64,
     unique: &MembershipUnique,
-) -> Result<String> {
+) -> Result<Sql> {
     ensure!(storage_resource > 0, "invalid membership storage resource");
     unique_fields(resource, unique)?;
-    Ok(format!(
+    Ok(sql!(
         "CREATE UNIQUE INDEX {} ON nx_records(resource,{}, {}) WHERE resource={storage_resource}",
-        unique_index_name(storage_resource, unique)?,
+        Sql::identifier(&unique_index_name(storage_resource, unique)?)?,
         provider.field_expression(&unique.reference)?,
         provider.field_expression(&unique.account)?
     ))

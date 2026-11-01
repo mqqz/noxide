@@ -491,7 +491,7 @@ impl Application {
         nonce: &str,
         subject: &str,
     ) -> Result<Option<[String; 2]>> {
-        let sql = format!(
+        let sql = sql!(
             "SELECT subject,contract,input,{} FROM nx_receipts WHERE nonce=$1",
             tx.bounded_text("outcome", 4096)
         );

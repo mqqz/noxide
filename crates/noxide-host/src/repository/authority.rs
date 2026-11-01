@@ -148,16 +148,16 @@ pub(super) async fn load_batch(
         for id in chunk {
             ensure!(*id > 0 && *id <= i64::MAX as u64, "invalid resource target");
             params.push((*id as i64).into());
-            slots.push(format!("${}", params.len()));
+            slots.push(sql!("${}", params.len()));
         }
         *calls = calls
             .checked_sub(1)
             .ok_or_else(|| anyhow::anyhow!("list database call budget"))?;
-        let sql = format!(
+        let sql = sql!(
             "SELECT CAST(id AS TEXT),COALESCE(owner,''),tenant,{},{},CAST(revision AS TEXT),COALESCE(CAST(cap_version AS TEXT),'') FROM nx_records WHERE resource=$1 AND resource={storage} AND id IN ({}) LIMIT 3",
             tx.bounded_text("fields", 20_000),
             tx.bounded_text("incarnation", 64),
-            slots.join(",")
+            slots.joined(",")
         );
         for [
             id,
@@ -334,7 +334,7 @@ impl Effects {
         &mut self,
         operation: &Operation,
         params: &mut Vec<Param>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<Sql>> {
         let mut calls = self.list_calls;
         let result = self
             .authority

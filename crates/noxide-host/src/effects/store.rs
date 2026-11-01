@@ -1,5 +1,6 @@
 //! Short transactional outbox operations. No network, file reads or commits.
 use super::types::*;
+use crate::sql::sql;
 use crate::{
     database::{Transaction, lifecycle::RequestScope},
     query_plan::NativeProvider,
@@ -81,7 +82,7 @@ impl OutboxContext<'_> {
         } else {
             ""
         };
-        let rows=self.tx.fetch::<4>(&format!("SELECT deployment,contract,epoch,state FROM nx_job_runtime WHERE singleton=1 AND EXISTS(SELECT 1 FROM nx_deployment WHERE singleton=1 AND generation=nx_job_runtime.deployment){suffix}"),&[]).await?;
+        let rows=self.tx.fetch::<4>(&sql!("SELECT deployment,contract,epoch,state FROM nx_job_runtime WHERE singleton=1 AND EXISTS(SELECT 1 FROM nx_deployment WHERE singleton=1 AND generation=nx_job_runtime.deployment){suffix}"),&[]).await?;
         let [generation, contract, epoch, state] =
             rows.first().context("effect runtime unavailable")?;
         ensure!(
@@ -110,7 +111,7 @@ impl OutboxContext<'_> {
             ""
         };
         let declaration = self.tx.bounded_text("declaration", 16384);
-        let rows=self.tx.fetch::<5>(&format!("SELECT {declaration},state,CAST(version AS TEXT),contract,epoch FROM nx_effect_grants WHERE deployment=$1 AND tenant=$2 AND endpoint=$3{suffix}"),&[scope.deployment.as_str().into(),scope.tenant.as_str().into(),endpoint.into()]).await?;
+        let rows=self.tx.fetch::<5>(&sql!("SELECT {declaration},state,CAST(version AS TEXT),contract,epoch FROM nx_effect_grants WHERE deployment=$1 AND tenant=$2 AND endpoint=$3{suffix}"),&[scope.deployment.as_str().into(),scope.tenant.as_str().into(),endpoint.into()]).await?;
         let Some([declaration, state, version, contract, epoch]) = rows.first() else {
             return Ok(None);
         };
@@ -123,7 +124,7 @@ impl OutboxContext<'_> {
         let mut secret_version = 0;
         let mut state = state.clone();
         if let Some(slot) = &binding.endpoint.secret_slot {
-            let rows=self.tx.fetch::<4>(&format!("SELECT CAST(version AS TEXT),state,contract,epoch FROM nx_effect_secrets WHERE deployment=$1 AND slot=$2{suffix}"),&[scope.deployment.as_str().into(),slot.as_str().into()]).await?;
+            let rows=self.tx.fetch::<4>(&sql!("SELECT CAST(version AS TEXT),state,contract,epoch FROM nx_effect_secrets WHERE deployment=$1 AND slot=$2{suffix}"),&[scope.deployment.as_str().into(),slot.as_str().into()]).await?;
             match rows.first() {
                 Some([version, secret_state, secret_contract, secret_epoch]) => {
                     secret_version = integer(version)?;
@@ -265,7 +266,7 @@ impl OutboxContext<'_> {
         } else {
             ""
         };
-        let rows=self.tx.fetch::<4>(&format!("SELECT o.id,o.tenant,CAST(o.fence AS TEXT),CAST(o.attempts AS TEXT) FROM nx_outbox o JOIN nx_effect_tenants t ON t.deployment=o.deployment AND t.tenant=o.tenant WHERE o.deployment=$1 AND ((o.state='pending' AND o.eligible_ms<=$2) OR (o.state='running' AND o.lease_until_ms<=$2)) AND o.id<>$3 AND o.id<>$4 AND $5<(SELECT concurrency FROM nx_effect_queue WHERE singleton=1) ORDER BY t.claim_seq,o.eligible_ms,o.id LIMIT 1{suffix}"),&[generation.into(),now.unix_millis().into(),active.first().map(String::as_str).unwrap_or("").into(),active.get(1).map(String::as_str).unwrap_or("").into(),i64::try_from(active.len())?.into()]).await?;
+        let rows=self.tx.fetch::<4>(&sql!("SELECT o.id,o.tenant,CAST(o.fence AS TEXT),CAST(o.attempts AS TEXT) FROM nx_outbox o JOIN nx_effect_tenants t ON t.deployment=o.deployment AND t.tenant=o.tenant WHERE o.deployment=$1 AND ((o.state='pending' AND o.eligible_ms<=$2) OR (o.state='running' AND o.lease_until_ms<=$2)) AND o.id<>$3 AND o.id<>$4 AND $5<(SELECT concurrency FROM nx_effect_queue WHERE singleton=1) ORDER BY t.claim_seq,o.eligible_ms,o.id LIMIT 1{suffix}"),&[generation.into(),now.unix_millis().into(),active.first().map(String::as_str).unwrap_or("").into(),active.get(1).map(String::as_str).unwrap_or("").into(),i64::try_from(active.len())?.into()]).await?;
         // An empty poll writes nothing. Bumping the shared sequence on every poll
         // made concurrent workers abort each other's preflight under SERIALIZABLE.
         let Some([id, tenant, fence, attempts]) = rows.first() else {
@@ -305,7 +306,7 @@ impl OutboxContext<'_> {
             }
         }
         let payload = self.tx.bounded_text("payload", MAX_CAPTURE_BYTES);
-        let rows=self.tx.fetch::<15>(&format!("SELECT {payload},payload_digest,state,CAST(attempts AS TEXT),CAST(first_eligible_ms AS TEXT),CAST(eligible_ms AS TEXT),contract,epoch,CAST(grant_version AS TEXT),CAST(secret_version AS TEXT),CAST(lease_until_ms AS TEXT),origin,CAST(ordinal AS TEXT),endpoint,CAST(fence AS TEXT) FROM nx_outbox WHERE id=$1 AND deployment=$2 AND tenant=$3 AND fence=$4"),&[claim.id.as_str().into(),claim.scope.deployment.as_str().into(),claim.scope.tenant.as_str().into(),claim.fence.into()]).await?;
+        let rows=self.tx.fetch::<15>(&sql!("SELECT {payload},payload_digest,state,CAST(attempts AS TEXT),CAST(first_eligible_ms AS TEXT),CAST(eligible_ms AS TEXT),contract,epoch,CAST(grant_version AS TEXT),CAST(secret_version AS TEXT),CAST(lease_until_ms AS TEXT),origin,CAST(ordinal AS TEXT),endpoint,CAST(fence AS TEXT) FROM nx_outbox WHERE id=$1 AND deployment=$2 AND tenant=$3 AND fence=$4"),&[claim.id.as_str().into(),claim.scope.deployment.as_str().into(),claim.scope.tenant.as_str().into(),claim.fence.into()]).await?;
         let Some(
             [
                 payload,

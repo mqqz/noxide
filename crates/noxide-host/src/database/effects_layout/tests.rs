@@ -134,7 +134,7 @@ async fn valid(db: &Database) {
 async fn forged(db: &Database, sql: &[&str]) {
     let mut tx = db.begin(deadline()).await.unwrap();
     for s in sql {
-        tx.execute(s, &[]).await.unwrap();
+        tx.execute(s.to_string(), &[]).await.unwrap();
     }
     tx.commit().await.unwrap();
     assert!(

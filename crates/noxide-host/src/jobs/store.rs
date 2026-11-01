@@ -1,4 +1,5 @@
 use super::types::*;
+use crate::sql::sql;
 use crate::{
     action_contract::ValidatedActionRejection,
     database::{Transaction, lifecycle::RequestScope},
@@ -86,7 +87,7 @@ impl QueueContext<'_> {
             NativeProvider::Postgres => " FOR SHARE",
             NativeProvider::Sqlite => "",
         };
-        let query = format!(
+        let query = sql!(
             "SELECT deployment,contract,epoch,state,CAST(pending_limit AS TEXT),CAST(tenant_limit AS TEXT),CAST(concurrency AS TEXT) FROM nx_job_runtime WHERE singleton=1 AND EXISTS(SELECT 1 FROM nx_deployment WHERE singleton=1 AND generation=nx_job_runtime.deployment){suffix}"
         );
         let rows = self.tx.fetch::<7>(&query, &[]).await?;
@@ -132,7 +133,7 @@ impl QueueContext<'_> {
             NativeProvider::Postgres => " FOR SHARE",
             NativeProvider::Sqlite => "",
         };
-        let query = format!(
+        let query = sql!(
             "SELECT {payload},state,CAST(version AS TEXT),contract,epoch FROM nx_job_grants WHERE deployment=$1 AND tenant=$2 AND worker=$3{suffix}"
         );
         let rows = self
@@ -168,7 +169,7 @@ impl QueueContext<'_> {
             ensure!(changed == 1, "job claim superseded");
         }
         let payload = self.tx.bounded_text("payload", MAX_JOB_BYTES);
-        let rows = self.tx.fetch::<17>(&format!("SELECT {payload},payload_digest,state,CAST(attempts AS TEXT),CAST(first_eligible_ms AS TEXT),CAST(fence AS TEXT),CAST(lease_until_ms AS TEXT),contract,epoch,worker,CAST(action AS TEXT),CAST(grant_version AS TEXT),CAST(due_ms AS TEXT),CAST(eligible_ms AS TEXT),origin,CAST(ordinal AS TEXT),COALESCE(reconciled_from,'') FROM nx_jobs WHERE id=$1 AND deployment=$2 AND tenant=$3"), &[claim.id.as_str().into(), claim.scope.deployment.as_str().into(), claim.scope.tenant.as_str().into()]).await?;
+        let rows = self.tx.fetch::<17>(&sql!("SELECT {payload},payload_digest,state,CAST(attempts AS TEXT),CAST(first_eligible_ms AS TEXT),CAST(fence AS TEXT),CAST(lease_until_ms AS TEXT),contract,epoch,worker,CAST(action AS TEXT),CAST(grant_version AS TEXT),CAST(due_ms AS TEXT),CAST(eligible_ms AS TEXT),origin,CAST(ordinal AS TEXT),COALESCE(reconciled_from,'') FROM nx_jobs WHERE id=$1 AND deployment=$2 AND tenant=$3"), &[claim.id.as_str().into(), claim.scope.deployment.as_str().into(), claim.scope.tenant.as_str().into()]).await?;
         let [
             payload,
             digest,
@@ -252,7 +253,7 @@ impl QueueContext<'_> {
         let outcome = self
             .tx
             .bounded_text("outcome", noxide_protocol::MAX_RESULT_BYTES);
-        let receipts = self.tx.fetch::<5>(&format!("SELECT subject,contract,CAST(action AS TEXT),input,{outcome} FROM nx_receipts WHERE nonce=$1"), &[row.job.id()?.into()]).await?;
+        let receipts = self.tx.fetch::<5>(&sql!("SELECT subject,contract,CAST(action AS TEXT),input,{outcome} FROM nx_receipts WHERE nonce=$1"), &[row.job.id()?.into()]).await?;
         let Some([subject, contract, action, input, outcome]) = receipts.first() else {
             return Ok(None);
         };
@@ -399,7 +400,7 @@ impl QueueContext<'_> {
             NativeProvider::Postgres => " FOR UPDATE OF j SKIP LOCKED",
             NativeProvider::Sqlite => "",
         };
-        let rows = self.tx.fetch::<5>(&format!("SELECT j.id,j.tenant,CAST(j.fence AS TEXT),CAST(j.attempts AS TEXT),j.state FROM nx_jobs j JOIN nx_job_tenants t ON t.deployment=j.deployment AND t.tenant=j.tenant WHERE j.deployment=$1 AND ((j.state='running' AND j.lease_until_ms<=$2) OR (j.state='pending' AND j.eligible_ms<=$2 AND $3=1)) ORDER BY t.claim_seq,j.eligible_ms,j.id LIMIT 1{suffix}"), &[deployment.into(), now.unix_millis().into(), i64::from(capacity).into()]).await?;
+        let rows = self.tx.fetch::<5>(&sql!("SELECT j.id,j.tenant,CAST(j.fence AS TEXT),CAST(j.attempts AS TEXT),j.state FROM nx_jobs j JOIN nx_job_tenants t ON t.deployment=j.deployment AND t.tenant=j.tenant WHERE j.deployment=$1 AND ((j.state='running' AND j.lease_until_ms<=$2) OR (j.state='pending' AND j.eligible_ms<=$2 AND $3=1)) ORDER BY t.claim_seq,j.eligible_ms,j.id LIMIT 1{suffix}"), &[deployment.into(), now.unix_millis().into(), i64::from(capacity).into()]).await?;
         let Some([id, tenant, fence, attempts, state]) = rows.first() else {
             return Ok(None);
         };

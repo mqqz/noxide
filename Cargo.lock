@@ -1384,6 +1384,7 @@ dependencies = [
  "base64",
  "noxide-assets",
  "noxide-protocol",
+ "noxide-sql",
  "noxide-test-support",
  "rand",
  "serde",
@@ -1470,6 +1471,7 @@ dependencies = [
  "noxide-protocol",
  "noxide-render",
  "noxide-sandbox",
+ "noxide-sql",
  "noxide-test-support",
  "rand",
  "rustix",
@@ -1544,6 +1546,18 @@ dependencies = [
  "wasmtime",
  "wat",
 ]
+
+[[package]]
+name = "noxide-sql"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "noxide-sql-macros",
+]
+
+[[package]]
+name = "noxide-sql-macros"
+version = "0.1.0"
 
 [[package]]
 name = "noxide-test-support"

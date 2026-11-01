@@ -1,5 +1,6 @@
 //! Fixed blob metadata layout. No blob authority is enabled by these tables.
 use super::{Backend, Transaction};
+use crate::sql::{JoinSql, sql};
 use anyhow::{Context, Result, ensure};
 
 pub(super) type Table = (&'static str, &'static [(&'static str, &'static str)]);
@@ -169,15 +170,15 @@ impl Transaction {
 
         let names = INDEXES
             .iter()
-            .map(|(name, _)| format!("'{name}'"))
+            .map(|(name, _)| sql!("'{name}'"))
             .collect::<Vec<_>>()
-            .join(",");
+            .joined(",");
         let sql = match self.backend {
             Backend::Closed => anyhow::bail!("closed transaction"),
-            Backend::Sqlite(_) => format!(
+            Backend::Sqlite(_) => sql!(
                 "SELECT name,CASE WHEN length(CAST(sql AS BLOB))<=2048 THEN sql ELSE NULL END,'','1' FROM sqlite_schema WHERE type='index' AND name IN ({names}) ORDER BY name LIMIT 11"
             ),
-            Backend::Postgres(_) => format!(
+            Backend::Postgres(_) => sql!(
                 "SELECT x.relname,CASE WHEN octet_length(pg_catalog.pg_get_indexdef(i.indexrelid))<=2048 THEN pg_catalog.pg_get_indexdef(i.indexrelid) ELSE NULL END,pg_catalog.quote_ident(n.nspname),CASE WHEN i.indisvalid AND i.indisready AND i.indislive AND NOT i.indisexclusion THEN '1' ELSE '0' END FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class t ON t.oid=i.indrelid JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace JOIN pg_catalog.pg_class x ON x.oid=i.indexrelid WHERE n.nspname=current_schema() AND x.relname IN ({names}) ORDER BY x.relname LIMIT 11"
             ),
         };

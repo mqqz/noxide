@@ -72,23 +72,23 @@ pub(crate) struct FrontierContext<'a> {
     pub(crate) created_seq_upper: Option<u64>,
 }
 impl FrontierContext<'_> {
-    fn upper_clause(&self, column: &str, params: &mut Vec<Param>) -> Result<String> {
+    fn upper_clause(&self, column: &'static str, params: &mut Vec<Param>) -> Result<Sql> {
         let Some(upper) = self.created_seq_upper else {
-            return Ok(String::new());
+            return Ok(Sql::empty());
         };
         params.push(i64::try_from(upper)?.into());
-        Ok(format!(" AND {column}<=${}", params.len()))
+        Ok(sql!(" AND {column}<=${}", params.len()))
     }
-    fn visibility_clause(&self, op: &Operation, params: &mut Vec<Param>) -> Result<String> {
+    fn visibility_clause(&self, op: &Operation, params: &mut Vec<Param>) -> Result<Sql> {
         if !manifest::is_public(op) {
-            return Ok(String::new());
+            return Ok(Sql::empty());
         }
         let visible = op
             .visibility
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("missing public visibility"))?;
         params.push(visible.equals.as_str().into());
-        Ok(format!(
+        Ok(sql!(
             " AND {}=${}",
             self.tx.field_expression(&visible.field)?,
             params.len()
@@ -99,10 +99,10 @@ impl FrontierContext<'_> {
         plan: &ListPlan,
         after: Option<&CursorKey>,
         params: &mut Vec<Param>,
-    ) -> Result<String> {
+    ) -> Result<Sql> {
         match &plan.order {
             ListOrder::Field { .. } => after.map_or_else(
-                || Ok(String::new()),
+                || Ok(Sql::empty()),
                 |key| {
                     plan.scalar(self.manifest)?
                         .keyset_sql(self.tx.query_provider()?, key, params)
@@ -111,12 +111,12 @@ impl FrontierContext<'_> {
             _ => plan.keyset(after, params),
         }
     }
-    fn query_order(&self, plan: &ListPlan) -> Result<String> {
+    fn query_order(&self, plan: &ListPlan) -> Result<Sql> {
         Ok(match &plan.order {
             ListOrder::Field { .. } => plan
                 .scalar(self.manifest)?
                 .order_sql(self.tx.query_provider()?)?,
-            _ => format!("created_seq {},id {}", plan.direction(), plan.direction()),
+            _ => sql!("created_seq {},id {}", plan.direction(), plan.direction()),
         })
     }
     fn query_restrictions(
@@ -124,7 +124,7 @@ impl FrontierContext<'_> {
         op: &Operation,
         plan: &ListPlan,
         params: &mut Vec<Param>,
-    ) -> Result<String> {
+    ) -> Result<Sql> {
         let mut clause = self.visibility_clause(op, params)?;
         if let Some(scope) = &plan.scope {
             params.push(
@@ -133,15 +133,15 @@ impl FrontierContext<'_> {
                     .to_string()
                     .into(),
             );
-            clause.push_str(&format!(
+            clause.push(sql!(
                 " AND {}=${}",
                 self.tx.field_expression(scope)?,
                 params.len()
             ));
         }
-        clause.push_str(&plan.selection_sql(self.tx.query_provider()?, params, self.params)?);
+        clause.push(plan.selection_sql(self.tx.query_provider()?, params, self.params)?);
         if let Some(range) = op.query.as_ref().and_then(|q| q.range.as_ref()) {
-            clause.push_str(&plan.scalar(self.manifest)?.range_sql(
+            clause.push(plan.scalar(self.manifest)?.range_sql(
                 self.tx.query_provider()?,
                 range,
                 self.params,
@@ -179,13 +179,10 @@ impl FrontierContext<'_> {
                     i64::from(*field).into(),
                     tokens[0].as_str().into(),
                 ];
-                let keyset = plan
-                    .keyset(after, &mut params)?
-                    .replace("created_seq", "p.created_seq")
-                    .replace(",id)", ",p.record_id)");
+                let keyset = plan.keyset_on(after, &mut params, "p.created_seq", "p.record_id")?;
                 let upper = self.upper_clause("p.created_seq", &mut params)?;
                 // Posting index fixes resource/field/token before ordered LIMIT.
-                let sql = format!(
+                let sql = sql!(
                     "SELECT CAST(p.created_seq AS TEXT),CAST(p.record_id AS TEXT),p.incarnation,CAST(p.revision AS TEXT) FROM nx_search_postings p WHERE p.resource=$1 AND p.field=$2 AND p.token=$3{keyset}{upper} ORDER BY p.created_seq {},p.record_id {} LIMIT {per}",
                     plan.direction(),
                     plan.direction()
@@ -234,15 +231,15 @@ impl FrontierContext<'_> {
                 self.principal,
                 &mut params,
             )
-            .join(" OR ");
+            .joined(" OR ");
             let restrictions = self.query_restrictions(op, plan, &mut params)?;
             let keyset = self.query_keyset(plan, after, &mut params)?;
             let upper = self.upper_clause("created_seq", &mut params)?;
             let scalar = match &plan.order {
                 ListOrder::Field { field, .. } => self.tx.field_expression(field)?,
-                _ => "CAST(created_seq AS TEXT)".to_owned(),
+                _ => Sql::statement("CAST(created_seq AS TEXT)"),
             };
-            let sql = format!(
+            let sql = sql!(
                 "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),incarnation,CAST(revision AS TEXT),{scalar} FROM nx_records WHERE resource=$1 AND resource={storage} AND ({policy}){restrictions}{keyset}{upper} ORDER BY {order} LIMIT {per}"
             );
             self.budget.spend(1)?;
@@ -363,23 +360,23 @@ impl Effects {
             let mut ids = Vec::new();
             for row in group {
                 params.push(i64::try_from(id(&row.key))?.into());
-                ids.push(format!("${}", params.len()));
+                ids.push(sql!("${}", params.len()));
             }
             let fields = fields
                 .iter()
-                .map(u8::to_string)
+                .map(|field| sql!("{field}"))
                 .collect::<Vec<_>>()
-                .join(",");
+                .joined(",");
             let mut slots = Vec::new();
             for token in tokens {
                 params.push(token.as_str().into());
-                slots.push(format!("${}", params.len()));
+                slots.push(sql!("${}", params.len()));
             }
             // All grouping is restricted to the already sealed finite identity set.
-            let sql = format!(
+            let sql = sql!(
                 "SELECT CAST(record_id AS TEXT),incarnation,CAST(revision AS TEXT) FROM nx_search_postings WHERE resource=$1 AND record_id IN ({}) AND field IN ({fields}) AND token IN ({}) GROUP BY record_id,incarnation,revision HAVING COUNT(DISTINCT token)={} LIMIT 64",
-                ids.join(","),
-                slots.join(","),
+                ids.joined(","),
+                slots.joined(","),
                 tokens.len()
             );
             self.charge_list_calls(1)?;
@@ -630,22 +627,22 @@ impl Effects {
             width = width
                 .checked_add(field.max_bytes as usize * 6 + field.name.len() + 8)
                 .ok_or_else(|| anyhow::anyhow!("facts width overflow"))?;
-            pieces.push(format!(
+            pieces.push(sql!(
                 "'{}',COALESCE({},'')",
-                field.name,
+                Sql::identifier(&field.name)?,
                 self.tx.field_expression(&field.name)?
             ));
         }
         let projection = if pieces.is_empty() {
-            "'{}'".to_owned()
+            Sql::statement("'{}'")
         } else {
-            format!(
+            sql!(
                 "{}({})",
                 match provider {
                     NativeProvider::Sqlite => "json_object",
                     NativeProvider::Postgres => "jsonb_build_object",
                 },
-                pieces.join(",")
+                pieces.joined(",")
             )
         };
         let chunk = (60_000 / width).clamp(1, 64);
@@ -659,12 +656,12 @@ impl Effects {
             let mut slots = Vec::new();
             for candidate in group {
                 params.push(i64::try_from(id(&candidate.key))?.into());
-                slots.push(format!("${}", params.len()));
+                slots.push(sql!("${}", params.len()));
             }
             self.charge_list_calls(1)?;
-            let sql = format!(
+            let sql = sql!(
                 "SELECT CAST(id AS TEXT),COALESCE(owner,''),tenant,incarnation,CAST(revision AS TEXT),CAST(created_seq AS TEXT),CAST({projection} AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage} AND id IN ({}) LIMIT {chunk}",
-                slots.join(",")
+                slots.joined(",")
             );
             for [
                 record,
