@@ -1,0 +1,20 @@
+[package]
+name = "noxide-confine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Operating-system confinement applied to Noxide processes before they start threads"
+
+[dependencies]
+anyhow.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "=0.4.7"
+libc = "0.2"
+seccompiler = "=0.5.0"
+
+[[test]]
+name = "confine"
+harness = false
