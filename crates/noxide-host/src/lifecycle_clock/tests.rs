@@ -498,3 +498,33 @@ async fn production_tick_and_independent_observation_use_real_wall_and_database(
     assert!(before.watermark.unix_millis() > 0);
     assert_eq!(TICK_INTERVAL, Duration::from_secs(1));
 }
+
+#[test]
+fn snapshot_before_a_newer_publish_matches_a_recent_tick() {
+    let freshness = Freshness::default();
+    let start = Instant::now();
+    freshness
+        .committed_at(committed(clock(10_000, 1), start), start)
+        .unwrap();
+    let next = start + Duration::from_secs(1);
+    freshness
+        .committed_at(committed(clock(11_000, 2), next), next)
+        .unwrap();
+    // A request whose snapshot predates the second commit still sees tick 1.
+    assert_eq!(
+        freshness
+            .attempt_at(clock(10_000, 1), next)
+            .unwrap()
+            .timestamp(),
+        clock(10_000, 1).watermark
+    );
+    // An older clock that was never published is a regression.
+    assert!(freshness.attempt_at(clock(10_000, 0), next).is_err());
+    assert!(freshness.attempt_at(clock(9_000, 1), next).is_err());
+    // A published tick outside the freshness window no longer qualifies.
+    assert!(
+        freshness
+            .attempt_at(clock(10_000, 1), start + FRESHNESS_LIMIT)
+            .is_err()
+    );
+}

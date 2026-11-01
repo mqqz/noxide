@@ -37,13 +37,13 @@ Before serving temporal operations each process must complete a durable startup
 tick. It then ticks about once per second using reserved capacity, independent
 of application request and worker permits. Activation shares one two-second
 monotonic deadline across validation, schema/deployment binding, tick and commit.
-The one existing server maintenance service then uses a 200ms nonresetting
+The one existing server maintenance service then uses a 750ms nonresetting
 deadline for admission, connection, fencing, tick, commit and awaited cleanup.
 A dedicated one-slot maintenance semaphore has no queue. Each tick has a private
 work connection outside request/session/Wasm lanes; PostgreSQL additionally has
 one private control connection under that same slot. There is no shared pool to
-exhaust. The last 50ms of the original 200ms budget is reserved for cleanup. The
-provider execution deadline uses the preceding 150ms; this does not enlarge the
+exhaust. The last 50ms of the original 750ms budget is reserved for cleanup. The
+provider execution deadline uses the preceding 700ms; this does not enlarge the
 maintenance budget. SQLite maintenance connections use a zero busy
 wait; a failed BEGIN waits for the SQLx worker close acknowledgement before
 returning. Ordinary request connections retain their existing busy timeout.
@@ -77,10 +77,12 @@ required own startup tick. Out-of-order observations fail closed.
 After the normal host deployment fence, every temporal transaction captures one
 `AttemptTime` from the durable row and retains it throughout that attempt. Reads
 never sample wall time or update durable state or freshness. A newer attempt gets
-a new snapshot. A transaction snapshot older than already observed process
-progress is unavailable and can be retried under its existing deadline. This
-conservative rule prevents a GET from observing unpersisted expiry and later
-reviving the row after restart. Forward wall jumps can expire resources early;
+a new snapshot. A snapshot taken just before a newer tick committed is accepted
+only if it matches one of the last eight ticks this process published within the
+freshness window; it then uses that tick's committed watermark. Any other older
+clock, such as a restored database, is unavailable. Every accepted watermark was
+durably committed, so a GET cannot observe unpersisted expiry and later revive
+the row after restart. Forward wall jumps can expire resources early;
 operator wall accuracy is assumed, not externally certified.
 
 Clock recovery and key rotation must preserve both lifecycle columns. Recovery

@@ -144,6 +144,25 @@ struct State {
     startup_complete: bool,
     progress: Option<HeartbeatObservation>,
     fresh_since: Option<Instant>,
+    /// Ticks published during the freshness window. A request snapshot taken
+    /// before a newer tick committed still sees one of these exact clocks.
+    published: std::collections::VecDeque<HeartbeatObservation>,
+}
+
+/// Bounds `State::published`: one tick per second covers the freshness limit.
+const PUBLISHED_TICKS: usize = 8;
+
+impl State {
+    fn publish(&mut self, observation: HeartbeatObservation) {
+        if self.published.len() == PUBLISHED_TICKS {
+            self.published.pop_front();
+        }
+        self.published.push_back(HeartbeatObservation {
+            clock: observation.clock,
+            started: observation.started,
+        });
+        self.progress = Some(observation);
+    }
 }
 
 /// One process's proof of recent durable maintenance progress. All access is
@@ -171,7 +190,7 @@ impl Freshness {
         validate_progress(&state, tick.clock, tick.started, now)?;
         state.startup_complete = true;
         state.fresh_since = Some(tick.started);
-        state.progress = Some(HeartbeatObservation {
+        state.publish(HeartbeatObservation {
             clock: tick.clock,
             started: tick.started,
         });
@@ -207,7 +226,7 @@ impl Freshness {
                 None
             };
         }
-        state.progress = Some(observation);
+        state.publish(observation);
         Ok(())
     }
 
@@ -230,14 +249,18 @@ impl Freshness {
             .progress
             .as_ref()
             .ok_or(TemporalUnavailable::NotStarted)?;
-        ensure!(
-            clock.version >= progress.clock.version
-                && clock.watermark >= progress.clock.watermark
-                && clock.version > 0
-                && (clock.version != progress.clock.version
-                    || clock.watermark == progress.clock.watermark),
-            TemporalUnavailable::Inconsistent
-        );
+        let current = clock.version >= progress.clock.version
+            && clock.watermark >= progress.clock.watermark
+            && clock.version > 0
+            && (clock.version != progress.clock.version
+                || clock.watermark == progress.clock.watermark);
+        // A snapshot older than the latest publish must match a recent tick
+        // exactly; anything else is a regression such as a restored database.
+        let earlier = state
+            .published
+            .iter()
+            .any(|tick| tick.clock == clock && recent(tick.started, now));
+        ensure!(current || earlier, TemporalUnavailable::Inconsistent);
         Ok(AttemptTime(clock.watermark))
     }
 }
