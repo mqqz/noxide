@@ -1,9 +1,10 @@
 //! One DB-bound delivery owner. Wall leases never release physical capacity.
-use super::{
-    transport::{BearerSecret, Transport},
-    types::{digest, opaque},
-};
+use crate::transport::{BearerSecret, Transport};
 use anyhow::{Context, Result, ensure};
+use noxide_effects::{
+    directory::{OwnerDirectory, WALK, check, walk_directory},
+    types::opaque,
+};
 use rustix::{
     fd::OwnedFd,
     fs::{self, FileType, FlockOperation, Mode, OFlags},
@@ -12,7 +13,7 @@ use std::{
     collections::BTreeMap,
     fs::File,
     io::Read,
-    path::{Component, Path},
+    path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -21,65 +22,26 @@ use std::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-const DIRECTORY: OFlags = OFlags::RDONLY
-    .union(OFlags::DIRECTORY)
-    .union(OFlags::NOFOLLOW)
-    .union(OFlags::CLOEXEC)
-    .union(OFlags::NONBLOCK);
-/// Walks without read access, so a confined worker needs a rule for the secret only.
-const WALK: OFlags = OFlags::PATH
-    .union(OFlags::DIRECTORY)
-    .union(OFlags::NOFOLLOW)
-    .union(OFlags::CLOEXEC);
 const FILE: OFlags = OFlags::NOFOLLOW
     .union(OFlags::CLOEXEC)
     .union(OFlags::NONBLOCK);
-pub(crate) struct OwnerDirectory {
-    fd: OwnedFd,
-    digest: String,
-}
-impl OwnerDirectory {
-    pub(crate) fn open(path: &Path, deadline: Instant) -> Result<Self> {
-        let fd = open_directory(path, deadline)?;
-        let stat = fs::fstat(&fd)?;
-        ensure!(
-            stat.st_uid == rustix::process::geteuid().as_raw() && stat.st_mode & 0o7777 == 0o700,
-            "effect owner directory must be private and owned"
-        );
-        let digest = digest(&(
-            "effect-owner-directory-v1",
-            path.to_str().context("invalid effect owner path")?,
-            stat.st_dev,
-            stat.st_ino,
-        ))?;
-        check(deadline)?;
-        Ok(Self { fd, digest })
-    }
-    pub(crate) fn digest(&self) -> &str {
-        &self.digest
-    }
-}
 type Active = BTreeMap<u64, (Option<String>, tokio::time::Instant)>;
-pub(crate) struct DeliveryOwner {
+pub struct DeliveryOwner {
     lease: Arc<OwnerLease>,
-    pub(crate) transport: Transport,
+    pub transport: Transport,
     slots: Arc<Semaphore>,
     concurrency: u8,
     active: Mutex<Active>,
     next: AtomicU64,
     changed: tokio::sync::Notify,
-    pub(crate) claim_lock: tokio::sync::Mutex<()>,
+    pub claim_lock: tokio::sync::Mutex<()>,
 }
-pub(crate) struct OwnerLease {
+pub struct OwnerLease {
     _directory: Arc<OwnerDirectory>,
     file: OwnedFd,
 }
 impl OwnerLease {
-    pub(crate) fn open(
-        directory: Arc<OwnerDirectory>,
-        store_id: &str,
-        deadline: Instant,
-    ) -> Result<Self> {
+    pub fn open(directory: Arc<OwnerDirectory>, store_id: &str, deadline: Instant) -> Result<Self> {
         check(deadline)?;
         ensure!(
             opaque(store_id)
@@ -110,7 +72,7 @@ impl Drop for DeliveryOwner {
     }
 }
 impl DeliveryOwner {
-    pub(crate) fn claim(
+    pub fn claim(
         lease: Arc<OwnerLease>,
         concurrency: u8,
         transport: Transport,
@@ -129,7 +91,7 @@ impl DeliveryOwner {
             claim_lock: tokio::sync::Mutex::new(()),
         }))
     }
-    pub(crate) fn try_attempt(
+    pub fn try_attempt(
         self: &Arc<Self>,
         deadline: tokio::time::Instant,
     ) -> Result<PhysicalAttempt> {
@@ -160,7 +122,7 @@ impl DeliveryOwner {
             executor: tokio::runtime::Handle::current(),
         })
     }
-    pub(crate) fn active_claims(&self) -> Vec<String> {
+    pub fn active_claims(&self) -> Vec<String> {
         self.active
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -168,7 +130,7 @@ impl DeliveryOwner {
             .filter_map(|(id, _)| id.clone())
             .collect()
     }
-    pub(crate) async fn drain(&self) -> Result<()> {
+    pub async fn drain(&self) -> Result<()> {
         loop {
             let changed = self.changed.notified();
             let deadline = {
@@ -211,7 +173,7 @@ impl Drop for PhysicalState {
 }
 /// The private request token is also retained by ordinary provider cleanup.
 /// Only reacquiring its unique gate proves that provider/file holders stopped.
-pub(crate) struct PhysicalAttempt {
+pub struct PhysicalAttempt {
     state: Option<Arc<PhysicalState>>,
     request: Option<Arc<OwnedSemaphorePermit>>,
     gate: Arc<Semaphore>,
@@ -219,10 +181,10 @@ pub(crate) struct PhysicalAttempt {
     executor: tokio::runtime::Handle,
 }
 impl PhysicalAttempt {
-    pub(crate) fn request(&self) -> Arc<OwnedSemaphorePermit> {
+    pub fn request(&self) -> Arc<OwnedSemaphorePermit> {
         self.request.as_ref().expect("live effect attempt").clone()
     }
-    pub(crate) fn mark_claim(&self, id: &str) {
+    pub fn mark_claim(&self, id: &str) {
         let state = self.state.as_ref().expect("live effect attempt");
         if let Some((claim, _)) = state
             .owner
@@ -234,13 +196,13 @@ impl PhysicalAttempt {
             *claim = Some(id.to_owned());
         }
     }
-    pub(crate) fn native_hold(&self) -> NativeHold {
+    pub fn native_hold(&self) -> NativeHold {
         NativeHold {
             state: self.state.as_ref().expect("live effect attempt").clone(),
             _request: self.request(),
         }
     }
-    pub(crate) async fn finish(mut self) -> Result<()> {
+    pub async fn finish(mut self) -> Result<()> {
         drop(self.request.take());
         let state = self.state.take().expect("live effect attempt");
         if tokio::time::timeout_at(self.deadline, self.gate.clone().acquire_owned())
@@ -274,7 +236,7 @@ impl Drop for PhysicalAttempt {
         }
     }
 }
-pub(crate) struct NativeHold {
+pub struct NativeHold {
     state: Arc<PhysicalState>,
     _request: Arc<OwnedSemaphorePermit>,
 }
@@ -289,11 +251,7 @@ impl NativeHold {
 }
 /// Runs only on an admitted blocking worker, retaining the physical owner and
 /// request token until every file descriptor has actually closed.
-pub(crate) fn read_secret(
-    path: &Path,
-    deadline: Instant,
-    hold: NativeHold,
-) -> Result<BearerSecret> {
+pub fn read_secret(path: &Path, deadline: Instant, hold: NativeHold) -> Result<BearerSecret> {
     hold.check(deadline)?;
     let parent = path.parent().context("effect secret parent missing")?;
     let name = path.file_name().context("effect secret filename missing")?;
@@ -321,33 +279,6 @@ pub(crate) fn read_secret(
     BearerSecret::from_host(String::from_utf8(bytes).context("invalid effect secret encoding")?)
         .map_err(|_| anyhow::anyhow!("invalid effect bearer secret"))
 }
-fn open_directory(path: &Path, deadline: Instant) -> Result<OwnedFd> {
-    walk_directory(path, DIRECTORY, deadline)
-}
-fn walk_directory(path: &Path, flags: OFlags, deadline: Instant) -> Result<OwnedFd> {
-    ensure!(
-        path.is_absolute() && path.as_os_str().len() <= 4096,
-        "effect host path must be absolute and bounded"
-    );
-    let mut parts = path.components();
-    ensure!(
-        parts.next() == Some(Component::RootDir),
-        "invalid effect host path"
-    );
-    let mut fd = fs::open("/", flags, Mode::empty())?;
-    let mut count = 0;
-    for part in parts {
-        check(deadline)?;
-        count += 1;
-        ensure!(count <= 64, "effect host path depth");
-        let Component::Normal(name) = part else {
-            anyhow::bail!("noncanonical effect host path")
-        };
-        fd = fs::openat(&fd, name, flags, Mode::empty()).context("open effect host directory")?;
-    }
-    check(deadline)?;
-    Ok(fd)
-}
 fn regular(fd: &OwnedFd, size: u64) -> Result<()> {
     let stat = fs::fstat(fd)?;
     ensure!(
@@ -359,10 +290,6 @@ fn regular(fd: &OwnedFd, size: u64) -> Result<()> {
             && stat.st_size as u64 == size,
         "effect file must be private owned regular metadata"
     );
-    Ok(())
-}
-fn check(deadline: Instant) -> Result<()> {
-    ensure!(Instant::now() < deadline, "effect host I/O deadline");
     Ok(())
 }
 #[cfg(test)]

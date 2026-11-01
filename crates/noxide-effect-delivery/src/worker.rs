@@ -1,9 +1,7 @@
 //! Status-first classification. A body-discard failure never retries known 2xx.
-use super::{
-    store::DeliveryResult,
-    transport::{Error, Response},
-};
-pub(crate) fn classify(result: Result<Response, Error>) -> DeliveryResult {
+use crate::transport::{Error, Response};
+use noxide_effects::DeliveryResult;
+pub fn classify(result: Result<Response, Error>) -> DeliveryResult {
     match result {
         Ok(response) if (200..300).contains(&response.status) => DeliveryResult::Delivered,
         Ok(response) if response.status == 429 || (500..600).contains(&response.status) => {
@@ -20,7 +18,7 @@ pub(crate) fn classify(result: Result<Response, Error>) -> DeliveryResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effects::transport::Discard;
+    use crate::transport::Discard;
     #[test]
     fn known_status_precedes_discard_and_only_transient_statuses_retry() {
         for discard in [

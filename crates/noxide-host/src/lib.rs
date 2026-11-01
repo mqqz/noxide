@@ -4,6 +4,8 @@ pub use noxide_admission::{Presentation, assets, manifest, schema};
 pub(crate) use noxide_admission::{
     action_contract, expiry, ids, membership, policy, principal, query_plan, routing, search, sql,
 };
+pub(crate) use noxide_effects as effects;
+pub use noxide_effects::effect_deployment;
 pub use noxide_render as render;
 #[cfg(test)]
 use noxide_test_support as test_support;
@@ -11,7 +13,8 @@ mod blob_inspect;
 mod blob_io;
 mod blob_upload;
 pub mod deployment;
-pub mod effect_deployment;
+#[cfg(test)]
+mod effects_tests;
 #[cfg(test)]
 mod job_admission_tests;
 pub mod job_deployment;
@@ -32,7 +35,6 @@ mod blob_multipart;
 mod blob_state;
 mod blob_store;
 mod blob_transport;
-mod effects;
 mod jobs;
 pub mod runtime {
     pub use noxide_sandbox::Limits;
@@ -50,8 +52,8 @@ pub use security::HostKeys;
 mod application;
 mod repository;
 pub use application::{
-    ActionRejection, Application, EffectDelivery, EffectRunOutcome, JobRunOutcome, LoginChallenge,
-    POSTGRES_WORKER_GRANTS, RequestError, ValidatedActionRejection,
+    ActionRejection, Application, JobRunOutcome, LoginChallenge, RequestError,
+    ValidatedActionRejection,
 };
 pub mod http;
 

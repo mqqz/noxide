@@ -1,6 +1,6 @@
 //! Short transactional outbox operations. No network, file reads or commits.
-use super::types::*;
 use crate::sql::sql;
+use crate::types::*;
 use crate::{
     database::{Transaction, lifecycle::RequestScope},
     query_plan::NativeProvider,
@@ -12,12 +12,12 @@ use noxide_protocol::{
 };
 use sha2::{Digest, Sha256};
 
-pub(crate) struct OutboxContext<'a> {
-    pub(crate) tx: &'a mut Transaction,
-    pub(crate) calls: &'a mut u32,
+pub struct OutboxContext<'a> {
+    pub tx: &'a mut Transaction,
+    pub calls: &'a mut u32,
 }
 #[derive(Clone, Debug)]
-pub(crate) struct EffectClaim {
+pub struct EffectClaim {
     pub(super) id: String,
     pub(super) scope: EffectScope,
     pub(super) fence: i64,
@@ -25,25 +25,28 @@ pub(crate) struct EffectClaim {
     pub(super) epoch: String,
     pub(super) exhausted: bool,
 }
-pub(crate) struct PreparedEffect {
-    pub(crate) captured: CapturedEffect,
+pub struct PreparedEffect {
+    pub captured: CapturedEffect,
 }
-pub(crate) enum Preflight {
+pub enum Preflight {
     Send(Box<PreparedEffect>),
     Settled(Finalized),
 }
 impl EffectClaim {
-    pub(crate) fn id(&self) -> &str {
+    pub fn id(&self) -> &str {
         &self.id
     }
+    pub fn lease_until(&self) -> Timestamp {
+        self.lease_until
+    }
 }
-pub(crate) enum DeliveryResult {
+pub enum DeliveryResult {
     Delivered,
     Retry { retry_after_seconds: Option<u32> },
     Terminal,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Finalized {
+pub enum Finalized {
     Delivered,
     Retrying(Timestamp),
     Dead,
@@ -149,7 +152,7 @@ impl OutboxContext<'_> {
         grant.validate()?;
         Ok(Some((grant, state)))
     }
-    pub(crate) async fn endpoint_grant(
+    pub async fn endpoint_grant(
         &mut self,
         scope: &EffectScope,
         endpoint: &str,
@@ -172,7 +175,7 @@ impl OutboxContext<'_> {
         Ok(VerifiedEndpointGrant { grant })
     }
     /// Idempotent admission, atomic with the originating action and receipt.
-    pub(crate) async fn enqueue(&mut self, capture: &CapturedEffect, now: Timestamp) -> Result<()> {
+    pub async fn enqueue(&mut self, capture: &CapturedEffect, now: Timestamp) -> Result<()> {
         self.charge()?;
         capture.validate()?;
         ensure!(capture.created == now, "effect capture time changed");
@@ -229,7 +232,7 @@ impl OutboxContext<'_> {
     }
     /// Called only while the exclusive DB-bound owner and a physical slot live.
     /// In-process active IDs are excluded even after a wall-clock forward jump.
-    pub(crate) async fn claim(
+    pub async fn claim(
         &mut self,
         generation: &str,
         expected_contract: &str,
@@ -404,11 +407,7 @@ impl OutboxContext<'_> {
             && grant.binding == row.capture.binding)
     }
     /// Rechecks authority in a fresh short TX immediately before external I/O.
-    pub(crate) async fn preflight(
-        &mut self,
-        claim: &EffectClaim,
-        now: Timestamp,
-    ) -> Result<Preflight> {
+    pub async fn preflight(&mut self, claim: &EffectClaim, now: Timestamp) -> Result<Preflight> {
         self.charge()?;
         let runtime = self.runtime(&claim.scope).await?;
         // Preview does not lock; runtime lock prevents operator envelope changes.
@@ -457,14 +456,14 @@ impl OutboxContext<'_> {
     /// Returns a claim whose preflight failed before any send. Only a row still
     /// running under this exact fence changes, so a committed preflight
     /// settlement or a newer claim is untouched. The attempt is refunded.
-    pub(crate) async fn release_unsent(&mut self, claim: &EffectClaim) -> Result<()> {
+    pub async fn release_unsent(&mut self, claim: &EffectClaim) -> Result<()> {
         self.charge()?;
         self.tx.execute("UPDATE nx_outbox SET state='pending',reason='preflight_unavailable',lease_until_ms=0,attempts=attempts-$1 WHERE id=$2 AND deployment=$3 AND tenant=$4 AND state='running' AND fence=$5",&[i64::from(!claim.exhausted).into(),claim.id.as_str().into(),claim.scope.deployment.as_str().into(),claim.scope.tenant.as_str().into(),claim.fence.into()]).await?;
         Ok(())
     }
     /// An unknown acknowledgment is resolved by probing this fenced row later;
     /// it must never trigger a second POST in the same attempt.
-    pub(crate) async fn finalize(
+    pub async fn finalize(
         &mut self,
         claim: &EffectClaim,
         now: Timestamp,

@@ -3,37 +3,76 @@
 //! keys, no guest runtime, no blob store and no listener.
 //! Delivery has a separate 30-second host invocation, never a guest executor.
 //! All phases share its deadline, logical allowance and native statement meter.
-use super::effect_worker::{DirectoryPreparation, EffectRunOutcome};
-use super::*;
 use crate::{
-    database::{MaintenanceLease, MaintenanceUncertain},
+    owner::{DeliveryOwner, OwnerLease, PhysicalAttempt},
+    transport, worker,
+};
+use anyhow::{Context, Result, ensure};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use noxide_admission::manifest;
+use noxide_effects::{
+    DeliveryResult, EffectClaim, Finalized, OutboxContext, Preflight,
+    directory::DirectoryPreparation,
     effect_deployment::{EffectDeployment, EffectiveEffectDeployment},
-    effects::owner::{DeliveryOwner, OwnerLease, PhysicalAttempt},
-    effects::{self, DeliveryResult, EffectClaim, OutboxContext, Preflight},
+};
+use noxide_protocol::Manifest;
+use noxide_store::{
+    Database,
+    database::{
+        MaintenanceLease, MaintenanceUncertain, RequestError, Transaction,
+        lifecycle::{AdmissionOwner, Registry, RequestScope},
+    },
     lifecycle_clock::{self, AttemptTime},
 };
-use anyhow::Context;
+use sha2::{Digest, Sha256};
 use std::{
-    sync::{Mutex, atomic::AtomicBool},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicI64, Ordering},
+    },
     time::Duration,
 };
-use tokio::sync::Semaphore;
+use tokio::{
+    sync::Semaphore,
+    time::{Instant, timeout_at},
+};
 
-pub(super) struct LeasePreparation {
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectRunOutcome {
+    Delivered,
+    Retrying(noxide_protocol::time::Timestamp),
+    Dead,
+    Paused,
+    Superseded,
+}
+impl From<Finalized> for EffectRunOutcome {
+    fn from(value: Finalized) -> Self {
+        match value {
+            Finalized::Delivered => Self::Delivered,
+            Finalized::Retrying(at) => Self::Retrying(at),
+            Finalized::Dead => Self::Dead,
+            Finalized::Paused => Self::Paused,
+            Finalized::Superseded => Self::Superseded,
+        }
+    }
+}
+
+pub struct LeasePreparation {
     started: AtomicBool,
     result: OnceLock<std::result::Result<Arc<OwnerLease>, ()>>,
     changed: tokio::sync::Notify,
 }
-pub(super) struct DeliveryRuntime {
-    pub(super) effective: EffectiveEffectDeployment,
-    pub(super) directory: Arc<DirectoryPreparation>,
+pub struct DeliveryRuntime {
+    pub effective: EffectiveEffectDeployment,
+    pub directory: Arc<DirectoryPreparation>,
     lease: Arc<LeasePreparation>,
     database: Arc<Semaphore>,
-    pub(super) lifecycle: Arc<Registry>,
-    pub(super) owner: Mutex<Option<Arc<DeliveryOwner>>>,
+    pub lifecycle: Arc<Registry>,
+    pub owner: Mutex<Option<Arc<DeliveryOwner>>>,
     running: AtomicBool,
-    #[cfg(test)]
-    pub(super) test_roots: Mutex<Option<rustls::RootCertStore>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub test_roots: Mutex<Option<rustls::RootCertStore>>,
 }
 impl DeliveryRuntime {
     fn new(effective: EffectiveEffectDeployment) -> Self {
@@ -50,11 +89,11 @@ impl DeliveryRuntime {
             lifecycle: Arc::new(Registry::default()),
             owner: Mutex::new(None),
             running: AtomicBool::new(false),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             test_roots: Mutex::new(None),
         }
     }
-    pub(super) fn delivery_owner(&self) -> Result<Arc<DeliveryOwner>> {
+    pub fn delivery_owner(&self) -> Result<Arc<DeliveryOwner>> {
         let mut current = self.owner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(owner) = current.as_ref() {
             return Ok(owner.clone());
@@ -67,17 +106,17 @@ impl DeliveryRuntime {
             .as_ref()
             .map_err(|_| anyhow::anyhow!("effect owner preparation failed"))?
             .clone();
-        let proxy = effects::transport::TorProxy::loopback(self.effective.tor_proxy)
+        let proxy = transport::TorProxy::loopback(self.effective.tor_proxy)
             .map_err(|_| anyhow::anyhow!("invalid effect Tor proxy"))?;
-        let transport = effects::transport::Transport::new(proxy);
-        #[cfg(test)]
+        let transport = transport::Transport::new(proxy);
+        #[cfg(any(test, feature = "test-support"))]
         let transport = match self
             .test_roots
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            Some(roots) => effects::transport::Transport::with_test_roots(proxy, roots.clone()),
+            Some(roots) => transport::Transport::with_test_roots(proxy, roots.clone()),
             None => transport,
         };
         let owner =
@@ -85,7 +124,7 @@ impl DeliveryRuntime {
         *current = Some(owner.clone());
         Ok(owner)
     }
-    pub(super) fn release_owner(&self, owner: Arc<DeliveryOwner>) {
+    pub fn release_owner(&self, owner: Arc<DeliveryOwner>) {
         let mut current = self.owner.lock().unwrap_or_else(|e| e.into_inner());
         if current
             .as_ref()
@@ -123,7 +162,7 @@ pub struct EffectDelivery {
     clock: AtomicI64,
     lifecycle_clock: lifecycle_clock::Freshness,
     maintenance: Arc<Semaphore>,
-    pub(super) runtime: DeliveryRuntime,
+    pub runtime: DeliveryRuntime,
 }
 impl EffectDelivery {
     /// Validate the approved contract without host keys or compiling the guest.
@@ -151,14 +190,7 @@ impl EffectDelivery {
             256,
         ))
     }
-    #[cfg(test)]
-    pub(super) fn from_test_parts(app: &Application, database: Database) -> Self {
-        let (manifest, deployment, contract, effective, limit, roots) = app.effect_test_parts();
-        let delivery = Self::from_parts(database, manifest, deployment, contract, effective, limit);
-        *delivery.runtime.test_roots.lock().unwrap() = roots;
-        delivery
-    }
-    pub(super) fn from_parts(
+    pub fn from_parts(
         database: Database,
         manifest: Arc<Manifest>,
         deployment: String,
@@ -243,7 +275,7 @@ impl EffectDelivery {
         Ok(())
     }
     async fn tick_clock(&self) -> Result<()> {
-        let deadline = Instant::now() + security::CLOCK_CHECKPOINT_BEGIN_DEADLINE;
+        let deadline = Instant::now() + lifecycle_clock::CLOCK_CHECKPOINT_BEGIN_DEADLINE;
         let permit = self.maintenance.clone().try_acquire_owned()?;
         let mut lease =
             MaintenanceLease::new(permit, deadline.into_std(), self.lifecycle_clock.clone());
@@ -351,7 +383,7 @@ impl EffectDelivery {
                 .context("effect owner file preparation deadline")?;
         }
     }
-    pub(super) fn effect_request_scope(&self) -> std::result::Result<RequestScope, RequestError> {
+    pub fn effect_request_scope(&self) -> std::result::Result<RequestScope, RequestError> {
         let runtime = &self.runtime;
         Ok(RequestScope::current_or_new(
             runtime.lifecycle.clone(),
@@ -379,7 +411,7 @@ impl EffectDelivery {
             None,
         ))
     }
-    pub(super) async fn claim_effect(
+    pub async fn claim_effect(
         &self,
         scope: &RequestScope,
         physical: &PhysicalAttempt,
@@ -420,11 +452,11 @@ impl EffectDelivery {
                 if let Some(claim) = &claim {
                     physical.mark_claim(claim.id());
                 }
-                Application::finish_commit(&mut tx, claim).await
+                tx.finish_commit(claim).await
             })
             .await
     }
-    pub(super) async fn preflight_effect(
+    pub async fn preflight_effect(
         &self,
         scope: &RequestScope,
         physical: &PhysicalAttempt,
@@ -445,7 +477,7 @@ impl EffectDelivery {
                     .preflight(claim, now)
                     .await
                     .map_err(RequestError::database)?;
-                Application::finish_commit(&mut tx, ready).await
+                tx.finish_commit(ready).await
             })
             .await
     }
@@ -471,11 +503,11 @@ impl EffectDelivery {
                     .release_unsent(claim)
                     .await
                     .map_err(RequestError::database)?;
-                Application::finish_commit(&mut tx, ()).await
+                tx.finish_commit(()).await
             })
             .await
     }
-    pub(super) async fn finalize_effect(
+    pub async fn finalize_effect(
         &self,
         scope: &RequestScope,
         physical: &PhysicalAttempt,
@@ -497,7 +529,7 @@ impl EffectDelivery {
                     .finalize(claim, now, result)
                     .await
                     .map_err(RequestError::database)?;
-                Application::finish_commit(&mut tx, outcome.into()).await
+                tx.finish_commit(outcome.into()).await
             })
             .await
     }
@@ -553,7 +585,7 @@ impl EffectDelivery {
                         .clone();
                     let hold = physical.native_hold();
                     let worker = tokio::task::spawn_blocking(move || {
-                        effects::owner::read_secret(&path, deadline.into_std(), hold)
+                        crate::owner::read_secret(&path, deadline.into_std(), hold)
                     });
                     match timeout_at(deadline, worker).await {
                         Ok(Ok(Ok(secret))) => Some(secret),
@@ -576,15 +608,15 @@ impl EffectDelivery {
                     None
                 };
                 let capture = &prepared.captured;
-                let endpoint = effects::transport::Endpoint::checked(
+                let endpoint = transport::Endpoint::checked(
                     &capture.binding().host,
                     capture.binding().port,
                     &capture.binding().path,
                 )
                 .map_err(|_| RequestError::Rejected)?;
-                let body = effects::transport::JsonBody::checked(capture.body().to_vec())
+                let body = transport::JsonBody::checked(capture.body().to_vec())
                     .map_err(|_| RequestError::Rejected)?;
-                let key = effects::transport::IdempotencyKey::from_host(
+                let key = transport::IdempotencyKey::from_host(
                     capture.receiver_key().map_err(RequestError::database)?,
                 )
                 .map_err(|_| RequestError::Rejected)?;
@@ -592,7 +624,7 @@ impl EffectDelivery {
                     .transport
                     .post(&endpoint, &body, &key, secret.as_ref(), deadline)
                     .await;
-                let delivery = effects::worker::classify(result);
+                let delivery = worker::classify(result);
                 self.finalize_effect(&scope, &physical, &claim, &mut calls, delivery)
                     .await
                     .map(Some)
@@ -628,7 +660,7 @@ impl EffectDelivery {
         runtime.release_owner(owner);
         result
     }
-    pub(crate) fn start_effect_service(self: &Arc<Self>) -> Result<EffectService> {
+    pub fn start_effect_service(self: &Arc<Self>) -> Result<EffectService> {
         let runtime = &self.runtime;
         ensure!(
             self.generation.get().is_some(),

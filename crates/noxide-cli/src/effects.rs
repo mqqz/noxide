@@ -19,7 +19,7 @@ pub async fn run(args: &[OsString]) -> Result<()> {
             noxide_protocol::identifier(&role),
             "role must be a lowercase identifier"
         );
-        for grant in noxide_host::POSTGRES_WORKER_GRANTS {
+        for grant in noxide_effect_delivery::POSTGRES_WORKER_GRANTS {
             println!("{};", grant.replace("ROLE", &role));
         }
         return Ok(());
@@ -37,7 +37,7 @@ pub async fn run(args: &[OsString]) -> Result<()> {
     );
     let path = text(args, 1)?;
     if command == "worker-once" {
-        let delivery = super::effect_delivery(Path::new(&path))?;
+        let delivery = super::delivery::effect_delivery(Path::new(&path))?;
         delivery.activate().await?;
         println!(
             "{}",

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 use noxide_host::AccountAdmin as _;
 mod config;
+mod delivery;
 mod deps;
 mod effects;
 mod jobs;

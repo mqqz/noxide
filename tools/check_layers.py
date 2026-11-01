@@ -15,7 +15,7 @@ LAYERS = [
     ["limiter", "security", "auth", "authority", "operator_roles"],
     ["blob_state", "blob_io", "blob_store", "blob_inspect", "blob_metadata", "blob_pairing",
      "blob_transport", "blob_multipart", "blob_upload"],
-    ["deployment", "effect_deployment", "job_deployment", "repository", "jobs", "effects"],
+    ["deployment", "job_deployment", "repository", "jobs"],
     ["application"],
     ["http"],
 ]
@@ -67,9 +67,11 @@ def targets(code):
 # External crates that carry authority, and the only workspace crates allowed them.
 RESTRICTED = {
     "sqlx": {"noxide-store"},
-    "rustls": {"noxide-host"},
-    "tokio-rustls": {"noxide-host"},
-    "webpki-roots": {"noxide-host"},
+    "rustls": {"noxide-effect-delivery"},
+    "tokio-rustls": {"noxide-effect-delivery"},
+    "webpki-roots": {"noxide-effect-delivery"},
+    "httparse": {"noxide-effect-delivery"},
+    "noxide-effect-delivery": {"noxide-cli"},
     "argon2": {"noxide-host"},
     "wasmtime": {"noxide-sandbox"},
     "wasmparser": {"noxide-sandbox"},

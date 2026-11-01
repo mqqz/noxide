@@ -16,7 +16,9 @@ the [explicit examples](../sdk-lowering.md).
 | `noxide-confine` | Landlock and seccomp policy for deployed processes |
 | `noxide-test-support` | Test fixtures; a dev-dependency only |
 | `noxide-store` | Transactions, schema activation, storage layout, the request lifecycle and durable time; the only crate that links a database driver |
-| `noxide-host` | Authentication, authorization, repository, jobs, effects, blobs, application orchestration and HTTP |
+| `noxide-effects` | Effect approval, the outbox and operator commands; opens no outbound socket |
+| `noxide-effect-delivery` | The delivery worker, Tor SOCKS client and TLS transport; only `noxide-cli` depends on it |
+| `noxide-host` | Authentication, authorization, repository, jobs, blobs, application orchestration and HTTP |
 | `noxide` | Typed resources, queries, actions, forms and pages; WIT bindings and guest entry points |
 | `noxide-macros` | Explicit declaration expansion and optional convenience lowering |
 | `noxide-cli` | Operator build, dependency, approval, lifecycle, schema and role commands |
@@ -27,8 +29,8 @@ impure one, if a deployed binary enables a `test-support` feature, or if a modul
 inside `noxide-host` depends on a higher layer. `tools/check_binaries.py` checks the
 symbols of each deployed binary, because `noxide-cli` builds them all.
 
-`noxide-host` still contains the repository, blobs, jobs and effects as modules,
-separated by that lint and not by the compiler. `Transaction` accepts only `Sql`, so
+`noxide-host` still contains the repository, blobs and jobs as modules, separated by
+that lint and not by the compiler. `Transaction` accepts only `Sql`, so
 runtime strings cannot become statement text anywhere, but the statements for those
 modules still live beside them, and any crate depending on the store can run them.
 
@@ -52,6 +54,10 @@ A compromised server can still use the keys through its service while it runs, r
 and write everything in its database, and run job actions: jobs still run in the
 server process. Landlock port rules name no address, so loopback-only database and
 proxy connections rest on the checks in `Database::postgres` and `TorProxy::loopback`.
+
+`noxide-effects-worker` shares `noxide-cli`'s configuration code, which uses types
+from `noxide-host`, so its binary still carries unreachable Wasmtime support code. It
+compiles no guest and calls no Wasmtime entry point.
 
 The SDK and host use the canonical protocol. Macro implementation follows
 `convenience -> explicit declaration parser/expander -> generated SDK code and

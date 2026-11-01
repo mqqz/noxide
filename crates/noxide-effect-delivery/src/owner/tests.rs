@@ -1,5 +1,5 @@
 use super::*;
-use crate::effects::transport::TorProxy;
+use crate::transport::TorProxy;
 use std::{future::Future, task::Poll, time::Duration};
 fn directory() -> std::path::PathBuf {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -88,9 +88,9 @@ pub struct EffectiveEffectDeployment {
     /// Covers the admitted per-emission schemas and disclosure expressions.
     pub contract: EffectContract,
     #[serde(skip)]
-    pub(crate) secrets: Vec<EffectSecret>,
+    pub secrets: Vec<EffectSecret>,
     #[serde(skip)]
-    pub(crate) runtime_directory: Option<PathBuf>,
+    pub runtime_directory: Option<PathBuf>,
 }
 impl fmt::Debug for EffectiveEffectDeployment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -104,7 +104,7 @@ impl EffectDeployment {
     }
     pub fn effective(&self, contract: &EffectContract) -> Result<EffectiveEffectDeployment> {
         self.limits.validate()?;
-        crate::effects::transport::TorProxy::loopback(self.tor_proxy)
+        crate::transport::TorProxy::loopback(self.tor_proxy)
             .map_err(|_| anyhow::anyhow!("invalid effect Tor proxy"))?;
         ensure!(
             self.grants.len() <= 64 && self.secrets.len() <= 32,
@@ -140,12 +140,8 @@ impl EffectDeployment {
                     .is_none_or(|slot| slots.contains(slot)),
                 "effect secret slot has no host resource"
             );
-            crate::effects::transport::Endpoint::checked(
-                &requested.host,
-                requested.port,
-                &requested.path,
-            )
-            .map_err(|_| anyhow::anyhow!("invalid approved HTTPS endpoint"))?;
+            crate::transport::Endpoint::checked(&requested.host, requested.port, &requested.path)
+                .map_err(|_| anyhow::anyhow!("invalid approved HTTPS endpoint"))?;
             grants.push(EffectiveEffectGrant {
                 tenant: requested.tenant.clone(),
                 endpoint: endpoint.clone(),

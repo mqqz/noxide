@@ -1,22 +1,23 @@
-use super::Error;
+//! Validated values for effect endpoints, proxies and request parts. Opens no
+//! socket; the transport that uses them lives in noxide-effect-delivery.
 use std::{
     fmt,
     net::{IpAddr, SocketAddr},
 };
 
-pub(super) const MAX_BODY: usize = 65_536;
-pub(super) const MAX_RESPONSE: usize = 16_384;
-pub(super) const MAX_HEADERS: usize = 8_192;
+pub const MAX_BODY: usize = 65_536;
+pub const MAX_RESPONSE: usize = 16_384;
+pub const MAX_HEADERS: usize = 8_192;
 
 /// Canonical shape, not an authorization grant. Future admission must intersect
 /// the named endpoint/operator policy with current outbox and disclosure scope.
-pub(crate) struct Endpoint {
+pub struct Endpoint {
     host: String,
     port: u16,
     path: String,
 }
 impl Endpoint {
-    pub(crate) fn checked(host: &str, port: u16, path: &str) -> Result<Self, Error> {
+    pub fn checked(host: &str, port: u16, path: &str) -> Result<Self, Error> {
         if host.len() > 253 || path.len() > 1_024 {
             return Err(Error::Endpoint);
         }
@@ -63,16 +64,16 @@ impl Endpoint {
             path: path.into(),
         })
     }
-    pub(super) fn host(&self) -> &str {
+    pub fn host(&self) -> &str {
         &self.host
     }
-    pub(super) fn port(&self) -> u16 {
+    pub fn port(&self) -> u16 {
         self.port
     }
-    pub(super) fn path(&self) -> &str {
+    pub fn path(&self) -> &str {
         &self.path
     }
-    pub(super) fn authority(&self) -> String {
+    pub fn authority(&self) -> String {
         if self.port == 443 {
             self.host.clone()
         } else {
@@ -87,15 +88,15 @@ impl fmt::Debug for Endpoint {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct TorProxy(SocketAddr);
+pub struct TorProxy(SocketAddr);
 impl TorProxy {
-    pub(crate) fn loopback(address: SocketAddr) -> Result<Self, Error> {
+    pub fn loopback(address: SocketAddr) -> Result<Self, Error> {
         if !address.ip().is_loopback() || address.port() == 0 {
             return Err(Error::ProxyConfig);
         }
         Ok(Self(address))
     }
-    pub(super) fn address(self) -> SocketAddr {
+    pub fn address(self) -> SocketAddr {
         self.0
     }
 }
@@ -105,16 +106,16 @@ impl fmt::Debug for TorProxy {
     }
 }
 
-pub(crate) struct JsonBody(Box<[u8]>);
+pub struct JsonBody(Box<[u8]>);
 impl JsonBody {
-    pub(crate) fn checked(bytes: Vec<u8>) -> Result<Self, Error> {
+    pub fn checked(bytes: Vec<u8>) -> Result<Self, Error> {
         if bytes.len() > MAX_BODY {
             return Err(Error::BodyLimit);
         }
         serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| Error::Json)?;
         Ok(Self(bytes.into_boxed_slice()))
     }
-    pub(super) fn bytes(&self) -> &[u8] {
+    pub fn bytes(&self) -> &[u8] {
         &self.0
     }
 }
@@ -124,9 +125,9 @@ impl fmt::Debug for JsonBody {
     }
 }
 
-pub(crate) struct IdempotencyKey(String);
+pub struct IdempotencyKey(String);
 impl IdempotencyKey {
-    pub(crate) fn from_host(value: String) -> Result<Self, Error> {
+    pub fn from_host(value: String) -> Result<Self, Error> {
         if value.is_empty()
             || value.len() > 128
             || !value
@@ -137,7 +138,7 @@ impl IdempotencyKey {
         }
         Ok(Self(value))
     }
-    pub(super) fn value(&self) -> &str {
+    pub fn value(&self) -> &str {
         &self.0
     }
 }
@@ -148,9 +149,9 @@ impl fmt::Debug for IdempotencyKey {
 }
 
 /// Host-resolved slot material, never a manifest or guest payload field.
-pub(crate) struct BearerSecret(String);
+pub struct BearerSecret(String);
 impl BearerSecret {
-    pub(crate) fn from_host(value: String) -> Result<Self, Error> {
+    pub fn from_host(value: String) -> Result<Self, Error> {
         if value.is_empty() || value.len() > 2_048 {
             return Err(Error::Header);
         }
@@ -165,7 +166,7 @@ impl BearerSecret {
         }
         Ok(Self(value))
     }
-    pub(super) fn value(&self) -> &str {
+    pub fn value(&self) -> &str {
         &self.0
     }
 }
@@ -177,7 +178,7 @@ impl fmt::Debug for BearerSecret {
 
 /// Conservative global-unicast policy: deny every special-purpose registry block,
 /// including special anycast exceptions. IANA registry snapshot: 2026-10-31.
-pub(super) fn public_ip(ip: IpAddr) -> bool {
+pub fn public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
             let n = u32::from(ip);
@@ -225,3 +226,42 @@ pub(super) fn public_ip(ip: IpAddr) -> bool {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    Endpoint,
+    ProxyConfig,
+    Json,
+    BodyLimit,
+    Header,
+    Busy,
+    ProxyIo,
+    Socks,
+    Address,
+    Tls,
+    Http,
+    ResponseLimit,
+    Redirect(u16),
+    Deadline,
+}
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Endpoint => "invalid canonical endpoint",
+            Self::ProxyConfig => "invalid local Tor proxy",
+            Self::Json => "invalid JSON body",
+            Self::BodyLimit => "request body limit",
+            Self::Header => "invalid host header value",
+            Self::Busy => "effect transport busy",
+            Self::ProxyIo => "Tor proxy I/O failed",
+            Self::Socks => "Tor SOCKS negotiation failed",
+            Self::Address => "Tor returned a forbidden address",
+            Self::Tls => "endpoint TLS failed",
+            Self::Http => "invalid endpoint HTTP response",
+            Self::ResponseLimit => "endpoint response limit",
+            Self::Redirect(_) => "endpoint redirect rejected",
+            Self::Deadline => "effect transport deadline",
+        })
+    }
+}
+impl std::error::Error for Error {}

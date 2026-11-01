@@ -1,12 +1,12 @@
 //! Trusted operator controls; all changes serialize through the shared runtime.
-use super::{
-    store::{OutboxContext, checkpoint, integer},
-    types::*,
-};
 use crate::sql::sql;
 use crate::{
     database::Transaction,
     effect_deployment::{EffectiveEffectDeployment, EffectiveEffectGrant},
+};
+use crate::{
+    store::{OutboxContext, checkpoint, integer},
+    types::*,
 };
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::time::{Duration, Timestamp};
@@ -40,7 +40,7 @@ pub struct EffectSummary {
     pub eligible: Timestamp,
 }
 #[allow(async_fn_in_trait, clippy::too_many_arguments)]
-pub(crate) trait EffectOperatorTransaction {
+pub trait EffectOperatorTransaction {
     async fn resume_effect(
         &mut self,
         generation: &str,
@@ -140,7 +140,7 @@ impl EffectOperatorTransaction for Transaction {
             .await?;
         match rows.first() {
             None => {
-                let store_id = crate::security::random_id()?;
+                let store_id = crate::ids::random_id()?;
                 self.execute("INSERT INTO nx_effect_queue(singleton,claim_seq,store_id,owner_directory,pending_limit,tenant_limit,concurrency) VALUES(1,0,$1,$2,$3,$4,$5)",&[store_id.into(),owner_directory.into(),i64::from(effective.limits.pending_per_app).into(),i64::from(effective.limits.pending_per_tenant).into(),i64::from(effective.limits.worker_concurrency).into()]).await?;
             }
             Some([store_id, stored_directory]) => {
@@ -153,7 +153,7 @@ impl EffectOperatorTransaction for Transaction {
                         restore_fork,
                         "effect database belongs to another owner directory"
                     );
-                    let store_id = crate::security::random_id()?;
+                    let store_id = crate::ids::random_id()?;
                     self.execute("UPDATE nx_effect_queue SET store_id=$1,owner_directory=$2 WHERE singleton=1",&[store_id.into(),owner_directory.into()]).await?;
                     self.pause_effects_for_epoch().await?;
                 }

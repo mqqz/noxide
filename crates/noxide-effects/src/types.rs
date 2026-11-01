@@ -12,9 +12,9 @@ use std::{
 pub(super) const MAX_CAPTURE_BYTES: usize = 196_608;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct EffectScope {
-    pub(crate) deployment: String,
-    pub(crate) tenant: String,
+pub struct EffectScope {
+    pub deployment: String,
+    pub tenant: String,
 }
 impl EffectScope {
     pub(super) fn validate(&self) -> Result<()> {
@@ -61,7 +61,7 @@ impl EndpointGrant {
                     .is_none_or(|s| noxide_protocol::identifier(s)),
             "invalid endpoint identity"
         );
-        super::transport::Endpoint::checked(
+        crate::transport::Endpoint::checked(
             &self.binding.host,
             self.binding.port,
             &self.binding.path,
@@ -71,13 +71,13 @@ impl EndpointGrant {
     }
 }
 /// Constructed only from current rows locked in the originating action TX.
-pub(crate) struct VerifiedEndpointGrant {
+pub struct VerifiedEndpointGrant {
     pub(super) grant: EndpointGrant,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CapturedEffect {
+pub struct CapturedEffect {
     pub(super) scope: EffectScope,
     pub(super) origin: String,
     pub(super) ordinal: u8,
@@ -99,7 +99,10 @@ impl fmt::Debug for CapturedEffect {
     }
 }
 impl CapturedEffect {
-    pub(crate) fn capture(
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+    pub fn capture(
         declaration: &EmitEffect,
         origin: String,
         source_action_version: u32,
@@ -176,7 +179,7 @@ impl CapturedEffect {
         }
     }
     /// Immutable identity, independent of grant changes, rounds, epoch or fence.
-    pub(crate) fn id(&self) -> Result<String> {
+    pub fn id(&self) -> Result<String> {
         Ok(format!(
             "e1_{}",
             digest(&(
@@ -188,22 +191,22 @@ impl CapturedEffect {
             ))?
         ))
     }
-    pub(crate) fn receiver_key(&self) -> Result<String> {
+    pub fn receiver_key(&self) -> Result<String> {
         self.id()
     }
-    pub(super) fn capture_digest(&self) -> Result<String> {
+    pub fn capture_digest(&self) -> Result<String> {
         digest(&("effect-capture-v1", self))
     }
-    pub(crate) fn endpoint(&self) -> &str {
+    pub fn endpoint(&self) -> &str {
         &self.binding.endpoint.name
     }
-    pub(crate) fn binding(&self) -> &EffectiveEffectGrant {
+    pub fn binding(&self) -> &EffectiveEffectGrant {
         &self.binding
     }
-    pub(crate) fn body(&self) -> &[u8] {
+    pub fn body(&self) -> &[u8] {
         self.body.as_bytes()
     }
-    pub(crate) fn source_action(&self) -> (u32, u32) {
+    pub fn source_action(&self) -> (u32, u32) {
         (self.source_action, self.source_action_version)
     }
 }
@@ -302,10 +305,10 @@ fn validate_fields(schemas: &[Input], bytes: &[u8]) -> Result<()> {
     }
     Ok(())
 }
-pub(super) fn digest(value: &impl Serialize) -> Result<String> {
+pub fn digest(value: &impl Serialize) -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(serde_json::to_vec(value)?)))
 }
-pub(super) fn opaque(value: &str) -> bool {
+pub fn opaque(value: &str) -> bool {
     !value.is_empty() && value.len() <= 64 && !value.contains('\0')
 }
 

@@ -4,8 +4,11 @@
 #![forbid(unsafe_code)]
 #[path = "../config.rs"]
 mod config;
+#[path = "../delivery.rs"]
+mod delivery;
 use anyhow::{Context, Result};
 use config::*;
+use delivery::effect_delivery;
 use std::{sync::Arc, time::Duration};
 
 fn main() -> Result<()> {

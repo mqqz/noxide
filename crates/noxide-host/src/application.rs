@@ -12,10 +12,7 @@ pub use action::{ActionRejection, ValidatedActionRejection};
 use action::{CanonicalActionInput, ExecutionBudget};
 mod capabilities;
 mod clock;
-mod effect_delivery;
 mod effect_worker;
-pub use effect_delivery::{EffectDelivery, POSTGRES_WORKER_GRANTS};
-pub use effect_worker::EffectRunOutcome;
 mod effects;
 mod jobs;
 mod navigation;
@@ -245,63 +242,13 @@ mod query_compatibility_tests {
     }
 }
 
-#[derive(Debug)]
-pub enum RequestError {
-    Authentication,
-    InvalidRequest,
-    InvalidCursor,
-    Rejected,
-    Busy,
-    OutcomeUnknown,
-}
-impl RequestError {
-    fn authentication(error: auth::AuthError) -> Self {
-        match error {
-            auth::AuthError::Invalid => Self::Authentication,
-            auth::AuthError::Unavailable => Self::Busy,
-        }
-    }
-    fn deadline() -> Self {
-        if RequestScope::commit_pending() {
-            Self::OutcomeUnknown
-        } else {
-            Self::Busy
-        }
-    }
-    fn database(error: anyhow::Error) -> Self {
-        if error.is::<crate::database::CommitFailure>() {
-            return Self::OutcomeUnknown;
-        }
-        if error.is::<crate::database::lifecycle::Unavailable>()
-            || error.is::<crate::database::lifecycle::meter::StatementLimit>()
-        {
-            return Self::Busy;
-        }
-        if retryable(&error) {
-            Self::Busy
-        } else {
-            Self::Rejected
-        }
+pub use crate::database::RequestError;
+pub(crate) fn authentication_error(error: auth::AuthError) -> RequestError {
+    match error {
+        auth::AuthError::Invalid => RequestError::Authentication,
+        auth::AuthError::Unavailable => RequestError::Busy,
     }
 }
-impl std::fmt::Display for RequestError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::Authentication => "Sign in to continue.",
-                Self::InvalidCursor =>
-                    "This pagination link is invalid or has expired. Restart pagination.",
-                Self::InvalidRequest => "This request is invalid or has expired.",
-                Self::Rejected => "The request could not be completed.",
-                Self::Busy => "The service is busy. Retry this request.",
-                Self::OutcomeUnknown => "The operation result is not yet confirmed.",
-            }
-        )
-    }
-}
-impl std::error::Error for RequestError {}
 
 pub struct Application {
     pub(crate) presentation: crate::Presentation,
@@ -397,14 +344,7 @@ impl Application {
         tx: &mut Transaction,
         prepared: T,
     ) -> std::result::Result<T, RequestError> {
-        let result = tx.commit().await;
-        if tx.commit_acknowledged() {
-            return Ok(prepared);
-        }
-        if tx.commit_may_have_succeeded() {
-            return Err(RequestError::OutcomeUnknown);
-        }
-        result.map(|_| prepared).map_err(RequestError::database)
+        tx.finish_commit(prepared).await
     }
     /// Lower the total actual provider-statement ceiling for an ordinary request.
     /// This supplements all existing action/list/query budgets.
@@ -1025,7 +965,7 @@ impl Application {
                             .map_err(RequestError::database)?;
                         let (session, _) = auth::authenticate(&mut tx, &self.keys, cookie, now)
                             .await
-                            .map_err(RequestError::authentication)?;
+                            .map_err(crate::application::authentication_error)?;
 
                         self.keys
                             .verify_csrf(&session.nonce, csrf)
@@ -1099,7 +1039,7 @@ impl Application {
             );
             let (session, principal) = auth::authenticate(tx, &self.keys, cookie, now)
                 .await
-                .map_err(RequestError::authentication)?;
+                .map_err(crate::application::authentication_error)?;
             ensure!(token.subject == session.nonce, RequestError::InvalidRequest);
             self.keys
                 .verify_csrf(&session.nonce, csrf)
@@ -2174,7 +2114,7 @@ impl Application {
                     now,
                 )
                 .await
-                .map_err(RequestError::authentication)?,
+                .map_err(crate::application::authentication_error)?,
             ),
             Access::PublicOptional => match cookie {
                 None => None,

@@ -31,6 +31,7 @@ doc = false
 [dependencies]
 noxide.workspace = true
 noxide-host.workspace = true
+noxide-effect-delivery.workspace = true
 noxide-protocol.workspace = true
 noxide-asset-admission.workspace = true
 noxide-assets.workspace = true

@@ -1,81 +1,16 @@
 //! Operator effect commands and the serving application's queue binding.
 
-#[cfg(test)]
-use super::effect_delivery::{EffectDelivery, EffectService};
 use super::*;
 use crate::effects::EffectOperatorTransaction as _;
 use crate::{
     effect_deployment::EffectiveEffectDeployment,
-    effects::owner::OwnerDirectory,
-    effects::{self, Finalized},
+    effects::{self, directory::DirectoryPreparation},
 };
-use anyhow::Context;
+#[cfg(test)]
+use noxide_effect_delivery::{EffectDelivery, EffectRunOutcome, EffectService};
 #[cfg(test)]
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
 
-pub(super) struct DirectoryPreparation {
-    started: AtomicBool,
-    result: OnceLock<std::result::Result<Arc<OwnerDirectory>, ()>>,
-    changed: tokio::sync::Notify,
-}
-impl DirectoryPreparation {
-    pub(super) fn new() -> Arc<Self> {
-        Arc::new(Self {
-            started: AtomicBool::new(false),
-            result: OnceLock::new(),
-            changed: tokio::sync::Notify::new(),
-        })
-    }
-    pub(super) fn prepared(&self) -> Result<&Arc<OwnerDirectory>> {
-        self.result
-            .get()
-            .context("effect directory not prepared")?
-            .as_ref()
-            .map_err(|_| anyhow::anyhow!("effect directory preparation failed"))
-    }
-    pub(super) fn digest(&self) -> Result<&str> {
-        Ok(self.prepared()?.digest())
-    }
-    /// At most one bounded native preparation. The blocking task owns its state
-    /// through actual completion even if the caller is cancelled.
-    pub(super) async fn prepare(
-        state: &Arc<Self>,
-        effective: &EffectiveEffectDeployment,
-        deadline: std::time::Instant,
-    ) -> Result<()> {
-        let path = effective
-            .runtime_directory
-            .clone()
-            .context("effect runtime directory missing")?;
-        if state
-            .started
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            let worker = state.clone();
-            tokio::task::spawn_blocking(move || {
-                let result = OwnerDirectory::open(&path, deadline)
-                    .map(Arc::new)
-                    .map_err(|_| ());
-                let _ = worker.result.set(result);
-                worker.changed.notify_waiters();
-            });
-        }
-        loop {
-            let changed = state.changed.notified();
-            if let Some(result) = state.result.get() {
-                return result
-                    .as_ref()
-                    .map(|_| ())
-                    .map_err(|_| anyhow::anyhow!("effect owner directory preparation failed"));
-            }
-            timeout_at(deadline.into(), changed)
-                .await
-                .context("effect directory preparation deadline")?;
-        }
-    }
-}
 /// What a serving application needs to bind the effect queue. Delivery itself
 /// runs in [`EffectDelivery`], outside the serving process.
 pub(crate) struct EffectRuntime {
@@ -102,26 +37,6 @@ impl EffectRuntime {
     }
     pub(crate) fn owner_directory_digest(&self) -> Result<&str> {
         self.directory.digest()
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EffectRunOutcome {
-    Delivered,
-    Retrying(noxide_protocol::time::Timestamp),
-    Dead,
-    Paused,
-    Superseded,
-}
-impl From<Finalized> for EffectRunOutcome {
-    fn from(value: Finalized) -> Self {
-        match value {
-            Finalized::Delivered => Self::Delivered,
-            Finalized::Retrying(at) => Self::Retrying(at),
-            Finalized::Dead => Self::Dead,
-            Finalized::Paused => Self::Paused,
-            Finalized::Superseded => Self::Superseded,
-        }
     }
 }
 impl Application {
@@ -234,7 +149,7 @@ impl Application {
         DirectoryPreparation::prepare(&runtime.directory, &runtime.effective, deadline).await
     }
     #[cfg(test)]
-    pub(super) fn effect_test_parts(
+    pub(crate) fn effect_test_parts(
         &self,
     ) -> (
         Arc<Manifest>,
@@ -262,7 +177,7 @@ impl Application {
             .delivery
             .get_or_init(|| async {
                 let delivery =
-                    Arc::new(EffectDelivery::from_test_parts(self, self.database.clone()));
+                    Arc::new(effect_delivery_from_test_parts(self, self.database.clone()));
                 delivery.activate().await.expect("activate effect delivery");
                 delivery
             })
@@ -282,6 +197,18 @@ impl Application {
             .start_effect_service()
             .map(Some)
     }
+}
+/// A delivery context over `database`, as a worker process would build one.
+#[cfg(test)]
+pub(super) fn effect_delivery_from_test_parts(
+    app: &Application,
+    database: Database,
+) -> EffectDelivery {
+    let (manifest, deployment, contract, effective, limit, roots) = app.effect_test_parts();
+    let delivery =
+        EffectDelivery::from_parts(database, manifest, deployment, contract, effective, limit);
+    *delivery.runtime.test_roots.lock().unwrap() = roots;
+    delivery
 }
 #[cfg(test)]
 mod tests;

@@ -23,17 +23,20 @@ fn roots() -> rustls::RootCertStore {
     let mut roots = rustls::RootCertStore::empty();
     roots
         .add(rustls::pki_types::CertificateDer::from(
-            include_bytes!("../../effects/transport/fixtures/ca.der").to_vec(),
+            include_bytes!("../../../../noxide-effect-delivery/src/transport/fixtures/ca.der")
+                .to_vec(),
         ))
         .unwrap();
     roots
 }
 fn tls() -> TlsAcceptor {
     let cert = rustls::pki_types::CertificateDer::from(
-        include_bytes!("../../effects/transport/fixtures/server.der").to_vec(),
+        include_bytes!("../../../../noxide-effect-delivery/src/transport/fixtures/server.der")
+            .to_vec(),
     );
     let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
-        include_bytes!("../../effects/transport/fixtures/server-key.der").to_vec(),
+        include_bytes!("../../../../noxide-effect-delivery/src/transport/fixtures/server-key.der")
+            .to_vec(),
     ));
     let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
@@ -374,16 +377,19 @@ async fn lost_database_ack_contract(database: Option<Database>) {
                 panic!("not admitted")
             };
             let captured = &prepared.captured;
-            let endpoint = effects::transport::Endpoint::checked(
+            let endpoint = noxide_effect_delivery::transport::Endpoint::checked(
                 &captured.binding().host,
                 captured.binding().port,
                 &captured.binding().path,
             )
             .unwrap();
-            let body = effects::transport::JsonBody::checked(captured.body().to_vec()).unwrap();
-            let key =
-                effects::transport::IdempotencyKey::from_host(captured.receiver_key().unwrap())
+            let body =
+                noxide_effect_delivery::transport::JsonBody::checked(captured.body().to_vec())
                     .unwrap();
+            let key = noxide_effect_delivery::transport::IdempotencyKey::from_host(
+                captured.receiver_key().unwrap(),
+            )
+            .unwrap();
             let result = owner
                 .transport
                 .post(
@@ -395,7 +401,7 @@ async fn lost_database_ack_contract(database: Option<Database>) {
                 )
                 .await;
             assert!(matches!(
-                effects::worker::classify(result),
+                noxide_effect_delivery::worker::classify(result),
                 DeliveryResult::Delivered
             ));
             let result = crate::failure_tests::lose_commit_ack(delivery.finalize_effect(
@@ -547,7 +553,7 @@ async fn postgres_worker_role_delivers_without_reaching_application_data() {
     let case = case(Some(owner), listener.local_addr().unwrap(), false).await;
     case.create("ready").await;
     let mut own = sqlx::PgConnection::connect(&owner_url).await.unwrap();
-    for grant in crate::POSTGRES_WORKER_GRANTS {
+    for grant in noxide_effect_delivery::POSTGRES_WORKER_GRANTS {
         sqlx::query(&grant.replace("ROLE", &role))
             .execute(&mut own)
             .await
@@ -571,17 +577,15 @@ async fn postgres_worker_role_delivers_without_reaching_application_data() {
         );
     }
     restricted.close().await.unwrap();
-    let delivery = Arc::new(
-        super::super::effect_delivery::EffectDelivery::from_test_parts(
-            &case.app,
-            Database::postgres(&format!(
-                "{}://{role}@{}/{name}",
-                prefix.split_once("://").unwrap().0,
-                prefix.split_once('@').unwrap().1,
-            ))
-            .unwrap(),
-        ),
-    );
+    let delivery = Arc::new(effect_delivery_from_test_parts(
+        &case.app,
+        Database::postgres(&format!(
+            "{}://{role}@{}/{name}",
+            prefix.split_once("://").unwrap().0,
+            prefix.split_once('@').unwrap().1,
+        ))
+        .unwrap(),
+    ));
     delivery.activate().await.unwrap();
     let receiver = tokio::spawn(async move {
         let (mut tls, request) = receive(&listener).await;

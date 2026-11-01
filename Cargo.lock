@@ -1427,6 +1427,7 @@ dependencies = [
  "noxide-asset-admission",
  "noxide-assets",
  "noxide-confine",
+ "noxide-effect-delivery",
  "noxide-host",
  "noxide-keys",
  "noxide-protocol",
@@ -1452,6 +1453,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "noxide-effect-delivery"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "httparse",
+ "noxide-admission",
+ "noxide-effects",
+ "noxide-protocol",
+ "noxide-sql",
+ "noxide-store",
+ "rustix",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots",
+]
+
+[[package]]
+name = "noxide-effects"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "noxide-admission",
+ "noxide-protocol",
+ "noxide-sql",
+ "noxide-store",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "noxide-host"
 version = "0.1.0"
 dependencies = [
@@ -1467,6 +1509,8 @@ dependencies = [
  "noxide-admission",
  "noxide-asset-admission",
  "noxide-assets",
+ "noxide-effect-delivery",
+ "noxide-effects",
  "noxide-keys",
  "noxide-protocol",
  "noxide-render",
@@ -1487,7 +1531,6 @@ dependencies = [
  "tower",
  "url",
  "wat",
- "webpki-roots",
 ]
 
 [[package]]

@@ -9,6 +9,8 @@ members = [
     "crates/noxide-confine",
     "crates/noxide-keys",
     "crates/noxide-store",
+    "crates/noxide-effects",
+    "crates/noxide-effect-delivery",
     "crates/noxide-sql",
     "crates/noxide-sql-macros",
     "crates/noxide-admission",
@@ -38,6 +40,8 @@ noxide-render = { path = "crates/noxide-render", version = "0.1.0" }
 noxide-test-support = { path = "crates/noxide-test-support", version = "0.1.0" }
 noxide-sql = { path = "crates/noxide-sql", version = "0.1.0" }
 noxide-sql-macros = { path = "crates/noxide-sql-macros", version = "0.1.0" }
+noxide-effects = { path = "crates/noxide-effects", version = "0.1.0" }
+noxide-effect-delivery = { path = "crates/noxide-effect-delivery", version = "0.1.0" }
 noxide-store = { path = "crates/noxide-store", version = "0.1.0" }
 noxide-keys = { path = "crates/noxide-keys", version = "0.1.0" }
 noxide-confine = { path = "crates/noxide-confine", version = "0.1.0" }

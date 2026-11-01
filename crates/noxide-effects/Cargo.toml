@@ -1,0 +1,22 @@
+[package]
+name = "noxide-effects"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Noxide effect approval, outbox and operator commands. Opens no outbound socket"
+
+[dependencies]
+noxide-protocol.workspace = true
+noxide-admission.workspace = true
+noxide-store.workspace = true
+noxide-sql.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+rustix.workspace = true
+tokio.workspace = true
+base64 = "0.22"
+url = "2"

@@ -548,6 +548,18 @@ impl Database {
 }
 
 impl Transaction {
+    /// Commit and report the prepared result, distinguishing a commit whose
+    /// outcome is unknown from one known to have failed.
+    pub async fn finish_commit<T>(&mut self, prepared: T) -> std::result::Result<T, RequestError> {
+        let result = self.commit().await;
+        if self.commit_acknowledged() {
+            return Ok(prepared);
+        }
+        if self.commit_may_have_succeeded() {
+            return Err(RequestError::OutcomeUnknown);
+        }
+        result.map(|_| prepared).map_err(RequestError::database)
+    }
     /// Pause captured effects and revoke their authority when the runtime changes.
     pub async fn pause_effects_for_epoch(&mut self) -> Result<()> {
         self.execute("UPDATE nx_outbox SET state='paused',reason='runtime_changed',lease_until_ms=0 WHERE state IN ('pending','running')",&[]).await?;
@@ -1126,6 +1138,56 @@ impl std::fmt::Display for ConditionalConflict {
     }
 }
 impl std::error::Error for ConditionalConflict {}
+
+#[derive(Debug)]
+pub enum RequestError {
+    Authentication,
+    InvalidRequest,
+    InvalidCursor,
+    Rejected,
+    Busy,
+    OutcomeUnknown,
+}
+impl RequestError {
+    pub fn deadline() -> Self {
+        if lifecycle::RequestScope::commit_pending() {
+            Self::OutcomeUnknown
+        } else {
+            Self::Busy
+        }
+    }
+    pub fn database(error: anyhow::Error) -> Self {
+        if error.is::<CommitFailure>() {
+            return Self::OutcomeUnknown;
+        }
+        if error.is::<lifecycle::Unavailable>() || error.is::<lifecycle::meter::StatementLimit>() {
+            return Self::Busy;
+        }
+        if retryable(&error) {
+            Self::Busy
+        } else {
+            Self::Rejected
+        }
+    }
+}
+impl std::fmt::Display for RequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Authentication => "Sign in to continue.",
+                Self::InvalidCursor =>
+                    "This pagination link is invalid or has expired. Restart pagination.",
+                Self::InvalidRequest => "This request is invalid or has expired.",
+                Self::Rejected => "The request could not be completed.",
+                Self::Busy => "The service is busy. Retry this request.",
+                Self::OutcomeUnknown => "The operation result is not yet confirmed.",
+            }
+        )
+    }
+}
+impl std::error::Error for RequestError {}
 
 pub fn retryable(error: &anyhow::Error) -> bool {
     if error.is::<commit::CommitFailure>() {

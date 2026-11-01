@@ -1,7 +1,7 @@
 //! Retained provider-paired store/operator fixtures. Actual action receipts and
 //! Tor/TLS delivery are covered by the application adapter fixtures separately.
 
-use super::*;
+use crate::effects::{EffectOperatorTransaction as _, store::*, types::*};
 use crate::jobs::JobOperatorTransaction as _;
 use crate::{
     database::{
@@ -309,7 +309,7 @@ async fn fill(db: &Database, tenant: &str, count: usize) {
         phase(db,async |tx:&mut Transaction| {let mut calls=16;let proof=OutboxContext {tx,calls:&mut calls}.endpoint_grant(&EffectScope {deployment:"deployment".into(),tenant:tenant.into()},"events","contract").await?;
         for n in first..end {let capture=CapturedEffect::capture(&approval().contract.emissions[0],format!("filler-{n}"),1,&proof,b"{}".to_vec(),at(1000))?;
             tx.execute("INSERT INTO nx_effect_tenants(deployment,tenant,claim_seq) VALUES('deployment',$1,0) ON CONFLICT(deployment,tenant) DO NOTHING",&[tenant.into()]).await?;
-            tx.execute("INSERT INTO nx_outbox(id,deployment,tenant,origin,ordinal,endpoint,contract,epoch,grant_version,secret_version,payload,payload_digest,eligible_ms,first_eligible_ms,attempts,fence,lease_until_ms,round,state,reason) VALUES($1,'deployment',$2,$3,0,'events','contract','epoch',1,0,$4,$5,1000,1000,0,0,0,0,'pending','')",&[capture.id()?.into(),tenant.into(),capture.origin.as_str().into(),serde_json::to_string(&capture)?.into(),capture.capture_digest()?.into()]).await?;
+            tx.execute("INSERT INTO nx_outbox(id,deployment,tenant,origin,ordinal,endpoint,contract,epoch,grant_version,secret_version,payload,payload_digest,eligible_ms,first_eligible_ms,attempts,fence,lease_until_ms,round,state,reason) VALUES($1,'deployment',$2,$3,0,'events','contract','epoch',1,0,$4,$5,1000,1000,0,0,0,0,'pending','')",&[capture.id()?.into(),tenant.into(),capture.origin().into(),serde_json::to_string(&capture)?.into(),capture.capture_digest()?.into()]).await?;
         }Ok(())}).await.unwrap();
     }
 }
@@ -492,7 +492,7 @@ async fn retry_and_atomicity_contract(db: &Database) {
     let fifth = claim(db, 1000).await;
     // No finalization acknowledgment: the fifth send could already have left.
     // Reclaim may inspect state but cannot create a sixth network attempt.
-    let recovered = claim(db, fifth.lease_until.unix_millis()).await;
+    let recovered = claim(db, fifth.lease_until().unix_millis()).await;
     phase(db, async |tx: &mut Transaction| {
         let mut calls = 16;
         assert!(matches!(
@@ -500,7 +500,7 @@ async fn retry_and_atomicity_contract(db: &Database) {
                 tx,
                 calls: &mut calls
             }
-            .preflight(&recovered, fifth.lease_until)
+            .preflight(&recovered, fifth.lease_until())
             .await?,
             Preflight::Settled(Finalized::Dead)
         ));
@@ -525,11 +525,11 @@ async fn retry_and_atomicity_contract(db: &Database) {
     .unwrap();
     assert_eq!(state(db, &unsent.id().unwrap()).await, "pending");
     let second = claim(db, 1000).await;
-    assert_eq!(second.id, first.id);
+    assert_eq!(second.id(), first.id());
     let attempts = phase(db, async |tx: &mut Transaction| {
         tx.fetch::<1>(
             "SELECT CAST(attempts AS TEXT) FROM nx_outbox WHERE id=$1",
-            &[second.id.as_str().into()],
+            &[second.id().into()],
         )
         .await
     })
@@ -559,9 +559,9 @@ async fn retry_and_atomicity_contract(db: &Database) {
                 tx,
                 calls: &mut calls
             }
-            .preflight(&stale, stale.lease_until)
+            .preflight(&stale, stale.lease_until())
             .await?,
-            Preflight::Settled(Finalized::Retrying(at)) if at == stale.lease_until
+            Preflight::Settled(Finalized::Retrying(at)) if at == stale.lease_until()
         ));
         Ok(())
     })
