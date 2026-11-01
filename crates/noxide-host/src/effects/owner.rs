@@ -26,6 +26,11 @@ const DIRECTORY: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC)
     .union(OFlags::NONBLOCK);
+/// Walks without read access, so a confined worker needs a rule for the secret only.
+const WALK: OFlags = OFlags::PATH
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
 const FILE: OFlags = OFlags::NOFOLLOW
     .union(OFlags::CLOEXEC)
     .union(OFlags::NONBLOCK);
@@ -292,7 +297,7 @@ pub(crate) fn read_secret(
     hold.check(deadline)?;
     let parent = path.parent().context("effect secret parent missing")?;
     let name = path.file_name().context("effect secret filename missing")?;
-    let directory = open_directory(parent, deadline)?;
+    let directory = walk_directory(parent, WALK, deadline)?;
     let fd = fs::openat(&directory, name, FILE | OFlags::RDONLY, Mode::empty())
         .context("open effect secret")?;
     let stat = fs::fstat(&fd)?;
@@ -317,6 +322,9 @@ pub(crate) fn read_secret(
         .map_err(|_| anyhow::anyhow!("invalid effect bearer secret"))
 }
 fn open_directory(path: &Path, deadline: Instant) -> Result<OwnedFd> {
+    walk_directory(path, DIRECTORY, deadline)
+}
+fn walk_directory(path: &Path, flags: OFlags, deadline: Instant) -> Result<OwnedFd> {
     ensure!(
         path.is_absolute() && path.as_os_str().len() <= 4096,
         "effect host path must be absolute and bounded"
@@ -326,7 +334,7 @@ fn open_directory(path: &Path, deadline: Instant) -> Result<OwnedFd> {
         parts.next() == Some(Component::RootDir),
         "invalid effect host path"
     );
-    let mut fd = fs::open("/", DIRECTORY, Mode::empty())?;
+    let mut fd = fs::open("/", flags, Mode::empty())?;
     let mut count = 0;
     for part in parts {
         check(deadline)?;
@@ -335,8 +343,7 @@ fn open_directory(path: &Path, deadline: Instant) -> Result<OwnedFd> {
         let Component::Normal(name) = part else {
             anyhow::bail!("noncanonical effect host path")
         };
-        fd = fs::openat(&fd, name, DIRECTORY, Mode::empty())
-            .context("open effect host directory")?;
+        fd = fs::openat(&fd, name, flags, Mode::empty()).context("open effect host directory")?;
     }
     check(deadline)?;
     Ok(fd)

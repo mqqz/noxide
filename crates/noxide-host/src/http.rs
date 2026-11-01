@@ -23,7 +23,7 @@ use std::{
 };
 #[cfg(test)]
 use transport::*;
-pub use transport::{Listener, serve};
+pub use transport::{BoundListener, Listener, serve};
 
 pub(crate) use crate::limiter::Peer;
 

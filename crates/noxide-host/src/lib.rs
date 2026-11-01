@@ -34,7 +34,7 @@ pub mod runtime {
     pub type Runtime = noxide_sandbox::Runtime<noxide_sandbox::NoHostCalls>;
 }
 pub mod schema;
-pub use database::Database;
+pub use database::{Database, StoreResources};
 mod auth;
 mod operator_roles;
 pub use auth::{Registration, account_id};

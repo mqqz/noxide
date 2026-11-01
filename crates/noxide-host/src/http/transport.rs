@@ -5,6 +5,38 @@ impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Transport f
 
 pub struct Listener(pub(super) ListenerKind);
 
+/// A socket bound without a runtime, so a process can bind it before confining
+/// itself and creating the threads that serve it.
+pub struct BoundListener(BoundKind);
+enum BoundKind {
+    Tcp(std::net::TcpListener),
+    #[cfg(unix)]
+    Unix {
+        listener: std::os::unix::net::UnixListener,
+        socket: SocketFile,
+        tor: bool,
+    },
+}
+
+/// Removes its own socket path on drop, and no pre-existing or replacement file.
+#[cfg(unix)]
+pub(super) struct SocketFile {
+    path: std::path::PathBuf,
+    identity: (u64, u64),
+}
+#[cfg(unix)]
+impl Drop for SocketFile {
+    fn drop(&mut self) {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        if let Ok(metadata) = std::fs::symlink_metadata(&self.path)
+            && metadata.file_type().is_socket()
+            && (metadata.dev(), metadata.ino()) == self.identity
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 pub(super) enum ListenerKind {
     #[cfg(test)]
     AcceptError(Arc<tokio::sync::Notify>),
@@ -12,32 +44,30 @@ pub(super) enum ListenerKind {
     #[cfg(unix)]
     Unix {
         listener: tokio::net::UnixListener,
-        path: std::path::PathBuf,
-        identity: (u64, u64),
+        _socket: SocketFile,
         tor: bool,
     },
 }
-impl Listener {
-    #[cfg(test)]
-    pub(crate) fn test_accept_error(release: Arc<tokio::sync::Notify>) -> Self {
-        Self(ListenerKind::AcceptError(release))
-    }
-    pub async fn loopback(address: std::net::SocketAddr) -> Result<Self> {
+impl BoundListener {
+    pub fn loopback(address: std::net::SocketAddr) -> Result<Self> {
         ensure!(address.ip().is_loopback(), "listener must bind loopback");
-        Ok(Self(ListenerKind::Tcp(
-            tokio::net::TcpListener::bind(address).await?,
-        )))
+        let listener = std::net::TcpListener::bind(address)?;
+        listener.set_nonblocking(true)?;
+        Ok(Self(BoundKind::Tcp(listener)))
     }
     #[cfg(unix)]
     pub fn unix(path: &std::path::Path) -> Result<Self> {
         use std::os::unix::fs::MetadataExt;
         let path = std::path::absolute(path)?;
-        let listener = tokio::net::UnixListener::bind(&path)?;
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        listener.set_nonblocking(true)?;
         let metadata = std::fs::symlink_metadata(&path)?;
-        Ok(Self(ListenerKind::Unix {
+        Ok(Self(BoundKind::Unix {
             listener,
-            path,
-            identity: (metadata.dev(), metadata.ino()),
+            socket: SocketFile {
+                path,
+                identity: (metadata.dev(), metadata.ino()),
+            },
             tor: false,
         }))
     }
@@ -54,21 +84,56 @@ impl Listener {
             parent.is_dir() && parent.mode() & 0o7777 == 0o2750 && parent.gid() == tor_gid,
             "Tor socket directory must have mode 2750 and the configured group"
         );
-        let mut socket = Self::unix(&path)?;
+        let mut bound = Self::unix(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660))?;
         let metadata = std::fs::symlink_metadata(&path)?;
-        let ListenerKind::Unix { identity, tor, .. } = &mut socket.0 else {
+        let BoundKind::Unix { socket, tor, .. } = &mut bound.0 else {
             unreachable!()
         };
         ensure!(
-            (metadata.dev(), metadata.ino()) == *identity
+            (metadata.dev(), metadata.ino()) == socket.identity
                 && metadata.uid() == parent.uid()
                 && metadata.gid() == tor_gid
                 && metadata.mode() & 0o777 == 0o660,
             "Tor socket ownership or permissions differ"
         );
         *tor = true;
-        Ok(socket)
+        Ok(bound)
+    }
+    /// Register with the current runtime.
+    pub fn start(self) -> Result<Listener> {
+        Ok(Listener(match self.0 {
+            BoundKind::Tcp(listener) => {
+                ListenerKind::Tcp(tokio::net::TcpListener::from_std(listener)?)
+            }
+            #[cfg(unix)]
+            BoundKind::Unix {
+                listener,
+                socket,
+                tor,
+            } => ListenerKind::Unix {
+                listener: tokio::net::UnixListener::from_std(listener)?,
+                _socket: socket,
+                tor,
+            },
+        }))
+    }
+}
+impl Listener {
+    #[cfg(test)]
+    pub(crate) fn test_accept_error(release: Arc<tokio::sync::Notify>) -> Self {
+        Self(ListenerKind::AcceptError(release))
+    }
+    pub async fn loopback(address: std::net::SocketAddr) -> Result<Self> {
+        BoundListener::loopback(address)?.start()
+    }
+    #[cfg(unix)]
+    pub fn unix(path: &std::path::Path) -> Result<Self> {
+        BoundListener::unix(path)?.start()
+    }
+    #[cfg(unix)]
+    pub fn tor_unix(path: &std::path::Path, tor_gid: u32) -> Result<Self> {
+        BoundListener::tor_unix(path, tor_gid)?.start()
     }
     async fn accept(&self) -> std::io::Result<(Box<dyn Transport>, bool)> {
         match &self.0 {
@@ -82,22 +147,6 @@ impl Listener {
             ListenerKind::Unix { listener, tor, .. } => {
                 Ok((Box::new(listener.accept().await?.0), *tor))
             }
-        }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for Listener {
-    fn drop(&mut self) {
-        use std::os::unix::fs::{FileTypeExt, MetadataExt};
-        if let ListenerKind::Unix { path, identity, .. } = &self.0
-            && let Ok(metadata) = std::fs::symlink_metadata(path)
-            && metadata.file_type().is_socket()
-            && (metadata.dev(), metadata.ino()) == *identity
-        {
-            // Only remove our own socket. Never remove a pre-existing or
-            // replacement file, including after a failed deployment activation.
-            let _ = std::fs::remove_file(path);
         }
     }
 }

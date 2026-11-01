@@ -27,6 +27,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Files and ports a store reaches at runtime.
+#[derive(Clone, Debug)]
+pub struct StoreResources {
+    pub files: Vec<std::path::PathBuf>,
+    /// A loopback port; `Database::postgres` admits no other TCP destination.
+    pub tcp_port: Option<u16>,
+    /// The host is a name, so resolver files must stay readable.
+    pub resolves_host: bool,
+}
+
 #[derive(Clone)]
 pub struct Database {
     options: DatabaseOptions,
@@ -97,13 +107,54 @@ impl Database {
             .synchronous(SqliteSynchronous::Full)
             .foreign_keys(true)
             .busy_timeout(busy)
-            .pragma("trusted_schema", "OFF");
+            .pragma("trusted_schema", "OFF")
+            // Sorts stay inside the request's memory; a confined process has no
+            // temporary directory, and no plaintext reaches one.
+            .pragma("temp_store", "MEMORY");
         Self {
             options: DatabaseOptions::Sqlite {
                 options,
                 path,
                 busy,
             },
+        }
+    }
+    /// What this store needs from a confined process. SQLite's sidecar files are
+    /// created here, because a confined process has no right to create files.
+    pub fn confinement(&self) -> Result<StoreResources> {
+        match &self.options {
+            DatabaseOptions::Sqlite { path, .. } => {
+                let sidecar = |suffix: &str| {
+                    let mut name = path.clone().into_os_string();
+                    name.push(suffix);
+                    std::path::PathBuf::from(name)
+                };
+                let files = vec![path.clone(), sidecar("-wal"), sidecar("-shm")];
+                let mode = std::fs::metadata(path)
+                    .context("activate the database before confinement")?
+                    .permissions();
+                for file in &files {
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(file)?
+                        .set_permissions(mode.clone())?;
+                }
+                Ok(StoreResources {
+                    files,
+                    tcp_port: None,
+                    resolves_host: false,
+                })
+            }
+            DatabaseOptions::Postgres(options) => {
+                let host = options.get_host();
+                let unix = host.starts_with('/');
+                Ok(StoreResources {
+                    files: Vec::new(),
+                    tcp_port: (!unix).then(|| options.get_port()),
+                    resolves_host: !unix && host.parse::<std::net::IpAddr>().is_err(),
+                })
+            }
         }
     }
     #[cfg(test)]
