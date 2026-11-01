@@ -531,7 +531,7 @@ async fn postgres_worker_role_delivers_without_reaching_application_data() {
     let (prefix, _) = base.rsplit_once('/').unwrap();
     let name = format!(
         "nx_worker_{}",
-        crate::ids::random_id()
+        crate::security::random_id()
             .unwrap()
             .replace('-', "a")
             .replace('_', "b")
@@ -543,7 +543,7 @@ async fn postgres_worker_role_delivers_without_reaching_application_data() {
         .execute(&mut admin)
         .await
         .unwrap();
-    sqlx::query(&format!("CREATE ROLE {role} LOGIN"))
+    sqlx::query(&format!("CREATE ROLE {role} LOGIN PASSWORD 'worker-test'"))
         .execute(&mut admin)
         .await
         .unwrap();
@@ -561,7 +561,7 @@ async fn postgres_worker_role_delivers_without_reaching_application_data() {
     }
     // The role reaches delivery state and nothing the application stores.
     let mut restricted = sqlx::PgConnection::connect(&format!(
-        "{}://{role}@{}/{name}",
+        "{}://{role}:worker-test@{}/{name}",
         prefix.split_once("://").unwrap().0,
         prefix.split_once('@').unwrap().1,
     ))
@@ -580,7 +580,7 @@ async fn postgres_worker_role_delivers_without_reaching_application_data() {
     let delivery = Arc::new(effect_delivery_from_test_parts(
         &case.app,
         Database::postgres(&format!(
-            "{}://{role}@{}/{name}",
+            "{}://{role}:worker-test@{}/{name}",
             prefix.split_once("://").unwrap().0,
             prefix.split_once('@').unwrap().1,
         ))
