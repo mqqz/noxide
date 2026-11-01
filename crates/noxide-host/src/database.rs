@@ -312,46 +312,45 @@ impl Database {
                     options.clone()
                 };
                 let mut cx = sqlx::PgConnection::connect_with(&options).await?;
-                for setting in ["SHOW fsync", "SHOW full_page_writes"] {
-                    let value: String = sqlx::query_scalar(setting).fetch_one(&mut cx).await?;
-                    ensure!(value == "on", "unsafe PostgreSQL durability");
-                }
-                sqlx::query("SET synchronous_commit = on")
-                    .execute(&mut cx)
-                    .await?;
                 let statement_timeout = if maintenance.is_some() {
-                    format!(
-                        "SET statement_timeout = '{}ms'",
-                        maintenance::remaining_ms(deadline)?
-                    )
+                    format!("{}ms", maintenance::remaining_ms(deadline)?)
                 } else if exclusive {
-                    "SET statement_timeout = '60s'".into()
+                    "60s".into()
                 } else {
-                    "SET statement_timeout = '1500ms'".into()
+                    "1500ms".into()
                 };
-                sqlx::query(&statement_timeout).execute(&mut cx).await?;
-                sqlx::query(if maintenance.is_some() {
-                    "SET lock_timeout = '1ms'"
+                let lock_timeout = if maintenance.is_some() {
+                    "1ms"
                 } else {
-                    "SET lock_timeout = '250ms'"
-                })
-                .execute(&mut cx)
-                .await?;
-                sqlx::query(if exclusive {
-                    "SET idle_in_transaction_session_timeout = '10s'"
-                } else {
-                    "SET idle_in_transaction_session_timeout = '3000ms'"
-                })
-                .execute(&mut cx)
-                .await?;
-                // Session locks precede BEGIN so waiting never freezes a stale
-                // serializable snapshot. Connections are private and close on drop.
+                    "250ms"
+                };
+                let idle_timeout = if exclusive { "10s" } else { "3000ms" };
+                // One round trip verifies durability, applies session limits and
+                // takes the session lock. The lock precedes BEGIN so waiting never
+                // freezes a stale serializable snapshot. Connections are private
+                // and close on drop, which also releases the lock on any failure.
                 let lock = if exclusive {
-                    "SELECT pg_try_advisory_lock(5642817467268123)"
+                    "pg_try_advisory_lock(5642817467268123)"
                 } else {
-                    "SELECT pg_try_advisory_lock_shared(5642817467268123)"
+                    "pg_try_advisory_lock_shared(5642817467268123)"
                 };
-                let acquired: bool = sqlx::query_scalar(lock).fetch_one(&mut cx).await?;
+                let row = sqlx::query(&format!(
+                    "SELECT current_setting('fsync'),current_setting('full_page_writes'),\
+                     set_config('synchronous_commit','on',false),\
+                     set_config('statement_timeout',$1,false),\
+                     set_config('lock_timeout',$2,false),\
+                     set_config('idle_in_transaction_session_timeout',$3,false),{lock}"
+                ))
+                .bind(&statement_timeout)
+                .bind(lock_timeout)
+                .bind(idle_timeout)
+                .fetch_one(&mut cx)
+                .await?;
+                ensure!(
+                    row.try_get::<String, _>(0)? == "on" && row.try_get::<String, _>(1)? == "on",
+                    "unsafe PostgreSQL durability"
+                );
+                let acquired: bool = row.try_get(6)?;
                 ensure!(acquired, "application database is busy with maintenance");
                 if let Some(overall) = maintenance {
                     control = Some(

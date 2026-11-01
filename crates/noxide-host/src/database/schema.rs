@@ -149,9 +149,23 @@ impl Transaction {
             crate::schema::digest(&resources)? == crate::schema::digest(&manifest.resources)?,
             "stored schema differs from approved resource contract; an explicit migration is required"
         );
-        for resource in &manifest.resources {
-            self.storage_resource(manifest, resource.id).await?;
-        }
+        // One catalog read binds every resource instead of one query each.
+        let bound: std::collections::BTreeSet<String> = self
+            .fetch::<1>(
+                "SELECT resource_key FROM nx_resource_catalog ORDER BY storage_id LIMIT 256",
+                &[],
+            )
+            .await?
+            .into_iter()
+            .map(|[key]| key)
+            .collect();
+        ensure!(
+            manifest
+                .resources
+                .iter()
+                .all(|resource| bound.contains(&resource.name)),
+            "resource schema is not bound"
+        );
         Ok(())
     }
 
