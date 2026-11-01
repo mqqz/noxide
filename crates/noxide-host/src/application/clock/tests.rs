@@ -99,7 +99,7 @@ async fn provider_contract(database: Database) {
         wasm.push(permit);
     }
     assert!(!requests.is_empty() && !connections.is_empty() && !wasm.is_empty());
-    tokio::time::timeout(Duration::from_millis(500), app.tick_clock())
+    tokio::time::timeout(tick_wait(), app.tick_clock())
         .await
         .unwrap()
         .unwrap();
@@ -135,7 +135,7 @@ async fn provider_contract(database: Database) {
         .await
         .unwrap();
     assert!(
-        tokio::time::timeout(Duration::from_millis(500), app.tick_clock())
+        tokio::time::timeout(tick_wait(), app.tick_clock())
             .await
             .unwrap()
             .is_err()
@@ -249,7 +249,7 @@ async fn blocked_tick_deadline_cancellation_and_service_drain_are_bounded() {
         .await
         .unwrap();
     assert!(
-        tokio::time::timeout(Duration::from_millis(500), app.tick_clock())
+        tokio::time::timeout(tick_wait(), app.tick_clock())
             .await
             .unwrap()
             .is_err()
@@ -271,7 +271,7 @@ async fn blocked_tick_deadline_cancellation_and_service_drain_are_bounded() {
     });
     // Explicit completion + worker-close acknowledgement, with the writer still
     // held: no sleep is used to infer that failed maintenance stopped working.
-    tokio::time::timeout(Duration::from_millis(500), complete.notified())
+    tokio::time::timeout(tick_wait(), complete.notified())
         .await
         .unwrap();
     assert!(closed.load(Ordering::Acquire));
@@ -287,7 +287,7 @@ async fn blocked_tick_deadline_cancellation_and_service_drain_are_bounded() {
     let service = app.start_clock_service().unwrap();
     assert!(app.start_clock_service().is_err());
     tokio::time::sleep(Duration::from_millis(1_020)).await;
-    tokio::time::timeout(Duration::from_millis(500), service.shutdown())
+    tokio::time::timeout(tick_wait(), service.shutdown())
         .await
         .unwrap()
         .unwrap();
@@ -298,7 +298,7 @@ async fn blocked_tick_deadline_cancellation_and_service_drain_are_bounded() {
     assert_eq!(clock(&database).await[2], before[2] + 1);
     let restarted = app.start_clock_service().unwrap();
     drop(restarted); // Early serve cancellation/error uses this path.
-    tokio::time::timeout(Duration::from_millis(500), async {
+    tokio::time::timeout(tick_wait(), async {
         while app.maintenance_running.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
         }
@@ -402,7 +402,8 @@ async fn postgres_fixture(label: &str) -> (Database, String) {
 #[ignore = "requires NOXIDE_TEST_POSTGRES disposable local server"]
 async fn postgres_http_stop_waits_for_actual_inflight_backend_termination() {
     use sqlx::{Connection, Row};
-    for delay in [0, 205] {
+    let budget = crate::security::CLOCK_CHECKPOINT_BEGIN_DEADLINE;
+    for delay in [0, budget.as_millis() as u64 + 5] {
         let (database, url) = postgres_fixture("http_stop").await;
         let app = Arc::new(build(database.clone(), HostKeys::generate().unwrap()).await);
         app.activate().await.unwrap();
@@ -410,7 +411,7 @@ async fn postgres_http_stop_waits_for_actual_inflight_backend_termination() {
         let mut monitor = sqlx::PgConnection::connect(&url).await.unwrap();
         // A real server-side barrier inside the actual production clock UPDATE;
         // this exercises cancellation of admitted work, not an idle Rust task.
-        sqlx::query("CREATE FUNCTION nx_clock_pause() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_catalog.pg_sleep(0.3); RETURN NEW; END $$").execute(&mut monitor).await.unwrap();
+        sqlx::query("CREATE FUNCTION nx_clock_pause() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_catalog.pg_sleep(1.5); RETURN NEW; END $$").execute(&mut monitor).await.unwrap();
         sqlx::query("CREATE TRIGGER nx_clock_pause BEFORE UPDATE ON nx_clock FOR EACH ROW EXECUTE FUNCTION nx_clock_pause()").execute(&mut monitor).await.unwrap();
         let listener = crate::http::Listener::loopback("127.0.0.1:0".parse().unwrap())
             .await
@@ -436,16 +437,16 @@ async fn postgres_http_stop_waits_for_actual_inflight_backend_termination() {
             }
         }).await.unwrap();
         // First branch cancels during proven live provider work. Second branch
-        // lets the old 200ms client deadline pass before asking HTTP to stop.
+        // lets the original client deadline pass before asking HTTP to stop.
         tokio::time::sleep(Duration::from_millis(delay)).await;
         let stopped = std::time::Instant::now();
         stop.send(()).unwrap();
-        tokio::time::timeout(Duration::from_millis(250), server)
+        tokio::time::timeout(tick_wait(), server)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
-        assert!(stopped.elapsed() < Duration::from_millis(200));
+        assert!(stopped.elapsed() < budget);
         let present: i64 =
             sqlx::query_scalar("SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE pid=$1")
                 .bind(pid)
@@ -475,7 +476,7 @@ async fn postgres_lost_control_quarantines_capacity_and_service_readiness() {
     app.activate().await.unwrap();
     let before = clock(&database).await;
     let mut monitor = sqlx::PgConnection::connect(&url).await.unwrap();
-    sqlx::query("CREATE FUNCTION nx_clock_pause() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_catalog.pg_sleep(0.3); RETURN NEW; END $$").execute(&mut monitor).await.unwrap();
+    sqlx::query("CREATE FUNCTION nx_clock_pause() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_catalog.pg_sleep(1.5); RETURN NEW; END $$").execute(&mut monitor).await.unwrap();
     sqlx::query("CREATE TRIGGER nx_clock_pause BEFORE UPDATE ON nx_clock FOR EACH ROW EXECUTE FUNCTION nx_clock_pause()").execute(&mut monitor).await.unwrap();
     let service = app.start_clock_service().unwrap();
     let control=tokio::time::timeout(Duration::from_secs(3),async {
@@ -543,7 +544,7 @@ async fn postgres_post_commit_gate_release_keeps_original_budget_and_no_freshnes
         .unwrap();
     // Trusted-provider fault injection, matching R's exact production repro:
     // spend 80ms before COMMIT, then pause the actual post-COMMIT unlock query.
-    sqlx::query("CREATE FUNCTION public.pg_advisory_unlock_all() RETURNS void LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_catalog.pg_sleep(0.3); PERFORM pg_catalog.pg_advisory_unlock_all(); END $$").execute(&mut monitor).await.unwrap();
+    sqlx::query("CREATE FUNCTION public.pg_advisory_unlock_all() RETURNS void LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_catalog.pg_sleep(1.0); PERFORM pg_catalog.pg_advisory_unlock_all(); END $$").execute(&mut monitor).await.unwrap();
     sqlx::query("CREATE FUNCTION nx_clock_pause() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.lifecycle_version != OLD.lifecycle_version THEN PERFORM pg_catalog.pg_sleep(0.08); END IF; RETURN NEW; END $$").execute(&mut monitor).await.unwrap();
     sqlx::query("CREATE TRIGGER nx_clock_pause BEFORE UPDATE ON nx_clock FOR EACH ROW EXECUTE FUNCTION nx_clock_pause()").execute(&mut monitor).await.unwrap();
     let listener = crate::http::Listener::loopback("127.0.0.1:0".parse().unwrap())
@@ -571,14 +572,15 @@ async fn postgres_post_commit_gate_release_keeps_original_budget_and_no_freshnes
     }).await.unwrap();
     let observed = std::time::Instant::now();
     stop.send(()).unwrap();
-    tokio::time::timeout(Duration::from_millis(250), server)
+    tokio::time::timeout(tick_wait(), server)
         .await
         .unwrap()
         .unwrap()
         .unwrap();
     assert!(
-        age_ms as u128 + observed.elapsed().as_millis() <= 200,
-        "post-COMMIT unlock enlarged the original 200ms maintenance budget"
+        age_ms as u128 + observed.elapsed().as_millis()
+            <= crate::security::CLOCK_CHECKPOINT_BEGIN_DEADLINE.as_millis(),
+        "post-COMMIT unlock enlarged the original maintenance budget"
     );
     let present: i64 =
         sqlx::query_scalar("SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE pid=$1")
@@ -601,4 +603,9 @@ async fn postgres_post_commit_gate_release_keeps_original_budget_and_no_freshnes
         matches!(temporal(&app).await, Err(RequestError::Busy)),
         "a post-COMMIT cleanup failure must not renew temporal freshness"
     );
+}
+
+/// Outer wait for work bounded by one clock tick budget, plus scheduling margin.
+fn tick_wait() -> Duration {
+    crate::security::CLOCK_CHECKPOINT_BEGIN_DEADLINE + Duration::from_millis(500)
 }
