@@ -1,10 +1,8 @@
 //! Trusted execution, rendering, and persistence for Noxide applications.
-// The only unsafe block reads SQLite scan counters in a test-only benchmark.
-#![cfg_attr(not(all(test, feature = "query-metrics")), forbid(unsafe_code))]
+#![forbid(unsafe_code)]
 pub use noxide_admission::{Presentation, assets, manifest, schema};
 pub(crate) use noxide_admission::{
     action_contract, expiry, ids, membership, policy, principal, query_plan, routing, search, sql,
-    temporal,
 };
 pub use noxide_render as render;
 #[cfg(test)]
@@ -22,6 +20,8 @@ mod limiter;
 mod membership_tests;
 #[cfg(test)]
 mod policy_tests;
+#[cfg(test)]
+mod store_tests;
 pub use deployment::{BlobDeployment, DeploymentResources};
 pub use effect_deployment::{EffectDeployment, EffectGrant, EffectLimits, EffectSecret};
 pub use effects::{EffectOperatorCommand, EffectOperatorResult, EffectSummary};
@@ -32,20 +32,19 @@ mod blob_multipart;
 mod blob_state;
 mod blob_store;
 mod blob_transport;
-mod database;
 mod effects;
 mod jobs;
-mod lifecycle_clock;
 pub mod runtime {
     pub use noxide_sandbox::Limits;
     /// A guest with no storage grant, for admission checks outside an application.
     pub type Runtime = noxide_sandbox::Runtime<noxide_sandbox::NoHostCalls>;
 }
-pub use database::{Database, StoreResources};
+pub use noxide_store::{Database, StoreResources};
+pub(crate) use noxide_store::{database, lifecycle_clock};
 mod auth;
 mod operator_roles;
-pub use auth::{Registration, account_id};
-pub use operator_roles::{RoleAssignment, RoleScope};
+pub use auth::{AccountAdmin, Registration, account_id};
+pub use operator_roles::{RoleAdmin, RoleAssignment, RoleScope};
 mod security;
 pub use security::HostKeys;
 mod application;

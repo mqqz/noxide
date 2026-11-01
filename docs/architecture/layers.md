@@ -15,7 +15,8 @@ the [explicit examples](../sdk-lowering.md).
 | `noxide-keys` | Host key material and the key service protocol; callers never receive key bytes |
 | `noxide-confine` | Landlock and seccomp policy for deployed processes |
 | `noxide-test-support` | Test fixtures; a dev-dependency only |
-| `noxide-host` | Authentication, authorization, persistence, jobs, effects, blobs, application orchestration and HTTP |
+| `noxide-store` | Transactions, schema activation, storage layout, the request lifecycle and durable time; the only crate that links a database driver |
+| `noxide-host` | Authentication, authorization, repository, jobs, effects, blobs, application orchestration and HTTP |
 | `noxide` | Typed resources, queries, actions, forms and pages; WIT bindings and guest entry points |
 | `noxide-macros` | Explicit declaration expansion and optional convenience lowering |
 | `noxide-cli` | Operator build, dependency, approval, lifecycle, schema and role commands |
@@ -26,10 +27,10 @@ impure one, if a deployed binary enables a `test-support` feature, or if a modul
 inside `noxide-host` depends on a higher layer. `tools/check_binaries.py` checks the
 symbols of each deployed binary, because `noxide-cli` builds them all.
 
-`noxide-host` still contains the store, repository, blobs, jobs and effects as
-modules, separated by that lint and not by the compiler. `Transaction` accepts only
-`Sql`, so runtime strings cannot become statement text anywhere, but statements are
-not yet confined to one crate.
+`noxide-host` still contains the repository, blobs, jobs and effects as modules,
+separated by that lint and not by the compiler. `Transaction` accepts only `Sql`, so
+runtime strings cannot become statement text anywhere, but the statements for those
+modules still live beside them, and any crate depending on the store can run them.
 
 ## Deployed processes
 

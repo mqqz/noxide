@@ -34,3 +34,4 @@ pub(crate) fn verified_job_principal(job: &VerifiedJob) -> crate::auth::Principa
         job.worker().to_owned(),
     )
 }
+pub(crate) use operator::JobOperatorTransaction;

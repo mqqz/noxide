@@ -1,7 +1,12 @@
-use super::*;
+use crate::auth::AccountAdmin as _;
+use crate::database::*;
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
+};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
 };
 use tower::ServiceExt;
 
@@ -67,7 +72,7 @@ async fn auth_http_committed_lost_ack_is_unknown_and_preserves_durable_state() {
             app.clone(),
             crate::http::Origin::parse("http://localhost:8080").unwrap(),
         );
-        let response = crate::failure_tests::lose_commit_ack(router.oneshot(request))
+        let response = crate::database::fault::lose_commit_ack(router.oneshot(request))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);

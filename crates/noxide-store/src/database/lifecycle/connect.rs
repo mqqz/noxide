@@ -17,7 +17,7 @@ async fn open_inner(
     let deadline = lease.work.into_std();
     let cancelled = Arc::new(AtomicBool::new(false));
     let mut tx = Transaction {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         creation_acquired: None,
         backend: Backend::Closed,
         active: false,

@@ -3,15 +3,17 @@ mod blob_layout;
 mod bootstrap_close_tests;
 mod commit;
 mod effects_layout;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fault;
 mod jobs_layout;
-pub(crate) mod lifecycle;
+pub mod lifecycle;
 mod maintenance;
-pub(crate) mod schema;
+pub mod schema;
 mod search_layout;
 use anyhow::{Context, Result, ensure};
-pub(crate) use commit::CommitFailure;
+pub use commit::CommitFailure;
 use commit::CommitState;
-pub(crate) use maintenance::{MaintenanceLease, MaintenanceUncertain};
+pub use maintenance::{MaintenanceLease, MaintenanceUncertain};
 use sqlx::{
     Connection, Row,
     postgres::PgConnectOptions,
@@ -51,21 +53,20 @@ enum DatabaseOptions {
     Postgres(PgConnectOptions),
 }
 
-#[cfg(test)]
-tokio::task_local! {pub(crate) static MAINTENANCE_CLOSE_PROBE: Arc<AtomicBool>;}
+#[cfg(any(test, feature = "test-support"))]
+tokio::task_local! {pub static MAINTENANCE_CLOSE_PROBE: Arc<AtomicBool>;}
 
-pub(crate) enum Backend {
+pub enum Backend {
     // Connection ownership has moved into physical provider cleanup.
     Closed,
     Sqlite(sqlx::SqliteConnection),
     Postgres(sqlx::PgConnection),
 }
-#[cfg(test)]
-pub(crate) static CREATION_HOLD_MAX: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+#[cfg(any(test, feature = "test-support"))]
+pub static CREATION_HOLD_MAX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-pub(crate) struct Transaction {
-    #[cfg(test)]
+pub struct Transaction {
+    #[cfg(any(test, feature = "test-support"))]
     creation_acquired: Option<Instant>,
     backend: Backend,
     active: bool,
@@ -81,7 +82,7 @@ pub(crate) struct Transaction {
     ordinary: Option<lifecycle::Ordinary>,
 }
 
-pub(crate) use crate::sql::{Param, Sql, sql};
+pub use crate::sql::{Param, Sql, sql};
 
 macro_rules! bound_query {
     ($sql:expr,$params:expr) => {{
@@ -157,12 +158,12 @@ impl Database {
             }
         }
     }
-    #[cfg(test)]
-    pub(crate) fn is_sqlite(&self) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn is_sqlite(&self) -> bool {
         matches!(self.options, DatabaseOptions::Sqlite { .. })
     }
-    #[cfg(test)]
-    pub(crate) fn with_sqlite_busy_timeout_for_test(mut self, timeout: Duration) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_sqlite_busy_timeout_for_test(mut self, timeout: Duration) -> Self {
         let DatabaseOptions::Sqlite { options, busy, .. } = &mut self.options else {
             panic!("SQLite fixture required")
         };
@@ -187,13 +188,13 @@ impl Database {
             options: DatabaseOptions::Postgres(options),
         })
     }
-    pub(crate) async fn begin(&self, deadline: Instant) -> Result<Transaction> {
+    pub async fn begin(&self, deadline: Instant) -> Result<Transaction> {
         if let Some(result) = lifecycle::begin(self, deadline, false).await {
             return result;
         }
         tokio::time::timeout_at(deadline.into(), self.connect(deadline, false, false, None)).await?
     }
-    pub(crate) async fn begin_read(&self, deadline: Instant) -> Result<Transaction> {
+    pub async fn begin_read(&self, deadline: Instant) -> Result<Transaction> {
         if let Some(result) = lifecycle::begin(self, deadline, true).await {
             return result;
         }
@@ -201,7 +202,7 @@ impl Database {
     }
     /// Clock-only private connection. SQLite must never queue a busy worker
     /// beyond the maintenance attempt: its BEGIN IMMEDIATE fails without waiting.
-    pub(crate) async fn begin_maintenance(&self, deadline: Instant) -> Result<Transaction> {
+    pub async fn begin_maintenance(&self, deadline: Instant) -> Result<Transaction> {
         let work = deadline
             .checked_sub(maintenance::CLEANUP_RESERVE)
             .context("maintenance deadline")?;
@@ -315,7 +316,7 @@ impl Database {
                         // Release capacity only after the worker acknowledges
                         // closure; failed/unknown closure remains quarantined.
                         cx.close().await?;
-                        #[cfg(test)]
+                        #[cfg(any(test, feature = "test-support"))]
                         let _ = MAINTENANCE_CLOSE_PROBE.try_with(|probe| {
                             probe.store(true, Ordering::Release);
                         });
@@ -401,7 +402,7 @@ impl Database {
             }
         };
         let tx = Transaction {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             creation_acquired: None,
             backend,
             active: true,
@@ -468,11 +469,11 @@ impl Database {
     /// Stop serving first. Old processes, sessions and forms are retired together
     /// with the credential-seconds reset; receipts and application records are
     /// preserved. Lifecycle milliseconds/version never reset or revive expiry.
-    pub async fn recover_clock(&self, keys: &crate::HostKeys) -> Result<()> {
+    pub async fn recover_clock(&self, incarnation: &str) -> Result<()> {
         let mut tx = self
             .begin(Instant::now() + Duration::from_secs(300))
             .await?;
-        if matches!(&tx.backend, Backend::Postgres(_)) {
+        if matches!(tx.backend, Backend::Postgres(_)) {
             tx.execute("SET LOCAL statement_timeout = '300s'", &[])
                 .await?;
             tx.execute("SET LOCAL idle_in_transaction_session_timeout = '10s'", &[])
@@ -489,7 +490,7 @@ impl Database {
             .first()
             .ok_or_else(|| anyhow::anyhow!("deployment missing"))?;
         ensure!(
-            old[0] != keys.incarnation(),
+            old[0] != incarnation,
             "clock recovery requires a fresh host key"
         );
         if matches!(tx.backend, Backend::Postgres(_)) {
@@ -517,7 +518,7 @@ impl Database {
         let generation = crate::ids::random_id()?;
         tx.execute(
             "UPDATE nx_deployment SET incarnation=$1,generation=$2 WHERE singleton=1",
-            &[keys.incarnation().into(), generation.into()],
+            &[incarnation.into(), generation.into()],
         )
         .await?;
         tx.execute("DELETE FROM nx_sessions", &[]).await?;
@@ -547,9 +548,24 @@ impl Database {
 }
 
 impl Transaction {
+    /// Pause captured effects and revoke their authority when the runtime changes.
+    pub async fn pause_effects_for_epoch(&mut self) -> Result<()> {
+        self.execute("UPDATE nx_outbox SET state='paused',reason='runtime_changed',lease_until_ms=0 WHERE state IN ('pending','running')",&[]).await?;
+        self.execute(
+            "UPDATE nx_effect_grants SET state='revoked' WHERE state='active'",
+            &[],
+        )
+        .await?;
+        self.execute(
+            "UPDATE nx_effect_secrets SET state='revoked' WHERE state='active'",
+            &[],
+        )
+        .await?;
+        Ok(())
+    }
     /// Liveness guard for bounded startup work owned by MaintenanceLease.
     /// This grants no operator CPU authority and is not a fallback request scope.
-    pub(crate) fn maintenance_checkpoint(&self) -> Result<()> {
+    pub fn maintenance_checkpoint(&self) -> Result<()> {
         ensure!(
             self.maintenance_work
                 && self.active
@@ -559,8 +575,8 @@ impl Transaction {
         );
         Ok(())
     }
-    #[cfg(test)]
-    pub(crate) async fn snapshot(&mut self) -> Result<Vec<(String, Vec<[String; 1]>)>> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn snapshot(&mut self) -> Result<Vec<(String, Vec<[String; 1]>)>> {
         let mut tables = Vec::new();
         for &(table, columns) in TABLE_COLUMNS
             .iter()
@@ -588,8 +604,8 @@ impl Transaction {
         Ok(tables)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn explain(&mut self, query: &str) -> Result<Vec<String>> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn explain(&mut self, query: &str) -> Result<Vec<String>> {
         match &mut self.backend {
             Backend::Closed => unreachable!("closed maintenance transaction"),
             Backend::Sqlite(cx) => Ok(sqlx::query(&format!("EXPLAIN QUERY PLAN {query}"))
@@ -609,8 +625,8 @@ impl Transaction {
 
     /// Test-only instrumentation. Enable SQLite's scanstatus build flag together
     /// with query-metrics; no raw database handle is exposed to applications.
-    #[cfg(all(test, feature = "query-metrics"))]
-    pub(crate) async fn examined_rows(&mut self, query: &str) -> Result<i64> {
+    #[cfg(all(any(test, feature = "test-support"), feature = "query-metrics"))]
+    pub async fn examined_rows(&mut self, query: &str) -> Result<i64> {
         match &mut self.backend {
             Backend::Closed => unreachable!("closed maintenance transaction"),
             Backend::Sqlite(cx) => {
@@ -688,17 +704,17 @@ impl Transaction {
         }
     }
 
-    pub(crate) async fn allocate_creation(&mut self) -> Result<i64> {
+    pub async fn allocate_creation(&mut self) -> Result<i64> {
         let rows=self.fetch::<1>("UPDATE nx_creation_counter SET value=value+1 WHERE singleton=1 AND value<9223372036854775807 RETURNING CAST(value AS TEXT)", &[]).await?;
         ensure!(rows.len() == 1, "creation sequence exhausted");
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             self.creation_acquired = Some(Instant::now());
         }
         Ok(rows[0][0].parse()?)
     }
 
-    pub(crate) async fn check_storage(&mut self) -> Result<()> {
+    pub async fn check_storage(&mut self) -> Result<()> {
         let rows = self.fetch::<2>(
             "SELECT CAST(singleton AS TEXT),CAST(version AS TEXT) FROM nx_storage ORDER BY singleton LIMIT 2",
             &[],
@@ -814,7 +830,7 @@ impl Transaction {
         self.check_effect_layout().await
     }
 
-    pub(crate) async fn deployment(
+    pub async fn deployment(
         &mut self,
         contract: &str,
         incarnation: &str,
@@ -849,7 +865,7 @@ impl Transaction {
         Ok(candidate)
     }
     /// Read the generation of a deployment another process activated.
-    pub(crate) async fn deployment_generation(&mut self, contract: &str) -> Result<String> {
+    pub async fn deployment_generation(&mut self, contract: &str) -> Result<String> {
         let rows = self
             .fetch::<2>(
                 "SELECT contract,generation FROM nx_deployment WHERE singleton=1",
@@ -862,11 +878,11 @@ impl Transaction {
         ensure!(stored == contract, "deployment was superseded");
         Ok(generation.clone())
     }
-    pub(crate) fn field_expression(&self, field: &str) -> Result<Sql> {
+    pub fn field_expression(&self, field: &str) -> Result<Sql> {
         self.query_provider()?.field_expression(field)
     }
 
-    pub(crate) fn bounded_text(&self, column: impl crate::sql::SqlArg, maximum: usize) -> Sql {
+    pub fn bounded_text(&self, column: impl crate::sql::SqlArg, maximum: usize) -> Sql {
         // NULL rejects oversized stored values before their contents cross the
         // SQL driver.
         let size = match self.backend {
@@ -876,7 +892,7 @@ impl Transaction {
         };
         sql!("CASE WHEN {size}<={maximum} THEN {column} ELSE NULL END")
     }
-    pub(crate) async fn execute(&mut self, sql: impl Into<Sql>, params: &[Param]) -> Result<u64> {
+    pub async fn execute(&mut self, sql: impl Into<Sql>, params: &[Param]) -> Result<u64> {
         ensure!(!self.read_only, "read-only transaction");
         self.execute_internal(sql.into().as_str(), params).await
     }
@@ -909,7 +925,7 @@ impl Transaction {
     }
     // Trusted queries cast selected columns to TEXT, keeping backend conversion
     // rules out of the semantic repository and receipt contracts.
-    pub(crate) async fn fetch<const N: usize>(
+    pub async fn fetch<const N: usize>(
         &mut self,
         sql: impl Into<Sql>,
         params: &[Param],
@@ -978,7 +994,7 @@ impl Transaction {
         result
     }
 
-    pub(crate) async fn commit(&mut self) -> Result<()> {
+    pub async fn commit(&mut self) -> Result<()> {
         self.operator_ended.store(true, Ordering::Release);
         ensure!(
             !self.commit_may_have_succeeded(),
@@ -999,7 +1015,7 @@ impl Transaction {
             }
             return Err(commit::CommitFailure::uncertain(error));
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(started) = self.creation_acquired.take() {
             CREATION_HOLD_MAX.fetch_max(
                 started.elapsed().as_micros().min(u64::MAX as u128) as u64,
@@ -1007,8 +1023,8 @@ impl Transaction {
             );
         }
         self.active = false;
-        #[cfg(test)]
-        crate::failure_tests::after_commit()
+        #[cfg(any(test, feature = "test-support"))]
+        crate::database::fault::after_commit()
             .await
             .map_err(commit::CommitFailure::uncertain)?;
         self.commit_state = CommitState::Acknowledged;
@@ -1047,13 +1063,13 @@ impl Transaction {
         Ok(())
     }
 
-    pub(crate) fn commit_acknowledged(&self) -> bool {
+    pub fn commit_acknowledged(&self) -> bool {
         self.commit_state == CommitState::Acknowledged
     }
-    pub(crate) fn commit_may_have_succeeded(&self) -> bool {
+    pub fn commit_may_have_succeeded(&self) -> bool {
         self.commit_state.may_have_committed()
     }
-    pub(crate) async fn rollback(&mut self) -> Result<()> {
+    pub async fn rollback(&mut self) -> Result<()> {
         self.operator_ended.store(true, Ordering::Release);
         let cleanup = if self.ordinary.is_some() {
             lifecycle::finish_transaction(self).await
@@ -1103,7 +1119,7 @@ impl Drop for Transaction {
 
 /// A conditional write lost to a concurrent transaction; the attempt may retry.
 #[derive(Debug)]
-pub(crate) struct ConditionalConflict;
+pub struct ConditionalConflict;
 impl std::fmt::Display for ConditionalConflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("conditional write conflict")
@@ -1111,15 +1127,15 @@ impl std::fmt::Display for ConditionalConflict {
 }
 impl std::error::Error for ConditionalConflict {}
 
-pub(crate) fn retryable(error: &anyhow::Error) -> bool {
+pub fn retryable(error: &anyhow::Error) -> bool {
     if error.is::<commit::CommitFailure>() {
         return false;
     }
     if error.is::<ConditionalConflict>() {
         return true;
     }
-    #[cfg(test)]
-    if error.is::<crate::failure_tests::Aborted>() {
+    #[cfg(any(test, feature = "test-support"))]
+    if error.is::<crate::database::fault::Aborted>() {
         return true;
     }
     if error.is::<tokio::time::error::Elapsed>() {

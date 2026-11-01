@@ -399,16 +399,12 @@ async fn provider_contract(database: Database) {
         .begin(Instant::now() + Duration::from_secs(2))
         .await
         .unwrap();
-    let old_keys = crate::HostKeys::generate().unwrap();
-    tx.deployment("clock-fixture", old_keys.incarnation(), true)
+    tx.deployment("clock-fixture", "old-incarnation", true)
         .await
         .unwrap();
     tx.commit().await.unwrap();
     let old_lifecycle = snapshot(&database).await;
-    database
-        .recover_clock(&crate::HostKeys::generate().unwrap())
-        .await
-        .unwrap();
+    database.recover_clock("fresh-incarnation").await.unwrap();
     assert_eq!(
         snapshot(&database).await,
         old_lifecycle,

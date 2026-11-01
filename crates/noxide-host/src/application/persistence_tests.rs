@@ -1,4 +1,5 @@
 //! Application persistence tests for clock recovery, read paths, and database contention.
+use crate::auth::AccountAdmin as _;
 use crate::{Application, Database, HostKeys, manifest, runtime::Limits, test_support as fixture};
 use noxide_protocol::{Fields, Manifest};
 use std::{
@@ -458,7 +459,7 @@ async fn clock_rollback_and_recovery(db: Database) {
     let before = clock_state(&db).await;
     assert_eq!(&before[2..], ["1", "1", "1"]);
     assert!(
-        db.recover_clock(&old.keys).await.is_err(),
+        db.recover_clock(old.keys.incarnation()).await.is_err(),
         "same key cannot reset clock"
     );
     assert_eq!(clock_state(&db).await, before);
@@ -472,7 +473,7 @@ async fn clock_rollback_and_recovery(db: Database) {
     let lifecycle_before = tx.fetch::<2>("SELECT CAST(lifecycle_ms AS TEXT),CAST(lifecycle_version AS TEXT) FROM nx_clock WHERE singleton=1", &[]).await.unwrap();
     tx.execute("DELETE FROM nx_clock", &[]).await.unwrap();
     tx.commit().await.unwrap();
-    assert!(db.recover_clock(&fresh).await.is_err());
+    assert!(db.recover_clock(fresh.incarnation()).await.is_err());
     assert_eq!(clock_state(&db).await, before);
     let mut tx = db
         .begin(Instant::now() + Duration::from_secs(2))
@@ -486,7 +487,7 @@ async fn clock_rollback_and_recovery(db: Database) {
     .unwrap();
     tx.commit().await.unwrap();
 
-    db.recover_clock(&fresh).await.unwrap();
+    db.recover_clock(fresh.incarnation()).await.unwrap();
     let after = clock_state(&db).await;
     assert_ne!(after[0], before[0]);
     assert_ne!(after[1], before[1]);
@@ -530,7 +531,7 @@ async fn clock_rollback_and_recovery(db: Database) {
         .unwrap();
     assert_eq!(clock_state(&db).await[3], "2");
     db.maintain().await.unwrap();
-    assert!(db.recover_clock(&fresh).await.is_err());
+    assert!(db.recover_clock(fresh.incarnation()).await.is_err());
     // Tokens issued by the recovered deployment retain normal expiry semantics.
     assert_eq!(
         fresh
@@ -936,7 +937,7 @@ async fn checkpoint_and_external_writes(db: Database) {
     tx.commit().await.unwrap();
     // An idle checkpoint after retirement succeeds without touching storage.
     // Dirty retired checkpoints are covered by the write-watermark regressions.
-    db.recover_clock(&HostKeys::generate().unwrap())
+    db.recover_clock(HostKeys::generate().unwrap().incarnation())
         .await
         .unwrap();
     let before = storage_snapshot(&db).await;

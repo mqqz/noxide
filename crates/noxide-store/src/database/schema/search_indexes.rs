@@ -156,7 +156,7 @@ impl Transaction {
 }
 
 /// Shared operator/runtime helper. Caller owns activation and the current transaction.
-pub(crate) async fn replace_postings(
+pub async fn replace_postings(
     tx: &mut Transaction,
     storage: i64,
     id: i64,

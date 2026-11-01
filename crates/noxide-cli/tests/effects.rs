@@ -1,5 +1,6 @@
 #![cfg(unix)]
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use noxide_host::AccountAdmin as _;
 use noxide_host::{
     Application, Database, DeploymentResources, EffectDeployment, EffectGrant, EffectLimits,
     EffectSecret, HostKeys, runtime::Limits,

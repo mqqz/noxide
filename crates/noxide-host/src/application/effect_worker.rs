@@ -1,7 +1,9 @@
 //! Operator effect commands and the serving application's queue binding.
+
 #[cfg(test)]
 use super::effect_delivery::{EffectDelivery, EffectService};
 use super::*;
+use crate::effects::EffectOperatorTransaction as _;
 use crate::{
     effect_deployment::EffectiveEffectDeployment,
     effects::owner::OwnerDirectory,

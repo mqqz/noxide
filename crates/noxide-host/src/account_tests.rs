@@ -1,3 +1,4 @@
+use crate::auth::AccountAdmin as _;
 use crate::{
     Database,
     auth::{Principal, User},

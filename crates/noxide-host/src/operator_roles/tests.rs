@@ -1,4 +1,5 @@
 use super::*;
+use crate::auth::AccountAdmin as _;
 use crate::{Application, HostKeys, auth, policy, runtime::Limits, test_support as fixture};
 use noxide_protocol::{Fields, Policy, Predicate};
 use std::sync::Arc;

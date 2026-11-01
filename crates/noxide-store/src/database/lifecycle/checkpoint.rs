@@ -2,13 +2,13 @@
 use super::*;
 
 #[derive(Clone)]
-pub(crate) struct OperatorCheckpoint {
+pub struct OperatorCheckpoint {
     deadline: tokio::time::Instant,
     cancelled: Arc<AtomicBool>,
     ended: Arc<AtomicBool>,
 }
 impl OperatorCheckpoint {
-    pub(crate) fn checkpoint(&self) -> Result<()> {
+    pub fn checkpoint(&self) -> Result<()> {
         ensure!(!RequestScope::active(), Unavailable::Closed);
         ensure!(
             !self.cancelled.load(Ordering::Acquire) && !self.ended.load(Ordering::Acquire),
@@ -22,7 +22,7 @@ impl OperatorCheckpoint {
     }
 }
 impl Transaction {
-    pub(crate) fn operator_checkpoint(&self) -> Result<OperatorCheckpoint> {
+    pub fn operator_checkpoint(&self) -> Result<OperatorCheckpoint> {
         ensure!(
             !RequestScope::active()
                 && self.active

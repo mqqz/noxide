@@ -3,23 +3,15 @@ use super::*;
 use std::{collections::BTreeMap, sync::Mutex};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
-#[cfg(test)]
-mod action_meter_tests;
-#[cfg(test)]
-mod auth_meter_tests;
-#[cfg(test)]
-mod auth_tests;
 mod checkpoint;
 #[cfg(test)]
 mod checkpoint_tests;
 mod connect;
-pub(crate) use checkpoint::OperatorCheckpoint;
-pub(crate) mod meter;
+pub use checkpoint::OperatorCheckpoint;
+pub mod meter;
 #[cfg(test)]
 mod meter_tests;
 mod provider;
-#[cfg(test)]
-mod receipt_tests;
 #[cfg(test)]
 mod search_candidate_tests;
 #[cfg(test)]
@@ -28,7 +20,7 @@ mod tests;
 const CLEANUP_RESERVE: Duration = maintenance::CLEANUP_RESERVE;
 
 #[derive(Debug)]
-pub(crate) enum Unavailable {
+pub enum Unavailable {
     Deadline,
     Closed,
     Unconfirmed,
@@ -52,12 +44,12 @@ struct RegistryState {
     deadlines: BTreeMap<tokio::time::Instant, usize>,
 }
 #[derive(Default)]
-pub(crate) struct Registry {
+pub struct Registry {
     state: Mutex<RegistryState>,
     changed: Notify,
 }
 impl Registry {
-    pub(crate) fn ensure_idle(&self) -> Result<()> {
+    pub fn ensure_idle(&self) -> Result<()> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         ensure!(
             state.active == 0 && !state.quarantined && !state.closed,
@@ -77,7 +69,7 @@ impl Registry {
         })
     }
     /// Wait until no provider is active, without closing admission.
-    pub(crate) async fn drain(&self) -> Result<()> {
+    pub async fn drain(&self) -> Result<()> {
         loop {
             let changed = self.changed.notified();
             let deadline = {
@@ -97,7 +89,7 @@ impl Registry {
                 .map_err(|_| Unavailable::Unconfirmed)?;
         }
     }
-    pub(crate) async fn shutdown(&self) -> Result<()> {
+    pub async fn shutdown(&self) -> Result<()> {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
         loop {
             let changed = self.changed.notified();
@@ -157,16 +149,16 @@ struct Root {
 }
 /// One phase of a host-created request. Clones preserve the same root lifetime.
 #[derive(Clone)]
-pub(crate) struct RequestScope {
+pub struct RequestScope {
     root: Arc<Root>,
     deadline: tokio::time::Instant,
 }
 tokio::task_local! { static REQUEST: RequestScope; }
 tokio::task_local! { static ADMISSION: AdmissionOwner; }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 tokio::task_local! { static OBSERVED_ROOTS: Arc<Mutex<Vec<RequestScope>>>; }
-#[cfg(test)]
-pub(crate) async fn observe_roots<T>(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn observe_roots<T>(
     future: impl std::future::Future<Output = T>,
 ) -> (T, Vec<RequestScope>) {
     let observed = Arc::new(Mutex::new(Vec::new()));
@@ -176,12 +168,20 @@ pub(crate) async fn observe_roots<T>(
 }
 
 impl RequestScope {
-    #[cfg(test)]
-    pub(crate) fn statement_snapshot(&self) -> (u16, u16, u16) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn statement_snapshot(&self) -> (u16, u16, u16) {
         self.root.meter.snapshot()
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn cleanup_charged(&self) -> u16 {
+        self.root.meter.cleanup_charged()
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn registry(&self) -> Arc<Registry> {
+        self.root.registry.clone()
+    }
 
-    pub(crate) fn new(
+    pub fn new(
         registry: Arc<Registry>,
         outer: tokio::time::Instant,
         cap: Duration,
@@ -199,15 +199,11 @@ impl RequestScope {
             deadline: outer,
         };
         let scope = scope.phase(cap);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let _ = OBSERVED_ROOTS.try_with(|observed| observed.lock().unwrap().push(scope.clone()));
         scope
     }
-    pub(crate) fn current_or_new(
-        registry: Arc<Registry>,
-        cap: Duration,
-        statement_limit: u16,
-    ) -> Self {
+    pub fn current_or_new(registry: Arc<Registry>, cap: Duration, statement_limit: u16) -> Self {
         REQUEST
             .try_with(|scope| {
                 Arc::ptr_eq(&scope.root.registry, &registry).then(|| scope.narrow(cap))
@@ -225,7 +221,7 @@ impl RequestScope {
     }
     /// Explicit host phase transition, for approved multipart stages only.
     /// The immutable outer deadline remains the maximum across all phases.
-    pub(crate) fn phase(&self, cap: Duration) -> Self {
+    pub fn phase(&self, cap: Duration) -> Self {
         Self {
             root: self.root.clone(),
             deadline: self.root.outer.min(tokio::time::Instant::now() + cap),
@@ -237,10 +233,10 @@ impl RequestScope {
             deadline: self.deadline.min(tokio::time::Instant::now() + cap),
         }
     }
-    pub(crate) fn deadline(&self) -> tokio::time::Instant {
+    pub fn deadline(&self) -> tokio::time::Instant {
         self.deadline
     }
-    pub(crate) fn work_deadline(&self) -> tokio::time::Instant {
+    pub fn work_deadline(&self) -> tokio::time::Instant {
         self.deadline
             .checked_sub(CLEANUP_RESERVE)
             .unwrap_or(self.deadline)
@@ -258,24 +254,24 @@ impl RequestScope {
     }
     /// CPU work must already belong to an admitted host scope. No fallback scope,
     /// new timer or authority is constructed by this checkpoint.
-    pub(crate) fn checkpoint_current() -> Result<()> {
+    pub fn checkpoint_current() -> Result<()> {
         REQUEST
             .try_with(Self::checkpoint)
             .map_err(|_| Unavailable::Closed)?
     }
-    pub(crate) fn statements_remaining() -> Result<u16> {
+    pub fn statements_remaining() -> Result<u16> {
         Self::checkpoint_current()?;
         REQUEST
             .try_with(|scope| scope.root.meter.remaining_work())
             .map_err(|_| Unavailable::Closed.into())
     }
-    pub(crate) fn search_candidates_remaining() -> Result<usize> {
+    pub fn search_candidates_remaining() -> Result<usize> {
         Self::checkpoint_current()?;
         REQUEST
             .try_with(|scope| scope.root.search_candidates.load(Ordering::Acquire))
             .map_err(|_| Unavailable::Closed.into())
     }
-    pub(crate) fn charge_search_candidates(count: usize) -> Result<()> {
+    pub fn charge_search_candidates(count: usize) -> Result<()> {
         Self::checkpoint_current()?;
         REQUEST
             .try_with(|scope| {
@@ -290,18 +286,18 @@ impl RequestScope {
             })
             .map_err(|_| Unavailable::Closed)?
     }
-    pub(crate) fn active() -> bool {
+    pub fn active() -> bool {
         REQUEST.try_with(|_| ()).is_ok()
     }
-    pub(crate) fn commit_pending() -> bool {
+    pub fn commit_pending() -> bool {
         ADMISSION
             .try_with(|owner| owner.0.commit_pending.load(Ordering::Acquire))
             .unwrap_or(false)
     }
-    pub(crate) fn current_work_deadline() -> Option<tokio::time::Instant> {
+    pub fn current_work_deadline() -> Option<tokio::time::Instant> {
         REQUEST.try_with(Self::work_deadline).ok()
     }
-    pub(crate) fn run<T, F: std::future::Future<Output = T>>(
+    pub fn run<T, F: std::future::Future<Output = T>>(
         &self,
         future: F,
     ) -> std::pin::Pin<Box<impl std::future::Future<Output = T> + use<T, F>>> {
@@ -356,9 +352,9 @@ impl Drop for Admission {
     }
 }
 #[derive(Clone)]
-pub(crate) struct AdmissionOwner(Arc<Admission>);
+pub struct AdmissionOwner(Arc<Admission>);
 impl AdmissionOwner {
-    pub(crate) fn new(
+    pub fn new(
         scope: RequestScope,
         request: Arc<OwnedSemaphorePermit>,
         database: Arc<OwnedSemaphorePermit>,
@@ -373,13 +369,13 @@ impl AdmissionOwner {
             commit_pending: AtomicBool::new(false),
         }))
     }
-    pub(crate) fn deadline(&self) -> tokio::time::Instant {
+    pub fn deadline(&self) -> tokio::time::Instant {
         self.0.scope.deadline()
     }
-    pub(crate) fn work_deadline(&self) -> tokio::time::Instant {
+    pub fn work_deadline(&self) -> tokio::time::Instant {
         self.0.scope.work_deadline()
     }
-    pub(crate) fn run<T, F: std::future::Future<Output = T>>(
+    pub fn run<T, F: std::future::Future<Output = T>>(
         &self,
         future: F,
     ) -> std::pin::Pin<Box<impl std::future::Future<Output = T> + use<T, F>>> {

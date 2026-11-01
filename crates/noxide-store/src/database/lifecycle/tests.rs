@@ -84,7 +84,7 @@ async fn committed_lost_ack_keeps_unknown_frontier_after_confirmed_stop() {
             tx.execute("UPDATE nx_clock SET observed=42 WHERE singleton=1", &[])
                 .await
                 .unwrap();
-            let error = crate::failure_tests::lose_commit_ack(tx.commit())
+            let error = crate::database::fault::lose_commit_ack(tx.commit())
                 .await
                 .unwrap_err();
             assert!(error.is::<commit::CommitFailure>());

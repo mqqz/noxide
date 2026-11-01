@@ -1,3 +1,4 @@
+use crate::jobs::JobOperatorTransaction as _;
 use crate::{
     Database,
     database::{
@@ -269,7 +270,10 @@ async fn paused_generation_restart(
     // It retires the generation without resetting the observed lifecycle clock.
     let keys = crate::HostKeys::generate().unwrap();
     let (owner, registry) = operator_admission();
-    owner.run(database.recover_clock(&keys)).await.unwrap();
+    owner
+        .run(database.recover_clock(keys.incarnation()))
+        .await
+        .unwrap();
     registry.shutdown().await.unwrap();
     let generation = operator_phase(database, async |tx: &mut Transaction| {
         let generation = tx.fetch::<1>("SELECT generation FROM nx_deployment WHERE singleton=1", &[]).await.unwrap()[0][0].clone();

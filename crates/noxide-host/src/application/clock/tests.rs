@@ -167,7 +167,7 @@ async fn provider_contract(database: Database) {
 
     let before_rotation = clock(&database).await;
     let keys = HostKeys::generate().unwrap();
-    database.recover_clock(&keys).await.unwrap();
+    database.recover_clock(keys.incarnation()).await.unwrap();
     let recovered = clock(&database).await;
     assert_eq!(&recovered[1..], &before_rotation[1..]);
     assert!(

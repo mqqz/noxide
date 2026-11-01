@@ -12,7 +12,6 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "crates/noxide-host/src"
 LAYERS = [
-    ["database", "lifecycle_clock"],
     ["limiter", "security", "auth", "authority", "operator_roles"],
     ["blob_state", "blob_io", "blob_store", "blob_inspect", "blob_metadata", "blob_pairing",
      "blob_transport", "blob_multipart", "blob_upload"],
@@ -67,7 +66,7 @@ def targets(code):
 
 # External crates that carry authority, and the only workspace crates allowed them.
 RESTRICTED = {
-    "sqlx": {"noxide-host"},
+    "sqlx": {"noxide-store"},
     "rustls": {"noxide-host"},
     "tokio-rustls": {"noxide-host"},
     "webpki-roots": {"noxide-host"},
@@ -82,6 +81,8 @@ RESTRICTED = {
     "seccompiler": {"noxide-confine"},
 }
 # Workspace crates that perform no I/O, and may depend only on each other.
+# The store depends on these and on nothing above them.
+STORE_ALLOWED = {"noxide-protocol", "noxide-admission", "noxide-sql", "noxide-assets", "noxide-sql-macros"}
 PURE = {"noxide-admission", "noxide-assets", "noxide-render", "noxide-sql", "noxide-sql-macros"}
 ROOT = SRC.parent.parent.parent
 TEST_ONLY = {"noxide-test-support"}
@@ -105,6 +106,8 @@ def crate_failures():
                 failures.append(f"{name} must not depend on {target}")
             if target in TEST_ONLY:
                 failures.append(f"{name} has a production dependency on {target}")
+            if name == "noxide-store" and target in workspace and target not in STORE_ALLOWED:
+                failures.append(f"noxide-store must not depend on {target}")
             if name in PURE and target in workspace and target not in PURE | {"noxide-protocol"}:
                 failures.append(f"pure crate {name} must not depend on {target}")
     tree = subprocess.run(
@@ -127,8 +130,6 @@ def main():
             failures.append(f"{relative}: module {module} has no layer")
             continue
         code = production(path.read_text())
-        if module != "database" and re.search(r"\bsqlx::", code):
-            failures.append(f"{relative}: only the database module may use sqlx")
         for target in targets(code):
             if target in RANK and RANK[target] > RANK[module]:
                 failures.append(f"{relative}: {module} must not depend on {target}")

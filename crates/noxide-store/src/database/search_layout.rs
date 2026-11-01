@@ -136,7 +136,7 @@ const PG_CONSTRAINTS: &[(&str, &str, &str, &str)] = &[
 
 impl Transaction {
     /// Operator startup only; ordinary requests do not scan provider catalogs.
-    pub(crate) async fn check_search_layout(&mut self) -> Result<()> {
+    pub async fn check_search_layout(&mut self) -> Result<()> {
         match self.backend {
             Backend::Closed => anyhow::bail!("closed transaction"),
             Backend::Sqlite(_) => {

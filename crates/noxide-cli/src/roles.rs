@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use noxide::__private::Predicate;
+use noxide_host::RoleAdmin as _;
 use noxide_host::{RoleScope, manifest};
 use std::{ffi::OsString, path::Path};
 

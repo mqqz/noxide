@@ -146,7 +146,7 @@ fn ddl_key(sql: &str) -> String {
 impl Transaction {
     /// Startup/activation only. Data requests use the deployment/schema fence,
     /// never catalog scans. Column layout is checked by the framework initializer.
-    pub(crate) async fn check_blob_layout(&mut self) -> Result<()> {
+    pub async fn check_blob_layout(&mut self) -> Result<()> {
         let keys = match self.backend {
             Backend::Closed => anyhow::bail!("closed transaction"),
             Backend::Sqlite(_) => {

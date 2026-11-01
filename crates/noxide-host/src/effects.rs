@@ -11,3 +11,4 @@ pub(crate) use store::{DeliveryResult, EffectClaim, Finalized, OutboxContext, Pr
 pub(crate) use types::{CapturedEffect, EffectScope};
 #[cfg(test)]
 mod tests;
+pub(crate) use operator::EffectOperatorTransaction;

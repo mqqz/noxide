@@ -1,3 +1,4 @@
+use noxide_host::AccountAdmin as _;
 use noxide_test_support as support;
 
 use noxide_host::{Application, Database, HostKeys, manifest, runtime::Limits};

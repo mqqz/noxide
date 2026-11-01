@@ -1,22 +1,17 @@
-use super::*;
+use crate::auth::AccountAdmin as _;
+use crate::database::lifecycle::*;
+use crate::database::*;
 use crate::{
     Application, HostKeys, Registration, RequestError, manifest, runtime::Limits,
     test_support as fixture,
 };
+use sqlx::Connection;
+use std::time::{Duration, Instant};
 async fn idle(scope: &RequestScope) {
-    loop {
-        let changed = scope.root.registry.changed.notified();
-        {
-            let state = scope.root.registry.state.lock().unwrap();
-            if state.active == 0 {
-                assert!(!state.quarantined);
-                return;
-            }
-        }
-        tokio::time::timeout_at(scope.deadline(), changed)
-            .await
-            .unwrap();
-    }
+    tokio::time::timeout_at(scope.deadline(), scope.registry().drain())
+        .await
+        .unwrap()
+        .unwrap();
 }
 async fn snapshot(database: &Database) -> [String; 4] {
     let mut tx = database
@@ -28,12 +23,12 @@ async fn snapshot(database: &Database) -> [String; 4] {
     rows[0].clone()
 }
 fn envelope(scope: &RequestScope, sqlite: bool) -> u16 {
-    let (_, _, spent) = scope.root.meter.snapshot();
+    let (_, _, spent) = scope.statement_snapshot();
     spent
         + if sqlite {
             0
         } else {
-            meter::POSTGRES_CLEANUP - scope.root.meter.cleanup_charged()
+            crate::database::lifecycle::meter::POSTGRES_CLEANUP - scope.cleanup_charged()
         }
 }
 async fn case(database: Database) {
@@ -86,7 +81,7 @@ async fn case(database: Database) {
     assert!(matches!(result, Err(RequestError::Busy)));
     idle(&roots[0]).await;
     assert_eq!(snapshot(&database).await, before);
-    let (free, reserved, spent) = roots[0].root.meter.snapshot();
+    let (free, reserved, spent) = roots[0].statement_snapshot();
     assert_eq!(reserved, 0);
     assert_eq!(free + spent, login_limit);
     println!(
@@ -119,7 +114,7 @@ async fn case(database: Database) {
     assert!(matches!(result, Err(RequestError::Busy)));
     idle(&roots[0]).await;
     assert_eq!(snapshot(&database).await, before);
-    let (free, reserved, spent) = roots[0].root.meter.snapshot();
+    let (free, reserved, spent) = roots[0].statement_snapshot();
     assert_eq!(reserved, 0);
     assert_eq!(free + spent, register_limit);
     println!(

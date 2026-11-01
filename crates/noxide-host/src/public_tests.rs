@@ -1,3 +1,4 @@
+use crate::auth::AccountAdmin as _;
 use crate::{
     Application, Database, HostKeys, RequestError,
     auth::{Principal, User},

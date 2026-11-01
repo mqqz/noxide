@@ -60,11 +60,18 @@ pub(crate) async fn assignments(tx: &mut Transaction, user: &str) -> Result<Vec<
         .collect()
 }
 
-impl Database {
+#[allow(async_fn_in_trait)]
+pub trait RoleAdmin {
+    async fn list_roles(&self, user: &str) -> Result<Vec<RoleAssignment>>;
+    async fn revoke_role(&self, user: &str, role: &str, scope: RoleScope<'_>) -> Result<bool>;
+    async fn grant_role(&self, user: &str, role: &str, scope: RoleScope<'_>) -> Result<bool>;
+}
+
+impl RoleAdmin for Database {
     /// Grant an exact assignment using trusted operator database credentials.
     /// No deployment activation is required. A commit error has an indeterminate
     /// outcome: reconcile current assignments before retrying against other operators.
-    pub async fn grant_role(&self, user: &str, role: &str, scope: RoleScope<'_>) -> Result<bool> {
+    async fn grant_role(&self, user: &str, role: &str, scope: RoleScope<'_>) -> Result<bool> {
         ensure!(
             crate::auth::account_id(user) && identifier(role),
             "invalid user or role identifier"
@@ -94,7 +101,7 @@ impl Database {
     }
 
     /// Revoke only the requested assignment, including obsolete tenant scopes.
-    pub async fn revoke_role(&self, user: &str, role: &str, scope: RoleScope<'_>) -> Result<bool> {
+    async fn revoke_role(&self, user: &str, role: &str, scope: RoleScope<'_>) -> Result<bool> {
         ensure!(
             crate::auth::account_id(user) && identifier(role),
             "invalid user or role identifier"
@@ -115,7 +122,7 @@ impl Database {
     }
 
     /// Read one account's bounded assignments in deterministic order.
-    pub async fn list_roles(&self, user: &str) -> Result<Vec<RoleAssignment>> {
+    async fn list_roles(&self, user: &str) -> Result<Vec<RoleAssignment>> {
         ensure!(crate::auth::account_id(user), "invalid user identifier");
         let mut tx = self
             .begin_read(Instant::now() + Duration::from_secs(5))

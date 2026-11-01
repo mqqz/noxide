@@ -1,4 +1,6 @@
 use super::*;
+use crate::effects::EffectOperatorTransaction as _;
+use crate::jobs::JobOperatorTransaction as _;
 use crate::{
     database::{MaintenanceLease, MaintenanceUncertain},
     lifecycle_clock::{self, AttemptTime},

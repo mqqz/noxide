@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+use noxide_host::AccountAdmin as _;
 mod config;
 mod deps;
 mod effects;
@@ -122,7 +123,7 @@ async fn main() -> Result<()> {
             let (config, base) = config(Path::new(&args[1]))?;
             let keys = host_keys(&base.join(&config.keys))?;
             database(&config.database, &base)?
-                .recover_clock(&keys)
+                .recover_clock(keys.incarnation())
                 .await?;
             println!(
                 "Clock recovered. Sessions and forms retired. Restart with the configured host key."

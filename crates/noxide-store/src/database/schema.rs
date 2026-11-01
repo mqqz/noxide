@@ -1,8 +1,8 @@
 use super::*;
-mod membership;
+pub mod membership;
 mod query_indexes;
 mod search_indexes;
-pub(crate) use search_indexes::replace_postings;
+pub use search_indexes::replace_postings;
 
 impl Database {
     /// Reconcile operation-derived indexes under the operator maintenance lock.
@@ -52,7 +52,7 @@ impl Database {
 }
 
 impl Transaction {
-    pub(crate) fn query_provider(&self) -> Result<crate::query_plan::NativeProvider> {
+    pub fn query_provider(&self) -> Result<crate::query_plan::NativeProvider> {
         match &self.backend {
             Backend::Sqlite(_) => Ok(crate::query_plan::NativeProvider::Sqlite),
             Backend::Postgres(_) => Ok(crate::query_plan::NativeProvider::Postgres),
@@ -115,7 +115,7 @@ impl Transaction {
             .context("resource identity exhausted")
     }
 
-    pub(crate) async fn storage_resource(
+    pub async fn storage_resource(
         &mut self,
         manifest: &noxide_protocol::Manifest,
         bundle_resource: u32,
@@ -136,10 +136,7 @@ impl Transaction {
             .map_err(Into::into)
     }
 
-    pub(crate) async fn check_schema(
-        &mut self,
-        manifest: &noxide_protocol::Manifest,
-    ) -> Result<()> {
+    pub async fn check_schema(&mut self, manifest: &noxide_protocol::Manifest) -> Result<()> {
         let (resources, _) = self
             .schema_definition()
             .await?
@@ -168,7 +165,7 @@ impl Transaction {
         Ok(())
     }
 
-    pub(crate) async fn bind_schema(&mut self, manifest: &noxide_protocol::Manifest) -> Result<()> {
+    pub async fn bind_schema(&mut self, manifest: &noxide_protocol::Manifest) -> Result<()> {
         self.bind_schema_catalog(manifest).await?;
         self.validate_query_indexes(manifest).await?;
         self.validate_search_states(manifest).await?;

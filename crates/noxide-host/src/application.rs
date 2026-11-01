@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::auth::AccountAdmin as _;
 use crate::sql::sql;
 mod action;
 mod authority;
@@ -1986,7 +1988,7 @@ mod clock_tests {
             .unwrap();
         assert_eq!(tx.snapshot().await.unwrap(), snapshot);
         tx.commit().await.unwrap();
-        db.recover_clock(&HostKeys::generate().unwrap())
+        db.recover_clock(HostKeys::generate().unwrap().incarnation())
             .await
             .unwrap();
         assert!(

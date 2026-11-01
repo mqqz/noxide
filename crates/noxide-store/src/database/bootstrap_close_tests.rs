@@ -23,6 +23,22 @@ pub(super) fn operator_closed() {
     let _ = CLOSE_GATE.try_with(|gate| gate.closed.store(true, Ordering::Release));
 }
 
+/// An operator transaction shaped like account provisioning.
+async fn create_account(database: &Database, login: &str) -> Result<String> {
+    let mut tx = database
+        .begin(Instant::now() + Duration::from_secs(5))
+        .await?;
+    tx.check_storage().await?;
+    let id = crate::ids::random_id()?;
+    tx.execute(
+        "INSERT INTO nx_accounts(id,login_name,password,tenant,state,epoch) VALUES($1,$2,'fixture','','active',1)",
+        &[id.as_str().into(), login.into()],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
 struct Fixture {
     database: Database,
     observer: sqlx::SqliteConnection,
@@ -110,14 +126,8 @@ async fn initializer_and_account_commit_wait_for_sqlite_worker_close() {
     maintenance_starts(&fixture.database).await;
 
     let gate = Arc::new(CloseGate::default());
-    let mut account = Box::pin(
-        CLOSE_GATE.scope(
-            gate.clone(),
-            fixture
-                .database
-                .create_account("alice", "operator fixture password", ""),
-        ),
-    );
+    let mut account =
+        Box::pin(CLOSE_GATE.scope(gate.clone(), create_account(&fixture.database, "alice")));
     let id = tokio::time::timeout(Duration::from_secs(5), async {
         tokio::select! {
             result = &mut account => panic!("account returned before its post-commit close gate: {result:?}"),
@@ -157,7 +167,7 @@ async fn pre_ack_loss_stays_unknown_and_does_not_enter_acknowledged_close() {
     let error = CLOSE_GATE
         .scope(
             gate.clone(),
-            crate::failure_tests::lose_commit_ack(tx.commit()),
+            crate::database::fault::lose_commit_ack(tx.commit()),
         )
         .await
         .unwrap_err();

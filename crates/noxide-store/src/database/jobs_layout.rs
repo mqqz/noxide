@@ -458,7 +458,7 @@ fn ddl_key(sql: &str) -> String {
     out.replace("'::text", "'")
 }
 impl Transaction {
-    pub(crate) async fn check_job_layout(&mut self) -> Result<()> {
+    pub async fn check_job_layout(&mut self) -> Result<()> {
         for ((name, _), sql) in TABLES.iter().zip(SQLITE) {
             match self.backend {
                 Backend::Sqlite(_) => {

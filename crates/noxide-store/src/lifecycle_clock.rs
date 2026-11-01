@@ -4,10 +4,10 @@
 //! fence. Requests consume a fixed durable snapshot through `Freshness::attempt`.
 //! Startup and the one maintenance service publish confirmed ticks. Resource
 //! expiry declarations/enforcement are separate and remain unavailable.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::database::Database;
 use crate::database::{Param, Transaction};
-pub(crate) use crate::temporal::{AttemptTime, TemporalUnavailable};
+pub use crate::temporal::{AttemptTime, TemporalUnavailable};
 use anyhow::{Result, ensure};
 use noxide_protocol::time::Timestamp;
 use std::{
@@ -15,8 +15,8 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-pub(crate) const TICK_INTERVAL: Duration = Duration::from_secs(1);
-pub(crate) const FRESHNESS_LIMIT: Duration = Duration::from_secs(5);
+pub const TICK_INTERVAL: Duration = Duration::from_secs(1);
+pub const FRESHNESS_LIMIT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DurableClock {
@@ -40,18 +40,15 @@ async fn read(tx: &mut Transaction) -> Result<DurableClock> {
 
 /// Evidence of a confirmed durable tick. Cannot be constructed from an arbitrary
 /// request snapshot or returned on an unknown commit outcome.
-pub(crate) struct CommittedTick {
+pub struct CommittedTick {
     clock: DurableClock,
     started: Instant,
-    pub(crate) credential_seconds: i64,
+    pub credential_seconds: i64,
 }
 
 /// Consume and commit a bounded, generation-fenced maintenance transaction.
 /// Its caller must reserve independent maintenance capacity before opening it.
-pub(crate) async fn tick(
-    tx: &mut Transaction,
-    credential_memory: &AtomicI64,
-) -> Result<CommittedTick> {
+pub async fn tick(tx: &mut Transaction, credential_memory: &AtomicI64) -> Result<CommittedTick> {
     let started = Instant::now();
     let wall = Timestamp::from_system_time(SystemTime::now())?;
     tick_sampled(tx, credential_memory, wall, started).await
@@ -100,16 +97,16 @@ async fn tick_sampled(
 
 /// A separate, fresh read-only heartbeat transaction. Request transactions never
 /// produce this evidence: their snapshots might predate a maintenance commit.
-pub(crate) struct HeartbeatObservation {
+pub struct HeartbeatObservation {
     clock: DurableClock,
     started: Instant,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl HeartbeatObservation {
     /// Caller holds reserved maintenance capacity. The monotonic observation
     /// time precedes BEGIN so a delayed database response cannot extend a lease.
-    pub(crate) async fn read(database: &Database, deadline: Instant) -> Result<Self> {
+    pub async fn read(database: &Database, deadline: Instant) -> Result<Self> {
         let started = Instant::now();
         let mut tx = database.begin_read(deadline).await?;
         let clock = read(&mut tx).await?;
@@ -148,17 +145,17 @@ impl State {
 /// One process's proof of recent durable maintenance progress. All access is
 /// constant work under a short mutex; no database work runs under that mutex.
 #[derive(Clone, Default)]
-pub(crate) struct Freshness(Arc<Mutex<State>>);
+pub struct Freshness(Arc<Mutex<State>>);
 
 impl Freshness {
-    pub(crate) fn quarantine(&self) {
+    pub fn quarantine(&self) {
         if let Ok(mut state) = self.0.lock() {
             state.quarantined = true;
         }
     }
     /// Startup must call this only after its own successful durable tick. A failed
     /// or ambiguous startup commit leaves this process unable to serve time.
-    pub(crate) fn committed(&self, tick: CommittedTick) -> Result<()> {
+    pub fn committed(&self, tick: CommittedTick) -> Result<()> {
         self.committed_at(tick, Instant::now())
     }
 
@@ -177,12 +174,12 @@ impl Freshness {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn observe(&self, observation: HeartbeatObservation) -> Result<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn observe(&self, observation: HeartbeatObservation) -> Result<()> {
         self.observe_at(observation, Instant::now())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn observe_at(&self, observation: HeartbeatObservation, now: Instant) -> Result<()> {
         let mut state = self
             .0
@@ -212,7 +209,7 @@ impl Freshness {
 
     /// Read once per transaction attempt, after the deployment fence. This never
     /// samples wall time, changes a lease, or writes any database state.
-    pub(crate) async fn attempt(&self, tx: &mut Transaction) -> Result<AttemptTime> {
+    pub async fn attempt(&self, tx: &mut Transaction) -> Result<AttemptTime> {
         let clock = read(tx).await?;
         self.attempt_at(clock, Instant::now())
     }
@@ -274,9 +271,9 @@ fn validate_progress(
 
 /// A small wall-clock correction may delay expiry, but must never revive it.
 /// Every caller uses the returned high-water time, including token verification.
-pub(crate) const CLOCK_ROLLBACK_TOLERANCE: i64 = 60;
+pub const CLOCK_ROLLBACK_TOLERANCE: i64 = 60;
 
-pub(crate) async fn observe_clock(tx: &mut Transaction, now: i64) -> Result<i64> {
+pub async fn observe_clock(tx: &mut Transaction, now: i64) -> Result<i64> {
     let rows = tx
         .fetch::<1>(
             "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
@@ -306,11 +303,11 @@ pub(crate) async fn observe_clock(tx: &mut Transaction, now: i64) -> Result<i64>
 /// persists it every second, so while the tick runs requests never write
 /// nx_clock and concurrent writes do not conflict on it. If the tick stalls,
 /// requests keep the persisted mark within this bound, as before.
-pub(crate) const CLOCK_PERSIST_LAG: i64 = 2;
+pub const CLOCK_PERSIST_LAG: i64 = 2;
 
 /// Request-path clock observation with rollback checks. It writes nx_clock only
 /// when the persisted mark is more than `CLOCK_PERSIST_LAG` seconds behind.
-pub(crate) async fn observe_clock_bounded(
+pub async fn observe_clock_bounded(
     tx: &mut Transaction,
     now: i64,
     memory: &std::sync::atomic::AtomicI64,
@@ -335,10 +332,10 @@ pub(crate) async fn observe_clock_bounded(
 /// One clock tick's nonresetting budget, including connection, admission, COMMIT
 /// and confirmed cleanup. It must fit a networked database while staying below the
 /// one-second tick interval; requests never wait on it.
-pub(crate) const CLOCK_CHECKPOINT_BEGIN_DEADLINE: std::time::Duration =
+pub const CLOCK_CHECKPOINT_BEGIN_DEADLINE: std::time::Duration =
     std::time::Duration::from_millis(750);
 
-pub(crate) async fn observe_clock_read(
+pub async fn observe_clock_read(
     tx: &mut Transaction,
     now: i64,
     memory: &std::sync::atomic::AtomicI64,

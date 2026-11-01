@@ -1,6 +1,8 @@
 //! The worker only claims and dispatches to the common action executor. It never
 //! finalizes a queue attempt from an error or supplies a browser/user identity.
+
 use super::*;
+use crate::jobs::JobOperatorTransaction as _;
 use crate::{
     job_deployment::EffectiveJobDeployment,
     jobs::{Claim, QueueContext},

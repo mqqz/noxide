@@ -39,10 +39,70 @@ pub struct EffectSummary {
     pub round: i64,
     pub eligible: Timestamp,
 }
-impl Transaction {
+#[allow(async_fn_in_trait, clippy::too_many_arguments)]
+pub(crate) trait EffectOperatorTransaction {
+    async fn resume_effect(
+        &mut self,
+        generation: &str,
+        contract: &str,
+        effective: &EffectiveEffectDeployment,
+        id: &str,
+        current_source_version: u32,
+        now: Timestamp,
+        retry: bool,
+    ) -> Result<()>;
+    async fn effect_operator_source(
+        &mut self,
+        generation: &str,
+        id: &str,
+    ) -> Result<CapturedEffect>;
+    async fn grant_effect_secret(
+        &mut self,
+        generation: &str,
+        contract: &str,
+        slot: &str,
+        effective: &EffectiveEffectDeployment,
+    ) -> Result<()>;
+    async fn grant_effect_endpoint(
+        &mut self,
+        generation: &str,
+        contract: &str,
+        binding: &EffectiveEffectGrant,
+    ) -> Result<()>;
+    async fn pause_effect_secret_rows(
+        &mut self,
+        generation: &str,
+        slot: &str,
+        reason: &str,
+    ) -> Result<()>;
+    async fn revoke_effect_secret(&mut self, generation: &str, slot: &str) -> Result<()>;
+    async fn revoke_effect_endpoint(
+        &mut self,
+        generation: &str,
+        tenant: &str,
+        endpoint: &str,
+    ) -> Result<()>;
+    async fn cancel_effect(&mut self, generation: &str, id: &str) -> Result<()>;
+    async fn inspect_effects(
+        &mut self,
+        generation: &str,
+        after: &str,
+    ) -> Result<Vec<EffectSummary>>;
+    async fn lock_effect_operator(&mut self, generation: &str) -> Result<(String, String)>;
+    async fn activate_effects(
+        &mut self,
+        generation: &str,
+        contract: &str,
+        effective: Option<&EffectiveEffectDeployment>,
+        owner_directory: Option<&str>,
+        restore_fork: bool,
+    ) -> Result<()>;
+}
+
+impl EffectOperatorTransaction for Transaction {
     /// Invoked only in startup's existing clock-locked maintenance transaction.
     /// Filesystem preparation has already produced the retained directory proof.
-    pub(crate) async fn activate_effects(
+    async fn activate_effects(
         &mut self,
         generation: &str,
         contract: &str,
@@ -150,24 +210,7 @@ impl Transaction {
     }
     /// C calls this in the SAME transaction as shared epoch rotation/pause.
     /// This helper neither invents nor rotates an independent replay authority.
-    pub(crate) async fn pause_effects_for_epoch(&mut self) -> Result<()> {
-        self.execute("UPDATE nx_outbox SET state='paused',reason='runtime_changed',lease_until_ms=0 WHERE state IN ('pending','running')",&[]).await?;
-        self.execute(
-            "UPDATE nx_effect_grants SET state='revoked' WHERE state='active'",
-            &[],
-        )
-        .await?;
-        self.execute(
-            "UPDATE nx_effect_secrets SET state='revoked' WHERE state='active'",
-            &[],
-        )
-        .await?;
-        Ok(())
-    }
-    pub(super) async fn lock_effect_operator(
-        &mut self,
-        generation: &str,
-    ) -> Result<(String, String)> {
+    async fn lock_effect_operator(&mut self, generation: &str) -> Result<(String, String)> {
         checkpoint(self)?;
         ensure!(opaque(generation), "invalid effect generation");
         let n=self.execute("UPDATE nx_job_runtime SET state=state WHERE singleton=1 AND deployment=$1 AND EXISTS(SELECT 1 FROM nx_deployment WHERE singleton=1 AND generation=$1)",&[generation.into()]).await?;
@@ -182,7 +225,7 @@ impl Transaction {
         ensure!(opaque(contract) && opaque(epoch), "invalid effect runtime");
         Ok((contract.clone(), epoch.clone()))
     }
-    pub(crate) async fn inspect_effects(
+    async fn inspect_effects(
         &mut self,
         generation: &str,
         after: &str,
@@ -219,14 +262,14 @@ impl Transaction {
             )
             .collect()
     }
-    pub(crate) async fn cancel_effect(&mut self, generation: &str, id: &str) -> Result<()> {
+    async fn cancel_effect(&mut self, generation: &str, id: &str) -> Result<()> {
         self.lock_effect_operator(generation).await?;
         ensure!(opaque(id), "invalid effect identity");
         let n=self.execute("UPDATE nx_outbox SET state='cancelled',reason='operator_cancelled',lease_until_ms=0 WHERE id=$1 AND state IN ('pending','running','paused','dead')",&[id.into()]).await?;
         ensure!(n == 1, "effect unavailable for cancellation");
         Ok(())
     }
-    pub(crate) async fn revoke_effect_endpoint(
+    async fn revoke_effect_endpoint(
         &mut self,
         generation: &str,
         tenant: &str,
@@ -238,11 +281,7 @@ impl Transaction {
         self.execute("UPDATE nx_outbox SET state='paused',reason='endpoint_revoked',lease_until_ms=0 WHERE tenant=$1 AND endpoint=$2 AND state IN ('pending','running')",&[tenant.into(),endpoint.into()]).await?;
         Ok(())
     }
-    pub(crate) async fn revoke_effect_secret(
-        &mut self,
-        generation: &str,
-        slot: &str,
-    ) -> Result<()> {
+    async fn revoke_effect_secret(&mut self, generation: &str, slot: &str) -> Result<()> {
         self.lock_effect_operator(generation).await?;
         let n=self.execute("UPDATE nx_effect_secrets SET state='revoked',version=version+1 WHERE deployment=$1 AND slot=$2 AND version<9223372036854775807",&[generation.into(),slot.into()]).await?;
         ensure!(n == 1, "secret grant missing");
@@ -267,7 +306,7 @@ impl Transaction {
         }
         Ok(())
     }
-    pub(crate) async fn grant_effect_endpoint(
+    async fn grant_effect_endpoint(
         &mut self,
         generation: &str,
         contract: &str,
@@ -285,7 +324,7 @@ impl Transaction {
         .await?;
         Ok(())
     }
-    pub(crate) async fn grant_effect_secret(
+    async fn grant_effect_secret(
         &mut self,
         generation: &str,
         contract: &str,
@@ -302,7 +341,7 @@ impl Transaction {
         self.pause_effect_secret_rows(generation, slot, "grant_changed")
             .await
     }
-    pub(crate) async fn effect_operator_source(
+    async fn effect_operator_source(
         &mut self,
         generation: &str,
         id: &str,
@@ -328,7 +367,7 @@ impl Transaction {
     /// Explicit current-authority reconciliation changes only the mutable
     /// envelope. Receiver identity, original capture and payload remain intact.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn resume_effect(
+    async fn resume_effect(
         &mut self,
         generation: &str,
         contract: &str,

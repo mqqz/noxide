@@ -1,9 +1,11 @@
 //! Original receipt evidence survives a separate aborted delivery transaction.
-use super::*;
+use crate::database::*;
 use crate::{
     Application, HostKeys, RequestError, manifest, runtime::Limits, test_support as fixture,
 };
 use noxide_protocol::{Access, Fields, Predicate};
+use sqlx::Connection;
+use std::time::{Duration, Instant};
 
 async fn state(database: &Database, offline: bool) -> (String, String, String) {
     let mut tx = database

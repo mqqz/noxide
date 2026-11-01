@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::auth::AccountAdmin as _;
 mod blobs;
 mod transport;
 use crate::{

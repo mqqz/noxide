@@ -15,7 +15,7 @@ impl CommitState {
 }
 
 #[derive(Debug)]
-pub(crate) enum CommitFailure {
+pub enum CommitFailure {
     Uncertain(anyhow::Error),
     Committed(anyhow::Error),
 }
@@ -82,7 +82,7 @@ mod tests {
         tx.execute("UPDATE nx_clock SET observed=1 WHERE singleton=1", &[])
             .await
             .unwrap();
-        let error = crate::failure_tests::lose_commit_ack(tx.commit())
+        let error = crate::database::fault::lose_commit_ack(tx.commit())
             .await
             .unwrap_err();
         assert!(!retryable(&error));

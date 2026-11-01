@@ -1,5 +1,6 @@
 //! Operator changes share the execution lock order: clock (when held), runtime,
 //! grant, job. No operation commits its caller's transaction.
+
 use super::types::*;
 use crate::sql::sql;
 use crate::{database::Transaction, job_deployment::EffectiveJobDeployment};
@@ -38,12 +39,42 @@ pub struct JobSummary {
     pub eligible: Timestamp,
 }
 
-impl Transaction {
-    pub(crate) async fn reconciliation_source(
+#[allow(async_fn_in_trait)]
+pub(crate) trait JobOperatorTransaction {
+    async fn inspect_jobs(&mut self, generation: &str, after: &str) -> Result<Vec<JobSummary>>;
+    async fn apply_job_fork(&mut self, generation: &str) -> Result<()>;
+    async fn fork_job_runtime(&mut self, generation: &str) -> Result<()>;
+    async fn cancel_job(&mut self, generation: &str, id: &str) -> Result<()>;
+    async fn grant_job_service(
         &mut self,
         generation: &str,
-        id: &str,
-    ) -> Result<CapturedJob> {
+        approved_contract: &str,
+        approved: &crate::job_deployment::EffectiveJobGrant,
+        declarations: &JobContract,
+    ) -> Result<()>;
+    async fn revoke_job_grant(
+        &mut self,
+        generation: &str,
+        tenant: &str,
+        worker: &str,
+    ) -> Result<()>;
+    async fn activate_jobs(
+        &mut self,
+        generation: &str,
+        contract: &str,
+        effective: Option<&EffectiveJobDeployment>,
+        declarations: Option<&JobContract>,
+        effects_enabled: bool,
+    ) -> Result<()>;
+    async fn lock_job_operator_runtime(
+        &mut self,
+        generation: &str,
+    ) -> Result<(String, String, String)>;
+    async fn reconciliation_source(&mut self, generation: &str, id: &str) -> Result<CapturedJob>;
+}
+
+impl JobOperatorTransaction for Transaction {
+    async fn reconciliation_source(&mut self, generation: &str, id: &str) -> Result<CapturedJob> {
         self.lock_job_operator_runtime(generation).await?;
         ensure!(opaque(id), "invalid reconciliation identity");
         let payload = self.bounded_text("payload", noxide_protocol::jobs::MAX_JOB_BYTES);
@@ -92,7 +123,7 @@ impl Transaction {
     /// Called while the startup MaintenanceLease already holds the clock lock.
     /// The following lifecycle tick commits activation and its durable heartbeat
     /// together. Same-approval restart never rotates or revives paused work.
-    pub(crate) async fn activate_jobs(
+    async fn activate_jobs(
         &mut self,
         generation: &str,
         contract: &str,
@@ -227,7 +258,7 @@ impl Transaction {
 
     /// Serialize revocation with every execution commit. Existing receipts and
     /// terminal outcomes remain available; pending/running work requires review.
-    pub(crate) async fn revoke_job_grant(
+    async fn revoke_job_grant(
         &mut self,
         generation: &str,
         tenant: &str,
@@ -259,7 +290,7 @@ impl Transaction {
     /// Explicit regrant only within the current approved declaration. Rotate
     /// the version even if the requested worker is unchanged, so old captures
     /// remain paused and cannot acquire new authority by being retried.
-    pub(crate) async fn grant_job_service(
+    async fn grant_job_service(
         &mut self,
         generation: &str,
         approved_contract: &str,
@@ -302,7 +333,7 @@ impl Transaction {
         Ok(())
     }
 
-    pub(crate) async fn cancel_job(&mut self, generation: &str, id: &str) -> Result<()> {
+    async fn cancel_job(&mut self, generation: &str, id: &str) -> Result<()> {
         self.lock_job_operator_runtime(generation).await?;
         ensure!(opaque(id), "invalid job identity");
         // Runtime exclusive lock waits for actual execution termination. A lease
@@ -314,13 +345,13 @@ impl Transaction {
 
     /// Explicit restore/fork fence. This is required before starting workers on
     /// copied storage. It preserves every receipt and never resumes old captures.
-    pub(crate) async fn fork_job_runtime(&mut self, generation: &str) -> Result<()> {
+    async fn fork_job_runtime(&mut self, generation: &str) -> Result<()> {
         self.lock_job_operator_runtime(generation).await?;
         self.apply_job_fork(generation).await
     }
     /// Fork updates for a caller that already holds exclusive runtime authority:
     /// the operator lock above, or startup's clock-locked restore activation.
-    pub(crate) async fn apply_job_fork(&mut self, generation: &str) -> Result<()> {
+    async fn apply_job_fork(&mut self, generation: &str) -> Result<()> {
         let epoch = crate::security::random_id()?;
         self.execute(
             "UPDATE nx_job_runtime SET epoch=$1,state='paused' WHERE singleton=1",
@@ -344,11 +375,7 @@ impl Transaction {
 
     /// Bounded metadata only. Input, target seals, rejection text and receipt
     /// bodies intentionally never enter the operator listing.
-    pub(crate) async fn inspect_jobs(
-        &mut self,
-        generation: &str,
-        after: &str,
-    ) -> Result<Vec<JobSummary>> {
+    async fn inspect_jobs(&mut self, generation: &str, after: &str) -> Result<Vec<JobSummary>> {
         cpu_checkpoint(self)?;
         ensure!(
             opaque(generation) && (after.is_empty() || opaque(after)),

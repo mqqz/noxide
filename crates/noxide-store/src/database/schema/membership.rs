@@ -6,7 +6,7 @@ use std::fmt;
 
 /// SQL providers disagree about duplicate JSON keys. Reject them before either
 /// JSON extraction or a migration can erase the ambiguity. Values remain strings.
-pub(super) fn parse_fields(raw: &str) -> Result<Fields> {
+pub fn parse_fields(raw: &str) -> Result<Fields> {
     struct FieldMap;
     impl<'de> Visitor<'de> for FieldMap {
         type Value = Fields;

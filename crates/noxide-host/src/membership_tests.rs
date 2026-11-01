@@ -1,11 +1,11 @@
 use crate::membership::*;
-use crate::temporal::AttemptTime;
 use crate::{
     Database,
     auth::User,
     lifecycle_clock::{self, Freshness},
 };
 use crate::{auth::Principal, authority::witnesses::Witnesses, database::Transaction};
+use noxide_admission::temporal::AttemptTime;
 use noxide_protocol::{AccountScope, ChoiceVariant};
 use noxide_protocol::{
     FieldKind, Fields, Resource, TextField,

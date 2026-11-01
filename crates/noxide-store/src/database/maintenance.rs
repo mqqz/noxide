@@ -16,7 +16,7 @@ pub(super) fn remaining_ms(deadline: Instant) -> Result<u64> {
 }
 
 #[derive(Debug)]
-pub(crate) struct MaintenanceUncertain;
+pub struct MaintenanceUncertain;
 impl std::fmt::Display for MaintenanceUncertain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("maintenance cleanup is unconfirmed; capacity quarantined")
@@ -193,7 +193,7 @@ impl Transaction {
 
 /// Holds actual reserved capacity through provider cleanup, including when its
 /// caller is canceled. Uncertain cleanup permanently quarantines that slot.
-pub(crate) struct MaintenanceLease {
+pub struct MaintenanceLease {
     tx: Option<Transaction>,
     permit: Option<OwnedSemaphorePermit>,
     deadline: Instant,
@@ -202,7 +202,7 @@ pub(crate) struct MaintenanceLease {
     freshness: crate::lifecycle_clock::Freshness,
 }
 impl MaintenanceLease {
-    pub(crate) fn new(
+    pub fn new(
         permit: OwnedSemaphorePermit,
         deadline: Instant,
         freshness: crate::lifecycle_clock::Freshness,
@@ -216,7 +216,7 @@ impl MaintenanceLease {
             freshness,
         }
     }
-    pub(crate) async fn begin(&mut self, database: &Database) -> Result<()> {
+    pub async fn begin(&mut self, database: &Database) -> Result<()> {
         match database.begin_maintenance(self.deadline).await {
             Ok(tx) => {
                 self.tx = Some(tx);
@@ -236,10 +236,10 @@ impl MaintenanceLease {
             Err(_) => Err(MaintenanceUncertain.into()),
         }
     }
-    pub(crate) fn tx(&mut self) -> &mut Transaction {
+    pub fn tx(&mut self) -> &mut Transaction {
         self.tx.as_mut().expect("maintenance began")
     }
-    pub(crate) async fn finish(&mut self) -> Result<()> {
+    pub async fn finish(&mut self) -> Result<()> {
         if let Some(tx) = self.tx.take() {
             let capacity = CleanupCapacity {
                 permit: self.permit.take(),

@@ -1472,6 +1472,7 @@ dependencies = [
  "noxide-render",
  "noxide-sandbox",
  "noxide-sql",
+ "noxide-store",
  "noxide-test-support",
  "rand",
  "rustix",
@@ -1558,6 +1559,25 @@ dependencies = [
 [[package]]
 name = "noxide-sql-macros"
 version = "0.1.0"
+
+[[package]]
+name = "noxide-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libsqlite3-sys",
+ "noxide-admission",
+ "noxide-protocol",
+ "noxide-sql",
+ "noxide-test-support",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "url",
+]
 
 [[package]]
 name = "noxide-test-support"

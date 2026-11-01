@@ -96,7 +96,7 @@ pub(crate) struct Token {
 }
 
 impl HostKeys {
-    pub(crate) fn incarnation(&self) -> &str {
+    pub fn incarnation(&self) -> &str {
         self.0.incarnation()
     }
     pub fn generate() -> Result<Self> {

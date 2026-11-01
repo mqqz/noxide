@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::operator_roles::RoleAdmin as _;
 pub(crate) use crate::principal::{Principal, PrincipalKey, User};
 use crate::sql::sql;
 use crate::{
@@ -22,9 +24,25 @@ pub enum Registration {
     Open,
 }
 
-impl Database {
+#[allow(async_fn_in_trait)]
+pub trait AccountAdmin {
+    async fn create_account(
+        &self,
+        login_name: &str,
+        password: &str,
+        tenant: &str,
+    ) -> Result<String>;
+    async fn mint_invite(&self, expires_days: Option<u64>) -> Result<String>;
+    async fn account_state(&self, id: &str, state: &str) -> Result<()>;
+    async fn delete_account(&self, id: &str) -> Result<()>;
+    async fn enable_account(&self, id: &str) -> Result<()>;
+    async fn disable_account(&self, id: &str) -> Result<()>;
+    async fn account_id(&self, login: &str) -> Result<String>;
+}
+
+impl AccountAdmin for Database {
     /// Operator-only provisioning; never linked into an application component.
-    pub async fn create_account(
+    async fn create_account(
         &self,
         login_name: &str,
         password: &str,
@@ -54,6 +72,86 @@ impl Database {
         let account = insert_account(&mut tx, login_name, &hash, tenant).await?;
         tx.commit().await?;
         Ok(account)
+    }
+    /// Mint an operator invitation. Only its SHA-256 digest is persisted.
+    async fn mint_invite(&self, expires_days: Option<u64>) -> Result<String> {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        let code = crate::security::random_id()?;
+        let lifetime = match expires_days {
+            Some(days) => days
+                .checked_mul(86400)
+                .ok_or_else(|| anyhow::anyhow!("invite expiry overflow"))?,
+            None => crate::limiter::INVITE_DEFAULT_EXPIRY.as_secs(),
+        };
+        let lifetime: i64 = lifetime.try_into()?;
+        let mut tx = self
+            .begin(std::time::Instant::now() + std::time::Duration::from_secs(5))
+            .await?;
+        tx.check_storage().await?;
+        let now = crate::security::observe_clock(&mut tx, crate::security::now()?).await?;
+        let expires = now
+            .checked_add(lifetime)
+            .ok_or_else(|| anyhow::anyhow!("invite expiry overflow"))?;
+        tx.execute(
+            "INSERT INTO nx_invites(code_hash,issuer,expires) VALUES($1,$2,$3)",
+            &[
+                URL_SAFE_NO_PAD.encode(invite_hash(&code)).into(),
+                "operator".into(),
+                expires.into(),
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(code)
+    }
+    /// Trusted operator lookup; deliberately absent from the guest interface.
+    async fn account_id(&self, login: &str) -> Result<String> {
+        let mut tx = self
+            .begin_read(std::time::Instant::now() + std::time::Duration::from_secs(5))
+            .await?;
+        tx.check_storage().await?;
+        let rows = tx
+            .fetch::<1>(
+                "SELECT id FROM nx_accounts WHERE login_name=$1 AND state<>'deleted'",
+                &[login.into()],
+            )
+            .await?;
+        let id = rows
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("account not found"))?[0]
+            .clone();
+        tx.commit().await?;
+        Ok(id)
+    }
+    async fn disable_account(&self, id: &str) -> Result<()> {
+        self.account_state(id, "disabled").await
+    }
+    async fn enable_account(&self, id: &str) -> Result<()> {
+        self.account_state(id, "active").await
+    }
+    async fn delete_account(&self, id: &str) -> Result<()> {
+        self.account_state(id, "deleted").await
+    }
+
+    async fn account_state(&self, id: &str, state: &str) -> Result<()> {
+        ensure!(account_id(id), "invalid account identity");
+        let mut tx = self
+            .begin(std::time::Instant::now() + std::time::Duration::from_secs(5))
+            .await?;
+        tx.check_storage().await?;
+        ensure!(tx.execute("UPDATE nx_accounts SET state=$2,epoch=epoch+1 WHERE id=$1 AND state<>'deleted' AND epoch<9223372036854775807", &[id.into(), state.into()]).await? == 1, "account unavailable");
+        tx.execute("DELETE FROM nx_sessions WHERE principal=$1", &[id.into()])
+            .await?;
+        if state == "deleted" {
+            tx.execute("DELETE FROM nx_roles WHERE principal=$1", &[id.into()])
+                .await?;
+            tx.execute(
+                "UPDATE nx_accounts SET login_name=NULL,password=NULL,tenant='' WHERE id=$1",
+                &[id.into()],
+            )
+            .await?;
+        }
+        tx.commit().await
     }
 }
 
@@ -163,39 +261,6 @@ pub(crate) async fn authenticate(
     ))
 }
 
-impl Database {
-    /// Mint an operator invitation. Only its SHA-256 digest is persisted.
-    pub async fn mint_invite(&self, expires_days: Option<u64>) -> Result<String> {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-        let code = crate::security::random_id()?;
-        let lifetime = match expires_days {
-            Some(days) => days
-                .checked_mul(86400)
-                .ok_or_else(|| anyhow::anyhow!("invite expiry overflow"))?,
-            None => crate::limiter::INVITE_DEFAULT_EXPIRY.as_secs(),
-        };
-        let lifetime: i64 = lifetime.try_into()?;
-        let mut tx = self
-            .begin(std::time::Instant::now() + std::time::Duration::from_secs(5))
-            .await?;
-        tx.check_storage().await?;
-        let now = crate::security::observe_clock(&mut tx, crate::security::now()?).await?;
-        let expires = now
-            .checked_add(lifetime)
-            .ok_or_else(|| anyhow::anyhow!("invite expiry overflow"))?;
-        tx.execute(
-            "INSERT INTO nx_invites(code_hash,issuer,expires) VALUES($1,$2,$3)",
-            &[
-                URL_SAFE_NO_PAD.encode(invite_hash(&code)).into(),
-                "operator".into(),
-                expires.into(),
-            ],
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(code)
-    }
-}
 fn invite_hash(code: &str) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     Sha256::digest(code.as_bytes()).into()
@@ -265,58 +330,6 @@ async fn insert_account(
         }
     }
     anyhow::bail!("account identity allocation failed")
-}
-
-impl Database {
-    /// Trusted operator lookup; deliberately absent from the guest interface.
-    pub async fn account_id(&self, login: &str) -> Result<String> {
-        let mut tx = self
-            .begin_read(std::time::Instant::now() + std::time::Duration::from_secs(5))
-            .await?;
-        tx.check_storage().await?;
-        let rows = tx
-            .fetch::<1>(
-                "SELECT id FROM nx_accounts WHERE login_name=$1 AND state<>'deleted'",
-                &[login.into()],
-            )
-            .await?;
-        let id = rows
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("account not found"))?[0]
-            .clone();
-        tx.commit().await?;
-        Ok(id)
-    }
-    pub async fn disable_account(&self, id: &str) -> Result<()> {
-        self.account_state(id, "disabled").await
-    }
-    pub async fn enable_account(&self, id: &str) -> Result<()> {
-        self.account_state(id, "active").await
-    }
-    pub async fn delete_account(&self, id: &str) -> Result<()> {
-        self.account_state(id, "deleted").await
-    }
-
-    async fn account_state(&self, id: &str, state: &str) -> Result<()> {
-        ensure!(account_id(id), "invalid account identity");
-        let mut tx = self
-            .begin(std::time::Instant::now() + std::time::Duration::from_secs(5))
-            .await?;
-        tx.check_storage().await?;
-        ensure!(tx.execute("UPDATE nx_accounts SET state=$2,epoch=epoch+1 WHERE id=$1 AND state<>'deleted' AND epoch<9223372036854775807", &[id.into(), state.into()]).await? == 1, "account unavailable");
-        tx.execute("DELETE FROM nx_sessions WHERE principal=$1", &[id.into()])
-            .await?;
-        if state == "deleted" {
-            tx.execute("DELETE FROM nx_roles WHERE principal=$1", &[id.into()])
-                .await?;
-            tx.execute(
-                "UPDATE nx_accounts SET login_name=NULL,password=NULL,tenant='' WHERE id=$1",
-                &[id.into()],
-            )
-            .await?;
-        }
-        tx.commit().await
-    }
 }
 
 #[cfg(test)]

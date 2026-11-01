@@ -695,33 +695,18 @@ async fn contract(db: Database) {
     println!("native tuple lookup plan: {}", plan.join(" | "));
     t.rollback().await.unwrap();
 
-    let application = crate::Application::new(
-        &crate::test_support::component(None),
-        &serde_json::to_vec(&renamed).unwrap(),
-        crate::manifest::digest(&renamed).unwrap(),
-        db.clone(),
-        crate::HostKeys::generate().unwrap(),
-        crate::runtime::Limits::default(),
-        crate::DeploymentResources {
-            effects: None,
-            jobs: None,
-            assets: crate::assets::AssetBundle::default(),
-            blobs: None,
-        },
-    )
-    .unwrap();
+    // The schema work of activation, within its two-second budget.
     let started = Instant::now();
-    application.activate().await.unwrap();
+    let mut t = db
+        .begin(Instant::now() + Duration::from_secs(2))
+        .await
+        .unwrap();
+    t.bind_schema(&renamed).await.unwrap();
+    t.rollback().await.unwrap();
     println!(
-        "production Application::activate: 83 unique rows + 83 parent rows, {}ms (unchanged2s budget)",
+        "schema activation: 83 unique rows + 83 parent rows, {}ms",
         started.elapsed().as_millis()
     );
-}
-
-#[tokio::test]
-async fn sqlite_schema_membership_activation() {
-    let tmp = tempfile::tempdir().unwrap();
-    contract(Database::sqlite(tmp.path().join("membership-schema.db"))).await;
 }
 
 #[tokio::test]

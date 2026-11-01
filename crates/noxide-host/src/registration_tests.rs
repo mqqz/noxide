@@ -1,3 +1,4 @@
+use crate::auth::AccountAdmin as _;
 use crate::{
     Application, Database, HostKeys, Registration, limiter::HashGate, manifest, runtime::Limits,
     security, test_support as fixture,
@@ -565,10 +566,10 @@ async fn clock_recovery_invites_contract(db: Database) {
     assert_eq!(tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_invites WHERE redeemed_at IS NULL AND expires>$1", &[(now + 7200).into()]).await.unwrap()[0][0], "0");
     tx.commit().await.unwrap();
     let before = snapshot(&db).await;
-    assert!(db.recover_clock(&old.keys).await.is_err());
+    assert!(db.recover_clock(old.keys.incarnation()).await.is_err());
     assert_eq!(snapshot(&db).await, before);
     let keys = HostKeys::generate().unwrap();
-    db.recover_clock(&keys).await.unwrap();
+    db.recover_clock(keys.incarnation()).await.unwrap();
     let mut tx = db
         .begin_read(Instant::now() + Duration::from_secs(3))
         .await

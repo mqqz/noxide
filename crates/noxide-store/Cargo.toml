@@ -1,0 +1,34 @@
+[package]
+name = "noxide-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Noxide storage: transactions, schema, request lifecycle and durable time"
+
+[dependencies]
+noxide-protocol.workspace = true
+noxide-admission.workspace = true
+noxide-sql.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+libsqlite3-sys = { version = "0.30.1", optional = true }
+sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
+
+[features]
+# Fault points and test-only accessors for other crates' tests. Never enabled by a
+# deployed binary; tools/check_layers.py verifies the production feature set.
+test-support = ["noxide-admission/test-support", "noxide-sql/test-support"]
+query-metrics = ["dep:libsqlite3-sys"]
+
+[dev-dependencies]
+noxide-sql = { workspace = true, features = ["test-support"] }
+noxide-admission = { workspace = true, features = ["test-support"] }
+noxide-test-support.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"
+url = "2"

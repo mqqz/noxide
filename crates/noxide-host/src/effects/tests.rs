@@ -1,6 +1,8 @@
 //! Retained provider-paired store/operator fixtures. Actual action receipts and
 //! Tor/TLS delivery are covered by the application adapter fixtures separately.
+
 use super::*;
+use crate::jobs::JobOperatorTransaction as _;
 use crate::{
     database::{
         Database, Transaction,
@@ -717,7 +719,7 @@ async fn actual_clock_recovery_contract(db: &Database) {
     .unwrap();
     let _old = claim(db, initial.unix_millis()).await;
     phase(db,async |tx:&mut Transaction| {assert_eq!(tx.fetch::<2>("SELECT CAST((SELECT COUNT(*) FROM nx_outbox WHERE state='pending') AS TEXT),CAST((SELECT COUNT(*) FROM nx_outbox WHERE state='running') AS TEXT)",&[]).await?,[[String::from("1"),String::from("1")]]);Ok(())}).await.unwrap();
-    db.recover_clock(&crate::HostKeys::generate().unwrap())
+    db.recover_clock(crate::HostKeys::generate().unwrap().incarnation())
         .await
         .unwrap();
     let recovered=phase(db,async |tx:&mut Transaction| {tx.fetch::<6>("SELECT generation,CAST((SELECT lifecycle_ms FROM nx_clock WHERE singleton=1) AS TEXT),(SELECT state FROM nx_outbox WHERE id=$1),(SELECT state FROM nx_job_runtime WHERE singleton=1),(SELECT state FROM nx_outbox WHERE id=$2),CAST((SELECT first_eligible_ms FROM nx_outbox WHERE id=$1) AS TEXT) FROM nx_deployment WHERE singleton=1",&[capture.id()?.into(),pending.id()?.into()]).await}).await.unwrap();

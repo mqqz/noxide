@@ -1,3 +1,4 @@
+use crate::auth::AccountAdmin as _;
 use crate::{
     Application, Database, HostKeys, auth::Principal, database::Param, manifest,
     repository::Effects, runtime::Limits, test_support as fixture,

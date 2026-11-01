@@ -1,5 +1,7 @@
 //! Core action execution and transactional replay semantics.
 #[cfg(test)]
+use crate::auth::AccountAdmin as _;
+#[cfg(test)]
 mod computation_tests;
 #[cfg(test)]
 mod membership_tests;

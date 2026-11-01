@@ -1,23 +1,23 @@
 //! Public action flow with one observed private root, including all retries and
 //! post-commit delivery. Operator snapshots run only outside that request scope.
-use super::*;
+use crate::auth::AccountAdmin as _;
+use crate::database::lifecycle::*;
+use crate::database::*;
 use crate::{
     Application, HostKeys, RequestError, manifest, runtime::Limits, test_support as fixture,
 };
 use noxide_protocol::Fields;
+use sqlx::Connection;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 async fn idle(registry: &Registry, deadline: tokio::time::Instant) {
-    loop {
-        let changed = registry.changed.notified();
-        {
-            let state = registry.state.lock().unwrap();
-            if state.active == 0 {
-                assert!(!state.quarantined);
-                return;
-            }
-        }
-        tokio::time::timeout_at(deadline, changed).await.unwrap();
-    }
+    tokio::time::timeout_at(deadline, registry.drain())
+        .await
+        .unwrap()
+        .unwrap();
 }
 async fn counts(database: &Database) -> (i64, i64, i64) {
     let mut tx = database
@@ -84,13 +84,13 @@ async fn action_exhaustion(database: Database) {
     baseline.unwrap();
     assert_eq!(roots.len(), 1);
     idle(&app.request_lifecycle(), roots[0].deadline()).await;
-    let (_, reserved, endpoint_spent) = roots[0].root.meter.snapshot();
+    let (_, reserved, endpoint_spent) = roots[0].statement_snapshot();
     assert_eq!(reserved, 0);
     let endpoint_envelope = endpoint_spent
         + if database.is_sqlite() {
             0
         } else {
-            meter::POSTGRES_CLEANUP - roots[0].root.meter.cleanup_charged()
+            crate::database::lifecycle::meter::POSTGRES_CLEANUP - roots[0].cleanup_charged()
         };
     app = app
         .with_database_statement_limit(endpoint_envelope)
@@ -128,9 +128,9 @@ async fn action_exhaustion(database: Database) {
         axum::http::StatusCode::OK,
         "classification was not charged against endpoint allowance"
     );
-    let registry = http_roots[0].root.registry.clone();
+    let registry = http_roots[0].registry().clone();
     idle(&registry, http_roots[0].deadline()).await;
-    let (free, reserved, spent) = http_roots[0].root.meter.snapshot();
+    let (free, reserved, spent) = http_roots[0].statement_snapshot();
     assert_eq!(reserved, 0);
     assert_eq!(free + spent, endpoint_envelope);
     println!(
@@ -152,7 +152,7 @@ async fn action_exhaustion(database: Database) {
             .run(app.submit(&session, 1, &submission, &csrf, input.clone()))
             .await;
         idle(&app.request_lifecycle(), scope.deadline()).await;
-        let (free, reserved, spent) = scope.root.meter.snapshot();
+        let (free, reserved, spent) = scope.statement_snapshot();
         assert_eq!(reserved, 0);
         assert_eq!(free + spent, limit);
         assert!(spent <= limit);
@@ -213,7 +213,7 @@ async fn action_exhaustion(database: Database) {
         .unwrap();
     idle(&app.request_lifecycle(), scope.deadline()).await;
     assert_eq!(counts(&database).await, (1, 1, 1));
-    let (_, reserved, spent) = scope.root.meter.snapshot();
+    let (_, reserved, spent) = scope.statement_snapshot();
     assert_eq!(reserved, 0);
     assert!(spent <= 256);
     println!(
@@ -236,14 +236,14 @@ async fn action_exhaustion(database: Database) {
         None,
     );
     let retried = scope
-        .run(crate::failure_tests::known_conflict_once(
+        .run(crate::database::fault::known_conflict_once(
             app.submit(&session, 1, &fresh, &csrf, input),
         ))
         .await
         .unwrap();
     idle(&app.request_lifecycle(), scope.deadline()).await;
     assert_eq!(counts(&database).await, (2, 2, 2));
-    let (free, reserved, spent) = scope.root.meter.snapshot();
+    let (free, reserved, spent) = scope.statement_snapshot();
     assert_eq!(reserved, 0);
     assert_eq!(free + spent, 256);
     assert!(spent <= 256);

@@ -4,10 +4,10 @@ use super::*;
 pub(in crate::database) const ORDINARY_SQLITE_STARTUP: u16 = 3;
 #[cfg(test)]
 pub(in crate::database) const BOOTSTRAP_SQLITE_STARTUP: u16 = 4;
-pub(in crate::database) const POSTGRES_CLEANUP: u16 = 40;
+pub const POSTGRES_CLEANUP: u16 = 40;
 
 #[derive(Debug)]
-pub(crate) struct StatementLimit;
+pub struct StatementLimit;
 impl std::fmt::Display for StatementLimit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("actual database statement budget exhausted")
@@ -19,7 +19,7 @@ struct State {
     free: u16,
     reserved: u16,
     spent: u16,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     cleanup_charged: u16,
 }
 pub(in crate::database) struct Meter(Mutex<State>);
@@ -33,7 +33,7 @@ impl Meter {
             free: limit,
             reserved: 0,
             spent: 0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             cleanup_charged: 0,
         })))
     }
@@ -60,14 +60,14 @@ impl Meter {
             .unwrap_or_else(|error| error.into_inner())
             .free
     }
-    #[cfg(test)]
-    pub(super) fn cleanup_charged(&self) -> u16 {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn cleanup_charged(&self) -> u16 {
         self.0
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .cleanup_charged
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn snapshot(&self) -> (u16, u16, u16) {
         let state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         (state.free, state.reserved, state.spent)
@@ -91,7 +91,7 @@ impl Cleanup {
         *remaining -= statements;
         state.reserved -= statements;
         state.spent += statements;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             state.cleanup_charged += statements;
         }
