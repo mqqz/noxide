@@ -471,7 +471,7 @@ impl Effects {
                             fields: self.visible_fields(op, stored.record.fields.clone())?,
                         };
                         if records.len() == usize::from(plan.limit)
-                            || !append_prefix(
+                            || !lists::append_prefix(
                                 &mut records,
                                 record,
                                 self.result_limit,
