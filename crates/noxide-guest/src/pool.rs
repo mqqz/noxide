@@ -94,6 +94,7 @@ pub struct GuestPool {
     /// Workers idle, busy or starting.
     live: AtomicUsize,
     starting: AtomicUsize,
+    waiting: AtomicUsize,
     started: AtomicUsize,
     retire_after: u32,
     limits: Limits,
@@ -125,6 +126,7 @@ impl GuestPool {
             available: Semaphore::new(1),
             live: AtomicUsize::new(1),
             starting: AtomicUsize::new(0),
+            waiting: AtomicUsize::new(0),
             started: AtomicUsize::new(1),
             retire_after: DEFAULT_RETIRE_AFTER,
             limits,
@@ -208,19 +210,20 @@ impl GuestPool {
     /// Wait for a worker, up to the deadline. The admission limit in front of this
     /// bounds how many can wait.
     async fn checkout(self: &Arc<Self>, deadline: Instant) -> Result<Worker> {
-        if self.idle_workers() == 0 {
-            if self.starting.load(Ordering::Acquire) == 0 {
-                self.add_worker();
-            }
-            if self.broker.is_none() {
-                return Err(GuestBusy::Capacity.into());
-            }
+        if self.broker.is_none() && self.idle_workers() == 0 {
+            return Err(GuestBusy::Capacity.into());
         }
-        let permit = tokio::time::timeout_at(deadline, self.available.acquire())
-            .await
+        // Each waiter beyond the idle and starting workers needs another one.
+        let waiting = self.waiting.fetch_add(1, Ordering::AcqRel) + 1;
+        if self.idle_workers() + self.starting.load(Ordering::Acquire) < waiting {
+            self.add_worker();
+        }
+        let permit = tokio::time::timeout_at(deadline, self.available.acquire()).await;
+        self.waiting.fetch_sub(1, Ordering::AcqRel);
+        permit
             .map_err(|_| GuestBusy::Deadline)?
-            .map_err(|_| GuestBusy::Capacity)?;
-        permit.forget();
+            .map_err(|_| GuestBusy::Capacity)?
+            .forget();
         let worker = self.idle.lock().unwrap().pop();
         self.keep_warm();
         worker.ok_or_else(|| GuestBusy::Capacity.into())
@@ -230,6 +233,8 @@ impl GuestPool {
     fn discard(self: &Arc<Self>, worker: Worker) {
         drop(worker);
         self.live.fetch_sub(1, Ordering::AcqRel);
+        // One for one, so load that needed this many workers still has them.
+        self.add_worker();
         self.keep_warm();
     }
 
@@ -464,6 +469,7 @@ mod tests {
             available: Semaphore::new(1),
             live: AtomicUsize::new(1),
             starting: AtomicUsize::new(0),
+            waiting: AtomicUsize::new(0),
             started: AtomicUsize::new(1),
             retire_after: DEFAULT_RETIRE_AFTER,
             limits: Limits::default(),
