@@ -36,6 +36,8 @@ pub(super) fn cursor_scope(
 }
 
 impl Application {
+    /// Without HTTP, for tests; a request reaches `view_page_parameters`.
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn view(
         &self,
         cookie: &str,
@@ -45,6 +47,8 @@ impl Application {
         self.view_page(Some(cookie), route, target, None).await
     }
 
+    /// Without HTTP, for tests; a request reaches `view_page_parameters`.
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn view_page(
         &self,
         cookie: Option<&str>,
@@ -56,6 +60,8 @@ impl Application {
             .await
     }
 
+    /// Without HTTP, for tests; a request reaches `view_page_parameters`.
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn view_page_anonymous(
         &self,
         cookie: Option<&str>,

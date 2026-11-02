@@ -164,16 +164,16 @@ async fn busy_responses_are_identical_across_every_admission_resource() {
     let mut expected = None;
     for cause in 0..5 {
         let permits = match cause {
-            0 => Some(&app.limits.admission.requests),
-            1 => Some(&app.limits.admission.database),
-            2 => Some(&app.limits.admission.verified.wasm),
-            3 => Some(&app.limits.admission.argon2),
+            0 => Some(&app.admission_limits().requests),
+            1 => Some(&app.admission_limits().database),
+            2 => Some(&app.admission_limits().verified.wasm),
+            3 => Some(&app.admission_limits().argon2),
             _ => None,
         };
         let held = if let Some(permits) = permits {
             fill(&app, permits).await
         } else {
-            while app.limits.admission.argon2_attempts.allow() {}
+            while app.admission_limits().argon2_attempts.allow() {}
             Vec::new()
         };
         let request = if cause >= 3 {
@@ -243,7 +243,7 @@ async fn cancelling_login_keeps_all_hash_worker_capacity_until_finished() {
     let challenge = app.login_challenge().await.unwrap();
     let gate = HashGate::new();
     let _resume = Resume(gate.clone());
-    *app.limits.admission.hash_gate.lock().unwrap() = Some(gate.clone());
+    *app.admission_limits().hash_gate.lock().unwrap() = Some(gate.clone());
     let worker = {
         let app = app.clone();
         tokio::spawn(async move {
@@ -261,14 +261,14 @@ async fn cancelling_login_keeps_all_hash_worker_capacity_until_finished() {
         .unwrap();
     worker.abort();
     assert!(worker.await.unwrap_err().is_cancelled());
-    assert_eq!(app.limits.admission.argon2.available(), 1);
-    assert_eq!(app.limits.admission.database.available(), 4);
-    assert_eq!(app.limits.admission.requests.available(), 43);
+    assert_eq!(app.admission_limits().argon2.available(), 1);
+    assert_eq!(app.admission_limits().database.available(), 4);
+    assert_eq!(app.admission_limits().requests.available(), 43);
     gate.finish();
     tokio::time::timeout(Duration::from_secs(2), async {
-        while app.limits.admission.argon2.available() != 2
-            || app.limits.admission.database.available() != 5
-            || app.limits.admission.requests.available() != 44
+        while app.admission_limits().argon2.available() != 2
+            || app.admission_limits().database.available() != 5
+            || app.admission_limits().requests.available() != 44
         {
             tokio::task::yield_now().await;
         }
@@ -365,7 +365,7 @@ async fn client_disconnect_does_not_free_argon2_capacity_early() {
     let challenge = app.login_challenge().await.unwrap();
     let gate = HashGate::new();
     let _resume = Resume(gate.clone());
-    *app.limits.admission.hash_gate.lock().unwrap() = Some(gate.clone());
+    *app.admission_limits().hash_gate.lock().unwrap() = Some(gate.clone());
     let (address, stop, server) = tcp_server(app.clone()).await;
     let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
     let body = url::form_urlencoded::Serializer::new(String::new())
@@ -385,12 +385,12 @@ async fn client_disconnect_does_not_free_argon2_capacity_early() {
     client.shutdown().await.unwrap();
     drop(client);
     tokio::task::yield_now().await;
-    assert_eq!(app.limits.admission.argon2.available(), 1);
+    assert_eq!(app.admission_limits().argon2.available(), 1);
     gate.finish();
     tokio::time::timeout(Duration::from_secs(3), async {
-        while app.limits.admission.argon2.available() != 2
-            || app.limits.admission.database.available() != 5
-            || app.limits.admission.requests.available() != 44
+        while app.admission_limits().argon2.available() != 2
+            || app.admission_limits().database.available() != 5
+            || app.admission_limits().requests.available() != 44
         {
             tokio::task::yield_now().await;
         }
@@ -568,16 +568,16 @@ async fn expired_cookie_skips_session_lookup_and_pays_only_class_cost() {
         .issue(TokenKind::Session, "alice", now - 100, 1)
         .unwrap();
     // A preflight lookup would time out; a verified request would also stall.
-    let _session = fill(&app, &app.limits.admission.session_check.requests).await;
-    let _verified = fill(&app, &app.limits.admission.verified.requests).await;
+    let _session = fill(&app, &app.admission_limits().session_check.requests).await;
+    let _verified = fill(&app, &app.admission_limits().verified.requests).await;
     assert_eq!(
         identity_get(app.clone(), "/login", &expired, Peer::Circuit(101))
             .await
             .status(),
         StatusCode::OK
     );
-    assert_eq!(app.limits.admission.circuit_millitokens(101), 4000);
-    assert_eq!(app.limits.admission.verified.database.available(), 2);
+    assert_eq!(app.admission_limits().circuit_millitokens(101), 4000);
+    assert_eq!(app.admission_limits().verified.database.available(), 2);
 }
 
 #[tokio::test]
@@ -601,16 +601,16 @@ async fn revoked_unexpired_candidate_pays_lookup_cost_without_using_verified_cap
     tx.execute("DELETE FROM nx_sessions", &[]).await.unwrap();
     tx.commit().await.unwrap();
     assert!(app.session_envelope(&session));
-    let _verified = fill(&app, &app.limits.admission.verified.requests).await;
+    let _verified = fill(&app, &app.admission_limits().verified.requests).await;
     assert_eq!(
         identity_get(app.clone(), "/login", &session, Peer::Circuit(102))
             .await
             .status(),
         StatusCode::OK
     );
-    assert_eq!(app.limits.admission.circuit_millitokens(102), 0);
-    assert_eq!(app.limits.admission.verified.database.available(), 2);
-    assert_eq!(app.limits.admission.session_check.requests.available(), 4);
+    assert_eq!(app.admission_limits().circuit_millitokens(102), 0);
+    assert_eq!(app.admission_limits().verified.database.available(), 2);
+    assert_eq!(app.admission_limits().session_check.requests.available(), 4);
 }
 
 #[tokio::test]
@@ -632,9 +632,9 @@ async fn verified_get_and_action_complete_with_every_anonymous_share_full() {
     let html = std::str::from_utf8(&page.body).unwrap();
     let submission = fixture::hidden(html, "_submission");
     let csrf = fixture::hidden(html, "_csrf");
-    let _requests = fill(&app, &app.limits.admission.requests).await;
-    let _database = fill(&app, &app.limits.admission.database).await;
-    let _wasm = fill(&app, &app.limits.admission.wasm).await;
+    let _requests = fill(&app, &app.admission_limits().requests).await;
+    let _database = fill(&app, &app.admission_limits().database).await;
+    let _wasm = fill(&app, &app.admission_limits().wasm).await;
     assert_eq!(
         identity_get(app.clone(), "/", &session, Peer::Local)
             .await
@@ -650,7 +650,7 @@ async fn verified_get_and_action_complete_with_every_anonymous_share_full() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("{}/1", app.web.presentation.action_path))
+                .uri(format!("{}/1", app.presentation().action_path))
                 .header("Host", "localhost:8080")
                 .header("Origin", "http://localhost:8080")
                 .header("Content-Type", "application/x-www-form-urlencoded")
@@ -663,7 +663,7 @@ async fn verified_get_and_action_complete_with_every_anonymous_share_full() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     app.request_lifecycle().drain().await.unwrap();
-    assert_eq!(app.limits.admission.verified.requests.available(), 16);
+    assert_eq!(app.admission_limits().verified.requests.available(), 16);
 }
 
 #[tokio::test]
@@ -691,7 +691,7 @@ async fn local_requests_skip_circuit_budget_but_obey_partitions() {
             .status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    let _held = fill(&app, &app.limits.admission.requests).await;
+    let _held = fill(&app, &app.admission_limits().requests).await;
     assert_eq!(
         identity_get(app.clone(), "/login", "", Peer::Local)
             .await
@@ -713,8 +713,8 @@ async fn invalid_query_parameters_obey_circuit_and_request_admission() {
         )
         .await
         .unwrap();
-    let session_database = fill(&app, &app.limits.admission.session_check.database).await;
-    let database = fill(&app, &app.limits.admission.database).await;
+    let session_database = fill(&app, &app.admission_limits().session_check.database).await;
+    let database = fill(&app, &app.admission_limits().database).await;
     // Charge all five requests at the same monotonic instant. Real runner
     // scheduling can otherwise refill a millitoken before the final assertion.
     tokio::time::pause();
@@ -726,14 +726,14 @@ async fn invalid_query_parameters_obey_circuit_and_request_admission() {
             StatusCode::NOT_FOUND
         );
     }
-    assert_eq!(app.limits.admission.circuit_millitokens(104), 0);
+    assert_eq!(app.admission_limits().circuit_millitokens(104), 0);
     assert_eq!(
         identity_get(app.clone(), "/?unknown=value", &session, Peer::Circuit(104))
             .await
             .status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    let requests = fill(&app, &app.limits.admission.requests).await;
+    let requests = fill(&app, &app.admission_limits().requests).await;
     assert_eq!(
         identity_get(app.clone(), "/?unknown=value", &session, Peer::Local)
             .await
@@ -785,8 +785,8 @@ async fn runtime_concurrency_below_global_cap_returns_busy_at_admission() {
         )
         .await
         .unwrap();
-    assert_eq!(app.limits.admission.wasm.available(), 1);
-    let held = app.limits.admission.wasm.acquire().await.unwrap();
+    assert_eq!(app.admission_limits().wasm.available(), 1);
+    let held = app.admission_limits().wasm.acquire().await.unwrap();
     let response = router(app.clone(), Origin::parse("http://localhost:8080").unwrap())
         .oneshot(
             Request::builder()
@@ -842,9 +842,9 @@ async fn identity_provider_checks(db: Database) {
         )
         .await
         .unwrap();
-    let requests = fill(&app, &app.limits.admission.requests).await;
-    let database = fill(&app, &app.limits.admission.database).await;
-    let wasm = fill(&app, &app.limits.admission.wasm).await;
+    let requests = fill(&app, &app.admission_limits().requests).await;
+    let database = fill(&app, &app.admission_limits().database).await;
+    let wasm = fill(&app, &app.admission_limits().wasm).await;
     assert_eq!(
         identity_get(app.clone(), "/", &session, Peer::Local)
             .await
@@ -863,15 +863,15 @@ async fn identity_provider_checks(db: Database) {
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    let verified = fill(&app, &app.limits.admission.verified.requests).await;
+    let verified = fill(&app, &app.admission_limits().verified.requests).await;
     assert_eq!(
         identity_get(app.clone(), "/login", &session, Peer::Circuit(201))
             .await
             .status(),
         StatusCode::OK
     );
-    assert_eq!(app.limits.admission.circuit_millitokens(201), 0);
-    let session_share = fill(&app, &app.limits.admission.session_check.requests).await;
+    assert_eq!(app.admission_limits().circuit_millitokens(201), 0);
+    let session_share = fill(&app, &app.admission_limits().session_check.requests).await;
     let now = security::now().unwrap();
     let (_, expired) = app
         .test_keys()
@@ -883,10 +883,10 @@ async fn identity_provider_checks(db: Database) {
             .status(),
         StatusCode::OK
     );
-    assert_eq!(app.limits.admission.circuit_millitokens(202), 4000);
+    assert_eq!(app.admission_limits().circuit_millitokens(202), 4000);
     drop((verified, session_share));
     // A candidate cannot become Anonymous because its lookup is unavailable.
-    let session_share = fill(&app, &app.limits.admission.session_check.database).await;
+    let session_share = fill(&app, &app.admission_limits().session_check.database).await;
     assert_eq!(
         identity_get(app.clone(), "/login", &session, Peer::Local)
             .await
@@ -978,7 +978,7 @@ async fn verified_http_pages_work_with_small_reserves_and_one_runtime_slot() {
             StatusCode::OK
         );
         assert!(app.view(&session, 1, None).await.is_ok());
-        let held = app.limits.admission.wasm.acquire().await.unwrap();
+        let held = app.admission_limits().wasm.acquire().await.unwrap();
         assert_eq!(
             identity_get(app.clone(), "/", &session, Peer::Local)
                 .await
@@ -997,12 +997,16 @@ async fn verified_http_pages_work_with_small_reserves_and_one_runtime_slot() {
 
 #[tokio::test]
 async fn registration_disconnect_keeps_argon2_capacity_until_hash_finishes() {
-    let (_temp, mut app) = application().await;
-    Arc::get_mut(&mut app).unwrap().web.registration = crate::Registration::Open;
+    let (_temp, app) = application().await;
+    let app = Arc::new(
+        Arc::into_inner(app)
+            .unwrap()
+            .with_registration(crate::Registration::Open),
+    );
     let challenge = app.login_challenge().await.unwrap();
     let gate = HashGate::new();
     let _resume = Resume(gate.clone());
-    *app.limits.admission.hash_gate.lock().unwrap() = Some(gate.clone());
+    *app.admission_limits().hash_gate.lock().unwrap() = Some(gate.clone());
     let (address, stop, server) = tcp_server(app.clone()).await;
     let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
     let body = url::form_urlencoded::Serializer::new(String::new())
@@ -1022,12 +1026,12 @@ async fn registration_disconnect_keeps_argon2_capacity_until_hash_finishes() {
     client.shutdown().await.unwrap();
     drop(client);
     tokio::task::yield_now().await;
-    assert_eq!(app.limits.admission.argon2.available(), 1);
+    assert_eq!(app.admission_limits().argon2.available(), 1);
     gate.finish();
     tokio::time::timeout(Duration::from_secs(3), async {
-        while app.limits.admission.argon2.available() != 2
-            || app.limits.admission.database.available() != 5
-            || app.limits.admission.requests.available() != 44
+        while app.admission_limits().argon2.available() != 2
+            || app.admission_limits().database.available() != 5
+            || app.admission_limits().requests.available() != 44
         {
             tokio::task::yield_now().await;
         }

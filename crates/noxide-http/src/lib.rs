@@ -6,7 +6,6 @@ pub(crate) use noxide_admission::{assets, policy, query_plan, schema};
 pub(crate) use noxide_authority::auth;
 pub(crate) use noxide_authority::auth::{Registration, account_id};
 pub(crate) use noxide_authority::{limiter, security};
-pub(crate) use noxide_host::application;
 #[cfg(test)]
 pub(crate) use noxide_host::{
     BlobDeployment, DeploymentResources, HostKeys, deployment, repository, runtime, test_account,
@@ -390,46 +389,43 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
     scope
         .run(async {
             let path = request.uri().path();
-            let presentation = &app.web.presentation;
+            let presentation = app.presentation();
             let mut context = AdmissionContext {
                 peer,
                 class,
                 identity: AdmissionIdentity::Anonymous,
             };
             if !app
-                .limits
-                .admission
+                .admission_limits()
                 .charge_circuit(context.peer, context.class)
             {
                 return finish(busy());
             }
             if request.method() == axum::http::Method::GET
                 && let Some(route) = app
-                    .identity
-                    .manifest
+                    .manifest()
                     .routes
                     .iter()
                     .find(|r| crate::routing::match_path(r, path).is_some())
-                && parse_query(&app.identity.manifest, route, request.uri().query()).is_err()
+                && parse_query(app.manifest(), route, request.uri().query()).is_err()
             {
-                let Ok(_permit) = app.limits.admission.requests.request().await else {
+                let Ok(_permit) = app.admission_limits().requests.request().await else {
                     return finish(busy());
                 };
                 return finish(StatusCode::NOT_FOUND.into_response());
             }
             let public = path.starts_with(noxide_protocol::assets::ASSET_PATH_PREFIX)
                 || (path == presentation.registration_path
-                    && app.web.registration == crate::Registration::Closed)
+                    && app.registration() == crate::Registration::Closed)
                 || app
-                    .identity
-                    .manifest
+                    .manifest()
                     .routes
                     .iter()
                     .find(|r| crate::render::match_path(r, path).is_some())
                     .is_some_and(|r| r.access == noxide_protocol::Access::Public);
             if !public
                 && !matches!(class, RequestClass::PasswordHash)
-                && let Ok(cookie) = cookie(request.headers(), &app.web.presentation.session_cookie)
+                && let Ok(cookie) = cookie(request.headers(), &app.presentation().session_cookie)
                 && app.session_envelope(&cookie)
             {
                 context.identity = AdmissionIdentity::Candidate;
@@ -438,27 +434,25 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
                         context.identity = AdmissionIdentity::Verified { principal }
                     }
                     Ok(None) => {
-                        app.limits.admission.failed_session(peer);
+                        app.admission_limits().failed_session(peer);
                         context.identity = AdmissionIdentity::Anonymous;
                     }
-                    Err(e) => return finish(error(e, &app.web.presentation.login_path)),
+                    Err(e) => return finish(error(e, &app.presentation().login_path)),
                 }
             }
             if let AdmissionIdentity::Verified { principal } = &context.identity
                 && matches!(class, RequestClass::AuthenticatedAction)
-                && !app.limits.admission.principal_action(principal)
+                && !app.admission_limits().principal_action(principal)
             {
                 return finish(busy());
             }
-            app.limits
-                .admission
+            app.admission_limits()
                 .context(context, async {
-                    let Ok(permit) = app.limits.admission.requests().request().await else {
+                    let Ok(permit) = app.admission_limits().requests().request().await else {
                         return finish(busy());
                     };
                     finish(
-                        app.limits
-                            .admission
+                        app.admission_limits()
                             .scope(permit, dispatch_inner(gateway, request, endpoint))
                             .await,
                     )

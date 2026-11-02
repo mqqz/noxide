@@ -3,13 +3,13 @@ use crate::auth::AccountAdmin as _;
 mod accounts;
 mod action;
 mod authority;
-pub mod blobs;
+pub(crate) mod blobs;
 use crate::database::lifecycle::{AdmissionOwner, Registry, RequestScope};
 pub(crate) use action::ActionCore;
 pub use action::{ActionRejection, ValidatedActionRejection};
 use action::{CanonicalActionInput, ExecutionBudget};
 mod capabilities;
-pub mod clock;
+pub(crate) mod clock;
 mod effect_worker;
 mod effects;
 mod forms;
@@ -22,7 +22,7 @@ mod submission;
 pub use accounts::LoginChallenge;
 pub use jobs::JobRunOutcome;
 mod job_selection;
-pub mod job_worker;
+pub(crate) mod job_worker;
 use crate::{
     Database, HostKeys, auth,
     database::{Transaction, retryable},
@@ -58,10 +58,10 @@ pub(crate) fn guest_error(error: anyhow::Error) -> anyhow::Error {
 }
 
 pub struct Application {
-    pub identity: state::Identity,
-    pub web: state::Web,
-    pub limits: state::RequestLimits,
-    pub services: state::Services,
+    pub(crate) identity: state::Identity,
+    pub(crate) web: state::Web,
+    pub(crate) limits: state::RequestLimits,
+    pub(crate) services: state::Services,
     time: state::Time,
     pub(crate) keys: Arc<HostKeys>,
     database: Database,
@@ -108,6 +108,49 @@ impl Application {
     #[cfg(feature = "test-support")]
     pub fn test_keys(&self) -> &Arc<HostKeys> {
         &self.keys
+    }
+
+    #[cfg(feature = "test-support")]
+    pub async fn test_reconcile_blobs(&self, deadline: Instant) -> Result<()> {
+        self.reconcile_blobs(deadline).await
+    }
+
+    #[cfg(feature = "test-support")]
+    pub async fn test_temporal_attempt(
+        &self,
+        tx: &mut Transaction,
+    ) -> std::result::Result<crate::lifecycle_clock::AttemptTime, RequestError> {
+        self.temporal_attempt(tx).await
+    }
+
+    #[cfg(feature = "test-support")]
+    pub async fn test_admission_owner(&self) -> std::result::Result<AdmissionOwner, RequestError> {
+        Ok(self.admit_invocation(false).await?.owner)
+    }
+
+    /// The admitted manifest.
+    pub fn manifest(&self) -> &Arc<Manifest> {
+        &self.identity.manifest
+    }
+    pub fn presentation(&self) -> &crate::Presentation {
+        &self.web.presentation
+    }
+    pub fn registration(&self) -> auth::Registration {
+        self.web.registration
+    }
+    pub fn assets(&self) -> &Arc<crate::assets::AssetBundle> {
+        &self.web.assets
+    }
+    /// Bounds how many asset responses are streaming at once.
+    pub fn asset_responses(&self) -> &Arc<tokio::sync::Semaphore> {
+        &self.web.asset_responses
+    }
+    pub fn admission_limits(&self) -> &AdmissionLimits {
+        &self.limits.admission
+    }
+    /// The blob runtime, when this deployment approved blobs.
+    pub fn blobs(&self) -> Option<&blobs::BlobRuntime> {
+        self.services.blobs.as_ref()
     }
 
     pub fn request_lifecycle(&self) -> Arc<Registry> {

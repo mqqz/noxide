@@ -123,7 +123,7 @@ impl Application {
 
     /// Temporal callers retain this value for their complete transaction
     /// attempt. No wall sample or freshness renewal occurs on the request path.
-    pub async fn temporal_attempt(
+    pub(crate) async fn temporal_attempt(
         &self,
         tx: &mut Transaction,
     ) -> std::result::Result<AttemptTime, RequestError> {

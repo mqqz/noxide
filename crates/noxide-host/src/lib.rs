@@ -2,13 +2,14 @@
 #![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 
-pub mod application;
+mod application;
 pub mod deployment;
 
 pub mod runtime {
     pub use noxide_guest::Limits;
 }
 
+pub use application::blobs::PreparedUpload;
 pub use application::{
     ActionRejection, Application, JobRunOutcome, LoginChallenge, RequestError,
     ValidatedActionRejection,

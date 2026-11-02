@@ -47,14 +47,14 @@ async fn auth_http_committed_lost_ack_is_unknown_and_preserves_durable_state() {
         app.activate().await.unwrap();
         let challenge = app.login_challenge().await.unwrap();
         let body = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair(&app.web.presentation.csrf_field, &challenge.csrf)
+            .append_pair(&app.presentation().csrf_field, &challenge.csrf)
             .append_pair("username", "alice")
             .append_pair("password", "synthetic auth password")
             .finish();
         let path = if register {
-            &app.web.presentation.registration_path
+            &app.presentation().registration_path
         } else {
-            &app.web.presentation.login_path
+            &app.presentation().login_path
         };
         let request = Request::builder()
             .method("POST")
@@ -64,7 +64,7 @@ async fn auth_http_committed_lost_ack_is_unknown_and_preserves_durable_state() {
             .header("Content-Type", "application/x-www-form-urlencoded")
             .header(
                 "Cookie",
-                format!("{}={}", app.web.presentation.login_cookie, challenge.cookie),
+                format!("{}={}", app.presentation().login_cookie, challenge.cookie),
             )
             .body(Body::from(body))
             .unwrap();

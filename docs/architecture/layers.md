@@ -43,6 +43,10 @@ supplies its fence through a narrow trait such as `ReconcileHost`, and every tra
 calls it first. In `noxide-http`, every request gets its class, deadline and handler from
 one `Endpoint` classification, so admission cannot disagree with routing.
 
+Other crates reach `Application` only through its methods. Its fields and modules are
+private, its state is read through accessors that cannot change it, and methods only tests
+need sit behind `test-support`, which no deployed binary enables.
+
 ### SQL boundary
 
 All statement text lives in `noxide-store`. `Transaction::execute` and `fetch` are

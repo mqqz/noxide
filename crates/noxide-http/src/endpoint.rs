@@ -30,7 +30,7 @@ pub(super) enum Endpoint<'a> {
 
 impl<'a> Endpoint<'a> {
     pub(super) fn classify(app: &'a Application, is_get: bool, path: &str) -> Self {
-        let presentation = &app.web.presentation;
+        let presentation = app.presentation();
         if path == "/_noxide/download" {
             return Self::Download;
         }
@@ -38,7 +38,7 @@ impl<'a> Endpoint<'a> {
             return Self::Asset;
         }
         if path == presentation.registration_path {
-            return if app.web.registration == crate::Registration::Closed {
+            return if app.registration() == crate::Registration::Closed {
                 Self::ClosedRegistration
             } else {
                 Self::Registration
@@ -65,8 +65,7 @@ impl<'a> Endpoint<'a> {
         }
         if is_get {
             return app
-                .identity
-                .manifest
+                .manifest()
                 .routes
                 .iter()
                 .find_map(|route| {
@@ -78,10 +77,9 @@ impl<'a> Endpoint<'a> {
         path.strip_prefix(&format!("{}/", presentation.action_path))
             .and_then(|id| id.parse().ok())
             .and_then(|id| {
-                let action = crate::manifest::web_action(&app.identity.manifest, id).ok()?;
+                let action = crate::manifest::web_action(app.manifest(), id).ok()?;
                 let operation =
-                    crate::manifest::operation(&app.identity.manifest, action.steps[0].operation)
-                        .ok()?;
+                    crate::manifest::operation(app.manifest(), action.steps[0].operation).ok()?;
                 Some(Self::Action { id, operation })
             })
             .unwrap_or(Self::NotFound)

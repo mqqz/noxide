@@ -271,12 +271,11 @@ async fn closed_registration_has_no_page_cookie_lookup_or_hashing() {
     let app = app(db.clone(), Registration::Closed).await;
     let before = snapshot(&db).await;
     let mut held = Vec::new();
-    while app.limits.admission.database.available() != 0 {
-        held.push(app.limits.admission.database.acquire().await.unwrap());
+    while app.admission_limits().database.available() != 0 {
+        held.push(app.admission_limits().database.acquire().await.unwrap());
     }
     let session_check = app
-        .limits
-        .admission
+        .admission_limits()
         .session_check
         .database
         .acquire()
@@ -314,7 +313,7 @@ async fn closed_registration_has_no_page_cookie_lookup_or_hashing() {
     }
     drop((held, session_check));
     assert_eq!(snapshot(&db).await, before);
-    assert_eq!(app.limits.admission.argon2.available(), 2);
+    assert_eq!(app.admission_limits().argon2.available(), 2);
 }
 #[tokio::test]
 async fn open_registration_uses_host_forms_csrf_and_all_password_hash_bounds() {
@@ -400,8 +399,8 @@ async fn open_registration_uses_host_forms_csrf_and_all_password_hash_bounds() {
     .await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(snapshot(&db).await, before);
-    let first = app.limits.admission.argon2.acquire().await.unwrap();
-    let second = app.limits.admission.argon2.acquire().await.unwrap();
+    let first = app.admission_limits().argon2.acquire().await.unwrap();
+    let second = app.admission_limits().argon2.acquire().await.unwrap();
     assert_eq!(
         post(
             router.clone(),
@@ -457,7 +456,7 @@ async fn open_registration_uses_host_forms_csrf_and_all_password_hash_bounds() {
             StatusCode::SEE_OTHER
         );
     }
-    while app.limits.admission.argon2_attempts.allow() {}
+    while app.admission_limits().argon2_attempts.allow() {}
     assert_eq!(
         post(
             router,
@@ -487,7 +486,7 @@ async fn cancelling_registration_keeps_hash_request_and_database_permits() {
     let challenge = app.login_challenge().await.unwrap();
     let gate = HashGate::new();
     let _resume = Resume(gate.clone());
-    *app.limits.admission.hash_gate.lock().unwrap() = Some(gate.clone());
+    *app.admission_limits().hash_gate.lock().unwrap() = Some(gate.clone());
     let worker = {
         let app = app.clone();
         tokio::spawn(async move {
@@ -506,14 +505,14 @@ async fn cancelling_registration_keeps_hash_request_and_database_permits() {
         .unwrap();
     worker.abort();
     assert!(worker.await.unwrap_err().is_cancelled());
-    assert_eq!(app.limits.admission.argon2.available(), 1);
-    assert_eq!(app.limits.admission.database.available(), 4);
-    assert_eq!(app.limits.admission.requests.available(), 43);
+    assert_eq!(app.admission_limits().argon2.available(), 1);
+    assert_eq!(app.admission_limits().database.available(), 4);
+    assert_eq!(app.admission_limits().requests.available(), 43);
     gate.finish();
     tokio::time::timeout(Duration::from_secs(3), async {
-        while app.limits.admission.argon2.available() != 2
-            || app.limits.admission.database.available() != 5
-            || app.limits.admission.requests.available() != 44
+        while app.admission_limits().argon2.available() != 2
+            || app.admission_limits().database.available() != 5
+            || app.admission_limits().requests.available() != 44
         {
             tokio::task::yield_now().await;
         }

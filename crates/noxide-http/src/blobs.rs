@@ -1,8 +1,8 @@
 use super::*;
-use crate::application::blobs::PreparedUpload;
 use anyhow::Context;
 use hyper::body::Body as _;
 use noxide_blobs::multipart::{Boundary, PrefixDecoder};
+use noxide_host::PreparedUpload;
 use std::{pin::Pin, sync::atomic::AtomicBool};
 
 async fn next(
@@ -45,7 +45,7 @@ fn failure(error: anyhow::Error, presentation: &crate::Presentation) -> Response
 #[allow(clippy::too_many_lines)]
 pub(super) async fn upload(gateway: Arc<Gateway>, request: Request) -> Response {
     let app = gateway.app.clone();
-    let presentation = &app.web.presentation;
+    let presentation = app.presentation();
     let result: Result<Response> = async {
         let binding: u32 = request
             .uri()
@@ -53,8 +53,8 @@ pub(super) async fn upload(gateway: Arc<Gateway>, request: Request) -> Response 
             .strip_prefix(&format!("{}/", presentation.action_path))
             .context("invalid upload path")?
             .parse()?;
-        let action = crate::manifest::web_action(&app.identity.manifest, binding)?;
-        let op = crate::manifest::operation(&app.identity.manifest, action.steps[0].operation)?;
+        let action = crate::manifest::web_action(app.manifest(), binding)?;
+        let op = crate::manifest::operation(app.manifest(), action.steps[0].operation)?;
         let cookie = cookie(
             request.headers(),
             if crate::manifest::anonymous_action(op) {
@@ -89,9 +89,7 @@ pub(super) async fn upload(gateway: Arc<Gateway>, request: Request) -> Response 
             .prepare_upload(&cookie, binding, &values, ready.filename.clone())
             .await?;
         let file = app
-            .services
-            .blobs
-            .as_ref()
+            .blobs()
             .context("blob runtime missing")?
             .policy()
             .uploads
@@ -126,11 +124,7 @@ pub(super) async fn upload(gateway: Arc<Gateway>, request: Request) -> Response 
                 return Ok(response);
             }
             PreparedUpload::Created(row, lease) => {
-                let blobs = app
-                    .services
-                    .blobs
-                    .as_ref()
-                    .context("blob runtime missing")?;
+                let blobs = app.blobs().context("blob runtime missing")?;
                 let store = blobs.store().clone();
                 let key = row.metadata.key.clone();
                 let limit = row.metadata.reserved;
@@ -282,7 +276,7 @@ async fn submit(
         Ok(value) => Ok(rendered(
             value,
             gateway.origin.secure,
-            &gateway.app.web.presentation,
+            gateway.app.presentation(),
         )),
         Err(e) => {
             let unknown = matches!(e, RequestError::OutcomeUnknown);
@@ -294,7 +288,7 @@ async fn submit(
                 Ok(value) => Ok(rendered(
                     value,
                     gateway.origin.secure,
-                    &gateway.app.web.presentation,
+                    gateway.app.presentation(),
                 )),
                 Err(_) => Err(e.into()),
             }
@@ -335,7 +329,7 @@ pub(super) async fn download(gateway: Arc<Gateway>, request: Request) -> Respons
         let _ = params;
         let session = cookie(
             request.headers(),
-            &gateway.app.web.presentation.session_cookie,
+            &gateway.app.presentation().session_cookie,
         )
         .ok();
         drop(request);
@@ -348,12 +342,7 @@ pub(super) async fn download(gateway: Arc<Gateway>, request: Request) -> Respons
         let mut opened = download.opened;
         let (send, receive) = tokio::sync::mpsc::channel(1);
         let runtime = tokio::runtime::Handle::current();
-        let blobs = gateway
-            .app
-            .services
-            .blobs
-            .as_ref()
-            .context("blob runtime missing")?;
+        let blobs = gateway.app.blobs().context("blob runtime missing")?;
         let native_permit = download.permit.clone();
         let lease = Arc::new(StreamLease {
             permit: Mutex::new(Some(download.permit)),

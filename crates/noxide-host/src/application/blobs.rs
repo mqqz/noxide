@@ -21,7 +21,7 @@ impl Application {
         }
     }
     /// One maintenance page under its own request scope and admission.
-    pub async fn reconcile_blobs(&self, deadline: Instant) -> Result<()> {
+    pub(crate) async fn reconcile_blobs(&self, deadline: Instant) -> Result<()> {
         self.reconcile_blobs_through(self, deadline).await
     }
     /// The same page through a wrapped host, so a test can count its fence calls.
@@ -104,7 +104,7 @@ impl Application {
         let scope = scope.with_barrier(blobs.verification().lock().unwrap().clone());
         Ok(Some(scope))
     }
-    pub fn upload_ticket(&self, binding: u32, submission: &str) -> Result<String> {
+    pub(crate) fn upload_ticket(&self, binding: u32, submission: &str) -> Result<String> {
         self.keys.csrf(&format!(
             "noxide/upload-ticket/v1:{}:{binding}:{submission}",
             self.submission_contract()

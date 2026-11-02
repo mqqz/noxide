@@ -263,7 +263,7 @@ async fn temporal(app: &Application) -> std::result::Result<AttemptTime, Request
         .begin_read(std::time::Instant::now() + Duration::from_secs(2))
         .await
         .unwrap();
-    let value = app.temporal_attempt(&mut tx).await;
+    let value = app.test_temporal_attempt(&mut tx).await;
     tx.commit().await.unwrap();
     value
 }

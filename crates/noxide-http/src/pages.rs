@@ -15,10 +15,10 @@ pub(super) fn asset(gateway: &Gateway, request: &Request) -> Response {
     if request.method() != axum::http::Method::GET || request.uri().query().is_some() {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let Some(asset) = gateway.app.web.assets.at_path(path) else {
+    let Some(asset) = gateway.app.assets().at_path(path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Ok(permit) = gateway.app.web.asset_responses.clone().try_acquire_owned() else {
+    let Ok(permit) = gateway.app.asset_responses().clone().try_acquire_owned() else {
         return busy();
     };
     struct AssetBody {
@@ -42,7 +42,7 @@ pub(super) fn asset(gateway: &Gateway, request: &Request) -> Response {
 }
 
 pub(super) async fn account(gateway: &Gateway, headers: &HeaderMap) -> Response {
-    let presentation = &gateway.app.web.presentation;
+    let presentation = gateway.app.presentation();
     let session = cookie(headers, &presentation.session_cookie).unwrap_or_default();
     match gateway.app.account_identity(&session).await {
                 Ok(id) if crate::account_id(&id) => ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], format!("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Your account</title><nav><a href=\"/\">Home</a></nav><main><h1>Your account ID</h1><p>Share this ID with someone who needs to address you.</p><code>{id}</code></main></html>")).into_response(),
@@ -52,11 +52,11 @@ pub(super) async fn account(gateway: &Gateway, headers: &HeaderMap) -> Response 
 }
 
 pub(super) async fn registration(gateway: &Gateway) -> Response {
-    let presentation = &gateway.app.web.presentation;
+    let presentation = gateway.app.presentation();
     match gateway.app.login_challenge().await {
         Err(e) => error(e, &presentation.login_path),
         Ok(challenge) => {
-            let invite = if gateway.app.web.registration == crate::Registration::Invite {
+            let invite = if gateway.app.registration() == crate::Registration::Invite {
                 "<label>Invite code<input type=\"password\" name=\"invite\" autocomplete=\"off\" maxlength=\"43\" required></label>"
             } else {
                 ""
@@ -90,7 +90,7 @@ pub(super) fn stylesheet(css: &str) -> Response {
 }
 
 pub(super) async fn login(gateway: &Gateway) -> Response {
-    let presentation = &gateway.app.web.presentation;
+    let presentation = gateway.app.presentation();
     match gateway.app.login_challenge().await {
         Err(e) => error(e, &presentation.login_path),
         Ok(challenge) => {
@@ -130,7 +130,7 @@ pub(super) async fn capability(
     resource: u32,
     id: u64,
 ) -> Response {
-    let presentation = &gateway.app.web.presentation;
+    let presentation = gateway.app.presentation();
     match gateway
         .app
         .capability_page(
@@ -154,8 +154,8 @@ pub(super) async fn route_page(
     route: &noxide_protocol::Route,
     target: Option<u64>,
 ) -> Response {
-    let presentation = &gateway.app.web.presentation;
-    let Ok((cursor, params)) = parse_query(&gateway.app.identity.manifest, route, query) else {
+    let presentation = gateway.app.presentation();
+    let Ok((cursor, params)) = parse_query(gateway.app.manifest(), route, query) else {
         return StatusCode::NOT_FOUND.into_response();
     };
 
@@ -189,7 +189,7 @@ pub(super) async fn route_page(
         Err(RequestError::InvalidCursor) => {
             // Resolve the restart URL from the current route, never token data.
             let restart = crate::routing::resolve(
-                &gateway.app.identity.manifest,
+                gateway.app.manifest(),
                 &noxide_protocol::RouteRef {
                     params: params.clone(),
                     route: route.id,

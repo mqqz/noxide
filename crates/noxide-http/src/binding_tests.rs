@@ -233,12 +233,12 @@ async fn binding_target_controls_http_admission_class_despite_core_id_collision(
     // A fresh circuit cannot afford an anonymous mutation. Treating the
     // colliding owner-only core as authoritative would admit it for less cost.
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert!(!app.limits.admission.charge_circuit(
+    assert!(!app.admission_limits().charge_circuit(
         Peer::Circuit(2),
         crate::limiter::RequestClass::AnonymousAction
     ));
     assert_eq!(
-        app.limits.admission.circuit_millitokens(1),
-        app.limits.admission.circuit_millitokens(2)
+        app.admission_limits().circuit_millitokens(1),
+        app.admission_limits().circuit_millitokens(2)
     );
 }
