@@ -131,8 +131,56 @@ pub(super) enum Settled {
     Rejected(ValidatedActionRejection),
 }
 
+/// Roll back after queuing a job or effect failed.
+async fn settle_enqueue_failure(effects: &mut Effects, error: anyhow::Error) -> Result<Attempt> {
+    effects.tx.rollback().await?;
+    if error.is::<repository::ReferenceUnavailable>() {
+        return Ok(Attempt::Settled(Settled::Unavailable));
+    }
+    Ok(Attempt::Aborted { error })
+}
+
+/// The guest's view of this action, including the fields its targets may inspect.
+fn action_request(
+    a: ActionCore<'_>,
+    sealed: &std::collections::BTreeMap<String, RecordTarget>,
+    records: &std::collections::BTreeMap<(u32, u64), StoredRecord>,
+    input: &Fields,
+) -> RequestView {
+    let inspection = a
+        .targets
+        .iter()
+        .filter_map(|target| target.inspect.as_ref().map(|inspect| (target, inspect)))
+        .map(|(target, inspect)| {
+            let proof = &sealed[&target.name];
+            let stored = &records[&(proof.resource, proof.id)];
+            (
+                target.name.clone(),
+                inspect
+                    .fields
+                    .iter()
+                    .map(|field| (field.clone(), stored.record.fields[field].clone()))
+                    .collect(),
+            )
+        })
+        .collect();
+    RequestView {
+        params: Default::default(),
+        available_forms: Vec::new(),
+        version: VERSION,
+        kind: RequestKind::Action(a.id),
+        target: a
+            .targets
+            .iter()
+            .find(|target| matches!(target.source, TargetSource::Page { .. }))
+            .and_then(|target| sealed.get(&target.name))
+            .map(|target| target.id),
+        input: input.clone(),
+        inspection,
+    }
+}
+
 impl Application {
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn attempt_action(
         &self,
         mut tx: Transaction,
@@ -193,32 +241,7 @@ impl Application {
                 },
             });
         }
-        let time = if admitted_time.is_some() {
-            admitted_time
-        } else if a.uses_time()
-            || crate::authority::uses_time(&self.identity.manifest)
-            || self.identity.manifest.jobs.as_ref().is_some_and(|jobs| {
-                jobs.schedules
-                    .iter()
-                    .any(|schedule| schedule.source_action == a.id)
-            })
-            || self
-                .identity
-                .manifest
-                .effects
-                .as_ref()
-                .is_some_and(|effects| {
-                    effects
-                        .emissions
-                        .iter()
-                        .any(|emission| emission.source_action == a.id)
-                })
-        {
-            budget.spend(1)?;
-            Some(self.temporal_after_admission(&mut tx).await?)
-        } else {
-            None
-        };
+        let time = self.attempt_time(&mut tx, a, admitted_time, budget).await?;
         let upload = upload
             .map(|scope| {
                 time.map(|time| scope.at(time))
@@ -245,31 +268,9 @@ impl Application {
         {
             Ok(value) => value,
             Err(error) => {
-                if error.is::<targets::ReviewConflict>()
-                    && a.targets.len() == 1
-                    && matches!(a.targets[0].source, TargetSource::Page { .. })
-                {
-                    let target = grants[&a.targets[0].name].target.clone();
-                    budget.spend(2)?;
-                    let stored = repository::load(
-                        &mut tx,
-                        &self.identity.manifest,
-                        target.resource,
-                        target.id,
-                    )
-                    .await?
-                    .ok_or(repository::ReferenceUnavailable)?;
-                    tx.rollback().await?;
-                    return Ok(Attempt::Settled(Settled::Conflict { target, stored }));
-                }
-                tx.rollback().await?;
-                if error.is::<targets::ReviewConflict>() {
-                    return Ok(Attempt::Settled(Settled::TargetConflict));
-                }
-                if error.is::<repository::ReferenceUnavailable>() {
-                    return Ok(Attempt::Settled(Settled::Unavailable));
-                }
-                return Ok(Attempt::Aborted { error });
+                return self
+                    .settle_target_failure(tx, a, &grants, error, budget)
+                    .await;
             }
         };
         let gated_destination = navigation
@@ -282,37 +283,7 @@ impl Application {
         }
         let original = records.clone();
         let response_principal = principal.clone();
-        let inspection = a
-            .targets
-            .iter()
-            .filter_map(|target| target.inspect.as_ref().map(|inspect| (target, inspect)))
-            .map(|(target, inspect)| {
-                let proof = &sealed[&target.name];
-                let stored = &records[&(proof.resource, proof.id)];
-                (
-                    target.name.clone(),
-                    inspect
-                        .fields
-                        .iter()
-                        .map(|field| (field.clone(), stored.record.fields[field].clone()))
-                        .collect(),
-                )
-            })
-            .collect();
-        let request = RequestView {
-            params: Default::default(),
-            available_forms: Vec::new(),
-            version: VERSION,
-            kind: RequestKind::Action(a.id),
-            target: a
-                .targets
-                .iter()
-                .find(|target| matches!(target.source, TargetSource::Page { .. }))
-                .and_then(|target| sealed.get(&target.name))
-                .map(|target| target.id),
-            input: input.clone(),
-            inspection,
-        };
+        let request = action_request(a, &sealed, &records, &input);
         let effects = Effects {
             authority,
             upload,
@@ -362,16 +333,141 @@ impl Application {
             .effects
             .ok_or_else(|| anyhow::anyhow!("missing request state"))?;
         budget.database_calls = effects.calls;
-        let outcome = match attempt.result {
+        if let Some(settled) = self
+            .settle_guest_outcome(&mut effects, a, attempt.result)
+            .await?
+        {
+            return Ok(settled);
+        }
+        let outcomes = match effects.execute_transaction(a, time).await {
+            Ok(outcomes) => outcomes,
+            Err(error) => {
+                budget.database_calls = effects.calls;
+                return self
+                    .settle_transaction_failure(&mut effects, a, error)
+                    .await;
+            }
+        };
+        budget.database_calls = effects.calls;
+        if let Err(error) = self
+            .enqueue_action_jobs(&mut effects, a, &original, &outcomes, time, &nonce)
+            .await
+        {
+            budget.database_calls = effects.calls;
+            return settle_enqueue_failure(&mut effects, error).await;
+        }
+        if let Err(error) = self
+            .enqueue_action_effects(&mut effects, a, &original, &outcomes, time, &nonce)
+            .await
+        {
+            budget.database_calls = effects.calls;
+            return settle_enqueue_failure(&mut effects, error).await;
+        }
+        budget.database_calls = effects.calls;
+        let destination = if let Some(plan) = navigation {
+            self.capture_destination(&mut effects.tx, plan, &sealed, &original, &outcomes)
+                .await?
+        } else {
+            None
+        };
+        let receipt = self.action_receipt(a, navigation, outcomes, destination)?;
+        Ok(Attempt::Commit {
+            tx: effects.tx,
+            receipt: Committed {
+                payload: receipt,
+                targets: sealed,
+                principal: response_principal,
+            },
+            nonce,
+        })
+    }
+
+    /// The time this attempt observes, read only when something it does depends on time.
+    async fn attempt_time(
+        &self,
+        tx: &mut Transaction,
+        a: ActionCore<'_>,
+        admitted_time: Option<crate::lifecycle_clock::AttemptTime>,
+        budget: &mut ExecutionBudget,
+    ) -> Result<Option<crate::lifecycle_clock::AttemptTime>> {
+        Ok(if admitted_time.is_some() {
+            admitted_time
+        } else if a.uses_time()
+            || crate::authority::uses_time(&self.identity.manifest)
+            || self.identity.manifest.jobs.as_ref().is_some_and(|jobs| {
+                jobs.schedules
+                    .iter()
+                    .any(|schedule| schedule.source_action == a.id)
+            })
+            || self
+                .identity
+                .manifest
+                .effects
+                .as_ref()
+                .is_some_and(|effects| {
+                    effects
+                        .emissions
+                        .iter()
+                        .any(|emission| emission.source_action == a.id)
+                })
+        {
+            budget.spend(1)?;
+            Some(self.temporal_after_admission(tx).await?)
+        } else {
+            None
+        })
+    }
+
+    /// Roll back after target resolution failed. A single page target's review
+    /// conflict also reloads the current row, so the form can show what changed.
+    async fn settle_target_failure(
+        &self,
+        mut tx: Transaction,
+        a: ActionCore<'_>,
+        grants: &std::collections::BTreeMap<String, TargetGrant>,
+        error: anyhow::Error,
+        budget: &mut ExecutionBudget,
+    ) -> Result<Attempt> {
+        if error.is::<targets::ReviewConflict>()
+            && a.targets.len() == 1
+            && matches!(a.targets[0].source, TargetSource::Page { .. })
+        {
+            let target = grants[&a.targets[0].name].target.clone();
+            budget.spend(2)?;
+            let stored =
+                repository::load(&mut tx, &self.identity.manifest, target.resource, target.id)
+                    .await?
+                    .ok_or(repository::ReferenceUnavailable)?;
+            tx.rollback().await?;
+            return Ok(Attempt::Settled(Settled::Conflict { target, stored }));
+        }
+        tx.rollback().await?;
+        if error.is::<targets::ReviewConflict>() {
+            return Ok(Attempt::Settled(Settled::TargetConflict));
+        }
+        if error.is::<repository::ReferenceUnavailable>() {
+            return Ok(Attempt::Settled(Settled::Unavailable));
+        }
+        Ok(Attempt::Aborted { error })
+    }
+
+    /// What the guest decided. `None` means execute the transaction.
+    async fn settle_guest_outcome(
+        &self,
+        effects: &mut Effects,
+        a: ActionCore<'_>,
+        result: Result<ResponseIntent>,
+    ) -> Result<Option<Attempt>> {
+        let outcome = match result {
             Ok(value) => value,
             Err(error) => {
                 effects.tx.rollback().await?;
                 if error.is::<crate::repository::ReferenceUnavailable>() {
-                    return Ok(Attempt::Settled(Settled::Unavailable));
+                    return Ok(Some(Attempt::Settled(Settled::Unavailable)));
                 }
-                return Ok(Attempt::Aborted {
+                return Ok(Some(Attempt::Aborted {
                     error: super::guest_error(error),
-                });
+                }));
             }
         };
         if let ResponseIntent::Rejected {
@@ -388,72 +484,54 @@ impl Application {
                 },
             ) {
                 Ok(rejection) => rejection,
-                Err(error) => return Ok(Attempt::Aborted { error }),
+                Err(error) => return Ok(Some(Attempt::Aborted { error })),
             };
-            return Ok(Attempt::Settled(Settled::Rejected(rejection)));
+            return Ok(Some(Attempt::Settled(Settled::Rejected(rejection))));
         }
         if outcome != ResponseIntent::Execute {
             effects.tx.rollback().await?;
-            return Ok(Attempt::Aborted {
+            return Ok(Some(Attempt::Aborted {
                 error: anyhow::anyhow!("invalid action decision"),
+            }));
+        }
+        Ok(None)
+    }
+
+    async fn settle_transaction_failure(
+        &self,
+        effects: &mut Effects,
+        a: ActionCore<'_>,
+        error: anyhow::Error,
+    ) -> Result<Attempt> {
+        effects.tx.rollback().await?;
+        if error.is::<repository::ReferenceUnavailable>() {
+            return Ok(Attempt::Settled(Settled::Unavailable));
+        }
+        if error.is::<repository::CalculationUnavailable>() {
+            return Ok(Attempt::Aborted {
+                error: RequestError::InvalidRequest.into(),
             });
         }
-        let outcomes = match effects.execute_transaction(a, time).await {
-            Ok(outcomes) => outcomes,
-            Err(error) => {
-                budget.database_calls = effects.calls;
-                effects.tx.rollback().await?;
-                if error.is::<repository::ReferenceUnavailable>() {
-                    return Ok(Attempt::Settled(Settled::Unavailable));
-                }
-                if error.is::<repository::CalculationUnavailable>() {
-                    return Ok(Attempt::Aborted {
-                        error: RequestError::InvalidRequest.into(),
-                    });
-                }
-                if let Some(guard) = error.downcast_ref::<repository::GuardFailure>() {
-                    let rejection = ValidatedActionRejection::new(
-                        manifest::action(&self.identity.manifest, a.id)?,
-                        ActionRejection::GuardRejected {
-                            input: guard.input.clone(),
-                            message: guard.message.clone(),
-                        },
-                    )?;
-                    return Ok(Attempt::Settled(Settled::Rejected(rejection)));
-                }
-                return Ok(Attempt::Aborted { error });
-            }
-        };
-        budget.database_calls = effects.calls;
-        if let Err(error) = self
-            .enqueue_action_jobs(&mut effects, a, &original, &outcomes, time, &nonce)
-            .await
-        {
-            budget.database_calls = effects.calls;
-            effects.tx.rollback().await?;
-            if error.is::<repository::ReferenceUnavailable>() {
-                return Ok(Attempt::Settled(Settled::Unavailable));
-            }
-            return Ok(Attempt::Aborted { error });
+        if let Some(guard) = error.downcast_ref::<repository::GuardFailure>() {
+            let rejection = ValidatedActionRejection::new(
+                manifest::action(&self.identity.manifest, a.id)?,
+                ActionRejection::GuardRejected {
+                    input: guard.input.clone(),
+                    message: guard.message.clone(),
+                },
+            )?;
+            return Ok(Attempt::Settled(Settled::Rejected(rejection)));
         }
-        if let Err(error) = self
-            .enqueue_action_effects(&mut effects, a, &original, &outcomes, time, &nonce)
-            .await
-        {
-            budget.database_calls = effects.calls;
-            effects.tx.rollback().await?;
-            if error.is::<repository::ReferenceUnavailable>() {
-                return Ok(Attempt::Settled(Settled::Unavailable));
-            }
-            return Ok(Attempt::Aborted { error });
-        }
-        budget.database_calls = effects.calls;
-        let destination = if let Some(plan) = navigation {
-            self.capture_destination(&mut effects.tx, plan, &sealed, &original, &outcomes)
-                .await?
-        } else {
-            None
-        };
+        Ok(Attempt::Aborted { error })
+    }
+
+    fn action_receipt(
+        &self,
+        a: ActionCore<'_>,
+        navigation: Option<NavigationPlan<'_>>,
+        outcomes: Vec<noxide_protocol::MutationOutcome>,
+        destination: Option<navigation::ReferenceDestination>,
+    ) -> Result<String> {
         let handover = outcomes
             .iter()
             .zip(a.steps)
@@ -473,22 +551,13 @@ impl Application {
                 })
             })
             .transpose()?;
-        let receipt = serde_json::to_string(&navigation::SemanticReceipt {
+        Ok(serde_json::to_string(&navigation::SemanticReceipt {
             version: 3,
             outcomes,
             source: navigation.map(|plan| plan.source.clone()),
             destination,
             handover,
-        })?;
-        Ok(Attempt::Commit {
-            tx: effects.tx,
-            receipt: Committed {
-                payload: receipt,
-                targets: sealed,
-                principal: response_principal,
-            },
-            nonce,
-        })
+        })?)
     }
 
     /// Browser admission verifies its own credentials; service admission below

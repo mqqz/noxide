@@ -344,79 +344,21 @@ impl Application {
                         .is_ok_and(manifest::is_capability)
             });
             if edit {
-                let storage = u32::try_from(
-                    tx.storage_resource(&self.identity.manifest, target.resource)
-                        .await?,
-                )?;
-                let (Some(secret), Some(version)) = (capability, stored.cap_version) else {
-                    anyhow::bail!(repository::ReferenceUnavailable)
-                };
-                ensure!(
-                    self.keys
-                        .verify_edit(secret, storage, target.id, version)
-                        .is_ok(),
-                    repository::ReferenceUnavailable
-                );
+                self.verify_edit_capability(tx, target, stored, capability)
+                    .await?;
                 capability_grant = Some(target.clone());
             }
-            match &declaration.source {
-                TargetSource::Service { eligible } => {
-                    ensure!(
-                        proof.service && matches!(principal, auth::Principal::Service(_)),
-                        repository::ReferenceUnavailable
-                    );
-                    ensure!(
-                        self.target_read(tx, authority, principal, *eligible, stored, budget)
-                            .await?,
-                        repository::ReferenceUnavailable
-                    );
-                }
-                TargetSource::Reference { eligible, .. } if proof.service => {
-                    ensure!(
-                        matches!(principal, auth::Principal::Service(_)),
-                        repository::ReferenceUnavailable
-                    );
-                    ensure!(
-                        self.target_read(tx, authority, principal, *eligible, stored, budget)
-                            .await?,
-                        repository::ReferenceUnavailable
-                    );
-                }
-                TargetSource::Page { reads } if !edit => {
-                    let route = manifest::route(
-                        &self.identity.manifest,
-                        target.route.ok_or(repository::ReferenceUnavailable)?,
-                    )?;
-                    let mut permitted = false;
-                    let mut reads: Vec<_> = reads
-                        .iter()
-                        .copied()
-                        .filter(|read| route.operations.contains(read))
-                        .collect();
-                    reads.sort_by_key(|id| {
-                        (
-                            manifest::operation(&self.identity.manifest, *id)
-                                .is_ok_and(manifest::is_public),
-                            *id,
-                        )
-                    });
-                    for read in reads {
-                        if self
-                            .target_read(tx, authority, principal, read, stored, budget)
-                            .await?
-                        {
-                            permitted = true;
-                            break;
-                        }
-                    }
-                    ensure!(permitted, repository::ReferenceUnavailable);
-                }
-                TargetSource::Page { .. } => {}
-                TargetSource::Selected { .. } | TargetSource::Reference { .. } => {
-                    // The mandatory projection names the single current eligible
-                    // read. Picker query selection is checked when minting proof.
-                }
-            }
+            self.authorize_target_source(
+                tx,
+                authority,
+                principal,
+                declaration,
+                proof,
+                stored,
+                edit,
+                budget,
+            )
+            .await?;
             for projection in [
                 declaration.projection.as_ref(),
                 declaration.inspect.as_ref(),
@@ -438,6 +380,129 @@ impl Application {
                 );
             }
         }
+        self.authorize_target_steps(tx, authority, action, grants, &records, principal, budget)
+            .await?;
+        check_reference_sources(action, grants, &records)?;
+        ensure!(
+            !conflicting_reviews
+                && reviewed
+                    .iter()
+                    .all(|(key, revision)| records[key].revision == *revision),
+            ReviewConflict
+        );
+        Ok((records, capability_grant))
+    }
+
+    /// An edit needs the record's capability secret at its current version.
+    async fn verify_edit_capability(
+        &self,
+        tx: &mut Transaction,
+        target: &RecordTarget,
+        stored: &StoredRecord,
+        capability: Option<&str>,
+    ) -> Result<()> {
+        let storage = u32::try_from(
+            tx.storage_resource(&self.identity.manifest, target.resource)
+                .await?,
+        )?;
+        let (Some(secret), Some(version)) = (capability, stored.cap_version) else {
+            anyhow::bail!(repository::ReferenceUnavailable)
+        };
+        ensure!(
+            self.keys
+                .verify_edit(secret, storage, target.id, version)
+                .is_ok(),
+            repository::ReferenceUnavailable
+        );
+        Ok(())
+    }
+
+    /// Each target source grants access only through its own declared reads.
+    #[allow(clippy::too_many_arguments)]
+    async fn authorize_target_source(
+        &self,
+        tx: &mut Transaction,
+        authority: &mut crate::authority::Authority,
+        principal: &auth::Principal,
+        declaration: &ActionTarget,
+        proof: &TargetGrant,
+        stored: &StoredRecord,
+        edit: bool,
+        budget: &mut ExecutionBudget,
+    ) -> Result<()> {
+        let target = &proof.target;
+        match &declaration.source {
+            TargetSource::Service { eligible } => {
+                ensure!(
+                    proof.service && matches!(principal, auth::Principal::Service(_)),
+                    repository::ReferenceUnavailable
+                );
+                ensure!(
+                    self.target_read(tx, authority, principal, *eligible, stored, budget)
+                        .await?,
+                    repository::ReferenceUnavailable
+                );
+            }
+            TargetSource::Reference { eligible, .. } if proof.service => {
+                ensure!(
+                    matches!(principal, auth::Principal::Service(_)),
+                    repository::ReferenceUnavailable
+                );
+                ensure!(
+                    self.target_read(tx, authority, principal, *eligible, stored, budget)
+                        .await?,
+                    repository::ReferenceUnavailable
+                );
+            }
+            TargetSource::Page { reads } if !edit => {
+                let route = manifest::route(
+                    &self.identity.manifest,
+                    target.route.ok_or(repository::ReferenceUnavailable)?,
+                )?;
+                let mut permitted = false;
+                let mut reads: Vec<_> = reads
+                    .iter()
+                    .copied()
+                    .filter(|read| route.operations.contains(read))
+                    .collect();
+                reads.sort_by_key(|id| {
+                    (
+                        manifest::operation(&self.identity.manifest, *id)
+                            .is_ok_and(manifest::is_public),
+                        *id,
+                    )
+                });
+                for read in reads {
+                    if self
+                        .target_read(tx, authority, principal, read, stored, budget)
+                        .await?
+                    {
+                        permitted = true;
+                        break;
+                    }
+                }
+                ensure!(permitted, repository::ReferenceUnavailable);
+            }
+            TargetSource::Page { .. } => {}
+            TargetSource::Selected { .. } | TargetSource::Reference { .. } => {
+                // The mandatory projection names the single current eligible
+                // read. Picker query selection is checked when minting proof.
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn authorize_target_steps(
+        &self,
+        tx: &mut Transaction,
+        authority: &mut crate::authority::Authority,
+        action: ActionCore<'_>,
+        grants: &BTreeMap<String, TargetGrant>,
+        records: &BTreeMap<(u32, u64), StoredRecord>,
+        principal: &auth::Principal,
+        budget: &mut ExecutionBudget,
+    ) -> Result<()> {
         // Check each alias's mutation and field-binding authority before exposing
         // review conflicts. Sharing a row never shares another alias's policy.
         for declaration in action.targets {
@@ -488,37 +553,7 @@ impl Application {
                 }
             }
         }
-        // The reference comes from an approved source projection; aliases never
-        // reuse that source's policy as authority for the destination.
-        for declaration in action.targets {
-            if let TargetSource::Reference {
-                target: source,
-                field,
-                ..
-            } = &declaration.source
-            {
-                let source = &grants[source].target;
-                let destination = &grants[&declaration.name].target;
-                let source = &records[&(source.resource, source.id)];
-                ensure!(
-                    source
-                        .record
-                        .fields
-                        .get(field)
-                        .and_then(|value| value.parse::<u64>().ok())
-                        == Some(destination.id),
-                    repository::ReferenceUnavailable
-                );
-            }
-        }
-        ensure!(
-            !conflicting_reviews
-                && reviewed
-                    .iter()
-                    .all(|(key, revision)| records[key].revision == *revision),
-            ReviewConflict
-        );
-        Ok((records, capability_grant))
+        Ok(())
     }
 }
 
@@ -831,3 +866,34 @@ impl Application {
 
 #[cfg(test)]
 mod tests;
+
+fn check_reference_sources(
+    action: ActionCore<'_>,
+    grants: &BTreeMap<String, TargetGrant>,
+    records: &BTreeMap<(u32, u64), StoredRecord>,
+) -> Result<()> {
+    // The reference comes from an approved source projection; aliases never
+    // reuse that source's policy as authority for the destination.
+    for declaration in action.targets {
+        if let TargetSource::Reference {
+            target: source,
+            field,
+            ..
+        } = &declaration.source
+        {
+            let source = &grants[source].target;
+            let destination = &grants[&declaration.name].target;
+            let source = &records[&(source.resource, source.id)];
+            ensure!(
+                source
+                    .record
+                    .fields
+                    .get(field)
+                    .and_then(|value| value.parse::<u64>().ok())
+                    == Some(destination.id),
+                repository::ReferenceUnavailable
+            );
+        }
+    }
+    Ok(())
+}
