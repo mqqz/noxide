@@ -87,6 +87,10 @@ STORE_ALLOWED = {"noxide-protocol", "noxide-admission", "noxide-sql", "noxide-as
 PURE = {"noxide-admission", "noxide-assets", "noxide-host-calls", "noxide-render", "noxide-sql", "noxide-sql-macros"}
 ROOT = SRC.parent.parent.parent
 TEST_ONLY = {"noxide-test-support"}
+# Feature crates hold storage and bookkeeping. Running guests, rendering and HTTP stay
+# in the host, so moving orchestration down cannot move that authority with it.
+FEATURE = {"noxide-blobs", "noxide-jobs", "noxide-effects", "noxide-effect-delivery"}
+ABOVE_FEATURE = {"noxide-host", "noxide-sandbox", "noxide-render", "axum", "hyper"}
 
 
 def crate_failures():
@@ -107,6 +111,8 @@ def crate_failures():
                 failures.append(f"{name} must not depend on {target}")
             if target in TEST_ONLY:
                 failures.append(f"{name} has a production dependency on {target}")
+            if name in FEATURE and target in ABOVE_FEATURE:
+                failures.append(f"feature crate {name} must not depend on {target}")
             if name == "noxide-store" and target in workspace and target not in STORE_ALLOWED:
                 failures.append(f"noxide-store must not depend on {target}")
             if name in PURE and target in workspace and target not in PURE | {"noxide-protocol"}:
