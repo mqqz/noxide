@@ -254,33 +254,7 @@ impl Application {
                 let (token, session, principal) = self
                     .submission_identity(&mut tx, core, cookie, submission, csrf, now)
                     .await?;
-                let scalar: Fields = values
-                    .iter()
-                    .filter(|(name, _)| {
-                        !matches!(name.as_str(), "_upload")
-                            && *name != &self.web.presentation.csrf_field
-                            && *name != &self.web.presentation.submission_field
-                    })
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                let (scalar, selections) = self.action_input(action.core, &scalar)?;
-                ensure!(
-                    scalar.keys().all(|name| action
-                        .inputs
-                        .iter()
-                        .any(|i| &i.name == name && i.name != upload.input)),
-                    "unexpected upload prefix field"
-                );
-                for field in action.inputs.iter().filter(|i| i.name != upload.input) {
-                    let raw = scalar.get(&field.name).map(String::as_str).unwrap_or(
-                        if field.kind == FieldKind::Boolean {
-                            "false"
-                        } else {
-                            ""
-                        },
-                    );
-                    field.canonical(raw).map_err(anyhow::Error::msg)?;
-                }
+                let selections = self.upload_prefix_selections(&action, &upload.input, values)?;
                 self.web_target_grants(
                     &token,
                     core,
@@ -313,76 +287,166 @@ impl Application {
                 let existing = MetadataContext { tx: &mut tx }
                     .slot(&context.binding.slot)
                     .await?;
-                let prepared = if let Some(row) = existing {
-                    ensure!(
-                        row.metadata.binding == context.binding,
-                        "foreign upload stage"
-                    );
-                    let replay = receipt.is_some();
-                    ensure!(
-                        replay
-                            || (row.metadata.state == noxide_blobs::state::State::Staged
-                                && time.context("upload lifecycle time missing")?
-                                    < row.metadata.expires),
-                        "upload is not reusable"
-                    );
-                    ensure!(
-                        replay || filename.is_none(),
-                        "a finalized upload cannot be replaced"
-                    );
-                    PreparedUpload::Existing {
-                        input: row.metadata.handle.as_str().into(),
-                        replay,
-                    }
-                } else if receipt.is_some() {
-                    if input.optional && filename.is_none() {
-                        PreparedUpload::Existing {
-                            input: String::new(),
-                            replay: true,
-                        }
-                    } else if filename.is_some() {
-                        anyhow::bail!(RequestError::InvalidRequest)
-                    } else {
-                        anyhow::bail!(RequestError::OutcomeUnknown)
-                    }
-                } else if let Some(filename) = filename {
-                    let FieldKind::UploadHandle { max_bytes } = input.kind else {
-                        anyhow::bail!("invalid upload input");
-                    };
-                    let result = MetadataContext { tx: &mut tx }
-                        .reserve(Reservation {
-                            binding: context.binding.clone(),
-                            filename,
-                            limit: max_bytes.min(blobs.policy().limits.file_bytes),
-                            now: time.context("upload lifecycle time missing")?,
-                            policy: blobs.policy(),
-                            capability: upload.anonymous,
-                            store: blobs.store().identity(),
-                            process: blobs.process(),
-                        })
-                        .await?;
-                    match result {
-                        ReservationOutcome::Created(row) => {
-                            let lease = blobs.reserve(&row)?;
-                            PreparedUpload::Created(Box::new(row), lease)
-                        }
-                        ReservationOutcome::Existing(row) => {
-                            ensure!(
-                                row.metadata.binding == context.binding,
-                                "foreign upload reservation race"
-                            );
-                            anyhow::bail!(RequestError::Busy)
-                        }
-                    }
-                } else {
-                    ensure!(input.optional, "required upload missing");
-                    PreparedUpload::Absent
-                };
+                let prepared = prepare_upload_slot(
+                    &mut tx,
+                    blobs,
+                    &context,
+                    (upload, input),
+                    existing,
+                    receipt.is_some(),
+                    time,
+                    filename,
+                )
+                .await?;
                 blob_commit(&mut tx).await?;
                 ensure!(tx.commit_acknowledged(), RequestError::OutcomeUnknown);
                 Ok(prepared)
             })
             .await
+    }
+    /// Check the form's non-file fields; the file itself arrives after this.
+    fn upload_prefix_selections(
+        &self,
+        action: &manifest::WebAction<'_>,
+        upload_input: &str,
+        values: &Fields,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        let scalar: Fields = values
+            .iter()
+            .filter(|(name, _)| {
+                !matches!(name.as_str(), "_upload")
+                    && *name != &self.web.presentation.csrf_field
+                    && *name != &self.web.presentation.submission_field
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let (scalar, selections) = self.action_input(action.core, &scalar)?;
+        ensure!(
+            scalar.keys().all(|name| action
+                .inputs
+                .iter()
+                .any(|i| &i.name == name && i.name != *upload_input)),
+            "unexpected upload prefix field"
+        );
+        for field in action.inputs.iter().filter(|i| i.name != *upload_input) {
+            let raw = scalar.get(&field.name).map(String::as_str).unwrap_or(
+                if field.kind == FieldKind::Boolean {
+                    "false"
+                } else {
+                    ""
+                },
+            );
+            field.canonical(raw).map_err(anyhow::Error::msg)?;
+        }
+        Ok(selections)
+    }
+
+    /// Everything that must hold before a download opens: a current ticket, its direct
+    /// Read, the session it was issued to, stored-read policy, the Read's projection
+    /// and the blob's association with this record. All in the caller's transaction.
+    async fn authorize_download(
+        &self,
+        tx: &mut Transaction,
+        cookie: Option<&str>,
+        ticket: &str,
+        now: i64,
+    ) -> Result<noxide_blobs::metadata::BlobRow> {
+        let token = self.keys.verify(ticket, now)?;
+        let TokenKind::Download {
+            contract,
+            read,
+            target,
+            field,
+            blob,
+        } = token.kind
+        else {
+            anyhow::bail!("invalid download ticket");
+        };
+        ensure!(
+            contract == self.submission_contract(),
+            "retired download ticket"
+        );
+        let route = manifest::route(
+            &self.identity.manifest,
+            target.route.context("download source route missing")?,
+        )?;
+        let op = manifest::operation(&self.identity.manifest, read)?;
+        ensure!(
+            route.operations.contains(&read)
+                && op.kind == OperationKind::Read
+                && op.via.is_none()
+                && op.resource == target.resource,
+            "invalid direct Read provenance"
+        );
+        let identity = self.route_identity(tx, &route.access, cookie, now).await?;
+        let (session, principal) = match identity {
+            Some((s, p)) => (Some(s), p),
+            None => (None, auth::Principal::Anonymous),
+        };
+        ensure!(
+            token.subject == session.as_ref().map(|s| s.nonce.as_str()).unwrap_or(""),
+            "foreign download session"
+        );
+        let mut calls = repository::MAX_LIST_DATABASE_CALLS;
+        let time = if crate::authority::uses_time(&self.identity.manifest) {
+            calls -= 1;
+            Some(self.temporal_after_admission(tx).await?)
+        } else {
+            None
+        };
+        let mut authority = self.authority_context(time)?;
+        let mut context = repository::ReadContext {
+            tx: &mut *tx,
+            manifest: &self.identity.manifest,
+            principal: &principal,
+            authority: &mut authority,
+            budget: repository::ReadBudget::Query(&mut calls),
+        };
+        let stored = context
+            .load(op.resource, target.id)
+            .await?
+            .context("download unavailable")?;
+        ensure!(
+            stored.incarnation == target.incarnation
+                && repository::authorize_stored_read(&mut context, op, &stored).await?,
+            "download unavailable"
+        );
+        ensure!(
+            op.fields
+                .as_ref()
+                .is_none_or(|fields| fields.contains(&field)),
+            "blob outside Read projection"
+        );
+        ensure!(
+            manifest::resource(&self.identity.manifest, op.resource)?
+                .fields
+                .iter()
+                .any(|f| f.name == field && matches!(f.kind, FieldKind::Blob { .. })),
+            "invalid blob field"
+        );
+        ensure!(
+            stored.record.fields.get(&field).map(String::as_str) == Some(blob.as_str()),
+            "download association changed"
+        );
+        let row = MetadataContext { tx: &mut *tx }
+            .reference(&blob)
+            .await?
+            .context("download unavailable")?;
+        let storage_resource = tx
+            .storage_resource(&self.identity.manifest, op.resource)
+            .await?;
+        ensure!(
+            row.metadata.state == noxide_blobs::state::State::Attached
+                && row.metadata.association.as_ref()
+                    == Some(&noxide_blobs::state::Association {
+                        resource: storage_resource,
+                        id: i64::try_from(target.id)?,
+                        incarnation: target.incarnation,
+                        field
+                    }),
+            "download association mismatch"
+        );
+        Ok(row)
     }
     pub async fn publish_upload(
         &self,
@@ -496,103 +560,9 @@ impl Application {
                 let now =
                     security::observe_clock_read(&mut tx, security::now()?, &self.time.observed)
                         .await?;
-                let token = self.keys.verify(ticket, now)?;
-                let TokenKind::Download {
-                    contract,
-                    read,
-                    target,
-                    field,
-                    blob,
-                } = token.kind
-                else {
-                    anyhow::bail!("invalid download ticket");
-                };
-                ensure!(
-                    contract == self.submission_contract(),
-                    "retired download ticket"
-                );
-                let route = manifest::route(
-                    &self.identity.manifest,
-                    target.route.context("download source route missing")?,
-                )?;
-                let op = manifest::operation(&self.identity.manifest, read)?;
-                ensure!(
-                    route.operations.contains(&read)
-                        && op.kind == OperationKind::Read
-                        && op.via.is_none()
-                        && op.resource == target.resource,
-                    "invalid direct Read provenance"
-                );
-                let identity = self
-                    .route_identity(&mut tx, &route.access, cookie, now)
+                let row = self
+                    .authorize_download(&mut tx, cookie, ticket, now)
                     .await?;
-                let (session, principal) = match identity {
-                    Some((s, p)) => (Some(s), p),
-                    None => (None, auth::Principal::Anonymous),
-                };
-                ensure!(
-                    token.subject == session.as_ref().map(|s| s.nonce.as_str()).unwrap_or(""),
-                    "foreign download session"
-                );
-                let mut calls = repository::MAX_LIST_DATABASE_CALLS;
-                let time = if crate::authority::uses_time(&self.identity.manifest) {
-                    calls -= 1;
-                    Some(self.temporal_after_admission(&mut tx).await?)
-                } else {
-                    None
-                };
-                let mut authority = self.authority_context(time)?;
-                let mut context = repository::ReadContext {
-                    tx: &mut tx,
-                    manifest: &self.identity.manifest,
-                    principal: &principal,
-                    authority: &mut authority,
-                    budget: repository::ReadBudget::Query(&mut calls),
-                };
-                let stored = context
-                    .load(op.resource, target.id)
-                    .await?
-                    .context("download unavailable")?;
-                ensure!(
-                    stored.incarnation == target.incarnation
-                        && repository::authorize_stored_read(&mut context, op, &stored).await?,
-                    "download unavailable"
-                );
-                ensure!(
-                    op.fields
-                        .as_ref()
-                        .is_none_or(|fields| fields.contains(&field)),
-                    "blob outside Read projection"
-                );
-                ensure!(
-                    manifest::resource(&self.identity.manifest, op.resource)?
-                        .fields
-                        .iter()
-                        .any(|f| f.name == field && matches!(f.kind, FieldKind::Blob { .. })),
-                    "invalid blob field"
-                );
-                ensure!(
-                    stored.record.fields.get(&field).map(String::as_str) == Some(blob.as_str()),
-                    "download association changed"
-                );
-                let row = MetadataContext { tx: &mut tx }
-                    .reference(&blob)
-                    .await?
-                    .context("download unavailable")?;
-                let storage_resource = tx
-                    .storage_resource(&self.identity.manifest, op.resource)
-                    .await?;
-                ensure!(
-                    row.metadata.state == noxide_blobs::state::State::Attached
-                        && row.metadata.association.as_ref()
-                            == Some(&noxide_blobs::state::Association {
-                                resource: storage_resource,
-                                id: i64::try_from(target.id)?,
-                                incarnation: target.incarnation,
-                                field
-                            }),
-                    "download association mismatch"
-                );
                 let cancelled = Arc::new(AtomicBool::new(false));
                 let cancel = cancelled.clone();
                 let store = blobs.store().clone();
@@ -676,4 +646,82 @@ impl ReconcileHost for Application {
         self.observe_clock_write(tx, security::now()?).await?;
         Ok(self.temporal_after_admission(tx).await?.timestamp())
     }
+}
+
+/// What this form's file slot should do: reuse its stage, replay, reserve, or stay empty.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_upload_slot(
+    tx: &mut Transaction,
+    blobs: &BlobRuntime,
+    context: &UploadScope,
+    (upload, input): (&noxide_protocol::blobs::UploadBinding, &Input),
+    existing: Option<noxide_blobs::metadata::BlobRow>,
+    has_receipt: bool,
+    time: Option<Timestamp>,
+    filename: Option<noxide_blobs::transport::AttachmentName>,
+) -> Result<PreparedUpload> {
+    Ok(if let Some(row) = existing {
+        ensure!(
+            row.metadata.binding == context.binding,
+            "foreign upload stage"
+        );
+        let replay = has_receipt;
+        ensure!(
+            replay
+                || (row.metadata.state == noxide_blobs::state::State::Staged
+                    && time.context("upload lifecycle time missing")? < row.metadata.expires),
+            "upload is not reusable"
+        );
+        ensure!(
+            replay || filename.is_none(),
+            "a finalized upload cannot be replaced"
+        );
+        PreparedUpload::Existing {
+            input: row.metadata.handle.as_str().into(),
+            replay,
+        }
+    } else if has_receipt {
+        if input.optional && filename.is_none() {
+            PreparedUpload::Existing {
+                input: String::new(),
+                replay: true,
+            }
+        } else if filename.is_some() {
+            anyhow::bail!(RequestError::InvalidRequest)
+        } else {
+            anyhow::bail!(RequestError::OutcomeUnknown)
+        }
+    } else if let Some(filename) = filename {
+        let FieldKind::UploadHandle { max_bytes } = input.kind else {
+            anyhow::bail!("invalid upload input");
+        };
+        let result = MetadataContext { tx: &mut *tx }
+            .reserve(Reservation {
+                binding: context.binding.clone(),
+                filename,
+                limit: max_bytes.min(blobs.policy().limits.file_bytes),
+                now: time.context("upload lifecycle time missing")?,
+                policy: blobs.policy(),
+                capability: upload.anonymous,
+                store: blobs.store().identity(),
+                process: blobs.process(),
+            })
+            .await?;
+        match result {
+            ReservationOutcome::Created(row) => {
+                let lease = blobs.reserve(&row)?;
+                PreparedUpload::Created(Box::new(row), lease)
+            }
+            ReservationOutcome::Existing(row) => {
+                ensure!(
+                    row.metadata.binding == context.binding,
+                    "foreign upload reservation race"
+                );
+                anyhow::bail!(RequestError::Busy)
+            }
+        }
+    } else {
+        ensure!(input.optional, "required upload missing");
+        PreparedUpload::Absent
+    })
 }

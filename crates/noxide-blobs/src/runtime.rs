@@ -269,7 +269,6 @@ impl BlobRuntime {
         host: &impl ReconcileHost,
         deadline: Instant,
     ) -> Result<()> {
-        use crate::inspect::{FindingKind, InspectionPage, SnapshotItem};
         let inventory = self.inventory.clone();
         let store = self.store.clone();
         let batch = self
@@ -343,185 +342,198 @@ impl BlobRuntime {
             if deleted == 4 {
                 break;
             }
-            let store = self.store.clone();
-            let key = row.metadata.key.clone();
-            let physical = self
-                .uploads
-                .try_start(
-                    key.clone(),
-                    row.metadata.generation,
-                    deadline.into_std(),
-                    Arc::new(AtomicBool::new(false)),
-                    move |guard| Ok(Snapshot(store.snapshot(&key, &guard)?)),
-                )?
-                .finish()
-                .await?
-                .0;
-            let matching = |witness: &IoWitness| {
-                witness
-                    .stopped()
-                    .is_some_and(|proof| proof.generation() == row.metadata.generation)
-            };
-            let witness = self
-                .workers
-                .lock()
-                .unwrap()
-                .get(row.metadata.key.as_str())
-                .filter(|w| matching(w))
-                .cloned()
-                .or_else(|| {
-                    self.undispatched
-                        .lock()
-                        .unwrap()
-                        .get(row.metadata.key.as_str())
-                        .filter(|w| matching(w))
-                        .cloned()
-                });
-            let stopped = witness.as_ref().and_then(IoWitness::stopped);
-            let stopped_refs: Vec<_> = stopped.iter().collect();
-            let page = InspectionPage::plan(
-                self.store.identity(),
-                &self.process,
-                &[SnapshotItem {
-                    key: row.metadata.key.clone(),
-                    physical,
-                    metadata: Some(row.clone()),
-                }],
-                &stopped_refs,
-                now,
-            )?;
-            let _digest = page.digest()?;
-            let kind = page.findings[0].kind;
-            ensure!(row.claimed <= now, "blob claim is ahead of observed clock");
-            if kind.requires_operator() {
-                self.quarantined.store(true, Ordering::Release);
-                continue;
+            if self.reconcile_row(host, &row, now, deadline).await? {
+                deleted += 1;
             }
-            if kind == FindingKind::RetainTombstone {
-                self.workers
-                    .lock()
-                    .unwrap()
-                    .remove(row.metadata.key.as_str());
+        }
+        Ok(())
+    }
+
+    /// Plan one known row from its physical state. Returns whether it removed an object.
+    async fn reconcile_row(
+        &self,
+        host: &impl ReconcileHost,
+        row: &BlobRow,
+        now: Timestamp,
+        deadline: Instant,
+    ) -> Result<bool> {
+        use crate::inspect::{FindingKind, InspectionPage, SnapshotItem};
+        let store = self.store.clone();
+        let key = row.metadata.key.clone();
+        let physical = self
+            .uploads
+            .try_start(
+                key.clone(),
+                row.metadata.generation,
+                deadline.into_std(),
+                Arc::new(AtomicBool::new(false)),
+                move |guard| Ok(Snapshot(store.snapshot(&key, &guard)?)),
+            )?
+            .finish()
+            .await?
+            .0;
+        let matching = |witness: &IoWitness| {
+            witness
+                .stopped()
+                .is_some_and(|proof| proof.generation() == row.metadata.generation)
+        };
+        let witness = self
+            .workers
+            .lock()
+            .unwrap()
+            .get(row.metadata.key.as_str())
+            .filter(|w| matching(w))
+            .cloned()
+            .or_else(|| {
                 self.undispatched
                     .lock()
                     .unwrap()
-                    .remove(row.metadata.key.as_str());
-            }
-            if !kind.recoverable_hint() {
-                continue;
-            }
-            if kind == FindingKind::CleanKnownDeletedObject {
-                // Tombstones name only their original opaque key. A
-                // current transaction rechecks them before native I/O.
-                self.clean_tombstone(host, &row, deadline).await?;
-                deleted += 1;
-                continue;
-            }
-            let mut tx = host.database().begin(deadline.into_std()).await?;
-            host.fence(&mut tx).await?;
-            let current = MetadataContext { tx: &mut tx }
-                .slot(&row.metadata.binding.slot)
-                .await?
-                .context("blob recovery row missing")?;
-            if current.metadata.generation != row.metadata.generation
-                || current.metadata.state != row.metadata.state
-            {
-                tx.rollback().await?;
-                continue;
-            }
-            let (claimed, claim) = match kind {
-                FindingKind::ClaimExpiredStage | FindingKind::ClaimUnreferenced => {
-                    MetadataContext { tx: &mut tx }
-                        .claim_collectable(&current, &self.process, now)
-                        .await?
-                }
-                FindingKind::ClaimStoppedUpload => {
-                    MetadataContext { tx: &mut tx }
-                        .claim_stopped_upload(
-                            &current,
-                            &self.process,
-                            now,
-                            stopped.as_ref().context("stopped upload proof missing")?,
-                        )
-                        .await?
-                }
-                FindingKind::RecoverPriorProcessUpload => {
-                    MetadataContext { tx: &mut tx }
-                        .recover_prior_upload(&current, &self.fence, now)
-                        .await?
-                }
-                FindingKind::ResumeStoppedDeletion | FindingKind::RecoverPriorProcessDeletion => {
-                    MetadataContext { tx: &mut tx }
-                        .resume_deletion(&current, &self.fence, now, stopped.as_ref())
-                        .await?
-                }
-                _ => {
-                    tx.rollback().await?;
-                    continue;
-                }
-            };
-            // Retain stopped proof for both possible commit
-            // generations until native dispatch is authoritative.
-            if let Some(witness) = witness {
-                self.workers
-                    .lock()
-                    .unwrap()
-                    .insert(row.metadata.key.as_str().into(), witness);
-            }
-            let pending = IoWitness::pending(claim.key().clone(), claim.generation());
-            self.undispatched
-                .lock()
-                .unwrap()
-                .insert(row.metadata.key.as_str().into(), pending.clone());
-            let dispatch = ReservationLease {
-                witness: pending,
-                armed: true,
-            };
-            commit(&mut tx).await?;
-            ensure!(tx.commit_acknowledged(), "blob deletion claim unconfirmed");
-            #[cfg(any(test, feature = "test-support"))]
-            {
-                let barrier = { self.gc_after_commit.lock().unwrap().clone() };
-                if let Some(barrier) = barrier {
-                    barrier.wait().await;
-                }
-            }
-            let store = self.store.clone();
-            let key = claim.key().clone();
-            let job = self.uploads.try_start(
-                key.clone(),
-                claim.generation(),
-                deadline.into_std(),
-                Arc::new(AtomicBool::new(false)),
-                move |guard| store.remove(&key, &guard),
-            )?;
-            self.workers
-                .lock()
-                .unwrap()
-                .insert(row.metadata.key.as_str().into(), job.witness());
-            self.undispatched
-                .lock()
-                .unwrap()
-                .remove(row.metadata.key.as_str());
-            dispatch.dispatched();
-            job.finish().await?;
-            let mut tx = host.database().begin(deadline.into_std()).await?;
-            host.fence(&mut tx).await?;
-            MetadataContext { tx: &mut tx }
-                .deleted(&claimed, &claim, self.store.identity(), now)
-                .await?;
-            commit(&mut tx).await?;
-            ensure!(
-                tx.commit_acknowledged(),
-                "blob deletion completion unconfirmed"
-            );
-            self.workers
-                .lock()
-                .unwrap()
-                .remove(row.metadata.key.as_str());
-            deleted += 1;
+                    .get(row.metadata.key.as_str())
+                    .filter(|w| matching(w))
+                    .cloned()
+            });
+        let stopped = witness.as_ref().and_then(IoWitness::stopped);
+        let stopped_refs: Vec<_> = stopped.iter().collect();
+        let page = InspectionPage::plan(
+            self.store.identity(),
+            &self.process,
+            &[SnapshotItem {
+                key: row.metadata.key.clone(),
+                physical,
+                metadata: Some(row.clone()),
+            }],
+            &stopped_refs,
+            now,
+        )?;
+        let _digest = page.digest()?;
+        let kind = page.findings[0].kind;
+        ensure!(row.claimed <= now, "blob claim is ahead of observed clock");
+        if kind.requires_operator() {
+            self.quarantined.store(true, Ordering::Release);
+            return Ok(false);
         }
-        Ok(())
+        if kind == FindingKind::RetainTombstone {
+            self.workers
+                .lock()
+                .unwrap()
+                .remove(row.metadata.key.as_str());
+            self.undispatched
+                .lock()
+                .unwrap()
+                .remove(row.metadata.key.as_str());
+        }
+        if !kind.recoverable_hint() {
+            return Ok(false);
+        }
+        if kind == FindingKind::CleanKnownDeletedObject {
+            // Tombstones name only their original opaque key. A
+            // current transaction rechecks them before native I/O.
+            self.clean_tombstone(host, row, deadline).await?;
+            return Ok(true);
+        }
+        let mut tx = host.database().begin(deadline.into_std()).await?;
+        host.fence(&mut tx).await?;
+        let current = MetadataContext { tx: &mut tx }
+            .slot(&row.metadata.binding.slot)
+            .await?
+            .context("blob recovery row missing")?;
+        if current.metadata.generation != row.metadata.generation
+            || current.metadata.state != row.metadata.state
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        let (claimed, claim) = match kind {
+            FindingKind::ClaimExpiredStage | FindingKind::ClaimUnreferenced => {
+                MetadataContext { tx: &mut tx }
+                    .claim_collectable(&current, &self.process, now)
+                    .await?
+            }
+            FindingKind::ClaimStoppedUpload => {
+                MetadataContext { tx: &mut tx }
+                    .claim_stopped_upload(
+                        &current,
+                        &self.process,
+                        now,
+                        stopped.as_ref().context("stopped upload proof missing")?,
+                    )
+                    .await?
+            }
+            FindingKind::RecoverPriorProcessUpload => {
+                MetadataContext { tx: &mut tx }
+                    .recover_prior_upload(&current, &self.fence, now)
+                    .await?
+            }
+            FindingKind::ResumeStoppedDeletion | FindingKind::RecoverPriorProcessDeletion => {
+                MetadataContext { tx: &mut tx }
+                    .resume_deletion(&current, &self.fence, now, stopped.as_ref())
+                    .await?
+            }
+            _ => {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+        };
+        // Retain stopped proof for both possible commit
+        // generations until native dispatch is authoritative.
+        if let Some(witness) = witness {
+            self.workers
+                .lock()
+                .unwrap()
+                .insert(row.metadata.key.as_str().into(), witness);
+        }
+        let pending = IoWitness::pending(claim.key().clone(), claim.generation());
+        self.undispatched
+            .lock()
+            .unwrap()
+            .insert(row.metadata.key.as_str().into(), pending.clone());
+        let dispatch = ReservationLease {
+            witness: pending,
+            armed: true,
+        };
+        commit(&mut tx).await?;
+        ensure!(tx.commit_acknowledged(), "blob deletion claim unconfirmed");
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            let barrier = { self.gc_after_commit.lock().unwrap().clone() };
+            if let Some(barrier) = barrier {
+                barrier.wait().await;
+            }
+        }
+        let store = self.store.clone();
+        let key = claim.key().clone();
+        let job = self.uploads.try_start(
+            key.clone(),
+            claim.generation(),
+            deadline.into_std(),
+            Arc::new(AtomicBool::new(false)),
+            move |guard| store.remove(&key, &guard),
+        )?;
+        self.workers
+            .lock()
+            .unwrap()
+            .insert(row.metadata.key.as_str().into(), job.witness());
+        self.undispatched
+            .lock()
+            .unwrap()
+            .remove(row.metadata.key.as_str());
+        dispatch.dispatched();
+        job.finish().await?;
+        let mut tx = host.database().begin(deadline.into_std()).await?;
+        host.fence(&mut tx).await?;
+        MetadataContext { tx: &mut tx }
+            .deleted(&claimed, &claim, self.store.identity(), now)
+            .await?;
+        commit(&mut tx).await?;
+        ensure!(
+            tx.commit_acknowledged(),
+            "blob deletion completion unconfirmed"
+        );
+        self.workers
+            .lock()
+            .unwrap()
+            .remove(row.metadata.key.as_str());
+        Ok(true)
     }
 
     async fn clean_tombstone(

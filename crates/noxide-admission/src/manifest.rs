@@ -311,6 +311,35 @@ pub fn validate(m: &Manifest) -> Result<()> {
     ensure!(m.version == VERSION, "unsupported manifest version");
     query::validate_declarations(m)?;
     crate::assets::validate_declarations(&m.assets)?;
+    validate_contract_limits(m)?;
+    validate_resources(m)?;
+    validate_resource_gates(m)?;
+    validate_operations(m)?;
+    validate_public_operations(m)?;
+    validate_capability_operations(m)?;
+    authority::validate(m)?;
+    crate::query_plan::required_indexes(m)?;
+    validate_routes(m)?;
+    ensure!(
+        m.routes.is_empty()
+            || m.routes
+                .iter()
+                .any(|r| r.path == "/" && r.resource.is_none()),
+        "missing index route"
+    );
+    for a in &m.actions {
+        validate_action(m, a)?;
+    }
+    for binding in &m.web_bindings {
+        validate_web_binding(m, &web_action(m, binding.id)?)?;
+    }
+    job_admission::validate(m)?;
+    effect_admission::validate(m)?;
+    blob_admission::validate_blobs(m)?;
+    Ok(())
+}
+
+fn validate_contract_limits(m: &Manifest) -> Result<()> {
     ensure!(
         m.routes
             .iter()
@@ -335,6 +364,10 @@ pub fn validate(m: &Manifest) -> Result<()> {
     unique(m.routes.iter().map(|x| x.id))?;
     unique(m.actions.iter().map(|x| x.id))?;
     unique(m.web_bindings.iter().map(|x| x.id))?;
+    Ok(())
+}
+
+fn validate_resources(m: &Manifest) -> Result<()> {
     let mut resource_keys = BTreeSet::new();
     for r in &m.resources {
         for field in &r.fields {
@@ -451,6 +484,10 @@ pub fn validate(m: &Manifest) -> Result<()> {
             "record limit"
         );
     }
+    Ok(())
+}
+
+fn validate_resource_gates(m: &Manifest) -> Result<()> {
     for r in &m.resources {
         if let Some(gate) = &r.gate {
             let field = reference_field(r, &gate.field)
@@ -474,6 +511,10 @@ pub fn validate(m: &Manifest) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn validate_operations(m: &Manifest) -> Result<()> {
     for op in &m.operations {
         ensure!(
             op.scope.is_none() || matches!(op.kind, OperationKind::List | OperationKind::Aggregate),
@@ -590,6 +631,10 @@ pub fn validate(m: &Manifest) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn validate_public_operations(m: &Manifest) -> Result<()> {
     for op in &m.operations {
         if is_public(op) {
             ensure!(
@@ -643,6 +688,10 @@ pub fn validate(m: &Manifest) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+fn validate_capability_operations(m: &Manifest) -> Result<()> {
     for op in &m.operations {
         if is_capability(op) {
             ensure!(
@@ -652,9 +701,11 @@ pub fn validate(m: &Manifest) -> Result<()> {
             );
         }
     }
-    authority::validate(m)?;
+    Ok(())
+}
+
+fn validate_routes(m: &Manifest) -> Result<()> {
     let mut paths = BTreeSet::new();
-    crate::query_plan::required_indexes(m)?;
     for r in &m.routes {
         validate_route_params(m, r)?;
         crate::routing::validate_path(r)?;
@@ -816,22 +867,6 @@ pub fn validate(m: &Manifest) -> Result<()> {
             }
         }
     }
-    ensure!(
-        m.routes.is_empty()
-            || m.routes
-                .iter()
-                .any(|r| r.path == "/" && r.resource.is_none()),
-        "missing index route"
-    );
-    for a in &m.actions {
-        validate_action(m, a)?;
-    }
-    for binding in &m.web_bindings {
-        validate_web_binding(m, &web_action(m, binding.id)?)?;
-    }
-    job_admission::validate(m)?;
-    effect_admission::validate(m)?;
-    blob_admission::validate_blobs(m)?;
     Ok(())
 }
 
@@ -903,109 +938,7 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
     );
     page_resource(&a.targets)?;
     for target in &a.targets {
-        ensure!(identifier(&target.name), "invalid target name");
-        resource(m, target.resource)?;
-        let eligible = match &target.source {
-            TargetSource::Page { reads } => {
-                unique(reads.iter().copied())?;
-                ensure!(reads.len() <= 8, "target read limit");
-                for id in reads {
-                    let read = operation(m, *id)?;
-                    ensure!(
-                        read.kind == OperationKind::Read
-                            && read.via.is_none()
-                            && read.resource == target.resource,
-                        "invalid page target read"
-                    );
-                }
-                let edit = a.steps.iter().any(|step| {
-                    matches!(&step.target, Target::Named(name) if name == &target.name)
-                        && operation(m, step.operation).is_ok_and(is_capability)
-                });
-                ensure!(
-                    !reads.is_empty() || edit,
-                    "page target requires eligible reads"
-                );
-                None
-            }
-            TargetSource::Service { eligible } => Some(*eligible),
-            TargetSource::Selected {
-                query,
-                eligible,
-                label,
-            } => {
-                projected_fields(resource(m, target.resource)?, label)?;
-                ensure!(
-                    target.projection.as_ref().is_some_and(|projection| label
-                        .iter()
-                        .all(|field| projection.fields.contains(field))),
-                    "picker labels exceed approved target projection"
-                );
-                let query = operation(m, *query)?;
-                ensure!(
-                    query.kind == OperationKind::List
-                        && query.via.is_none()
-                        && query.scope.is_none()
-                        && query.resource == target.resource
-                        && query
-                            .filter
-                            .iter()
-                            .all(|filter| matches!(filter.equals, Operand::Literal(_))),
-                    "invalid selection query"
-                );
-                Some(*eligible)
-            }
-            TargetSource::Reference {
-                target: source,
-                field,
-                eligible,
-            } => {
-                let source = action_target(&a.targets, source)?;
-                ensure!(
-                    !matches!(source.source, TargetSource::Reference { .. }),
-                    "derived target depth limit"
-                );
-                ensure!(
-                    reference_resource(m, source.resource, field)?
-                        .is_some_and(|resource| resource.id == target.resource),
-                    "derived target reference mismatch"
-                );
-                ensure!(
-                    source
-                        .projection
-                        .as_ref()
-                        .is_some_and(|projection| projection.fields.contains(field)),
-                    "derived target requires an approved source projection"
-                );
-                Some(*eligible)
-            }
-        };
-        if let Some(eligible) = eligible {
-            let read = operation(m, eligible)?;
-            ensure!(
-                read.kind == OperationKind::Read
-                    && read.via.is_none()
-                    && read.resource == target.resource,
-                "invalid target eligibility"
-            );
-            ensure!(
-                target
-                    .projection
-                    .as_ref()
-                    .is_some_and(|projection| projection.operation == eligible),
-                "selected and derived targets require explicit eligible-read projections"
-            );
-        }
-        if let Some(projection) = &target.projection {
-            target_projection(m, target, projection, false)?;
-        }
-        if let Some(inspect) = &target.inspect {
-            target_projection(m, target, inspect, true)?;
-            ensure!(
-                target.revision == Revision::Exact,
-                "inspection requires exact review"
-            );
-        }
+        validate_action_target(m, a, target)?;
     }
     let mut names = BTreeSet::new();
     for input in &a.inputs {
@@ -1069,108 +1002,15 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
         let mut assigned = BTreeSet::new();
         for assignment in &step.assign {
             ensure!(assigned.insert(&assignment.field), "duplicate assignment");
-            ensure!(
-                !matches!(
-                    assignment.field.as_str(),
-                    "owner" | "tenant" | "id" | "incarnation" | "revision"
-                ),
-                "protected assignment"
-            );
-            let field = resource
-                .fields
-                .iter()
-                .find(|field| field.name == assignment.field)
-                .ok_or_else(|| anyhow::anyhow!("unknown or protected assignment"))?;
-            ensure!(
-                op.kind != OperationKind::Create || field.initial.is_none(),
-                "initial value is host-applied"
-            );
-            ensure!(
-                op.kind == OperationKind::Create
-                    || !matches!(field.kind, FieldKind::Account { .. }),
-                "account fields are immutable"
-            );
-            ensure!(
-                op.kind != OperationKind::Update
-                    || !matches!(
-                        field.kind,
-                        FieldKind::Reference { .. } | FieldKind::Blob { .. }
-                    ),
-                "reference is immutable"
-            );
-            ensure!(
-                op.kind != OperationKind::Update || !field.immutable,
-                "declared immutable field cannot be updated"
-            );
-            match &assignment.change {
-                Change::Set(value) => {
-                    if let Target::Named(name) = &step.target {
-                        exact.insert(name.as_str());
-                    }
-                    if let FieldKind::Blob { max_bytes } = field.kind {
-                        let Value::Input(name) = value else {
-                            anyhow::bail!("Blob requires one host upload input");
-                        };
-                        let input = a
-                            .inputs
-                            .iter()
-                            .find(|i| i.name == *name)
-                            .ok_or_else(|| anyhow::anyhow!("unknown upload input"))?;
-                        ensure!(
-                            op.kind == OperationKind::Create
-                                && matches!(input.kind, FieldKind::UploadHandle { max_bytes: limit } if limit <= max_bytes)
-                                && (!input.optional || field.optional),
-                            "invalid Blob assignment"
-                        );
-                        used.insert(input.name.as_str());
-                        continue;
-                    }
-                    let domain = computations.value(m, a, index, value, false, &mut used)?;
-                    if matches!(field.kind, FieldKind::Reference { .. }) {
-                        ensure!(
-                            matches!(value, Value::Target(_) | Value::Created(_)),
-                            "reference requires a declared target or earlier create"
-                        );
-                        ensure!(
-                            domain.kind == field.kind,
-                            "wrong named or created reference type"
-                        );
-                    } else {
-                        ensure!(
-                            computation::fits(&domain, field),
-                            "expression/input domain does not fit destination"
-                        );
-                    }
-                }
-                Change::Decrease { by, rejection } | Change::Increase { by, rejection } => {
-                    ensure!(
-                        op.kind == OperationKind::Update && matches!(step.target, Target::Named(_)),
-                        "adjustments require named update steps"
-                    );
-                    let FieldKind::Integer {
-                        min: Some(min),
-                        max: Some(max),
-                    } = field.kind
-                    else {
-                        anyhow::bail!("adjustment requires bounded integer field")
-                    };
-                    let domain = computations.value(m, a, index, by, false, &mut used)?;
-                    let FieldKind::Integer {
-                        min: Some(amount_min),
-                        max: Some(amount_max),
-                    } = domain.kind
-                    else {
-                        anyhow::bail!("adjustment requires bounded integer expression")
-                    };
-                    ensure!(
-                        !domain.optional
-                            && amount_min >= 1
-                            && i128::from(amount_max) <= i128::from(max) - i128::from(min),
-                        "invalid adjustment amount domain"
-                    );
-                    computation::rejection(a, rejection)?;
-                }
-            }
+            validate_assignment(
+                m,
+                a,
+                (index, step, op, resource),
+                assignment,
+                &mut computations,
+                &mut used,
+                &mut exact,
+            )?;
         }
         if op.kind == OperationKind::Create {
             ensure!(
@@ -1200,6 +1040,229 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
         );
     }
     ensure!(used == names, "unused action input");
+    Ok(())
+}
+
+/// One target's source, eligibility and projections.
+fn validate_action_target(m: &Manifest, a: &Action, target: &ActionTarget) -> Result<()> {
+    ensure!(identifier(&target.name), "invalid target name");
+    resource(m, target.resource)?;
+    let eligible = match &target.source {
+        TargetSource::Page { reads } => {
+            unique(reads.iter().copied())?;
+            ensure!(reads.len() <= 8, "target read limit");
+            for id in reads {
+                let read = operation(m, *id)?;
+                ensure!(
+                    read.kind == OperationKind::Read
+                        && read.via.is_none()
+                        && read.resource == target.resource,
+                    "invalid page target read"
+                );
+            }
+            let edit = a.steps.iter().any(|step| {
+                matches!(&step.target, Target::Named(name) if name == &target.name)
+                    && operation(m, step.operation).is_ok_and(is_capability)
+            });
+            ensure!(
+                !reads.is_empty() || edit,
+                "page target requires eligible reads"
+            );
+            None
+        }
+        TargetSource::Service { eligible } => Some(*eligible),
+        TargetSource::Selected {
+            query,
+            eligible,
+            label,
+        } => {
+            projected_fields(resource(m, target.resource)?, label)?;
+            ensure!(
+                target.projection.as_ref().is_some_and(|projection| label
+                    .iter()
+                    .all(|field| projection.fields.contains(field))),
+                "picker labels exceed approved target projection"
+            );
+            let query = operation(m, *query)?;
+            ensure!(
+                query.kind == OperationKind::List
+                    && query.via.is_none()
+                    && query.scope.is_none()
+                    && query.resource == target.resource
+                    && query
+                        .filter
+                        .iter()
+                        .all(|filter| matches!(filter.equals, Operand::Literal(_))),
+                "invalid selection query"
+            );
+            Some(*eligible)
+        }
+        TargetSource::Reference {
+            target: source,
+            field,
+            eligible,
+        } => {
+            let source = action_target(&a.targets, source)?;
+            ensure!(
+                !matches!(source.source, TargetSource::Reference { .. }),
+                "derived target depth limit"
+            );
+            ensure!(
+                reference_resource(m, source.resource, field)?
+                    .is_some_and(|resource| resource.id == target.resource),
+                "derived target reference mismatch"
+            );
+            ensure!(
+                source
+                    .projection
+                    .as_ref()
+                    .is_some_and(|projection| projection.fields.contains(field)),
+                "derived target requires an approved source projection"
+            );
+            Some(*eligible)
+        }
+    };
+    if let Some(eligible) = eligible {
+        let read = operation(m, eligible)?;
+        ensure!(
+            read.kind == OperationKind::Read
+                && read.via.is_none()
+                && read.resource == target.resource,
+            "invalid target eligibility"
+        );
+        ensure!(
+            target
+                .projection
+                .as_ref()
+                .is_some_and(|projection| projection.operation == eligible),
+            "selected and derived targets require explicit eligible-read projections"
+        );
+    }
+    if let Some(projection) = &target.projection {
+        target_projection(m, target, projection, false)?;
+    }
+    if let Some(inspect) = &target.inspect {
+        target_projection(m, target, inspect, true)?;
+        ensure!(
+            target.revision == Revision::Exact,
+            "inspection requires exact review"
+        );
+    }
+    Ok(())
+}
+
+/// One assignment against its destination field. Records the inputs it uses and any
+/// target that now needs exact review.
+fn validate_assignment<'a>(
+    m: &Manifest,
+    a: &'a Action,
+    (index, step, op, resource): (usize, &'a Step, &Operation, &Resource),
+    assignment: &'a Assignment,
+    computations: &mut computation::Admission,
+    used: &mut BTreeSet<&'a str>,
+    exact: &mut BTreeSet<&'a str>,
+) -> Result<()> {
+    ensure!(
+        !matches!(
+            assignment.field.as_str(),
+            "owner" | "tenant" | "id" | "incarnation" | "revision"
+        ),
+        "protected assignment"
+    );
+    let field = resource
+        .fields
+        .iter()
+        .find(|field| field.name == assignment.field)
+        .ok_or_else(|| anyhow::anyhow!("unknown or protected assignment"))?;
+    ensure!(
+        op.kind != OperationKind::Create || field.initial.is_none(),
+        "initial value is host-applied"
+    );
+    ensure!(
+        op.kind == OperationKind::Create || !matches!(field.kind, FieldKind::Account { .. }),
+        "account fields are immutable"
+    );
+    ensure!(
+        op.kind != OperationKind::Update
+            || !matches!(
+                field.kind,
+                FieldKind::Reference { .. } | FieldKind::Blob { .. }
+            ),
+        "reference is immutable"
+    );
+    ensure!(
+        op.kind != OperationKind::Update || !field.immutable,
+        "declared immutable field cannot be updated"
+    );
+    match &assignment.change {
+        Change::Set(value) => {
+            if let Target::Named(name) = &step.target {
+                exact.insert(name.as_str());
+            }
+            if let FieldKind::Blob { max_bytes } = field.kind {
+                let Value::Input(name) = value else {
+                    anyhow::bail!("Blob requires one host upload input");
+                };
+                let input = a
+                    .inputs
+                    .iter()
+                    .find(|i| i.name == *name)
+                    .ok_or_else(|| anyhow::anyhow!("unknown upload input"))?;
+                ensure!(
+                    op.kind == OperationKind::Create
+                        && matches!(input.kind, FieldKind::UploadHandle { max_bytes: limit } if limit <= max_bytes)
+                        && (!input.optional || field.optional),
+                    "invalid Blob assignment"
+                );
+                used.insert(input.name.as_str());
+                return Ok(());
+            }
+            let domain = computations.value(m, a, index, value, false, used)?;
+            if matches!(field.kind, FieldKind::Reference { .. }) {
+                ensure!(
+                    matches!(value, Value::Target(_) | Value::Created(_)),
+                    "reference requires a declared target or earlier create"
+                );
+                ensure!(
+                    domain.kind == field.kind,
+                    "wrong named or created reference type"
+                );
+            } else {
+                ensure!(
+                    computation::fits(&domain, field),
+                    "expression/input domain does not fit destination"
+                );
+            }
+        }
+        Change::Decrease { by, rejection } | Change::Increase { by, rejection } => {
+            ensure!(
+                op.kind == OperationKind::Update && matches!(step.target, Target::Named(_)),
+                "adjustments require named update steps"
+            );
+            let FieldKind::Integer {
+                min: Some(min),
+                max: Some(max),
+            } = field.kind
+            else {
+                anyhow::bail!("adjustment requires bounded integer field")
+            };
+            let domain = computations.value(m, a, index, by, false, used)?;
+            let FieldKind::Integer {
+                min: Some(amount_min),
+                max: Some(amount_max),
+            } = domain.kind
+            else {
+                anyhow::bail!("adjustment requires bounded integer expression")
+            };
+            ensure!(
+                !domain.optional
+                    && amount_min >= 1
+                    && i128::from(amount_max) <= i128::from(max) - i128::from(min),
+                "invalid adjustment amount domain"
+            );
+            computation::rejection(a, rejection)?;
+        }
+    }
     Ok(())
 }
 
