@@ -142,23 +142,13 @@ impl Application {
     ) -> AdmissionOwner {
         AdmissionOwner::new(self.request_scope(cap), request, database, anonymous)
     }
+    /// The root scope for one HTTP request. `cap` is `None` for the guest's wall time.
     pub fn http_request_scope(
         &self,
-        class: crate::limiter::RequestClass,
-        path: &str,
+        cap: Option<std::time::Duration>,
         outer: Option<crate::limiter::TransportDeadline>,
     ) -> RequestScope {
-        use crate::limiter::RequestClass;
-        let cap = if matches!(class, RequestClass::PasswordHash) {
-            std::time::Duration::from_secs(3)
-        } else if path == self.presentation.login_path
-            || path == self.presentation.registration_path
-            || path == self.presentation.logout_path
-        {
-            std::time::Duration::from_secs(2)
-        } else {
-            self.runtime.limits().wall_time
-        };
+        let cap = cap.unwrap_or(self.runtime.limits().wall_time);
         let outer = outer.map_or_else(|| Instant::now() + cap, |outer| outer.0);
         RequestScope::new(
             self.request_lifecycle.clone(),

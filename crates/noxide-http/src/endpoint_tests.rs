@@ -75,9 +75,10 @@ fn class_name(class: RequestClass) -> &'static str {
 
 /// The class and whole seconds of deadline a request is admitted with.
 async fn admitted(app: &Application, method: &str, path: &str) -> (&'static str, u64) {
-    let method = axum::http::Method::from_bytes(method.as_bytes()).unwrap();
-    let class = request_class(app, &method, path);
-    let scope = app.http_request_scope(class, path, None);
+    let is_get = method == "GET";
+    let endpoint = Endpoint::classify(app, is_get, path);
+    let class = endpoint.class(is_get);
+    let scope = app.http_request_scope(endpoint.deadline(class), None);
     let remaining = scope
         .run(async { RequestScope::current_work_deadline().unwrap() - tokio::time::Instant::now() })
         .await;

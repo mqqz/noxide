@@ -35,6 +35,9 @@ mod registration_tests;
 #[cfg(test)]
 use crate::auth::AccountAdmin as _;
 mod blobs;
+mod endpoint;
+mod forms;
+mod pages;
 mod transport;
 use crate::{
     limiter::{
@@ -51,6 +54,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::Router,
 };
+use endpoint::Endpoint;
 pub(crate) use noxide_host::{Application, RequestError};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -362,42 +366,8 @@ fn decode_form(bytes: &[u8]) -> Result<BTreeMap<String, String>> {
     Ok(result)
 }
 
-fn capability_path(path: &str, presentation: &crate::Presentation) -> Option<(u32, u64)> {
-    let (resource, id) = path
-        .strip_prefix(&format!("{}/", presentation.capability_path))?
-        .split_once('/')?;
-    let r: u32 = resource.parse().ok()?;
-    let n: u64 = id.parse().ok()?;
-    (r > 0 && n > 0 && n <= i64::MAX as u64 && r.to_string() == resource && n.to_string() == id)
-        .then_some((r, n))
-}
-
 fn registration_failed(presentation: &crate::Presentation) -> Response {
     (StatusCode::UNPROCESSABLE_ENTITY, [(header::CONTENT_TYPE,"text/html; charset=utf-8")], format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Registration failed</title></head><body><main><h1>Registration failed</h1><p>Registration failed. Return to registration and try again.</p><a href=\"{}\">Return to registration</a></main></body></html>", presentation.registration_path)).into_response()
-}
-
-fn request_class(
-    app: &Application,
-    method: &axum::http::Method,
-    path: &str,
-) -> crate::limiter::RequestClass {
-    use crate::limiter::RequestClass;
-    if method == axum::http::Method::GET {
-        RequestClass::Get
-    } else if path == app.presentation.login_path || path == app.presentation.registration_path {
-        RequestClass::PasswordHash
-    } else if capability_path(path, &app.presentation).is_some()
-        || path
-            .strip_prefix(&format!("{}/", app.presentation.action_path))
-            .and_then(|s| s.parse().ok())
-            .and_then(|id| crate::manifest::web_action(&app.manifest, id).ok())
-            .and_then(|a| crate::manifest::operation(&app.manifest, a.steps[0].operation).ok())
-            .is_some_and(crate::manifest::anonymous_action)
-    {
-        RequestClass::AnonymousAction
-    } else {
-        RequestClass::AuthenticatedAction
-    }
 }
 
 async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Response {
@@ -409,10 +379,11 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
         .copied()
         .unwrap_or(Peer::Local);
     let path = request.uri().path();
-    let class = request_class(&app, request.method(), path);
+    let is_get = request.method() == axum::http::Method::GET;
+    let endpoint = Endpoint::classify(&app, is_get, path);
+    let class = endpoint.class(is_get);
     let scope = app.http_request_scope(
-        class,
-        path,
+        endpoint.deadline(class),
         request.extensions().get::<TransportDeadline>().copied(),
     );
     scope
@@ -482,7 +453,7 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
                     };
                     finish(
                         app.admission_limits
-                            .scope(permit, dispatch_inner(gateway, request))
+                            .scope(permit, dispatch_inner(gateway, request, endpoint))
                             .await,
                     )
                 })
@@ -490,8 +461,11 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
         })
         .await
 }
-async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
-    let presentation = &gateway.app.presentation;
+async fn dispatch_inner(
+    gateway: Arc<Gateway>,
+    request: Request,
+    endpoint: Endpoint<'_>,
+) -> Response {
     let headers = request.headers();
     if headers.get_all(header::HOST).iter().count() != 1
         || headers.get(header::HOST).and_then(|h| h.to_str().ok())
@@ -502,465 +476,27 @@ async fn dispatch_inner(gateway: Arc<Gateway>, request: Request) -> Response {
     if request.uri().path().len() > 256 {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let path = request.uri().path().to_owned();
-    if path == "/_noxide/download" {
-        return blobs::download(gateway, request).await;
+    match endpoint {
+        Endpoint::Download => return blobs::download(gateway, request).await,
+        Endpoint::Asset => return pages::asset(&gateway, &request),
+        Endpoint::ClosedRegistration => return StatusCode::NOT_FOUND.into_response(),
+        _ => {}
     }
-    if path.starts_with(noxide_protocol::assets::ASSET_PATH_PREFIX) {
-        if headers.contains_key(header::TRANSFER_ENCODING)
-            || headers
-                .get_all(header::CONTENT_LENGTH)
-                .iter()
-                .any(|value| value.as_bytes() != b"0")
-        {
-            return (StatusCode::BAD_REQUEST, [(header::CONNECTION, "close")]).into_response();
-        }
-        if request.method() != axum::http::Method::GET || request.uri().query().is_some() {
-            return StatusCode::NOT_FOUND.into_response();
-        }
-        let Some(asset) = gateway.app.assets.at_path(&path) else {
-            return StatusCode::NOT_FOUND.into_response();
-        };
-        let Ok(permit) = gateway.app.asset_responses.clone().try_acquire_owned() else {
-            return busy();
-        };
-        struct AssetBody {
-            bytes: Arc<[u8]>,
-            _permit: tokio::sync::OwnedSemaphorePermit,
-        }
-        impl AsRef<[u8]> for AssetBody {
-            fn as_ref(&self) -> &[u8] {
-                &self.bytes
-            }
-        }
-        let bytes = axum::body::Bytes::from_owner(AssetBody {
-            bytes: asset.shared_bytes(),
-            _permit: permit,
-        });
-        return (
-            [(header::CONTENT_TYPE, asset.declaration().media_type.mime())],
-            bytes,
-        )
-            .into_response();
+    if request.method() != axum::http::Method::GET {
+        return forms::post(gateway, request, endpoint).await;
     }
-
-    if path == presentation.registration_path
-        && gateway.app.registration == crate::Registration::Closed
-    {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    if request.method() == axum::http::Method::GET {
-        if path == presentation.account_path {
-            let session =
-                cookie(request.headers(), &presentation.session_cookie).unwrap_or_default();
-            return match gateway.app.account_identity(&session).await {
-                Ok(id) if crate::account_id(&id) => ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], format!("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Your account</title><nav><a href=\"/\">Home</a></nav><main><h1>Your account ID</h1><p>Share this ID with someone who needs to address you.</p><code>{id}</code></main></html>")).into_response(),
-                Ok(_) => redirect(&presentation.login_path),
-                Err(e) => error(e, &presentation.login_path),
-            };
+    match endpoint {
+        Endpoint::Account => pages::account(&gateway, headers).await,
+        Endpoint::Registration => pages::registration(&gateway).await,
+        Endpoint::Stylesheet(css) => pages::stylesheet(css),
+        Endpoint::Login => pages::login(&gateway).await,
+        Endpoint::Capability { resource, id } => {
+            pages::capability(&gateway, headers, resource, id).await
         }
-        if path == presentation.registration_path {
-            return match gateway.app.login_challenge().await {
-                Err(e) => error(e, &presentation.login_path),
-                Ok(challenge) => {
-                    let invite = if gateway.app.registration == crate::Registration::Invite {
-                        "<label>Invite code<input type=\"password\" name=\"invite\" autocomplete=\"off\" maxlength=\"43\" required></label>"
-                    } else {
-                        ""
-                    };
-                    let html = format!(
-                        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Create account</title></head><body><main><h1>Create account</h1><form method=\"post\" action=\"{}\"><input type=\"hidden\" name=\"{}\" value=\"{}\"><label>Username<input name=\"username\" autocomplete=\"username\" maxlength=\"32\" required></label><label>Password<input type=\"password\" name=\"password\" autocomplete=\"new-password\" maxlength=\"256\" required></label>{invite}<button>Create account</button></form></main></body></html>",
-                        presentation.registration_path, presentation.csrf_field, challenge.csrf
-                    );
-                    let mut response = ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
-                        .into_response();
-                    response.headers_mut().insert(
-                        header::SET_COOKIE,
-                        set_cookie(
-                            &presentation.login_cookie,
-                            &challenge.cookie,
-                            gateway.origin.secure,
-                            900,
-                        ),
-                    );
-                    response
-                }
-            };
+        Endpoint::Page { route, target } => {
+            pages::route_page(&gateway, headers, request.uri().query(), route, target).await
         }
-        if path == presentation.stylesheet_path
-            && let Some(css) = &presentation.stylesheet
-        {
-            return (
-                [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-                css.clone(),
-            )
-                .into_response();
-        }
-        if path == presentation.login_path {
-            return match gateway.app.login_challenge().await {
-                Err(e) => error(e, &presentation.login_path),
-                Ok(challenge) => {
-                    let html = format!(
-                        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Sign in</title>{}</head><body><main><h1>Sign in</h1><form method=\"post\" action=\"{}\"><input type=\"hidden\" name=\"{}\" value=\"{}\"><label>Username<input name=\"username\" autocomplete=\"username\" maxlength=\"32\" required></label><label>Password<input type=\"password\" name=\"password\" autocomplete=\"current-password\" maxlength=\"256\" required></label><button>Sign in</button></form></main></body></html>",
-                        if presentation.stylesheet.is_some() {
-                            format!(
-                                "<link rel=\"stylesheet\" href=\"{}\">",
-                                presentation.stylesheet_path
-                            )
-                        } else {
-                            String::new()
-                        },
-                        presentation.login_path,
-                        presentation.csrf_field,
-                        challenge.csrf
-                    );
-                    let mut response = ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
-                        .into_response();
-                    response.headers_mut().insert(
-                        header::SET_COOKIE,
-                        set_cookie(
-                            &presentation.login_cookie,
-                            &challenge.cookie,
-                            gateway.origin.secure,
-                            900,
-                        ),
-                    );
-                    response
-                }
-            };
-        }
-        if let Some((resource, id)) = capability_path(&path, presentation) {
-            return match gateway
-                .app
-                .capability_page(
-                    resource,
-                    id,
-                    cookie(headers, &presentation.anonymous_cookie)
-                        .ok()
-                        .as_deref(),
-                )
-                .await
-            {
-                Ok(page) => rendered(page, gateway.origin.secure, presentation),
-                Err(e) => error(e, &presentation.login_path),
-            };
-        }
-        let route = gateway.app.manifest.routes.iter().find_map(|route| {
-            crate::render::match_path(route, &path).map(|target| (route, target))
-        });
-        return match route {
-            Some((route, target)) => {
-                let Ok((cursor, params)) =
-                    parse_query(&gateway.app.manifest, route, request.uri().query())
-                else {
-                    return StatusCode::NOT_FOUND.into_response();
-                };
-
-                let session = match route.access {
-                    noxide_protocol::Access::Public => None,
-                    noxide_protocol::Access::Authenticated => {
-                        match cookie(headers, &presentation.session_cookie) {
-                            Ok(session) => Some(session),
-                            Err(_) => return redirect(&presentation.login_path),
-                        }
-                    }
-                    noxide_protocol::Access::PublicOptional => {
-                        cookie(headers, &presentation.session_cookie).ok()
-                    }
-                };
-                match gateway
-                    .app
-                    .view_page_parameters(
-                        session.as_deref(),
-                        cookie(headers, &presentation.anonymous_cookie)
-                            .ok()
-                            .as_deref(),
-                        route.id,
-                        target,
-                        cursor.as_deref(),
-                        params.clone(),
-                    )
-                    .await
-                {
-                    Ok(r) => rendered(r, gateway.origin.secure, presentation),
-                    Err(RequestError::InvalidCursor) => {
-                        // Resolve the restart URL from the current route, never token data.
-                        let restart = crate::routing::resolve(
-                            &gateway.app.manifest,
-                            &noxide_protocol::RouteRef {
-                                params: params.clone(),
-                                route: route.id,
-                                target,
-                            },
-                        );
-                        match restart {
-                            Ok(url) => cursor_error(&url),
-                            Err(_) => error(RequestError::InvalidRequest, &presentation.login_path),
-                        }
-                    }
-                    Err(e) => error(e, &presentation.login_path),
-                }
-            }
-            None => StatusCode::NOT_FOUND.into_response(),
-        };
-    }
-    if request.method() != axum::http::Method::POST {
-        return StatusCode::METHOD_NOT_ALLOWED.into_response();
-    }
-    if request.uri().query().is_some() {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    if headers.get_all(header::ORIGIN).iter().count() != 1
-        || headers.get(header::ORIGIN).and_then(|h| h.to_str().ok())
-            != Some(&gateway.origin.serialized)
-    {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-    if headers.get_all(header::CONTENT_TYPE).iter().count() == 1
-        && headers
-            .get(header::CONTENT_TYPE)
-            .and_then(|h| h.to_str().ok())
-            .is_some_and(|v| v.starts_with("multipart/form-data"))
-    {
-        return blobs::upload(gateway, request).await;
-    }
-    if headers.get_all(header::CONTENT_TYPE).iter().count() != 1
-        || headers
-            .get(header::CONTENT_TYPE)
-            .and_then(|h| h.to_str().ok())
-            .is_none_or(|v| {
-                !matches!(
-                    v,
-                    "application/x-www-form-urlencoded"
-                        | "application/x-www-form-urlencoded; charset=UTF-8"
-                        | "application/x-www-form-urlencoded; charset=utf-8"
-                )
-            })
-    {
-        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
-    }
-    let session = cookie(headers, &presentation.session_cookie);
-    let login = cookie(headers, &presentation.login_cookie);
-    let anonymous = cookie(headers, &presentation.anonymous_cookie);
-    let body_deadline = crate::database::lifecycle::RequestScope::current_work_deadline()
-        .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(30));
-    let bytes = match tokio::time::timeout_at(
-        body_deadline,
-        to_bytes(request.into_body(), MAX_ENCODED_FORM_BYTES),
-    )
-    .await
-    {
-        Ok(Ok(bytes)) => bytes,
-        _ => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
-    };
-    let mut form = match decode_form(&bytes) {
-        Ok(form) => form,
-        Err(_) if path == presentation.registration_path => {
-            return registration_failed(presentation);
-        }
-        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
-    };
-    let Some(csrf) = form.remove(&presentation.csrf_field) else {
-        return if path == presentation.registration_path {
-            registration_failed(presentation)
-        } else {
-            StatusCode::FORBIDDEN.into_response()
-        };
-    };
-    if path == presentation.registration_path {
-        let (Some(username), Some(password)) = (form.remove("username"), form.remove("password"))
-        else {
-            return registration_failed(presentation);
-        };
-        let invite = if gateway.app.registration == crate::Registration::Invite {
-            form.remove("invite")
-        } else {
-            None
-        };
-        if !form.is_empty()
-            || (gateway.app.registration == crate::Registration::Invite && invite.is_none())
-        {
-            return registration_failed(presentation);
-        }
-        return match gateway
-            .app
-            .register(
-                &login.unwrap_or_default(),
-                &csrf,
-                &username,
-                &password,
-                invite.as_deref(),
-            )
-            .await
-        {
-            Ok(()) => {
-                let mut response = redirect(&presentation.login_path);
-                response.headers_mut().insert(
-                    header::SET_COOKIE,
-                    set_cookie(&presentation.login_cookie, "", gateway.origin.secure, 0),
-                );
-                response
-            }
-            Err(RequestError::Busy) => busy(),
-            Err(RequestError::OutcomeUnknown) => {
-                error(RequestError::OutcomeUnknown, &presentation.login_path)
-            }
-            Err(_) => registration_failed(presentation),
-        };
-    }
-    if path == presentation.login_path {
-        let (Some(username), Some(password)) = (form.remove("username"), form.remove("password"))
-        else {
-            return StatusCode::BAD_REQUEST.into_response();
-        };
-        if !form.is_empty() {
-            return StatusCode::BAD_REQUEST.into_response();
-        }
-        return match gateway
-            .app
-            .login(&login.unwrap_or_default(), &csrf, &username, &password)
-            .await
-        {
-            Ok(signed) => {
-                let mut response = redirect("/");
-                response.headers_mut().append(
-                    header::SET_COOKIE,
-                    set_cookie(
-                        &presentation.session_cookie,
-                        &signed,
-                        gateway.origin.secure,
-                        3600,
-                    ),
-                );
-                response.headers_mut().append(
-                    header::SET_COOKIE,
-                    set_cookie(&presentation.login_cookie, "", gateway.origin.secure, 0),
-                );
-                response
-            }
-            Err(RequestError::Busy) => busy(),
-            Err(RequestError::OutcomeUnknown) => {
-                error(RequestError::OutcomeUnknown, &presentation.login_path)
-            }
-            Err(_) => (
-                StatusCode::UNAUTHORIZED,
-                "Sign-in failed. Return to the sign-in page and try again.",
-            )
-                .into_response(),
-        };
-    }
-    if let Some((resource, id)) = capability_path(&path, presentation) {
-        let (Some(submission), Some(secret)) = (
-            form.remove(&presentation.submission_field),
-            form.remove(&presentation.capability_field),
-        ) else {
-            return StatusCode::FORBIDDEN.into_response();
-        };
-        if !form.is_empty() {
-            return StatusCode::BAD_REQUEST.into_response();
-        }
-        return match gateway
-            .app
-            .rotate_capability(
-                resource,
-                id,
-                &anonymous.unwrap_or_default(),
-                &csrf,
-                &submission,
-                &secret,
-            )
-            .await
-        {
-            Ok(page) => rendered(page, gateway.origin.secure, presentation),
-            Err(e) => error(e, &presentation.login_path),
-        };
-    }
-    if path == presentation.logout_path {
-        let Ok(session) = session else {
-            return redirect(&presentation.login_path);
-        };
-        if !form.is_empty() {
-            return StatusCode::BAD_REQUEST.into_response();
-        }
-        return match gateway.app.logout(&session, &csrf).await {
-            Ok(()) => {
-                let mut r = redirect(&presentation.login_path);
-                r.headers_mut().insert(
-                    header::SET_COOKIE,
-                    set_cookie(&presentation.session_cookie, "", gateway.origin.secure, 0),
-                );
-                r
-            }
-            Err(e) => error(e, &presentation.login_path),
-        };
-    }
-    let Some(action) = path
-        .strip_prefix(&format!("{}/", presentation.action_path))
-        .and_then(|n| n.parse::<u32>().ok())
-    else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let op = match crate::manifest::web_action(&gateway.app.manifest, action)
-        .and_then(|a| crate::manifest::operation(&gateway.app.manifest, a.steps[0].operation))
-    {
-        Ok(op) => op,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
-    };
-    let capability = form.remove(&presentation.capability_field);
-    if capability.is_some() && !crate::manifest::is_capability(op) {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    let session = if crate::manifest::anonymous_action(op) {
-        anonymous.unwrap_or_default()
-    } else {
-        match session {
-            Ok(session) => session,
-            Err(_) => return redirect(&presentation.login_path),
-        }
-    };
-    let Some(submission) = form.remove(&presentation.submission_field) else {
-        return StatusCode::FORBIDDEN.into_response();
-    };
-    match gateway
-        .app
-        .submit_with_capability(
-            &session,
-            action,
-            &submission,
-            &csrf,
-            form.clone(),
-            capability.as_deref(),
-        )
-        .await
-    {
-        Ok(r) => rendered(r, gateway.origin.secure, presentation),
-        Err(RequestError::Busy) => busy(),
-        Err(e) => {
-            let unknown = matches!(e, RequestError::OutcomeUnknown);
-            let recovered = if let Some(capability) = capability.as_deref() {
-                gateway
-                    .app
-                    .recover_form_with_capability(
-                        &session,
-                        action,
-                        &submission,
-                        &csrf,
-                        &form,
-                        unknown,
-                        Some(capability),
-                    )
-                    .await
-            } else {
-                gateway
-                    .app
-                    .recover_form(&session, action, &submission, &csrf, &form, unknown)
-                    .await
-            };
-            match recovered {
-                Ok(r) => rendered(r, gateway.origin.secure, presentation),
-                Err(_) => error(e, &presentation.login_path),
-            }
-        }
+        _ => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

@@ -143,11 +143,7 @@ async fn action_exhaustion(database: Database) {
     let mut first_success = None;
     for limit in 1..=128 {
         app = app.with_database_statement_limit(limit).unwrap();
-        let scope = app.http_request_scope(
-            crate::limiter::RequestClass::AuthenticatedAction,
-            "/actions/1",
-            None,
-        );
+        let scope = app.http_request_scope(None, None);
         let result = scope
             .run(app.submit(&session, 1, &submission, &csrf, input.clone()))
             .await;
@@ -202,11 +198,7 @@ async fn action_exhaustion(database: Database) {
     // A new request has its own approved total, while its retries/navigation share
     // that root. Replay uses the semantic receipt and never re-executes effects.
     app = app.with_database_statement_limit(256).unwrap();
-    let scope = app.http_request_scope(
-        crate::limiter::RequestClass::AuthenticatedAction,
-        "/actions/1",
-        None,
-    );
+    let scope = app.http_request_scope(None, None);
     let recovered = scope
         .run(app.submit(&session, 1, &submission, &csrf, input.clone()))
         .await
@@ -230,11 +222,7 @@ async fn action_exhaustion(database: Database) {
         tokio::time::Instant::now() + Duration::from_secs(2),
     )
     .await;
-    let scope = app.http_request_scope(
-        crate::limiter::RequestClass::AuthenticatedAction,
-        "/actions/1",
-        None,
-    );
+    let scope = app.http_request_scope(None, None);
     let retried = scope
         .run(crate::database::fault::known_conflict_once(
             app.submit(&session, 1, &fresh, &csrf, input),
