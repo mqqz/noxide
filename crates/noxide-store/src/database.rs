@@ -29,6 +29,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Keeps SQLite's sidecars in place while a confined process runs.
+pub struct SidecarHold(#[allow(dead_code)] Option<sqlx::SqliteConnection>);
+
 /// Files and ports a store reaches at runtime.
 #[derive(Clone, Debug)]
 pub struct StoreResources {
@@ -119,6 +122,18 @@ impl Database {
                 busy,
             },
         }
+    }
+    /// Hold one idle connection for this process's lifetime. SQLite unlinks `-wal` and
+    /// `-shm` when the last connection closes, and a confined process can neither
+    /// recreate them nor open new files at those paths. Without this, any operator
+    /// command that closes last would break the server until it restarts.
+    pub async fn hold_sidecars(&self) -> Result<SidecarHold> {
+        Ok(SidecarHold(match &self.options {
+            DatabaseOptions::Sqlite { options, .. } => {
+                Some(sqlx::ConnectOptions::connect(options).await?)
+            }
+            DatabaseOptions::Postgres(_) => None,
+        }))
     }
     /// What this store needs from a confined process. SQLite's sidecar files are
     /// created here, because a confined process has no right to create files.

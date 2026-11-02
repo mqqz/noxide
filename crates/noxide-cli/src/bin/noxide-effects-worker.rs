@@ -55,6 +55,7 @@ fn main() -> Result<()> {
     policy.tcp_connect.push(effects.tor_proxy.port());
     confine(&policy, "effect worker")?;
     tokio::runtime::Runtime::new()?.block_on(async move {
+        let _sidecars = store.hold_sidecars().await?;
         let shutdown = shutdown_signal()?;
         delivery.serve(shutdown).await
     })

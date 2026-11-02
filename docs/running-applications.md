@@ -449,8 +449,9 @@ If the kernel cannot enforce it, startup fails. An operator can choose otherwise
 `best_effort` applies what the kernel supports and warns; `disabled` applies nothing
 and warns. Both are explicit deviations that remove the protection described here.
 
-A confined server cannot create files, so SQLite's `-wal` and `-shm` sidecars stay
-in place between runs, and it cannot unlink its Unix socket. `noxide serve` removes
+A confined server cannot create files, so SQLite's `-wal` and `-shm` sidecars are
+created at startup. Each confined process holds an idle connection so that operator
+commands do not remove them. It also cannot unlink its Unix socket. `noxide serve` removes
 the socket on exit; `noxide-server` removes a stale one at startup, and never a live
 socket or another file type.
 

@@ -146,6 +146,7 @@ fn main() -> Result<()> {
     confine(&policy, "server")?;
     let origin = Origin::parse(&config.origin)?;
     tokio::runtime::Runtime::new()?.block_on(async move {
+        let _sidecars = store.hold_sidecars().await?;
         let shutdown = shutdown_signal()?;
         println!("Runtime listening with the approved application contract.");
         http::serve(listener.start()?, app, origin, shutdown).await

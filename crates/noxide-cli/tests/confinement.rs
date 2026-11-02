@@ -95,6 +95,19 @@ async fn serving_process_is_confined_and_fails_closed_without_its_key_service() 
     assert!(ready.contains("Runtime listening"), "{ready}");
     assert!(get(&socket).await.starts_with("HTTP/1.1 200"));
 
+    // An operator command is the database's last other connection when it exits.
+    // SQLite would then unlink the sidecars, which a confined server cannot recreate.
+    let lookup = Command::new(env!("CARGO_BIN_EXE_noxide"))
+        .arg("account-lookup")
+        .arg(&config)
+        .arg("nobody")
+        .output()
+        .await
+        .unwrap();
+    assert!(!lookup.status.success(), "fixture has no such account");
+    let response = get(&socket).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
     let server = children(supervisor.id().unwrap())
         .into_iter()
         .find(|pid| name(*pid) == "noxide-server")
