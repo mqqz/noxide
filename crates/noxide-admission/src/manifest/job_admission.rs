@@ -254,3 +254,6 @@ pub fn validate(manifest: &Manifest) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

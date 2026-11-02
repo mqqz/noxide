@@ -1,10 +1,6 @@
-use crate::membership::*;
-use crate::{
-    Database,
-    auth::User,
-    lifecycle_clock::{self, Freshness},
-};
-use crate::{auth::Principal, authority::witnesses::Witnesses, database::Transaction};
+use crate::auth::User;
+use crate::{auth::Principal, authority::witnesses::Witnesses};
+use noxide_admission::membership::*;
 use noxide_admission::temporal::AttemptTime;
 use noxide_protocol::{AccountScope, ChoiceVariant};
 use noxide_protocol::{
@@ -13,6 +9,11 @@ use noxide_protocol::{
         ExistsRelated, MAX_MEMBERSHIP_PREDICATES, MembershipLiteral, MembershipUnique,
         RelatedTarget,
     },
+};
+use noxide_store::database::Transaction;
+use noxide_store::{
+    Database,
+    lifecycle_clock::{self, Freshness},
 };
 use std::collections::BTreeMap;
 use std::{

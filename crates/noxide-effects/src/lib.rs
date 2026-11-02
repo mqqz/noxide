@@ -15,3 +15,6 @@ pub use operator::{
 };
 pub use store::{DeliveryResult, EffectClaim, Finalized, OutboxContext, Preflight};
 pub use types::{CapturedEffect, EffectScope};
+
+#[cfg(test)]
+mod store_tests;

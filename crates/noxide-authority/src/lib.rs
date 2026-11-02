@@ -8,3 +8,8 @@ pub mod operator_roles;
 pub mod security;
 pub(crate) use noxide_admission::{expiry, ids, manifest, membership, policy, principal, sql};
 pub(crate) use noxide_store::{Database, database, lifecycle_clock};
+
+#[cfg(test)]
+mod membership_tests;
+#[cfg(test)]
+mod operator_roles_tests;

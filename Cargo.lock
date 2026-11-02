@@ -1529,6 +1529,7 @@ dependencies = [
  "anyhow",
  "base64",
  "noxide-admission",
+ "noxide-jobs",
  "noxide-protocol",
  "noxide-sql",
  "noxide-store",
@@ -1536,6 +1537,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
+ "tempfile",
  "tokio",
  "url",
 ]

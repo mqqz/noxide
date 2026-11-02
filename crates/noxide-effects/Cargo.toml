@@ -20,3 +20,10 @@ rustix.workspace = true
 tokio.workspace = true
 base64 = "0.22"
 url = "2"
+
+[dev-dependencies]
+noxide-jobs.workspace = true
+noxide-store = { workspace = true, features = ["test-support"] }
+sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"

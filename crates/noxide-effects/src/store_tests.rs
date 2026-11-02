@@ -1,17 +1,19 @@
 //! Retained provider-paired store/operator fixtures. Actual action receipts and
 //! Tor/TLS delivery are covered by the application adapter fixtures separately.
 
-use crate::effects::{EffectOperatorTransaction as _, store::*, types::*};
-use crate::jobs::JobOperatorTransaction as _;
 use crate::{
-    database::{
-        Database, Transaction,
-        lifecycle::{AdmissionOwner, Registry, RequestScope},
-    },
+    EffectOperatorTransaction as _,
     effect_deployment::{EffectDeployment, EffectGrant, EffectLimits, EffectiveEffectDeployment},
+    store::*,
+    types::*,
 };
 use anyhow::Result;
+use noxide_jobs::JobOperatorTransaction as _;
 use noxide_protocol::{effects::*, time::Timestamp};
+use noxide_store::database::{
+    Database, Transaction,
+    lifecycle::{AdmissionOwner, Registry, RequestScope},
+};
 use sqlx::Connection;
 use std::{
     path::PathBuf,
@@ -94,10 +96,10 @@ async fn setup(db: &Database, effective: &EffectiveEffectDeployment) {
     db.initialize().await.unwrap();
     phase(db,async |tx:&mut Transaction| {tx.execute("INSERT INTO nx_deployment(singleton,contract,incarnation,generation) VALUES(1,'contract','incarnation','deployment') ON CONFLICT(singleton) DO UPDATE SET contract='contract',incarnation='incarnation',generation='deployment'",&[]).await?;tx.execute("INSERT INTO nx_job_runtime(singleton,deployment,contract,epoch,state,pending_limit,tenant_limit,concurrency) VALUES(1,'deployment','contract','epoch','active',1000,1000,2)",&[]).await?;tx.execute("CREATE TABLE nx_effect_test_mutations(id BIGINT PRIMARY KEY,value BIGINT NOT NULL)",&[]).await?;Ok(())}).await.unwrap();
     let permits = Arc::new(Semaphore::new(1));
-    let mut lease = crate::database::MaintenanceLease::new(
+    let mut lease = noxide_store::database::MaintenanceLease::new(
         permits.try_acquire_owned().unwrap(),
         Instant::now() + Duration::from_secs(5),
-        crate::lifecycle_clock::Freshness::default(),
+        noxide_store::lifecycle_clock::Freshness::default(),
     );
     lease.begin(db).await.unwrap();
     lease
@@ -632,10 +634,10 @@ async fn recovered_activation(
     effective: &EffectiveEffectDeployment,
 ) {
     let permits = Arc::new(Semaphore::new(1));
-    let mut lease = crate::database::MaintenanceLease::new(
+    let mut lease = noxide_store::database::MaintenanceLease::new(
         permits.try_acquire_owned().unwrap(),
         Instant::now() + Duration::from_secs(5),
-        crate::lifecycle_clock::Freshness::default(),
+        noxide_store::lifecycle_clock::Freshness::default(),
     );
     lease.begin(db).await.unwrap();
     lease
@@ -655,7 +657,7 @@ async fn recovered_activation(
         .await
         .unwrap();
     let memory = std::sync::atomic::AtomicI64::new(0);
-    let _tick = crate::lifecycle_clock::tick(lease.tx(), &memory)
+    let _tick = noxide_store::lifecycle_clock::tick(lease.tx(), &memory)
         .await
         .unwrap();
     lease.finish().await.unwrap();
@@ -719,9 +721,7 @@ async fn actual_clock_recovery_contract(db: &Database) {
     .unwrap();
     let _old = claim(db, initial.unix_millis()).await;
     phase(db,async |tx:&mut Transaction| {assert_eq!(tx.fetch::<2>("SELECT CAST((SELECT COUNT(*) FROM nx_outbox WHERE state='pending') AS TEXT),CAST((SELECT COUNT(*) FROM nx_outbox WHERE state='running') AS TEXT)",&[]).await?,[[String::from("1"),String::from("1")]]);Ok(())}).await.unwrap();
-    db.recover_clock(crate::HostKeys::generate().unwrap().incarnation())
-        .await
-        .unwrap();
+    db.recover_clock("effect-store-test").await.unwrap();
     let recovered=phase(db,async |tx:&mut Transaction| {tx.fetch::<6>("SELECT generation,CAST((SELECT lifecycle_ms FROM nx_clock WHERE singleton=1) AS TEXT),(SELECT state FROM nx_outbox WHERE id=$1),(SELECT state FROM nx_job_runtime WHERE singleton=1),(SELECT state FROM nx_outbox WHERE id=$2),CAST((SELECT first_eligible_ms FROM nx_outbox WHERE id=$1) AS TEXT) FROM nx_deployment WHERE singleton=1",&[capture.id()?.into(),pending.id()?.into()]).await}).await.unwrap();
     assert_ne!(recovered[0][0], "deployment");
     assert_eq!(recovered[0][1], initial.unix_millis().to_string());
@@ -807,10 +807,10 @@ async fn restore_owner_contract(db: &Database) {
     let capture = enqueue(db, "alpha", "restored-owner").await;
     let activate = async |restore_fork: bool| {
         let permits = Arc::new(Semaphore::new(1));
-        let mut lease = crate::database::MaintenanceLease::new(
+        let mut lease = noxide_store::database::MaintenanceLease::new(
             permits.try_acquire_owned().unwrap(),
             Instant::now() + Duration::from_secs(5),
-            crate::lifecycle_clock::Freshness::default(),
+            noxide_store::lifecycle_clock::Freshness::default(),
         );
         lease.begin(db).await.unwrap();
         let result = lease

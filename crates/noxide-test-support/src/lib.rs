@@ -492,3 +492,68 @@ pub fn anonymous_component_with_redirect(forged: bool) -> Vec<u8> {
       (core instance $i (instantiate $m (with "h" (instance (export "emit" (func $emit)) (export "request" (func $request)) (export "invoke" (func $invoke)) (export "result" (func $result))))))
       (func (export "handle") (canon lift (core func $i "handle"))))"#)).unwrap()
 }
+
+/// The base manifest with one service worker and its job contract.
+pub fn job_contract() -> Manifest {
+    use noxide_protocol::jobs::*;
+    use std::collections::BTreeMap;
+    let mut m = manifest();
+    let service = Policy {
+        any: vec![vec![
+            Predicate::Service {
+                worker: "repair".into(),
+            },
+            Predicate::SameTenant,
+        ]],
+    };
+    let mut read = m.operations[1].clone();
+    read.id = 4;
+    read.policy = service;
+    let mut update = read.clone();
+    update.id = 5;
+    update.kind = OperationKind::Update;
+    m.operations.extend([read, update]);
+    let mut worker = m.actions[0].clone();
+    worker.id = 2;
+    worker.name = "Worker".into();
+    worker.targets = vec![ActionTarget {
+        name: "record".into(),
+        resource: 1,
+        source: TargetSource::Service { eligible: 4 },
+        revision: Revision::Identity,
+        projection: Some(Inspection {
+            operation: 4,
+            fields: vec![],
+        }),
+        inspect: None,
+    }];
+    worker.steps[0].operation = 5;
+    worker.steps[0].target = Target::Named("record".into());
+    m.actions.push(worker);
+    m.jobs = Some(JobContract {
+        workers: vec![Worker {
+            name: "repair".into(),
+            actions: vec![WorkerAction {
+                action: 2,
+                targets: BTreeMap::from([(
+                    "record".into(),
+                    WorkerTarget {
+                        resource: 1,
+                        eligible: 4,
+                    },
+                )]),
+            }],
+        }],
+        schedules: vec![Schedule {
+            source_action: 1,
+            ordinal: 0,
+            worker: "repair".into(),
+            action: 2,
+            targets: BTreeMap::from([("record".into(), ScheduledTarget::Created(0))]),
+            inputs: BTreeMap::from([("body".into(), Value::Input("body".into()))]),
+            due_at: Value::TransactionTime,
+        }],
+        recurring: vec![],
+    });
+    m
+}

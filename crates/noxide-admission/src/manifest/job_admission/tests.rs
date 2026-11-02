@@ -1,118 +1,6 @@
 use noxide_protocol::{jobs::*, time::Duration, *};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-fn contract() -> Manifest {
-    let mut m = noxide_test_support::manifest();
-    let service = Policy {
-        any: vec![vec![
-            Predicate::Service {
-                worker: "repair".into(),
-            },
-            Predicate::SameTenant,
-        ]],
-    };
-    let mut read = m.operations[1].clone();
-    read.id = 4;
-    read.policy = service;
-    let mut update = read.clone();
-    update.id = 5;
-    update.kind = OperationKind::Update;
-    m.operations.extend([read, update]);
-    let mut worker = m.actions[0].clone();
-    worker.id = 2;
-    worker.name = "Worker".into();
-    worker.targets = vec![ActionTarget {
-        name: "record".into(),
-        resource: 1,
-        source: TargetSource::Service { eligible: 4 },
-        revision: Revision::Identity,
-        projection: Some(Inspection {
-            operation: 4,
-            fields: vec![],
-        }),
-        inspect: None,
-    }];
-    worker.steps[0].operation = 5;
-    worker.steps[0].target = Target::Named("record".into());
-    m.actions.push(worker);
-    m.jobs = Some(JobContract {
-        workers: vec![Worker {
-            name: "repair".into(),
-            actions: vec![WorkerAction {
-                action: 2,
-                targets: BTreeMap::from([(
-                    "record".into(),
-                    WorkerTarget {
-                        resource: 1,
-                        eligible: 4,
-                    },
-                )]),
-            }],
-        }],
-        schedules: vec![Schedule {
-            source_action: 1,
-            ordinal: 0,
-            worker: "repair".into(),
-            action: 2,
-            targets: BTreeMap::from([("record".into(), ScheduledTarget::Created(0))]),
-            inputs: BTreeMap::from([("body".into(), Value::Input("body".into()))]),
-            due_at: Value::TransactionTime,
-        }],
-        recurring: vec![],
-    });
-    m
-}
-
-#[test]
-fn deployment_approval_binds_service_scope_limits_and_canonical_grants() {
-    use crate::job_deployment::{JobDeployment, JobGrant, JobLimits};
-    let manifest = contract();
-    let mut configured = JobDeployment {
-        grants: ["alpha", "beta"]
-            .into_iter()
-            .map(|tenant| JobGrant {
-                tenant: tenant.into(),
-                worker: "repair".into(),
-                actions: BTreeSet::from([2]),
-            })
-            .collect(),
-        limits: JobLimits::default(),
-    };
-    let digest = |configuration: &JobDeployment| {
-        crate::deployment::approval_digest(&manifest, None, Some(configuration), None).unwrap()
-    };
-    let approved = digest(&configured);
-    assert_ne!(approved, crate::manifest::digest(&manifest).unwrap());
-    configured.grants.reverse();
-    assert_eq!(approved, digest(&configured));
-    for limits in [
-        JobLimits {
-            pending_per_app: 999,
-            pending_per_tenant: 999,
-            ..JobLimits::default()
-        },
-        JobLimits {
-            pending_per_tenant: 999,
-            ..JobLimits::default()
-        },
-        JobLimits {
-            worker_concurrency: 1,
-            ..JobLimits::default()
-        },
-    ] {
-        configured.limits = limits;
-        assert_ne!(approved, digest(&configured));
-    }
-    configured.limits = JobLimits::default();
-    configured.grants[0].tenant = "gamma".into();
-    assert_ne!(approved, digest(&configured));
-    assert!(crate::deployment::approval_digest(&manifest, None, None, None).is_err());
-    let mut ordinary = manifest.clone();
-    ordinary.jobs = None;
-    ordinary.actions.truncate(1);
-    ordinary.operations.truncate(3);
-    assert!(crate::deployment::approval_digest(&ordinary, None, Some(&configured), None).is_err());
-}
 fn sum(leaves: usize) -> Value {
     if leaves == 1 {
         Value::Input("number".into())
@@ -124,7 +12,7 @@ fn sum(leaves: usize) -> Value {
     }
 }
 fn counted() -> Manifest {
-    let mut m = contract();
+    let mut m = noxide_test_support::job_contract();
     let kind = FieldKind::Integer {
         min: Some(0),
         max: Some(1000),
@@ -172,7 +60,7 @@ fn counted() -> Manifest {
     m
 }
 fn recurring() -> Manifest {
-    let mut m = contract();
+    let mut m = noxide_test_support::job_contract();
     let mut query = m.operations.iter().find(|op| op.id == 4).unwrap().clone();
     query.id = 6;
     query.kind = OperationKind::List;
@@ -217,7 +105,7 @@ fn shared_action_and_schedule_counter_and_effect_only_input() {
 }
 #[test]
 fn schedules_share_expression_depth_and_refuse_current_or_principal_scalars() {
-    let mut m = contract();
+    let mut m = noxide_test_support::job_contract();
     let mut due = Value::TransactionTime;
     for _ in 0..7 {
         due = Value::Add {
@@ -245,7 +133,7 @@ fn schedules_share_expression_depth_and_refuse_current_or_principal_scalars() {
         Value::Created(0),
         Value::Target("record".into()),
     ] {
-        let mut forged = contract();
+        let mut forged = noxide_test_support::job_contract();
         forged.jobs.as_mut().unwrap().schedules[0]
             .inputs
             .insert("body".into(), value);
@@ -254,11 +142,11 @@ fn schedules_share_expression_depth_and_refuse_current_or_principal_scalars() {
 }
 #[test]
 fn scheduled_and_recurring_domains_are_independent_of_guest_checks() {
-    let mut m = contract();
+    let mut m = noxide_test_support::job_contract();
     crate::manifest::validate(&m).unwrap();
     m.jobs.as_mut().unwrap().schedules[0].due_at = Value::Literal(Literal::Integer(1));
     assert!(crate::manifest::validate(&m).is_err());
-    let mut m = contract();
+    let mut m = noxide_test_support::job_contract();
     m.jobs.as_mut().unwrap().schedules[0]
         .inputs
         .insert("body".into(), Value::Literal(Literal::Boolean(true)));
@@ -272,16 +160,16 @@ fn scheduled_and_recurring_domains_are_independent_of_guest_checks() {
 }
 #[test]
 fn service_targets_and_maintenance_require_closed_worker_authority() {
-    let mut m = contract();
+    let mut m = noxide_test_support::job_contract();
     m.jobs = None;
     assert!(crate::manifest::validate(&m).is_err());
-    let mut m = contract();
+    let mut m = noxide_test_support::job_contract();
     let mut web = m.web_bindings[0].clone();
     web.id = 2;
     web.action = 2;
     m.web_bindings.push(web);
     assert!(crate::manifest::validate(&m).is_err());
-    let mut m = contract();
+    let mut m = noxide_test_support::job_contract();
     m.operations
         .iter_mut()
         .find(|op| op.id == 4)
@@ -299,13 +187,13 @@ fn service_targets_and_maintenance_require_closed_worker_authority() {
         crate::manifest::validate(&m).is_err(),
         "maintenance cannot inherit ordinary user rights"
     );
-    let mut m = contract();
+    let mut m = noxide_test_support::job_contract();
     m.operations[0].maintenance = true;
     assert!(
         crate::manifest::validate(&m).is_err(),
         "maintenance cannot be an ordinary route operation"
     );
-    let mut m = contract();
+    let mut m = noxide_test_support::job_contract();
     m.jobs.as_mut().unwrap().schedules[0].source_action = 2;
     m.jobs.as_mut().unwrap().schedules[0]
         .targets

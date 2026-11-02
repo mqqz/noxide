@@ -47,13 +47,7 @@ mod account_tests;
 #[cfg(test)]
 mod authority_tests;
 #[cfg(test)]
-mod effects_tests;
-#[cfg(test)]
 mod failure_tests;
-#[cfg(test)]
-mod job_admission_tests;
-#[cfg(test)]
-mod membership_tests;
 #[cfg(test)]
 mod operator_roles_tests;
 #[cfg(test)]
