@@ -286,7 +286,7 @@ impl Application {
         deadline: Instant,
         mut database_calls: u32,
     ) -> Rendered {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let barrier = self.postcommit_barrier.lock().unwrap().take();
             if let Some((committed, resume)) = barrier {
@@ -597,7 +597,7 @@ mod tests {
         m.routes[1].forms = vec![2, 3];
         m.routes[1].access = Access::PublicOptional;
         let app = Application::new(
-            &crate::anonymous_tests::component(),
+            &crate::test_support::anonymous_component(),
             &serde_json::to_vec(&m).unwrap(),
             manifest::digest(&m).unwrap(),
             db.clone(),

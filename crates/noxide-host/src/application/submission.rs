@@ -13,7 +13,7 @@ impl Application {
         self.submit_with_capability(cookie, action, submission, csrf, input, None)
             .await
     }
-    pub(crate) async fn submit_with_capability(
+    pub async fn submit_with_capability(
         &self,
         cookie: &str,
         action: u32,
@@ -121,7 +121,7 @@ impl Application {
             .await
     }
 
-    pub(crate) async fn recover_form(
+    pub async fn recover_form(
         &self,
         cookie: &str,
         action: u32,
@@ -134,7 +134,7 @@ impl Application {
             .await
     }
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn recover_form_with_capability(
+    pub async fn recover_form_with_capability(
         &self,
         cookie: &str,
         action: u32,

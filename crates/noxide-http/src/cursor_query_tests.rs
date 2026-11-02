@@ -43,7 +43,7 @@ fn reviewer_max_admitted_scalar_cursor_survives_http_query_transport() {
     );
     assert!(cursor.len() <= 2048);
     assert!(raw.len() > 1024);
-    let (parsed, params) = crate::http::parse_query(&manifest, &manifest.routes[0], Some(&raw))
+    let (parsed, params) = crate::parse_query(&manifest, &manifest.routes[0], Some(&raw))
         .expect("host-issued next-page cursor must pass the real HTTP query parser");
     assert_eq!(parsed, Some(cursor));
     assert!(params.is_empty());
@@ -70,7 +70,7 @@ fn escaped_maximum_scalar_cursor_keeps_the_existing_token_limit() {
         .unwrap();
     assert!(cursor.len() > 1024 && cursor.len() <= crate::security::MAX_TOKEN_BYTES);
     keys.verify_cursor(&cursor, i64::MAX - 900).unwrap();
-    let (parsed, params) = crate::http::parse_query(
+    let (parsed, params) = crate::parse_query(
         &manifest,
         &manifest.routes[0],
         Some(&format!("cursor={cursor}")),
@@ -101,8 +101,8 @@ fn opaque_cursor_allowance_cannot_expand_ordinary_query_inputs() {
         )
         .unwrap();
     let boundary = "&".repeat(1024);
-    crate::http::parse_query(&manifest, route, Some(&boundary)).unwrap();
-    crate::http::parse_query(
+    crate::parse_query(&manifest, route, Some(&boundary)).unwrap();
+    crate::parse_query(
         &manifest,
         route,
         Some(&format!("cursor={cursor}&{boundary}")),
@@ -112,7 +112,7 @@ fn opaque_cursor_allowance_cannot_expand_ordinary_query_inputs() {
         "&".repeat(1025),
         format!("cursor={cursor}&{}", "&".repeat(1025)),
     ] {
-        let error = crate::http::parse_query(&manifest, route, Some(&raw)).unwrap_err();
+        let error = crate::parse_query(&manifest, route, Some(&raw)).unwrap_err();
         assert!(error.to_string().contains("query string limit"));
     }
     for raw in [
@@ -120,6 +120,6 @@ fn opaque_cursor_allowance_cannot_expand_ordinary_query_inputs() {
         format!("cursor={}", "a".repeat(2049)),
         format!("cursor={cursor}&unknown=value"),
     ] {
-        assert!(crate::http::parse_query(&manifest, route, Some(&raw)).is_err());
+        assert!(crate::parse_query(&manifest, route, Some(&raw)).is_err());
     }
 }

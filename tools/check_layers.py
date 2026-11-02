@@ -14,7 +14,6 @@ SRC = Path(__file__).resolve().parent.parent / "crates/noxide-host/src"
 LAYERS = [
     ["deployment"],
     ["application"],
-    ["http"],
 ]
 RANK = {module: rank for rank, modules in enumerate(LAYERS) for module in modules}
 SKIP = re.compile(r"(_tests\.rs|_tests/|/tests\.rs|/tests/|/test_support|/test_account)")
@@ -70,6 +69,9 @@ RESTRICTED = {
     "httparse": {"noxide-effect-delivery"},
     "noxide-effect-delivery": {"noxide-cli"},
     "argon2": {"noxide-authority"},
+    "axum": {"noxide-http"},
+    "hyper": {"noxide-http"},
+    "hyper-util": {"noxide-http"},
     "wasmtime": {"noxide-sandbox"},
     "wasmparser": {"noxide-sandbox"},
     "cssparser": {"noxide-asset-admission"},

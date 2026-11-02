@@ -23,20 +23,17 @@ the [explicit examples](../sdk-lowering.md).
 | `noxide-jobs` | Job queue storage, recurrence and operator commands; runs no guest code |
 | `noxide-authority` | Accounts, roles, tokens, admission limits and per-attempt request authority |
 | `noxide-repository` | Record reads and writes, policy filtering, search and aggregates for one request attempt; runs no guest code |
-| `noxide-host` | Application orchestration, job execution and HTTP |
+| `noxide-host` | Application orchestration and job execution; links no HTTP server |
+| `noxide-http` | Routing, forms, cookies, headers and listeners over the application |
 | `noxide` | Typed resources, queries, actions, forms and pages; WIT bindings and guest entry points |
 | `noxide-macros` | Explicit declaration expansion and optional convenience lowering |
 | `noxide-cli` | Operator build, dependency, approval, lifecycle, schema and role commands |
 
 `tools/check_layers.py` runs in CI. It fails if a crate gains a restricted dependency
 such as `sqlx`, `rustls`, `wasmtime` or `image`, if a pure crate depends on an
-impure one, if a deployed binary enables a `test-support` feature, if a module
-inside `noxide-host` depends on a higher layer, or if a crate outside its allowed
+impure one, if a deployed binary enables a `test-support` feature, or if a crate outside its allowed
 list compiles a policy filter. `tools/check_binaries.py` checks the
 symbols of each deployed binary, because `noxide-cli` builds them all.
-
-`noxide-host` still contains application orchestration and HTTP as modules,
-separated by that lint and not by the compiler.
 
 ### SQL boundary
 

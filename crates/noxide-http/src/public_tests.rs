@@ -608,9 +608,9 @@ async fn public_request_flows(db: Database) {
         )
         .await
         .unwrap();
-    let router = crate::http::router(
+    let router = crate::router(
         app.clone(),
-        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+        crate::Origin::parse("http://localhost:8080").unwrap(),
     );
     let request = |path: &str, cookie: Option<HeaderValue>| {
         let mut request = Request::builder()
@@ -622,7 +622,7 @@ async fn public_request_flows(db: Database) {
         request.body(Body::empty()).unwrap()
     };
     let (_, expired) = app
-        .keys
+        .test_keys()
         .issue(
             security::TokenKind::Session,
             "alice",
@@ -687,7 +687,10 @@ async fn public_request_flows(db: Database) {
             .status(),
         StatusCode::OK
     );
-    let token = app.keys.verify(&session, security::now().unwrap()).unwrap();
+    let token = app
+        .test_keys()
+        .verify(&session, security::now().unwrap())
+        .unwrap();
     let mut tx = db
         .begin(Instant::now() + Duration::from_secs(2))
         .await
@@ -877,7 +880,7 @@ async fn sqlite_initial_create_commit_is_host_owned() {
             }
             let result = e
                 .execute_transaction(
-                    crate::application::ActionCore::of(&m.actions[0]).unwrap(),
+                    noxide_admission::action_contract::ActionCore::of(&m.actions[0]).unwrap(),
                     None,
                 )
                 .await;
@@ -965,7 +968,7 @@ async fn sqlite_initial_create_commit_is_host_owned() {
             );
 
             e.execute_transaction(
-                crate::application::ActionCore::of(&updates.actions[1]).unwrap(),
+                noxide_admission::action_contract::ActionCore::of(&updates.actions[1]).unwrap(),
                 None,
             )
             .await

@@ -1,9 +1,9 @@
 //! Host-owned blob authority and transport integration. All metadata statements
 //! share the enclosing request's actual SQL meter and original deadline.
 use super::*;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::blob_upload::Barrier;
-pub(crate) use crate::blob_upload::UploadScope;
+pub use crate::blob_upload::UploadScope;
 use crate::{
     blob_inspect::{InventoryBatch, Snapshot},
     blob_io::{IoPool, IoWitness},
@@ -15,25 +15,25 @@ use anyhow::Context;
 use noxide_protocol::blobs::*;
 use std::sync::{Mutex, atomic::AtomicBool};
 
-pub(crate) struct BlobRuntime {
-    pub(crate) store: BlobStore,
-    pub(crate) policy: BlobPolicy,
-    pub(crate) process: ObjectKey,
+pub struct BlobRuntime {
+    pub store: BlobStore,
+    pub policy: BlobPolicy,
+    pub process: ObjectKey,
     fence: crate::blob_store::ProcessFence,
-    pub(crate) uploads: Arc<IoPool>,
-    pub(crate) downloads: Arc<IoPool>,
-    streams: Arc<tokio::sync::Semaphore>,
-    pub(crate) ready: AtomicBool,
+    pub uploads: Arc<IoPool>,
+    pub downloads: Arc<IoPool>,
+    pub streams: Arc<tokio::sync::Semaphore>,
+    pub ready: AtomicBool,
     inventory: Arc<Mutex<Option<Inventory>>>,
     inventory_complete: AtomicBool,
     metadata_cursor: Mutex<String>,
-    pub(crate) quarantined: AtomicBool,
-    pub(crate) workers: Mutex<BTreeMap<String, IoWitness>>,
-    undispatched: Mutex<BTreeMap<String, IoWitness>>,
-    #[cfg(test)]
-    verification: Mutex<Option<Arc<Barrier>>>,
-    #[cfg(test)]
-    gc_after_commit: Mutex<Option<Arc<Barrier>>>,
+    pub quarantined: AtomicBool,
+    pub workers: Mutex<BTreeMap<String, IoWitness>>,
+    pub undispatched: Mutex<BTreeMap<String, IoWitness>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub verification: Mutex<Option<Arc<Barrier>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub gc_after_commit: Mutex<Option<Arc<Barrier>>>,
 }
 impl BlobRuntime {
     pub(super) fn open(deployment: crate::BlobDeployment, policy: BlobPolicy) -> Result<Self> {
@@ -56,13 +56,13 @@ impl BlobRuntime {
             quarantined: AtomicBool::new(false),
             workers: Mutex::new(BTreeMap::new()),
             undispatched: Mutex::new(BTreeMap::new()),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             verification: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             gc_after_commit: Mutex::new(None),
         })
     }
-    pub(crate) fn available(&self) -> Result<()> {
+    pub fn available(&self) -> Result<()> {
         ensure!(self.ready.load(Ordering::Acquire), RequestError::Busy);
         ensure!(
             self.inventory_complete.load(Ordering::Acquire),
@@ -188,11 +188,11 @@ impl Application {
                 input: commitment("noxide/upload-input/v1", &[&upload.input])?,
             },
         );
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let scope = scope.with_barrier(blobs.verification.lock().unwrap().clone());
         Ok(Some(scope))
     }
-    pub(crate) fn upload_ticket(&self, binding: u32, submission: &str) -> Result<String> {
+    pub fn upload_ticket(&self, binding: u32, submission: &str) -> Result<String> {
         self.keys.csrf(&format!(
             "noxide/upload-ticket/v1:{}:{binding}:{submission}",
             self.submission_contract()
@@ -200,13 +200,13 @@ impl Application {
     }
 }
 
-pub(crate) enum PreparedUpload {
+pub enum PreparedUpload {
     Existing { input: String, replay: bool },
     Created(Box<crate::blob_metadata::BlobRow>, ReservationLease),
     Absent,
 }
 impl Application {
-    pub(crate) fn multipart_spec(&self, binding: u32) -> Result<crate::blob_multipart::PrefixSpec> {
+    pub fn multipart_spec(&self, binding: u32) -> Result<crate::blob_multipart::PrefixSpec> {
         use crate::blob_multipart::{PrefixSpec, ScalarPart};
         let action = manifest::web_action(&self.manifest, binding)?;
         let blobs = self.blobs.as_ref().context("blob deployment missing")?;
@@ -292,7 +292,7 @@ impl Application {
             max_bytes.min(blobs.policy.limits.file_bytes),
         )
     }
-    pub(crate) async fn prepare_upload(
+    pub async fn prepare_upload(
         &self,
         cookie: &str,
         binding: u32,
@@ -483,7 +483,7 @@ impl Application {
             })
             .await
     }
-    pub(crate) async fn publish_upload(
+    pub async fn publish_upload(
         &self,
         row: &crate::blob_metadata::BlobRow,
         object: crate::blob_store::DurableObject,
@@ -511,24 +511,24 @@ impl Application {
 }
 
 impl Application {
-    pub(crate) fn blob_phase(&self, cap: std::time::Duration) -> RequestScope {
+    pub fn blob_phase(&self, cap: std::time::Duration) -> RequestScope {
         self.request_scope(self.runtime.limits().wall_time)
             .phase(cap)
     }
-    pub(crate) fn blob_action_limit(&self) -> std::time::Duration {
+    pub fn blob_action_limit(&self) -> std::time::Duration {
         self.runtime.limits().wall_time
     }
 }
 
-pub(crate) struct Download {
-    pub(crate) opened: crate::blob_store::OpenedObject,
-    pub(crate) permit: Arc<tokio::sync::OwnedSemaphorePermit>,
-    pub(crate) key: ObjectKey,
-    pub(crate) generation: crate::blob_state::Generation,
-    pub(crate) bytes: u64,
-    pub(crate) filename: crate::blob_transport::AttachmentName,
-    pub(crate) cancelled: Arc<AtomicBool>,
-    pub(crate) deadline: Instant,
+pub struct Download {
+    pub opened: crate::blob_store::OpenedObject,
+    pub permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+    pub key: ObjectKey,
+    pub generation: crate::blob_state::Generation,
+    pub bytes: u64,
+    pub filename: crate::blob_transport::AttachmentName,
+    pub cancelled: Arc<AtomicBool>,
+    pub deadline: Instant,
 }
 impl Application {
     pub(super) fn download_links(
@@ -574,11 +574,7 @@ impl Application {
             })
             .collect()
     }
-    pub(crate) async fn open_download(
-        &self,
-        cookie: Option<&str>,
-        ticket: &str,
-    ) -> Result<Download> {
+    pub async fn open_download(&self, cookie: Option<&str>, ticket: &str) -> Result<Download> {
         let blobs = self.blobs.as_ref().context("blobs unavailable")?;
         ensure!(blobs.ready.load(Ordering::Acquire), "blobs unavailable");
         let permit = Arc::new(
@@ -766,15 +762,12 @@ impl Application {
     }
 }
 
-#[cfg(test)]
-mod tests;
-
-pub(crate) struct ReservationLease {
+pub struct ReservationLease {
     witness: IoWitness,
     armed: bool,
 }
 impl ReservationLease {
-    pub(crate) fn dispatched(mut self) {
+    pub fn dispatched(mut self) {
         self.armed = false;
     }
 }
@@ -832,7 +825,7 @@ impl Inventory {
 impl Application {
     /// One bounded maintenance page. Unknown objects are charged and retained;
     /// only authoritative known metadata can produce a fenced deletion claim.
-    pub(crate) async fn reconcile_blobs(&self, deadline: Instant) -> Result<()> {
+    pub async fn reconcile_blobs(&self, deadline: Instant) -> Result<()> {
         use crate::blob_inspect::{FindingKind, InspectionPage, SnapshotItem};
         let Some(blobs) = &self.blobs else {
             return Ok(());
@@ -1075,7 +1068,7 @@ impl Application {
                             };
                             Self::blob_commit(&mut tx).await?;
                             ensure!(tx.commit_acknowledged(), "blob deletion claim unconfirmed");
-                            #[cfg(test)]
+                            #[cfg(any(test, feature = "test-support"))]
                             {
                                 let barrier = { blobs.gc_after_commit.lock().unwrap().clone() };
                                 if let Some(barrier) = barrier {

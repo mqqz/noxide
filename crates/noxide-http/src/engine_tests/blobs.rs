@@ -1,8 +1,16 @@
-use super::*;
+use super::prelude::*;
+use crate::auth::AccountAdmin as _;
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
+use noxide_authority::authority;
+use noxide_blobs::metadata::MetadataContext;
+use noxide_blobs::store as blob_store;
+use noxide_blobs::store::{IoGuard, ObjectKey};
+use noxide_blobs::upload::Barrier;
+use noxide_host::application::blobs::*;
+use tokio::time::Instant;
 use tower::ServiceExt;
 fn declarations() -> Manifest {
     let mut m = crate::test_support::manifest();
@@ -233,9 +241,9 @@ async fn flow(db: Database) {
     let page = String::from_utf8(app.view(&session, 1, None).await.unwrap().body).unwrap();
     assert!(page.contains("enctype=\"multipart/form-data\""));
     assert!(page.find("name=\"body\"").unwrap() < page.find("type=\"file\"").unwrap());
-    let router = crate::http::router(
+    let router = crate::router(
         app.clone(),
-        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+        crate::Origin::parse("http://localhost:8080").unwrap(),
     );
     let content = b"<script>hostile bytes</script>";
     let response = router
@@ -322,7 +330,7 @@ async fn flow(db: Database) {
             .status(),
         StatusCode::NOT_FOUND
     );
-    app.request_lifecycle.drain().await.unwrap();
+    app.request_lifecycle().drain().await.unwrap();
     let mut tx = db
         .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
         .await
@@ -461,9 +469,9 @@ impl Case {
         );
         app.activate().await.unwrap();
         let session = login(&app, "alice").await;
-        let router = crate::http::router(
+        let router = crate::router(
             app.clone(),
-            crate::http::Origin::parse("http://localhost:8080").unwrap(),
+            crate::Origin::parse("http://localhost:8080").unwrap(),
         );
         Self {
             app,
@@ -477,7 +485,7 @@ impl Case {
         String::from_utf8(self.app.view(&self.session, 1, None).await.unwrap().body).unwrap()
     }
     async fn state(&self) -> (String, String, String, String, String) {
-        self.app.request_lifecycle.drain().await.unwrap();
+        self.app.request_lifecycle().drain().await.unwrap();
         let mut tx = self
             .db
             .begin((Instant::now() + std::time::Duration::from_secs(2)).into_std())
@@ -505,7 +513,7 @@ impl Case {
         )
     }
     async fn maintenance(&self) {
-        self.app.request_lifecycle.drain().await.unwrap();
+        self.app.request_lifecycle().drain().await.unwrap();
         self.app
             .reconcile_blobs(Instant::now() + std::time::Duration::from_secs(2))
             .await
@@ -761,7 +769,7 @@ async fn sqlite_quota_race_reserves_before_bytes_and_reclaims_unstarted_upload()
     );
     assert!(
         store
-            .scan(crate::blob_store::ObjectLocation::Partial)
+            .scan(blob_store::ObjectLocation::Partial)
             .unwrap()
             .next_batch(&guard)
             .unwrap()
@@ -974,8 +982,8 @@ async fn restart_after_finalize(db: Option<Database>, finalized: bool) {
         drop(pending);
     }
     drop(lease);
-    case.app.request_lifecycle.drain().await.unwrap();
-    let keys = serde_json::from_slice(&serde_json::to_vec(&*case.app.keys).unwrap()).unwrap();
+    case.app.request_lifecycle().drain().await.unwrap();
+    let keys = serde_json::from_slice(&serde_json::to_vec(case.app.test_keys()).unwrap()).unwrap();
     let Case {
         app,
         db,
@@ -1174,9 +1182,9 @@ async fn anonymous_handover(absent: bool) {
         .unwrap();
     let anonymous = page.anonymous_cookie.unwrap();
     let page = String::from_utf8(page.body).unwrap();
-    let router = crate::http::router(
+    let router = crate::router(
         app.clone(),
-        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+        crate::Origin::parse("http://localhost:8080").unwrap(),
     );
     let mut request = post(
         "",
@@ -1219,7 +1227,7 @@ async fn anonymous_handover(absent: bool) {
         to_bytes(response.into_body(), 65536).await.unwrap(),
         handover.as_bytes()
     );
-    app.request_lifecycle.drain().await.unwrap();
+    app.request_lifecycle().drain().await.unwrap();
     let mut tx = db
         .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
         .await
@@ -1273,12 +1281,12 @@ async fn native_http(db: Option<Database>) {
     }
     let case = Case::new(db, declarations()).await;
     let socket = case._temp.path().join("http.sock");
-    let listener = crate::http::Listener::unix(&socket).unwrap();
+    let listener = crate::Listener::unix(&socket).unwrap();
     let (stop, stopped) = tokio::sync::oneshot::channel();
-    let serving = tokio::spawn(crate::http::serve(
+    let serving = tokio::spawn(crate::serve(
         listener,
         case.app.clone(),
-        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+        crate::Origin::parse("http://localhost:8080").unwrap(),
         async {
             let _ = stopped.await;
         },
@@ -1384,11 +1392,9 @@ async fn sqlite_download_slot_and_no_poll_watchdog_hold_until_actual_native_stop
             .header("Cookie", format!("session={}", case.session))
             .body(Body::empty())
             .unwrap();
-        request
-            .extensions_mut()
-            .insert(crate::http::TransportDeadline(
-                Instant::now() + std::time::Duration::from_secs(60),
-            ));
+        request.extensions_mut().insert(crate::TransportDeadline(
+            Instant::now() + std::time::Duration::from_secs(60),
+        ));
         request
     };
     let response = case.router.clone().oneshot(request()).await.unwrap();
@@ -1403,7 +1409,7 @@ async fn sqlite_download_slot_and_no_poll_watchdog_hold_until_actual_native_stop
         StatusCode::NOT_FOUND,
         "a completed native read still occupies the unconsumed stream slot"
     );
-    case.app.request_lifecycle.drain().await.unwrap();
+    case.app.request_lifecycle().drain().await.unwrap();
     tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_secs(16)).await;
     tokio::time::resume();
@@ -1628,7 +1634,10 @@ async fn attachment_wins_gc(db: Option<Database>) {
         let owner = admission.owner;
         owner
             .run(async {
-                let mut tx = app.database.begin(owner.work_deadline().into_std()).await?;
+                let mut tx = app
+                    .test_database()
+                    .begin(owner.work_deadline().into_std())
+                    .await?;
                 let result = MetadataContext { tx: &mut tx }
                     .claim_collectable(
                         &row,
@@ -1701,7 +1710,7 @@ async fn sqlite_slow_prefix_and_file_enforce_original_root_and_idle_deadlines() 
         } else {
             axum::body::Bytes::from_static(b"--test-boundary\r\n")
         };
-        parts.extensions.insert(crate::http::TransportDeadline(
+        parts.extensions.insert(crate::TransportDeadline(
             Instant::now() + std::time::Duration::from_secs(60),
         ));
         let (waiting, entered) = tokio::sync::oneshot::channel();
@@ -1715,7 +1724,7 @@ async fn sqlite_slow_prefix_and_file_enforce_original_root_and_idle_deadlines() 
         let router = case.router.clone();
         let task = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
         entered.await.unwrap();
-        case.app.request_lifecycle.drain().await.unwrap();
+        case.app.request_lifecycle().drain().await.unwrap();
         tokio::time::pause();
         tokio::time::advance(std::time::Duration::from_secs(3)).await;
         tokio::task::yield_now().await;
@@ -1899,7 +1908,7 @@ async fn sqlite_download_instruction_requires_successful_read_and_exact_projecti
 
 async fn lifecycle_clock_safety(db: Option<Database>) {
     let case = Case::new(db, declarations()).await;
-    assert!(crate::authority::uses_time(&case.app.manifest));
+    assert!(authority::uses_time(&case.app.manifest));
     let mut tx = case
         .db
         .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
@@ -1911,7 +1920,7 @@ async fn lifecycle_clock_safety(db: Option<Database>) {
     tx.commit().await.unwrap();
     // The existing startup tick sees a lower wall sample and preserves the
     // durable watermark, including its subsecond precision.
-    case.app.request_lifecycle.drain().await.unwrap();
+    case.app.request_lifecycle().drain().await.unwrap();
     case.app.activate().await.unwrap();
     let original = case.page().await;
     let response = case
@@ -1993,7 +2002,7 @@ async fn lifecycle_clock_safety(db: Option<Database>) {
     assert_eq!(tx.fetch::<3>("SELECT CAST(observed AS TEXT),CAST(lifecycle_ms AS TEXT),CAST(lifecycle_version AS TEXT) FROM nx_clock",&[]).await.unwrap(),before,"GET and download must not write clock state");
     tx.commit().await.unwrap();
     let fresh = case.page().await;
-    case.app.request_lifecycle.drain().await.unwrap();
+    case.app.request_lifecycle().drain().await.unwrap();
     // This expires the existing freshness lease; it does not order a race.
     tokio::time::sleep(
         crate::lifecycle_clock::FRESHNESS_LIMIT + std::time::Duration::from_millis(50),

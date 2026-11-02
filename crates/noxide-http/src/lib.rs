@@ -1,9 +1,45 @@
+pub(crate) use noxide_admission::{Presentation, manifest, routing};
+#[cfg(test)]
+pub(crate) use noxide_admission::{assets, policy, query_plan, schema};
+#[cfg(test)]
+pub(crate) use noxide_authority::auth;
+pub(crate) use noxide_authority::auth::{Registration, account_id};
+pub(crate) use noxide_authority::{limiter, security};
+pub(crate) use noxide_blobs::{
+    io as blob_io, multipart as blob_multipart, transport as blob_transport,
+};
+pub(crate) use noxide_host::application;
+#[cfg(test)]
+pub(crate) use noxide_host::{
+    BlobDeployment, DeploymentResources, HostKeys, deployment, repository, runtime, test_account,
+};
+pub(crate) use noxide_render as render;
+#[cfg(test)]
+pub(crate) use noxide_store::Database;
+pub(crate) use noxide_store::database;
+#[cfg(test)]
+pub(crate) use noxide_store::lifecycle_clock;
+#[cfg(test)]
+use noxide_test_support as test_support;
+#[cfg(test)]
+mod action_meter_tests;
+#[cfg(test)]
+mod anonymous_tests;
+#[cfg(test)]
+mod auth_tests;
+#[cfg(test)]
+mod engine_tests;
+#[cfg(test)]
+mod parameter_tests;
+#[cfg(test)]
+mod public_tests;
+#[cfg(test)]
+mod registration_tests;
 #[cfg(test)]
 use crate::auth::AccountAdmin as _;
 mod blobs;
 mod transport;
 use crate::{
-    Application, RequestError,
     limiter::{
         HEADER_READ_TIMEOUT, MAX_CONNECTIONS, MAX_CONNECTIONS_PER_CIRCUIT, PROXY_LINE_MAX,
         PROXY_LINE_TIMEOUT,
@@ -18,6 +54,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::Router,
 };
+pub(crate) use noxide_host::{Application, RequestError};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
@@ -988,9 +1025,9 @@ mod tests {
         let page = String::from_utf8(app.view(&session, 1, None).await.unwrap().body).unwrap();
         let token = fixture::hidden(&page, "_submission");
         let csrf = fixture::hidden(&page, "_csrf");
-        let router = crate::http::router(
+        let router = crate::router(
             app.clone(),
-            crate::http::Origin::parse("http://localhost:8080").unwrap(),
+            crate::Origin::parse("http://localhost:8080").unwrap(),
         );
         let request = |body| {
             Request::builder()
@@ -1325,14 +1362,77 @@ mod cursor_recovery_tests {
 #[cfg(test)]
 mod parent_redirect_disconnect_tests {
     use super::*;
-    use crate::{Database, parent_tests, test_support as fixture};
+
+    use crate::{Database, HostKeys, manifest, runtime::Limits, test_support as fixture};
+    use noxide_protocol::*;
+    use std::time::Instant;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn seed(db: &Database, m: &Manifest) {
+        if m.operations.iter().any(|op| !op.filter.is_empty()) {
+            db.reconcile_query_indexes(m).await.unwrap();
+        }
+        let mut tx = db
+            .begin(Instant::now() + Duration::from_secs(5))
+            .await
+            .unwrap();
+        tx.bind_schema(m).await.unwrap();
+        let parent = tx.storage_resource(m, 2).await.unwrap();
+        for id in [10i64, 20] {
+            tx.allocate_creation().await.unwrap();
+            tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,NULL,'',$3,'parent',1,(SELECT value FROM nx_creation_counter WHERE singleton=1))", &[parent.into(),id.into(),r#"{"published":"true","locked":"false"}"#.into()]).await.unwrap();
+        }
+        let child = tx.storage_resource(m, 1).await.unwrap();
+        for id in 1i64..=12 {
+            let fields = Fields::from([
+                ("body".into(), format!("reply {id}")),
+                ("published".into(), "true".into()),
+                (
+                    "thread".into(),
+                    if id % 2 == 0 { "10" } else { "20" }.into(),
+                ),
+            ]);
+            tx.allocate_creation().await.unwrap();
+            tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version,created_seq) VALUES($1,$2,NULL,'',$3,'child',1,1,(SELECT value FROM nx_creation_counter WHERE singleton=1))", &[child.into(),id.into(),serde_json::to_string(&fields).unwrap().into()]).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+    }
+    async fn redirect_app(db: Database) -> (Application, Manifest) {
+        db.initialize().await.unwrap();
+        let mut m = fixture::parent_declarations();
+        m.web_bindings[0].redirect = Redirect {
+            route: 3,
+            source: RedirectSource::Reference {
+                step: 0,
+                field: "thread".into(),
+            },
+        };
+        manifest::validate(&m).unwrap();
+        let app = Application::new(
+            &fixture::component(None),
+            &serde_json::to_vec(&m).unwrap(),
+            manifest::digest(&m).unwrap(),
+            db.clone(),
+            HostKeys::generate().unwrap(),
+            Limits::default(),
+            noxide_host::DeploymentResources {
+                effects: None,
+                jobs: None,
+                assets: noxide_admission::assets::AssetBundle::default(),
+                blobs: None,
+            },
+        )
+        .unwrap();
+        app.activate().await.unwrap();
+        seed(&db, &m).await;
+        (app, m)
+    }
 
     #[tokio::test]
     async fn committed_anonymous_create_recovers_original_secret_after_disconnect() {
         let temp = tempfile::tempdir().unwrap();
         let db = Database::sqlite(temp.path().join("disconnect.db"));
-        let (app, m) = parent_tests::redirect_app(db.clone()).await;
+        let (app, m) = redirect_app(db.clone()).await;
         let app = Arc::new(app);
         let listener = Listener::loopback("127.0.0.1:0".parse().unwrap())
             .await
@@ -1403,7 +1503,7 @@ mod parent_redirect_disconnect_tests {
         let receipt: serde_json::Value = serde_json::from_str(&row[0][0]).unwrap();
         let outcome: serde_json::Value = receipt["handover"].clone();
         let original = app
-            .keys
+            .test_keys()
             .edit_secret(
                 outcome["key_id"].as_u64().unwrap() as u32,
                 storage as u32,

@@ -75,7 +75,7 @@ async fn post(
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Cookie", format!("login={challenge}"));
     if circuit {
-        request = request.extension(crate::http::Peer::Circuit(123));
+        request = request.extension(crate::Peer::Circuit(123));
     }
     router
         .oneshot(request.body(Body::from(form.finish())).unwrap())
@@ -86,9 +86,9 @@ async fn invitation_contract(db: Database) {
     let app = app(db.clone(), Registration::Invite).await;
     db.initialize().await.unwrap(); // Reopening invokes check_layout on the fresh schema.
     let before = snapshot(&db).await;
-    let router = crate::http::router(
+    let router = crate::router(
         app.clone(),
-        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+        crate::Origin::parse("http://localhost:8080").unwrap(),
     );
     let page = router
         .oneshot(
@@ -182,9 +182,9 @@ async fn invitation_contract(db: Database) {
         winner
     );
     tx.commit().await.unwrap();
-    let router = crate::http::router(
+    let router = crate::router(
         app.clone(),
-        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+        crate::Origin::parse("http://localhost:8080").unwrap(),
     );
     let mut failure = None;
     for (user, password, invite) in [
@@ -282,7 +282,7 @@ async fn closed_registration_has_no_page_cookie_lookup_or_hashing() {
         .await
         .unwrap();
     let (_, signed) = app
-        .keys
+        .test_keys()
         .issue(
             security::TokenKind::Session,
             "nobody",
@@ -290,9 +290,9 @@ async fn closed_registration_has_no_page_cookie_lookup_or_hashing() {
             3600,
         )
         .unwrap();
-    let router = crate::http::router(
+    let router = crate::router(
         app.clone(),
-        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+        crate::Origin::parse("http://localhost:8080").unwrap(),
     );
     for method in ["GET", "POST"] {
         let response = router
@@ -320,9 +320,9 @@ async fn open_registration_uses_host_forms_csrf_and_all_password_hash_bounds() {
     let temp = tempfile::tempdir().unwrap();
     let db = Database::sqlite(temp.path().join("open.db"));
     let app = app(db.clone(), Registration::Open).await;
-    let router = crate::http::router(
+    let router = crate::router(
         app.clone(),
-        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+        crate::Origin::parse("http://localhost:8080").unwrap(),
     );
     let page = router
         .clone()
@@ -566,7 +566,11 @@ async fn clock_recovery_invites_contract(db: Database) {
     assert_eq!(tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM nx_invites WHERE redeemed_at IS NULL AND expires>$1", &[(now + 7200).into()]).await.unwrap()[0][0], "0");
     tx.commit().await.unwrap();
     let before = snapshot(&db).await;
-    assert!(db.recover_clock(old.keys.incarnation()).await.is_err());
+    assert!(
+        db.recover_clock(old.test_keys().incarnation())
+            .await
+            .is_err()
+    );
     assert_eq!(snapshot(&db).await, before);
     let keys = HostKeys::generate().unwrap();
     db.recover_clock(keys.incarnation()).await.unwrap();

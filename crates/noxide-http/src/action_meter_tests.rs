@@ -104,9 +104,9 @@ async fn action_exhaustion(database: Database) {
     )
     .await;
     let shared = Arc::new(app);
-    let router = crate::http::router(
+    let router = crate::router(
         shared.clone(),
-        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+        crate::Origin::parse("http://localhost:8080").unwrap(),
     );
     let request = axum::http::Request::builder()
         .method("GET")

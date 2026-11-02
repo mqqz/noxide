@@ -171,10 +171,7 @@ async fn public_assets_are_exact_no_store_typed_and_bounded_until_body_drop() {
         )
         .unwrap(),
     );
-    let router = noxide_host::http::router(
-        app,
-        noxide_host::http::Origin::parse("http://localhost").unwrap(),
-    );
+    let router = noxide_http::router(app, noxide_http::Origin::parse("http://localhost").unwrap());
     let request = |path: &str| {
         axum::http::Request::builder()
             .uri(path)

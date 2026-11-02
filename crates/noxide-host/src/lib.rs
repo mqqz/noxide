@@ -48,28 +48,18 @@ pub use noxide_store::{Database, StoreResources};
 pub(crate) use noxide_store::{database, lifecycle_clock};
 pub use operator_roles::{RoleAdmin, RoleAssignment, RoleScope};
 pub use security::HostKeys;
-mod application;
+pub mod application;
 pub use application::{
     ActionRejection, Application, JobRunOutcome, LoginChallenge, RequestError,
     ValidatedActionRejection,
 };
-pub(crate) use noxide_repository::repository;
-pub mod http;
+pub use noxide_repository::repository;
 
 #[cfg(test)]
 mod failure_tests;
 
 #[cfg(test)]
-mod public_tests;
-
-#[cfg(test)]
 mod query_receipt_tests;
-
-#[cfg(test)]
-mod anonymous_tests;
-
-#[cfg(test)]
-mod registration_tests;
 
 #[cfg(test)]
 mod parent_tests;
@@ -77,12 +67,9 @@ mod parent_tests;
 #[cfg(test)]
 mod account_tests;
 
-#[cfg(test)]
-async fn test_account(db: &Database, login: &str) -> String {
+#[cfg(any(test, feature = "test-support"))]
+pub async fn test_account(db: &Database, login: &str) -> String {
     db.account_id(login)
         .await
         .unwrap_or_else(|_| "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into())
 }
-
-#[cfg(test)]
-mod parameter_tests;

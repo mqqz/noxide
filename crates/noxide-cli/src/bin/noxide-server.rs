@@ -7,12 +7,8 @@
 mod config;
 use anyhow::{Context, Result, ensure};
 use config::*;
-use noxide_host::{
-    Application, HostKeys,
-    assets::AssetBundle,
-    http::{self, BoundListener, Origin},
-    runtime::Limits,
-};
+use noxide_host::{Application, HostKeys, assets::AssetBundle, runtime::Limits};
+use noxide_http::{BoundListener, Origin};
 use std::{path::PathBuf, sync::Arc};
 
 struct Arguments {
@@ -122,12 +118,12 @@ fn main() -> Result<()> {
         ListenConfig::Tcp(address) => BoundListener::loopback(*address)?,
         ListenConfig::Unix(path) => {
             let path = base.join(path);
-            http::reclaim_stale_socket(&path)?;
+            noxide_http::reclaim_stale_socket(&path)?;
             BoundListener::unix(&path)?
         }
         ListenConfig::TorUnix { path, tor_gid } => {
             let path = base.join(path);
-            http::reclaim_stale_socket(&path)?;
+            noxide_http::reclaim_stale_socket(&path)?;
             BoundListener::tor_unix(&path, *tor_gid)?
         }
     };
@@ -149,6 +145,6 @@ fn main() -> Result<()> {
         let _sidecars = store.hold_sidecars().await?;
         let shutdown = shutdown_signal()?;
         println!("Runtime listening with the approved application contract.");
-        http::serve(listener.start()?, app, origin, shutdown).await
+        noxide_http::serve(listener.start()?, app, origin, shutdown).await
     })
 }

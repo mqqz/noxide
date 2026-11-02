@@ -776,80 +776,6 @@ async fn read_only_clock_and_schema(db: Database) {
     tx.rollback().await.unwrap();
 }
 
-async fn concurrent_gets_write_nothing(db: Database) {
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
-    };
-    use tower::ServiceExt;
-    let app = app(db.clone(), fixture::manifest()).await;
-    let challenge = app.login_challenge().await.unwrap();
-    let session = app
-        .login(
-            &challenge.cookie,
-            &challenge.csrf,
-            "alice",
-            "review test password",
-        )
-        .await
-        .unwrap();
-    let page = app.view(&session, 1, None).await.unwrap();
-    let html = std::str::from_utf8(&page.body).unwrap();
-    // Populate both records and receipts so the dump checks meaningful rows.
-    app.submit(
-        &session,
-        1,
-        &fixture::hidden(html, "_submission"),
-        &fixture::hidden(html, "_csrf"),
-        Fields::from([("body".into(), "read-only fixture".into())]),
-    )
-    .await
-    .unwrap();
-    let before = storage_snapshot(&db).await;
-    let router = crate::http::router(
-        app,
-        crate::http::Origin::parse("http://localhost:8080").unwrap(),
-    );
-    let mut reads = tokio::task::JoinSet::new();
-    for path in ["/login", "/"] {
-        for _ in 0..2 {
-            let router = router.clone();
-            let session = session.clone();
-            reads.spawn(async move {
-                // Keep four clients active while rendering all 400 GETs. A
-                // 400-client retry storm can starve cold PostgreSQL connections
-                // on small runners. Overload rejection has dedicated admission
-                // tests; this test checks that successful concurrent reads never
-                // change storage.
-                tokio::time::timeout(Duration::from_secs(60), async {
-                    for _ in 0..100 {
-                        loop {
-                            let request = Request::builder()
-                                .uri(path)
-                                .header("Host", "localhost:8080")
-                                .header("Cookie", format!("session={session}"))
-                                .body(Body::empty())
-                                .unwrap();
-                            let response = router.clone().oneshot(request).await.unwrap();
-                            if response.status() != StatusCode::SERVICE_UNAVAILABLE {
-                                assert_eq!(response.status(), StatusCode::OK);
-                                break;
-                            }
-                            tokio::time::sleep(Duration::from_millis(25)).await;
-                        }
-                    }
-                })
-                .await
-                .unwrap();
-            });
-        }
-    }
-    while let Some(read) = reads.join_next().await {
-        read.unwrap();
-    }
-    assert_eq!(storage_snapshot(&db).await, before);
-}
-
 async fn checkpoint_and_external_writes(db: Database) {
     use crate::security;
     let app = app(db.clone(), fixture::manifest()).await;
@@ -952,130 +878,9 @@ async fn sqlite_read_only_clock_and_schema() {
 }
 
 #[tokio::test]
-async fn sqlite_concurrent_gets_write_nothing() {
-    let temp = tempfile::tempdir().unwrap();
-    concurrent_gets_write_nothing(Database::sqlite(temp.path().join("gets.db"))).await;
-}
-
-#[tokio::test]
 async fn sqlite_checkpoint_and_external_writes() {
     let temp = tempfile::tempdir().unwrap();
     checkpoint_and_external_writes(Database::sqlite(temp.path().join("checkpoint.db"))).await;
-}
-
-#[tokio::test]
-#[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable cluster"]
-async fn postgres_read_paths_and_checkpoints() {
-    use sqlx::Connection;
-    let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
-    let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
-    for case in ["schema", "gets", "checkpoint", "timer"] {
-        let name = format!(
-            "nx_read_{case}_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        sqlx::query(&format!("CREATE DATABASE {name}"))
-            .execute(&mut admin)
-            .await
-            .unwrap();
-        let mut url = url::Url::parse(&url).unwrap();
-        url.set_path(&format!("/{name}"));
-        let db = Database::postgres(url.as_str()).unwrap();
-        match case {
-            "schema" => read_only_clock_and_schema(db).await,
-            "gets" => concurrent_gets_write_nothing(db).await,
-            "checkpoint" => checkpoint_and_external_writes(db).await,
-            _ => server_checkpoints_read_advances(db).await,
-        }
-        sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
-            .execute(&mut admin)
-            .await
-            .unwrap();
-    }
-}
-
-async fn server_checkpoints_read_advances(db: Database) {
-    use crate::{
-        http::{Listener, Origin},
-        security,
-    };
-    let app = app(db.clone(), fixture::manifest()).await;
-    let before = security::now().unwrap();
-    // Advance only through a read, without changing the durable row.
-    while security::now().unwrap() == before {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    let snapshot = storage_snapshot(&db).await;
-    let challenge = app.login_challenge().await.unwrap();
-    let effective = app
-        .keys
-        .verify(&challenge.cookie, security::now().unwrap())
-        .unwrap()
-        .issued;
-    assert!(effective > before);
-    assert_eq!(storage_snapshot(&db).await, snapshot);
-    let listener = Listener::loopback("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
-    let (stop, shutdown) = tokio::sync::oneshot::channel();
-    let server_app = app.clone();
-    let server = tokio::spawn(async move {
-        crate::http::serve(
-            listener,
-            server_app,
-            Origin::parse("http://localhost:8080").unwrap(),
-            async {
-                let _ = shutdown.await;
-            },
-        )
-        .await
-        .unwrap();
-    });
-    // Exercise the production one-second timer without changing dependencies or
-    // introducing a configurable checkpoint interval solely for tests.
-    tokio::time::timeout(
-        crate::lifecycle_clock::TICK_INTERVAL + Duration::from_secs(5),
-        async {
-            loop {
-                let mut tx = db
-                    .begin_read(Instant::now() + Duration::from_secs(2))
-                    .await
-                    .unwrap();
-                let rows = tx
-                    .fetch::<1>(
-                        "SELECT CAST(observed AS TEXT) FROM nx_clock WHERE singleton=1",
-                        &[],
-                    )
-                    .await
-                    .unwrap();
-                tx.commit().await.unwrap();
-                if rows[0][0].parse::<i64>().unwrap() >= effective {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        },
-    )
-    .await
-    .unwrap();
-    stop.send(()).unwrap();
-    server.await.unwrap();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while Arc::strong_count(&app) != 1 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn sqlite_server_checkpoints_read_advances() {
-    let temp = tempfile::tempdir().unwrap();
-    server_checkpoints_read_advances(Database::sqlite(temp.path().join("server-clock.db"))).await;
 }
 
 #[tokio::test]
@@ -1136,4 +941,36 @@ async fn postgres_schema_lock_contention_is_busy_on_read_requests() {
         .execute(&mut admin)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires NOXIDE_TEST_POSTGRES with CREATE DATABASE on a disposable cluster"]
+async fn postgres_read_paths_and_checkpoints() {
+    use sqlx::Connection;
+    let url = std::env::var("NOXIDE_TEST_POSTGRES").unwrap();
+    let mut admin = sqlx::PgConnection::connect(&url).await.unwrap();
+    for case in ["schema", "checkpoint"] {
+        let name = format!(
+            "nx_read_{case}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sqlx::query(&format!("CREATE DATABASE {name}"))
+            .execute(&mut admin)
+            .await
+            .unwrap();
+        let mut url = url::Url::parse(&url).unwrap();
+        url.set_path(&format!("/{name}"));
+        let db = Database::postgres(url.as_str()).unwrap();
+        match case {
+            "schema" => read_only_clock_and_schema(db).await,
+            _ => checkpoint_and_external_writes(db).await,
+        }
+        sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+            .execute(&mut admin)
+            .await
+            .unwrap();
+    }
 }

@@ -11,7 +11,7 @@ impl Application {
             .ok_or_else(|| anyhow::anyhow!(RequestError::InvalidRequest))
     }
 
-    pub(crate) async fn capability_page(
+    pub async fn capability_page(
         &self,
         resource: u32,
         id: u64,
@@ -151,7 +151,7 @@ impl Application {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn rotate_capability(
+    pub async fn rotate_capability(
         &self,
         resource: u32,
         id: u64,

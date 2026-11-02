@@ -2,13 +2,13 @@
 use crate::auth::AccountAdmin as _;
 mod action;
 mod authority;
-pub(crate) mod blobs;
+pub mod blobs;
 use crate::database::lifecycle::{AdmissionOwner, Registry, RequestScope};
 pub(crate) use action::ActionCore;
 pub use action::{ActionRejection, ValidatedActionRejection};
 use action::{CanonicalActionInput, ExecutionBudget};
 mod capabilities;
-mod clock;
+pub mod clock;
 mod effect_worker;
 mod effects;
 mod jobs;
@@ -16,7 +16,7 @@ mod navigation;
 mod submission;
 pub use jobs::JobRunOutcome;
 mod job_selection;
-mod job_worker;
+pub mod job_worker;
 use crate::{
     Database, HostKeys, auth,
     database::{Transaction, retryable},
@@ -257,12 +257,12 @@ pub(crate) fn authentication_error(error: auth::AuthError) -> RequestError {
 }
 
 pub struct Application {
-    pub(crate) presentation: crate::Presentation,
-    pub(crate) assets: Arc<crate::assets::AssetBundle>,
-    pub(crate) blobs: Option<blobs::BlobRuntime>,
-    pub(crate) asset_responses: Arc<tokio::sync::Semaphore>,
-    pub(crate) registration: auth::Registration,
-    pub(crate) manifest: Arc<Manifest>,
+    pub presentation: crate::Presentation,
+    pub assets: Arc<crate::assets::AssetBundle>,
+    pub blobs: Option<blobs::BlobRuntime>,
+    pub asset_responses: Arc<tokio::sync::Semaphore>,
+    pub registration: auth::Registration,
+    pub manifest: Arc<Manifest>,
     pub(crate) plans: BTreeMap<u32, Arc<crate::query_plan::ListPlan>>,
     pub(crate) keys: Arc<HostKeys>,
     database: Database,
@@ -277,11 +277,11 @@ pub struct Application {
     lifecycle_clock: crate::lifecycle_clock::Freshness,
     maintenance: Arc<tokio::sync::Semaphore>,
     maintenance_running: std::sync::atomic::AtomicBool,
-    pub(crate) admission_limits: AdmissionLimits,
+    pub admission_limits: AdmissionLimits,
     pub(crate) request_lifecycle: Arc<Registry>,
     database_statement_limit: u16,
-    #[cfg(test)]
-    pub(crate) postcommit_barrier:
+    #[cfg(any(test, feature = "test-support"))]
+    pub postcommit_barrier:
         std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     restore_fork: bool,
 }
@@ -302,7 +302,33 @@ pub struct LoginChallenge {
 }
 
 impl Application {
-    pub(crate) fn request_lifecycle(&self) -> Arc<Registry> {
+    #[cfg(feature = "test-support")]
+    pub fn test_database(&self) -> &Database {
+        &self.database
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn test_clock(&self) -> &AtomicI64 {
+        &self.clock
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn test_maintenance(&self) -> &Arc<tokio::sync::Semaphore> {
+        &self.maintenance
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn test_maintenance_running(&self) -> &std::sync::atomic::AtomicBool {
+        &self.maintenance_running
+    }
+
+    /// Key access for tests of signed values; a deployed binary has no such route.
+    #[cfg(feature = "test-support")]
+    pub fn test_keys(&self) -> &Arc<HostKeys> {
+        &self.keys
+    }
+
+    pub fn request_lifecycle(&self) -> Arc<Registry> {
         self.request_lifecycle.clone()
     }
     fn request_scope(&self, cap: std::time::Duration) -> RequestScope {
@@ -321,7 +347,7 @@ impl Application {
     ) -> AdmissionOwner {
         AdmissionOwner::new(self.request_scope(cap), request, database, anonymous)
     }
-    pub(crate) fn http_request_scope(
+    pub fn http_request_scope(
         &self,
         class: crate::limiter::RequestClass,
         path: &str,
@@ -373,7 +399,7 @@ impl Application {
         self.registration = registration;
         self
     }
-    pub(crate) async fn register(
+    pub async fn register(
         &self,
         challenge: &str,
         csrf: &str,
@@ -490,7 +516,7 @@ impl Application {
     }
     /// Authenticate host-owned account content through normal request admission.
     /// Scheduling preflight must never authorize a response.
-    pub(crate) async fn account_identity(
+    pub async fn account_identity(
         &self,
         cookie: &str,
     ) -> std::result::Result<String, RequestError> {
@@ -551,7 +577,7 @@ impl Application {
             .await
     }
 
-    pub(crate) async fn session_candidate(
+    pub async fn session_candidate(
         &self,
         cookie: &str,
     ) -> std::result::Result<Option<String>, RequestError> {
@@ -602,7 +628,7 @@ impl Application {
             })
             .await
     }
-    pub(crate) fn session_envelope(&self, cookie: &str) -> bool {
+    pub fn session_envelope(&self, cookie: &str) -> bool {
         security::now()
             .ok()
             .and_then(|now| {
@@ -739,7 +765,7 @@ impl Application {
             request_lifecycle: Arc::new(Registry::default()),
             database_statement_limit: 256,
             restore_fork: false,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             postcommit_barrier: std::sync::Mutex::new(None),
         })
     }
@@ -1410,7 +1436,7 @@ impl Application {
         self.view_page_anonymous(cookie, None, route, target, cursor)
             .await
     }
-    pub(crate) async fn view_page_anonymous(
+    pub async fn view_page_anonymous(
         &self,
         cookie: Option<&str>,
         anonymous_cookie: Option<&str>,
@@ -1429,7 +1455,7 @@ impl Application {
         .await
     }
 
-    pub(crate) async fn view_page_parameters(
+    pub async fn view_page_parameters(
         &self,
         cookie: Option<&str>,
         anonymous_cookie: Option<&str>,
@@ -1645,105 +1671,6 @@ mod clock_tests {
     use super::*;
     use crate::test_support as fixture;
     use std::time::Duration;
-
-    #[tokio::test]
-    async fn account_endpoint_obeys_persisted_clock_after_memory_reset() {
-        use axum::{
-            body::{Body, to_bytes},
-            http::{Request, StatusCode},
-        };
-        use tower::ServiceExt;
-        let temp = tempfile::tempdir().unwrap();
-        let db = Database::sqlite(temp.path().join("account-clock.db"));
-        db.initialize().await.unwrap();
-        let id = db
-            .create_account("alice", "clock regression password", "team")
-            .await
-            .unwrap();
-        let m = fixture::manifest();
-        let app = Arc::new(
-            Application::new(
-                &fixture::component(None),
-                &serde_json::to_vec(&m).unwrap(),
-                manifest::digest(&m).unwrap(),
-                db.clone(),
-                HostKeys::generate().unwrap(),
-                Limits::default(),
-                crate::DeploymentResources {
-                    effects: None,
-                    jobs: None,
-                    assets: crate::assets::AssetBundle::default(),
-                    blobs: None,
-                },
-            )
-            .unwrap(),
-        );
-        app.activate().await.unwrap();
-        let wall = security::now().unwrap();
-        let (valid, signed) = app.keys.issue(TokenKind::Session, &id, wall, 3600).unwrap();
-        let (expiring, short) = app
-            .keys
-            .issue(TokenKind::Session, &id, wall - 60, 75)
-            .unwrap();
-        let mut tx = db
-            .begin(std::time::Instant::now() + Duration::from_secs(5))
-            .await
-            .unwrap();
-        for token in [&valid, &expiring] {
-            tx.execute(
-                "INSERT INTO nx_sessions(id,principal,epoch,expires) VALUES($1,$2,1,$3)",
-                &[
-                    token.nonce.as_str().into(),
-                    id.as_str().into(),
-                    token.expires.into(),
-                ],
-            )
-            .await
-            .unwrap();
-        }
-        tx.commit().await.unwrap();
-        let router = crate::http::router(
-            app.clone(),
-            crate::http::Origin::parse("http://localhost:8080").unwrap(),
-        );
-        for (advance, cookie, accepted) in [
-            (0, &signed, true),
-            (30, &short, false),
-            (120, &signed, false),
-        ] {
-            let mut tx = db
-                .begin(std::time::Instant::now() + Duration::from_secs(5))
-                .await
-                .unwrap();
-            tx.execute(
-                "UPDATE nx_clock SET observed=$1 WHERE singleton=1",
-                &[(wall + advance).into()],
-            )
-            .await
-            .unwrap();
-            tx.commit().await.unwrap();
-            // A restarted process has no in-memory watermark to protect it.
-            app.clock.store(0, Ordering::Relaxed);
-            let response = router
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/account")
-                        .header("host", "localhost:8080")
-                        .header("cookie", format!("session={cookie}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status() == StatusCode::OK, accepted);
-            let body = to_bytes(response.into_body(), 65536).await.unwrap();
-            assert_eq!(
-                String::from_utf8(body.to_vec()).unwrap().contains(&id),
-                accepted
-            );
-        }
-    }
 
     async fn read_advance(app: &Application, now: i64) {
         let mut tx = app

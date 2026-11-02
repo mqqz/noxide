@@ -1,0 +1,47 @@
+[package]
+name = "noxide-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Noxide HTTP surface: routing, forms, cookies, headers and listeners over the application engine"
+
+[dependencies]
+noxide-protocol.workspace = true
+noxide-admission.workspace = true
+noxide-authority.workspace = true
+noxide-blobs.workspace = true
+noxide-host.workspace = true
+noxide-render.workspace = true
+noxide-store.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rustix.workspace = true
+tokio.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+url = "2"
+
+[dev-dependencies]
+noxide-host = { workspace = true, features = ["test-support"] }
+noxide-repository = { workspace = true, features = ["test-support"] }
+noxide-authority = { workspace = true, features = ["test-support"] }
+noxide-blobs = { workspace = true, features = ["test-support"] }
+noxide-store = { workspace = true, features = ["test-support"] }
+noxide-sql = { workspace = true, features = ["test-support"] }
+noxide-admission = { workspace = true, features = ["test-support"] }
+noxide-test-support.workspace = true
+noxide-assets.workspace = true
+noxide-asset-admission.workspace = true
+image.workspace = true
+sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+base64 = "0.22"
+sha2.workspace = true
+rand = "0.8"
+wat = "1"

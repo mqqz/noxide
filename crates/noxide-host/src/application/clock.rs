@@ -115,7 +115,7 @@ impl Application {
 
     /// Temporal callers retain this value for their complete transaction
     /// attempt. No wall sample or freshness renewal occurs on the request path.
-    pub(crate) async fn temporal_attempt(
+    pub async fn temporal_attempt(
         &self,
         tx: &mut Transaction,
     ) -> std::result::Result<AttemptTime, RequestError> {
@@ -140,7 +140,7 @@ impl Application {
             .map_err(|_| RequestError::Busy)
     }
 
-    pub(crate) fn start_clock_service(self: &Arc<Self>) -> Result<ClockService> {
+    pub fn start_clock_service(self: &Arc<Self>) -> Result<ClockService> {
         ensure!(
             self.generation.get().is_some(),
             "application is not activated"
@@ -200,13 +200,13 @@ impl Drop for ServiceOwner {
     }
 }
 
-pub(crate) struct ClockService {
+pub struct ClockService {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<Result<()>>>,
     freshness: crate::lifecycle_clock::Freshness,
 }
 impl ClockService {
-    pub(crate) async fn shutdown(mut self) -> Result<()> {
+    pub async fn shutdown(mut self) -> Result<()> {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }

@@ -120,14 +120,14 @@ jobs:
       - name: Fetch locked framework dependencies
         run: cargo fetch --locked
       - name: Test ordinary framework crates concurrently
-        run: cargo test --workspace --exclude noxide-host --locked --offline -- --include-ignored --test-threads=2 --skip interrupting_a_build_terminates_its_executor
+        run: cargo test --workspace --exclude noxide-host --exclude noxide-repository --exclude noxide-http --locked --offline -- --include-ignored --test-threads=2 --skip interrupting_a_build_terminates_its_executor
       - name: Test CLI executor shutdown in isolation
         run: cargo test -p noxide-cli --test build --locked --offline interrupting_a_build_terminates_its_executor -- --exact --test-threads=1
       - name: Test host and providers in isolation
         # Host tests mix production deadlines, database contention and stress.
         # Keep this boundary serial; concurrency tests create their own requests.
         run: >-
-          cargo test -p noxide-host --locked --offline --
+          cargo test -p noxide-host -p noxide-repository -p noxide-http --locked --offline --
           --include-ignored --test-threads=1
           --skip failure_tests::crash_worker
           --skip postgres_nojs_browser_flow

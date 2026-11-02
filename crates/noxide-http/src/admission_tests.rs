@@ -564,7 +564,7 @@ async fn expired_cookie_skips_session_lookup_and_pays_only_class_cost() {
     let (_temp, app) = application().await;
     let now = security::now().unwrap();
     let (_, expired) = app
-        .keys
+        .test_keys()
         .issue(TokenKind::Session, "alice", now - 100, 1)
         .unwrap();
     // A preflight lookup would time out; a verified request would also stall.
@@ -874,7 +874,7 @@ async fn identity_provider_checks(db: Database) {
     let session_share = fill(&app, &app.admission_limits.session_check.requests).await;
     let now = security::now().unwrap();
     let (_, expired) = app
-        .keys
+        .test_keys()
         .issue(TokenKind::Session, "alice", now - 100, 1)
         .unwrap();
     assert_eq!(

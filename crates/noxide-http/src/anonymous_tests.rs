@@ -92,65 +92,12 @@ fn declarations() -> Manifest {
     m.routes[1].forms = vec![2, 3];
     m
 }
-fn emit(bytes: &[u8]) -> String {
-    bytes
-        .chunks(8)
-        .map(|part| {
-            let mut word = [0; 8];
-            word[..part.len()].copy_from_slice(part);
-            format!(
-                "i64.const {} i32.const {} call $emit\n",
-                i64::from_le_bytes(word),
-                part.len()
-            )
-        })
-        .collect()
-}
-pub(crate) fn component() -> Vec<u8> {
-    component_with_redirect(false)
-}
-fn component_with_redirect(forged: bool) -> Vec<u8> {
-    let page1 = emit(br#"{"page":{"title":"Create","nodes":[{"form":{"action":1}}]}}"#);
-    let page2 =
-        emit(br#"{"page":{"title":"Edit","nodes":[{"form":{"action":2}},{"form":{"action":3}}]}}"#);
-    let kind = format!(r#"{{"version":{VERSION},"kind":{{"#).len() + 1;
-    let action = format!(r#"{{"version":{VERSION},"kind":{{"action":"#).len();
-    let route = format!(r#"{{"version":{VERSION},"kind":{{"route":"#).len();
-    let decision = if forged {
-        emit(br#"{"created":{"resource":1,"id":1,"destination":{"route":999,"target":null}}}"#)
-    } else {
-        emit(br#""execute""#)
-    };
-    wat::parse_str(format!(r#"(component
-      (import "noxide:application/host@0.1.0" (instance $h
-        (export "emit" (func (param "word" u64) (param "length" u32)))
-        (export "request-chunk" (func (param "offset" u32) (result u64)))
-        (export "invoke" (func (param "operation" u32) (param "target" u64) (result u32)))
-        (export "result-chunk" (func (param "offset" u32) (result u64)))))
-      (alias export $h "emit" (func $emit)) (core func $emit (canon lower (func $emit)))
-      (alias export $h "request-chunk" (func $request)) (core func $request (canon lower (func $request)))
-      (alias export $h "invoke" (func $invoke)) (core func $invoke (canon lower (func $invoke)))
-      (alias export $h "result-chunk" (func $result)) (core func $result (canon lower (func $result)))
-      (core module $m
-        (import "h" "emit" (func $emit (param i64 i32)))
-        (import "h" "request" (func $request (param i32) (result i64)))
-        (import "h" "invoke" (func $invoke (param i32 i64) (result i32)))
-        (import "h" "result" (func $result (param i32) (result i64)))
-        (func (export "handle") (local $op i32) (local $len i32) (local $i i32) (local $c i32)
-          i32.const {kind} call $request i32.wrap_i64 i32.const 255 i32.and i32.const 97 i32.eq
-          if
-            i32.const {action} call $request i32.wrap_i64 i32.const 255 i32.and i32.const 48 i32.sub i32.const 2 i32.add local.set $op
-            {decision}
-          else i32.const {route} call $request i32.wrap_i64 i32.const 255 i32.and i32.const 49 i32.eq if {page1} else {page2} end end))
-      (core instance $i (instantiate $m (with "h" (instance (export "emit" (func $emit)) (export "request" (func $request)) (export "invoke" (func $invoke)) (export "result" (func $result))))))
-      (func (export "handle") (canon lift (core func $i "handle"))))"#)).unwrap()
-}
 async fn app(db: Database) -> Arc<Application> {
     db.initialize().await.unwrap();
     let m = declarations();
     let app = Arc::new(
         Application::new(
-            &component(),
+            &fixture::anonymous_component(),
             &serde_json::to_vec(&m).unwrap(),
             manifest::digest(&m).unwrap(),
             db,
@@ -212,7 +159,7 @@ async fn lifecycle(db: Database) {
     ]);
     let before = rows(&db).await;
     let (_, other) = app
-        .keys
+        .test_keys()
         .issue(
             security::TokenKind::Anonymous,
             "",
@@ -246,11 +193,11 @@ async fn lifecycle(db: Database) {
         .unwrap();
     assert!(secret(&replay) == old);
     let mut rotated_keys: HostKeys =
-        serde_json::from_value(serde_json::to_value(&*app.keys).unwrap()).unwrap();
+        serde_json::from_value(serde_json::to_value(app.test_keys()).unwrap()).unwrap();
     rotated_keys.rotate_edit_key().unwrap();
     let m = declarations();
     let retained = Application::new(
-        &component(),
+        &fixture::anonymous_component(),
         &serde_json::to_vec(&m).unwrap(),
         manifest::digest(&m).unwrap(),
         db.clone(),
@@ -270,14 +217,14 @@ async fn lifecycle(db: Database) {
         .await
         .unwrap();
     assert!(secret(&replay) == old);
-    let mut removed = serde_json::to_value(&*retained.keys).unwrap();
+    let mut removed = serde_json::to_value(retained.test_keys()).unwrap();
     removed["edit_keys"]
         .as_array_mut()
         .unwrap()
         .retain(|key| key["signing"] == true);
     let removed: HostKeys = serde_json::from_value(removed).unwrap();
     let retired_key = Application::new(
-        &component(),
+        &fixture::anonymous_component(),
         &serde_json::to_vec(&m).unwrap(),
         manifest::digest(&m).unwrap(),
         db.clone(),
@@ -455,8 +402,13 @@ async fn capability_denial_reincarnation_and_missing_target_are_indistinguishabl
     tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version,created_seq) VALUES($1,42,NULL,'','{\"body\":\"original\",\"published\":\"true\",\"private\":\"hidden\"}','original',1,1,(SELECT value FROM nx_creation_counter WHERE singleton=1))", &[storage.into()]).await.unwrap();
     tx.commit().await.unwrap();
     let secret = app
-        .keys
-        .edit_secret(app.keys.signing_edit_key().unwrap(), storage as u32, 42, 1)
+        .test_keys()
+        .edit_secret(
+            app.test_keys().signing_edit_key().unwrap(),
+            storage as u32,
+            42,
+            1,
+        )
         .unwrap();
     let page = app.view_page(None, 2, Some(42), None).await.unwrap();
     let cookie = page.anonymous_cookie.clone().unwrap();
@@ -583,7 +535,7 @@ async fn public_create_rejects_guest_outcomes_and_requires_an_edit_signing_key()
     db.initialize().await.unwrap();
     let m = declarations();
     let app = Application::new(
-        &component_with_redirect(true),
+        &fixture::anonymous_component_with_redirect(true),
         &serde_json::to_vec(&m).unwrap(),
         manifest::digest(&m).unwrap(),
         db.clone(),
@@ -622,7 +574,7 @@ async fn public_create_rejects_guest_outcomes_and_requires_an_edit_signing_key()
     let unbound = Database::sqlite(temp.path().join("unbound.db"));
     unbound.initialize().await.unwrap();
     let app = Application::new(
-        &component(),
+        &fixture::anonymous_component(),
         &serde_json::to_vec(&m).unwrap(),
         manifest::digest(&m).unwrap(),
         unbound.clone(),
@@ -680,9 +632,9 @@ async fn anonymous_http_csrf_cookie_flags_rotation_and_write_limits() {
     let temp = tempfile::tempdir().unwrap();
     let db = Database::sqlite(temp.path().join("http-anon.db"));
     let app = app(db.clone()).await;
-    let router = crate::http::router(
+    let router = crate::router(
         app.clone(),
-        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+        crate::Origin::parse("http://localhost:8080").unwrap(),
     );
     let response = router
         .clone()
@@ -723,7 +675,7 @@ async fn anonymous_http_csrf_cookie_flags_rotation_and_write_limits() {
     ];
     let before = rows(&db).await;
     let (_, other) = app
-        .keys
+        .test_keys()
         .issue(
             security::TokenKind::Anonymous,
             "",
@@ -865,10 +817,7 @@ async fn anonymous_http_csrf_cookie_flags_rotation_and_write_limits() {
         .status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
-    let secure = crate::http::router(
-        app,
-        crate::http::Origin::parse("https://localhost:8080").unwrap(),
-    );
+    let secure = crate::router(app, crate::Origin::parse("https://localhost:8080").unwrap());
     let response = secure
         .oneshot(
             Request::builder()
@@ -1089,9 +1038,9 @@ async fn persistent_resource_secret_contract(db: Database) {
         }
     }
     let keys: HostKeys =
-        serde_json::from_value(serde_json::to_value(&*original.keys).unwrap()).unwrap();
+        serde_json::from_value(serde_json::to_value(original.test_keys()).unwrap()).unwrap();
     let changed = Application::new(
-        &component(),
+        &fixture::anonymous_component(),
         &serde_json::to_vec(&rebound).unwrap(),
         manifest::digest(&rebound).unwrap(),
         db.clone(),
@@ -1169,9 +1118,9 @@ async fn persistent_resource_secret_contract(db: Database) {
     .await
     .unwrap();
     let keys: HostKeys =
-        serde_json::from_value(serde_json::to_value(&*original.keys).unwrap()).unwrap();
+        serde_json::from_value(serde_json::to_value(original.test_keys()).unwrap()).unwrap();
     let changed = Application::new(
-        &component(),
+        &fixture::anonymous_component(),
         &serde_json::to_vec(&renamed).unwrap(),
         manifest::digest(&renamed).unwrap(),
         db,
@@ -1408,9 +1357,9 @@ async fn custom_presentation_contract(db: Database) {
             .unwrap()
             .with_registration(crate::Registration::Open),
     );
-    let router = crate::http::router(
+    let router = crate::router(
         app.clone(),
-        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+        crate::Origin::parse("http://localhost:8080").unwrap(),
     );
     let get = |path: &str, cookie: &str| {
         Request::builder()
@@ -1665,9 +1614,9 @@ async fn custom_presentation_contract(db: Database) {
             .unwrap()
             .with_registration(crate::Registration::Closed),
     );
-    let router = crate::http::router(
+    let router = crate::router(
         closed,
-        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+        crate::Origin::parse("http://localhost:8080").unwrap(),
     );
     assert_eq!(
         router
@@ -1741,7 +1690,7 @@ async fn sqlite_initial_fields_reject_clients_and_stale_contracts() {
         let make = |m: &Manifest| {
             Arc::new(
                 Application::new(
-                    &component(),
+                    &fixture::anonymous_component(),
                     &serde_json::to_vec(m).unwrap(),
                     manifest::digest(m).unwrap(),
                     db.clone(),

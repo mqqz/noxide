@@ -105,7 +105,7 @@ pub async fn run(command: &str, args: &[OsString]) -> Result<()> {
         }
     };
     if let Some(socket) = socket {
-        noxide_host::http::reclaim_stale_socket(&socket)?;
+        noxide_http::reclaim_stale_socket(&socket)?;
     }
     ensure!(status.success(), "noxide-server stopped: {status}");
     Ok(())

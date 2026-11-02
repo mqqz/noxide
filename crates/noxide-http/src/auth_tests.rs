@@ -68,9 +68,9 @@ async fn auth_http_committed_lost_ack_is_unknown_and_preserves_durable_state() {
             )
             .body(Body::from(body))
             .unwrap();
-        let router = crate::http::router(
+        let router = crate::router(
             app.clone(),
-            crate::http::Origin::parse("http://localhost:8080").unwrap(),
+            crate::Origin::parse("http://localhost:8080").unwrap(),
         );
         let response = crate::database::fault::lose_commit_ack(router.oneshot(request))
             .await

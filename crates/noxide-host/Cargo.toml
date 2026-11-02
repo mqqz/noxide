@@ -26,14 +26,14 @@ serde_json.workspace = true
 sha2.workspace = true
 rustix.workspace = true
 tokio.workspace = true
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
-hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["tokio", "service"] }
 rand = "0.8"
 base64 = "0.22"
 url = "2"
 
 [features]
+# Internals for HTTP tests. Never enabled by a deployed binary;
+# tools/check_layers.py verifies the production feature set.
+test-support = ["noxide-store/test-support", "noxide-repository/test-support", "noxide-authority/test-support", "noxide-blobs/test-support", "noxide-jobs/test-support", "noxide-admission/test-support"]
 query-metrics = ["noxide-store/query-metrics", "noxide-repository/query-metrics"]
 
 [dev-dependencies]

@@ -432,3 +432,63 @@ pub fn parent_declarations() -> Manifest {
     crate::add_input(&mut m.actions[0], &m.resources[0], "published");
     m
 }
+
+/// A guest whose pages expose forms to anonymous visitors.
+pub fn anonymous_component() -> Vec<u8> {
+    anonymous_component_with_redirect(false)
+}
+
+fn anonymous_emit(bytes: &[u8]) -> String {
+    bytes
+        .chunks(8)
+        .map(|part| {
+            let mut word = [0; 8];
+            word[..part.len()].copy_from_slice(part);
+            format!(
+                "i64.const {} i32.const {} call $emit\n",
+                i64::from_le_bytes(word),
+                part.len()
+            )
+        })
+        .collect()
+}
+
+pub fn anonymous_component_with_redirect(forged: bool) -> Vec<u8> {
+    let page1 = anonymous_emit(br#"{"page":{"title":"Create","nodes":[{"form":{"action":1}}]}}"#);
+    let page2 = anonymous_emit(
+        br#"{"page":{"title":"Edit","nodes":[{"form":{"action":2}},{"form":{"action":3}}]}}"#,
+    );
+    let kind = format!(r#"{{"version":{VERSION},"kind":{{"#).len() + 1;
+    let action = format!(r#"{{"version":{VERSION},"kind":{{"action":"#).len();
+    let route = format!(r#"{{"version":{VERSION},"kind":{{"route":"#).len();
+    let decision = if forged {
+        anonymous_emit(
+            br#"{"created":{"resource":1,"id":1,"destination":{"route":999,"target":null}}}"#,
+        )
+    } else {
+        anonymous_emit(br#""execute""#)
+    };
+    wat::parse_str(format!(r#"(component
+      (import "noxide:application/host@0.1.0" (instance $h
+        (export "emit" (func (param "word" u64) (param "length" u32)))
+        (export "request-chunk" (func (param "offset" u32) (result u64)))
+        (export "invoke" (func (param "operation" u32) (param "target" u64) (result u32)))
+        (export "result-chunk" (func (param "offset" u32) (result u64)))))
+      (alias export $h "emit" (func $emit)) (core func $emit (canon lower (func $emit)))
+      (alias export $h "request-chunk" (func $request)) (core func $request (canon lower (func $request)))
+      (alias export $h "invoke" (func $invoke)) (core func $invoke (canon lower (func $invoke)))
+      (alias export $h "result-chunk" (func $result)) (core func $result (canon lower (func $result)))
+      (core module $m
+        (import "h" "emit" (func $emit (param i64 i32)))
+        (import "h" "request" (func $request (param i32) (result i64)))
+        (import "h" "invoke" (func $invoke (param i32 i64) (result i32)))
+        (import "h" "result" (func $result (param i32) (result i64)))
+        (func (export "handle") (local $op i32) (local $len i32) (local $i i32) (local $c i32)
+          i32.const {kind} call $request i32.wrap_i64 i32.const 255 i32.and i32.const 97 i32.eq
+          if
+            i32.const {action} call $request i32.wrap_i64 i32.const 255 i32.and i32.const 48 i32.sub i32.const 2 i32.add local.set $op
+            {decision}
+          else i32.const {route} call $request i32.wrap_i64 i32.const 255 i32.and i32.const 49 i32.eq if {page1} else {page2} end end))
+      (core instance $i (instantiate $m (with "h" (instance (export "emit" (func $emit)) (export "request" (func $request)) (export "invoke" (func $invoke)) (export "result" (func $result))))))
+      (func (export "handle") (canon lift (core func $i "handle"))))"#)).unwrap()
+}

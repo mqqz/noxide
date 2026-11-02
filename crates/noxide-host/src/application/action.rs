@@ -798,11 +798,11 @@ impl ExecutionBudget {
 }
 
 /// Common host admission envelope. A grant never replaces these permits.
-pub(super) struct InvocationAdmission {
-    pub(super) owner: crate::database::lifecycle::AdmissionOwner,
+pub struct InvocationAdmission {
+    pub owner: crate::database::lifecycle::AdmissionOwner,
 }
 impl Application {
-    pub(super) async fn admit_invocation(
+    pub async fn admit_invocation(
         &self,
         anonymous: bool,
     ) -> std::result::Result<InvocationAdmission, RequestError> {

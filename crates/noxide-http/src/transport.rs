@@ -38,8 +38,6 @@ impl Drop for SocketFile {
 }
 
 pub(super) enum ListenerKind {
-    #[cfg(test)]
-    AcceptError(Arc<tokio::sync::Notify>),
     Tcp(tokio::net::TcpListener),
     #[cfg(unix)]
     Unix {
@@ -136,10 +134,6 @@ impl BoundListener {
     }
 }
 impl Listener {
-    #[cfg(test)]
-    pub(crate) fn test_accept_error(release: Arc<tokio::sync::Notify>) -> Self {
-        Self(ListenerKind::AcceptError(release))
-    }
     pub async fn loopback(address: std::net::SocketAddr) -> Result<Self> {
         BoundListener::loopback(address)?.start()
     }
@@ -153,11 +147,6 @@ impl Listener {
     }
     async fn accept(&self) -> std::io::Result<(Box<dyn Transport>, bool)> {
         match &self.0 {
-            #[cfg(test)]
-            ListenerKind::AcceptError(release) => {
-                release.notified().await;
-                Err(std::io::Error::other("test listener stopped"))
-            }
             ListenerKind::Tcp(l) => Ok((Box::new(l.accept().await?.0), false)),
             #[cfg(unix)]
             ListenerKind::Unix { listener, tor, .. } => {

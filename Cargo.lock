@@ -1471,6 +1471,7 @@ dependencies = [
  "noxide-confine",
  "noxide-effect-delivery",
  "noxide-host",
+ "noxide-http",
  "noxide-keys",
  "noxide-protocol",
  "noxide-test-support",
@@ -1540,11 +1541,8 @@ name = "noxide-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "axum",
  "base64",
  "httparse",
- "hyper",
- "hyper-util",
  "image",
  "libsqlite3-sys",
  "noxide-admission",
@@ -1582,6 +1580,41 @@ name = "noxide-host-calls"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "noxide-http"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "hyper",
+ "hyper-util",
+ "image",
+ "noxide-admission",
+ "noxide-asset-admission",
+ "noxide-assets",
+ "noxide-authority",
+ "noxide-blobs",
+ "noxide-host",
+ "noxide-protocol",
+ "noxide-render",
+ "noxide-repository",
+ "noxide-sql",
+ "noxide-store",
+ "noxide-test-support",
+ "rand",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tower",
+ "url",
+ "wat",
 ]
 
 [[package]]

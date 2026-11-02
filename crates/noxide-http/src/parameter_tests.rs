@@ -3,7 +3,7 @@ use noxide_protocol::*;
 use std::sync::Arc;
 
 fn declarations() -> Manifest {
-    let mut m = crate::parent_tests::declarations();
+    let mut m = crate::test_support::parent_declarations();
     let mut field = m.resources[0].fields[1].clone();
     field.name = "archived".into();
     m.resources[0].fields.push(field);
@@ -379,9 +379,9 @@ async fn invalid_parameters_are_not_found_before_database_or_session_lookup() {
         },
     )
     .unwrap();
-    let router = crate::http::router(
+    let router = crate::router(
         Arc::new(app),
-        crate::http::Origin::parse("http://localhost:8080").unwrap(),
+        crate::Origin::parse("http://localhost:8080").unwrap(),
     );
     let mut expected = None;
     for path in [
@@ -423,7 +423,7 @@ async fn invalid_parameters_are_not_found_before_database_or_session_lookup() {
     }
     assert!(!tmp.path().join("missing").exists());
     for query in ["flag=false", "flag=tr%75e", "cursor=token&flag=true"] {
-        assert!(crate::http::parse_query(&m, &m.routes[2], Some(query)).is_ok());
+        assert!(crate::parse_query(&m, &m.routes[2], Some(query)).is_ok());
     }
-    assert!(crate::http::parse_query(&m, &m.routes[2], Some(&"x".repeat(1025))).is_err());
+    assert!(crate::parse_query(&m, &m.routes[2], Some(&"x".repeat(1025))).is_err());
 }

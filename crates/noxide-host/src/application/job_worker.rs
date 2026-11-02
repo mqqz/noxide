@@ -478,7 +478,7 @@ impl Application {
             .await
     }
 
-    pub(crate) fn start_job_service(self: &Arc<Self>) -> Result<Option<JobService>> {
+    pub fn start_job_service(self: &Arc<Self>) -> Result<Option<JobService>> {
         let Some(jobs) = &self.jobs else {
             return Ok(None);
         };
@@ -553,14 +553,14 @@ impl Application {
     }
 }
 
-pub(crate) struct JobService {
+pub struct JobService {
     stop: Option<tokio::sync::watch::Sender<bool>>,
     task: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 impl JobService {
     /// Waits for in-flight executor/provider cleanup. Shutdown does not cancel a
     /// transaction or infer termination from its lease or a timer.
-    pub(crate) async fn shutdown(mut self) -> Result<()> {
+    pub async fn shutdown(mut self) -> Result<()> {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(true);
         }

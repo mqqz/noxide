@@ -441,38 +441,6 @@ async fn sqlite_ambiguous_receiver_ack_retries_same_key_and_body() {
 async fn sqlite_known_delivery_lost_database_ack_is_probed_without_repost() {
     lost_database_ack_contract(None).await;
 }
-#[tokio::test]
-async fn serving_process_never_delivers_effects() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut case = case(None, listener.local_addr().unwrap(), false).await;
-    case.create("ready").await;
-    case.stop_clock().await;
-    let accept_error = Arc::new(tokio::sync::Notify::new());
-    let http = crate::http::Listener::test_accept_error(accept_error.clone());
-    let mut serving = Box::pin(crate::http::serve(
-        http,
-        case.app.clone(),
-        crate::http::Origin::parse("http://localhost").unwrap(),
-        std::future::pending(),
-    ));
-    std::future::poll_fn(|cx| {
-        assert!(serving.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
-    })
-    .await;
-    // Longer than the delivery service's one-second poll.
-    let contacted = tokio::time::timeout(Duration::from_millis(1_500), listener.accept()).await;
-    assert!(contacted.is_err(), "serving process contacted the proxy");
-    assert_eq!(outbox(&case).await[0][1], "pending");
-    accept_error.notify_one();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(5), serving)
-            .await
-            .unwrap()
-            .is_err()
-    );
-    case.close().await;
-}
 
 #[tokio::test]
 async fn claim_mutex_wait_uses_original_delivery_deadline() {
