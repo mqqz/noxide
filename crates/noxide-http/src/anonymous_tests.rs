@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn declarations() -> Manifest {
+pub(crate) fn declarations() -> Manifest {
     let mut m = fixture::manifest();
     m.resources[0].fields.push(TextField {
         immutable: false,

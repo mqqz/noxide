@@ -376,16 +376,13 @@ fn registration_failed(presentation: &crate::Presentation) -> Response {
     (StatusCode::UNPROCESSABLE_ENTITY, [(header::CONTENT_TYPE,"text/html; charset=utf-8")], format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Registration failed</title></head><body><main><h1>Registration failed</h1><p>Registration failed. Return to registration and try again.</p><a href=\"{}\">Return to registration</a></main></body></html>", presentation.registration_path)).into_response()
 }
 
-async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Response {
-    use crate::limiter::{AdmissionContext, AdmissionIdentity, RequestClass};
-    let app = gateway.app.clone();
-    let peer = request
-        .extensions()
-        .get::<Peer>()
-        .copied()
-        .unwrap_or(Peer::Local);
-    let path = request.uri().path();
-    let class = if request.method() == axum::http::Method::GET {
+fn request_class(
+    app: &Application,
+    method: &axum::http::Method,
+    path: &str,
+) -> crate::limiter::RequestClass {
+    use crate::limiter::RequestClass;
+    if method == axum::http::Method::GET {
         RequestClass::Get
     } else if path == app.presentation.login_path || path == app.presentation.registration_path {
         RequestClass::PasswordHash
@@ -400,7 +397,19 @@ async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Resp
         RequestClass::AnonymousAction
     } else {
         RequestClass::AuthenticatedAction
-    };
+    }
+}
+
+async fn dispatch(State(gateway): State<Arc<Gateway>>, request: Request) -> Response {
+    use crate::limiter::{AdmissionContext, AdmissionIdentity, RequestClass};
+    let app = gateway.app.clone();
+    let peer = request
+        .extensions()
+        .get::<Peer>()
+        .copied()
+        .unwrap_or(Peer::Local);
+    let path = request.uri().path();
+    let class = request_class(&app, request.method(), path);
     let scope = app.http_request_scope(
         class,
         path,
@@ -963,6 +972,8 @@ mod admission_tests;
 
 #[cfg(test)]
 mod cursor_recovery_tests;
+#[cfg(test)]
+mod endpoint_tests;
 
 #[cfg(test)]
 mod parent_redirect_disconnect_tests;
