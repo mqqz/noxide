@@ -124,8 +124,10 @@ pub struct GuestPool {
     broker: Option<Arc<BrokerClient>>,
 }
 
-/// Requests a worker serves before it is replaced.
-pub const DEFAULT_RETIRE_AFTER: u32 = 256;
+/// Requests a worker serves before it is replaced. One request each by default: a
+/// guest that escapes Wasmtime then sees no later request, from anyone, and a worker
+/// costs under a millisecond to start.
+pub const DEFAULT_RETIRE_AFTER: u32 = 1;
 
 /// Unassigned workers kept ready before anyone needs them. More start on demand, up
 /// to `limits.concurrency`.
@@ -606,7 +608,7 @@ mod tests {
             starting: AtomicUsize::new(0),
             waiting: AtomicUsize::new(0),
             started: AtomicUsize::new(1),
-            retire_after: DEFAULT_RETIRE_AFTER,
+            retire_after: 256,
             limits: Limits::default(),
             broker: None,
         };

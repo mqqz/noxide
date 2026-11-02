@@ -6,6 +6,9 @@ use noxide_protocol::{RequestKind, RequestView, ResponseIntent, VERSION};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::time::Instant;
 
+/// Workers that serve many requests, so tests can watch one survive.
+const REUSED: u32 = 256;
+
 fn request() -> RequestView {
     RequestView {
         params: Default::default(),
@@ -88,7 +91,7 @@ fn pool(body: &str, concurrency: usize) -> Arc<GuestPool> {
             "best_effort",
             &component(body),
             limits,
-            noxide_guest::pool::DEFAULT_RETIRE_AFTER,
+            REUSED,
         )
         .unwrap(),
     )
@@ -313,6 +316,37 @@ fn a_rejected_component_stops_startup() {
 }
 
 #[tokio::test]
+async fn by_default_every_request_gets_a_new_worker() {
+    let limits = Limits {
+        concurrency: 1,
+        ..Limits::default()
+    };
+    let pool = Arc::new(
+        GuestPool::start(
+            Path::new(env!("CARGO_BIN_EXE_noxide-guest")),
+            "best_effort",
+            &component(""),
+            limits,
+            noxide_guest::pool::DEFAULT_RETIRE_AFTER,
+        )
+        .unwrap(),
+    );
+    for _ in 0..3 {
+        pool.run(
+            request(),
+            Some(Storage::default()),
+            1_000_000,
+            16,
+            deadline(),
+        )
+        .await
+        .result
+        .unwrap();
+    }
+    assert_eq!(pool.workers_started(), 4);
+}
+
+#[tokio::test]
 async fn an_application_serves_and_writes_through_a_worker() {
     use noxide_host::{AccountAdmin as _, Application, Database, DeploymentResources, HostKeys};
     use noxide_test_support as fixture;
@@ -333,7 +367,7 @@ async fn an_application_serves_and_writes_through_a_worker() {
                 concurrency: 1,
                 ..Limits::default()
             },
-            noxide_guest::pool::DEFAULT_RETIRE_AFTER,
+            REUSED,
         )
         .unwrap(),
     );

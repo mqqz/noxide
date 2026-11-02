@@ -122,10 +122,10 @@ those bytes as machine code; `tools/check_layers.py` holds it to that one block 
 caller. A compiler bug triggered by a hostile component could make an artifact hostile,
 so a worker confines itself before it loads one.
 
-**Isolation.** A worker serves one account or one service identity, never another, so
-a guest that escapes Wasmtime cannot read other accounts' requests. Anonymous requests
-that submit input or use a capability get a worker used once. Anonymous page reads
-share a worker. Each worker is replaced after `guest_worker_requests` requests.
+**Isolation.** Each request gets a new worker, used once, so a guest that escapes
+Wasmtime sees no other request. `guest_worker_requests` can raise that. A worker then
+still serves only one account or service identity, and anonymous submissions and
+capability requests stay single-use; anonymous page reads share one.
 
 **Limits on a compromised worker.** Before running guest code a worker sets hard limits
 on address space, CPU time, open files, file size and locked memory, makes itself
@@ -140,13 +140,12 @@ that a supervisor restarts both.
 
 What this does not do:
 
-- Anonymous page reads share a worker, so an escaped guest can see the URLs other
-  anonymous visitors request, including query parameters.
-- A worker keeps its account's earlier requests in memory, and an escaped guest can
-  corrupt the responses for that account until the worker is retired.
+- With `guest_worker_requests` above one, an escaped guest can read that worker's later
+  requests, and corrupt their responses. For anonymous page reads, that includes the URLs
+  other visitors request.
 - The kernel limits are per process and coarse. The CPU limit covers a worker's whole
-  life, about 13 minutes at the defaults, so an escaped guest can spin between requests
-  until then. A worker can hold up to its 2 GiB address space, plus memfds it creates
+  life, about 33 seconds at the defaults, and grows with `guest_worker_requests`, so an
+  escaped guest can spin until then. A worker can hold up to its 2 GiB address space, plus memfds it creates
   and unmaps, up to its 32 files at the guest memory limit each. Many workers add up: a
   hard total needs a cgroup, which is an operator's choice.
 - Landlock and seccomp reduce a kernel attack surface; they do not remove it. An escape
@@ -154,7 +153,8 @@ What this does not do:
 - A burst of new accounts can still outrun worker starts. A request that finds none
   ready waits, and fails as busy at its deadline. With stubbed storage and a 162 KiB
   release-built application on one machine, new accounts ran at about 2100 per second,
-  and each worker used about 8 MiB.
+  and each worker used about 8 MiB. Through the whole server, one worker per request cost
+  under 10% of throughput against reusing workers, on SQLite and on PostgreSQL.
 
 ## Mutation and navigation lifecycle
 

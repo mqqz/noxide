@@ -262,11 +262,11 @@ group/world-readable existing files. Use a private directory for the database an
 its journal files. Keep keys outside application inputs and source control.
 
 Guest code runs in separate `noxide-guest` processes, which must be installed beside
-the server. A worker serves one account, and the optional `guest_worker_requests`
-setting is how many requests it serves before it is replaced. It defaults to 256. A
-value of `1` gives every request a new process, which also stops a guest that escapes
-Wasmtime from seeing later requests in that account. The server stops with an error if
-its guest broker dies, so run it under a supervisor that restarts it. See
+the server. By default each request gets a new one. The optional `guest_worker_requests`
+setting lets a worker serve more requests before it is replaced. Raise it only if
+measurements show you need to: a guest that escapes Wasmtime can then read later requests
+sent to that worker, though a worker never serves two accounts. The server stops with an error if its guest broker dies, so run it
+under a supervisor that restarts it. See
 [guest workers](architecture/layers.md#guest-workers).
 
 The optional `database_statement_limit` is an integer from 1 through 256 and
