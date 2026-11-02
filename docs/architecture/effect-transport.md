@@ -1,6 +1,6 @@
 # Effect transport
 
-The host effect transport (`noxide-host/src/effects/transport`) delivers
+The host effect transport (`noxide-effect-delivery/src/transport`) delivers
 [approved effects](effects.md) for the outbox worker. Guests have no network
 import. This is not a claim of transport anonymity, and no real remote endpoint
 was contacted in verification.

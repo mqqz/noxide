@@ -9,7 +9,7 @@ the [explicit examples](../sdk-lowering.md).
 | `noxide-sql`, `noxide-sql-macros` | SQL text composed only from literals, checked identifiers, numbers and other `Sql` values |
 | `noxide-assets` | Compiled public assets and their document rendering; parses no CSS, images or fonts |
 | `noxide-asset-admission` | Asset pack validation and compilation; never linked by the server |
-| `noxide-admission` | Pure manifest admission, policy and query planning, SQL generation and identity values |
+| `noxide-admission` | Pure manifest admission, policy and query planning, SQL generation, identity values and computed scalars |
 | `noxide-render` | Document IR to bytes, with its budget passed in |
 | `noxide-host-calls` | The storage calls a guest may make, as a trait with no runtime behind it |
 | `noxide-guest` | The worker wire protocol and the server's worker pool; links no guest runtime |
@@ -18,10 +18,10 @@ the [explicit examples](../sdk-lowering.md).
 | `noxide-confine` | Landlock and seccomp policy for deployed processes |
 | `noxide-test-support` | Test fixtures; a dev-dependency only |
 | `noxide-store` | Transactions, schema activation, storage layout, every SQL statement, the request lifecycle and durable time; the only crate that links a database driver |
-| `noxide-effects` | Effect approval, the outbox and operator commands; opens no outbound socket |
+| `noxide-effects` | Effect approval, capture, the outbox and operator commands; opens no outbound socket |
 | `noxide-effect-delivery` | The delivery worker, Tor SOCKS client and TLS transport; only `noxide-cli` depends on it |
-| `noxide-blobs` | The blob directory, blob metadata and upload authority |
-| `noxide-jobs` | Job queue storage, recurrence and operator commands; runs no guest code |
+| `noxide-blobs` | The blob directory, blob metadata, upload authority, pairing and bounded maintenance |
+| `noxide-jobs` | Job queue storage, recurrence, selection validation and operator commands; runs no guest code |
 | `noxide-authority` | Accounts, roles, tokens, admission limits and per-attempt request authority |
 | `noxide-repository` | Record reads and writes, policy filtering, search and aggregates for one request attempt; runs no guest code |
 | `noxide-host` | Application orchestration and job execution; links no HTTP server |
@@ -32,9 +32,16 @@ the [explicit examples](../sdk-lowering.md).
 
 `tools/check_layers.py` runs in CI. It fails if a crate gains a restricted dependency
 such as `sqlx`, `rustls`, `wasmtime` or `image`, if a pure crate depends on an
-impure one, if a deployed binary enables a `test-support` feature, or if a crate outside its allowed
+impure one, if a feature crate depends on the host, sandbox, renderer, `axum` or `hyper`,
+if a deployed binary enables a `test-support` feature, or if a crate outside its allowed
 list compiles a policy filter. `tools/check_binaries.py` checks the
 symbols of each deployed binary, because `noxide-cli` builds them all.
+
+Feature crates hold storage and bookkeeping; the host keeps what binds the guest,
+authorization and request budgets. When a feature crate runs maintenance, the host
+supplies its fence through a narrow trait such as `ReconcileHost`, and every transaction
+calls it first. In `noxide-http`, every request gets its class, deadline and handler from
+one `Endpoint` classification, so admission cannot disagree with routing.
 
 ### SQL boundary
 
