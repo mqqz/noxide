@@ -31,3 +31,6 @@ noxide-store = { workspace = true, features = ["test-support"] }
 noxide-test-support.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
+
+[lints]
+workspace = true

@@ -179,6 +179,7 @@ impl MetadataContext<'_> {
     /// Caller has already verified origin/CSRF/session/submission/upload ticket,
     /// probed the existing semantic receipt and serialized the stable nonce.
     /// Existing slot is returned WITHOUT a fresh charge or file rewrite.
+    #[allow(clippy::too_many_lines)]
     pub async fn reserve(&mut self, request: Reservation<'_>) -> Result<ReservationOutcome> {
         request
             .policy
@@ -679,6 +680,7 @@ pub struct BlobRow {
     pub process: ObjectKey,
 }
 impl BlobRow {
+    #[allow(clippy::too_many_lines)]
     fn parse(row: [String; 22]) -> Result<Self> {
         let [
             slot,

@@ -99,6 +99,7 @@ fn envelope_equal(left: &Operation, right: &Operation) -> bool {
         && left.visibility == right.visibility
         && left.fields == right.fields
 }
+#[allow(clippy::too_many_lines)]
 pub(super) fn validate_declarations(m: &Manifest) -> Result<()> {
     for resource in &m.resources {
         if let Some(index) = &resource.search {

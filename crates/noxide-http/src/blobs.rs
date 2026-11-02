@@ -42,6 +42,7 @@ fn failure(error: anyhow::Error, presentation: &crate::Presentation) -> Response
     }
     StatusCode::BAD_REQUEST.into_response()
 }
+#[allow(clippy::too_many_lines)]
 pub(super) async fn upload(gateway: Arc<Gateway>, request: Request) -> Response {
     let app = gateway.app.clone();
     let presentation = &app.web.presentation;
@@ -301,6 +302,7 @@ async fn submit(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) async fn download(gateway: Arc<Gateway>, request: Request) -> Response {
     let result: Result<Response> = async {
         ensure!(

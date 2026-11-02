@@ -151,6 +151,7 @@ impl FrontierContext<'_> {
         }
         Ok(clause)
     }
+    #[allow(clippy::too_many_lines)]
     pub async fn window(
         &mut self,
         op: &Operation,
@@ -716,6 +717,7 @@ impl Effects {
         );
         Ok(result)
     }
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn aggregate_query(
         &mut self,
         consumer: &Operation,

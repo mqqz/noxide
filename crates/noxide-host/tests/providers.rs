@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_lines)]
 use noxide_host::AccountAdmin as _;
 use noxide_host::{Application, Database, HostKeys, manifest, runtime::Limits};
 use noxide_protocol::Fields;

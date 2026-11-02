@@ -1,6 +1,7 @@
 //! Immutable public assets as the server holds them: already validated and
 //! compiled at approval by `noxide-asset-admission`. The server verifies an
 //! approved digest and parses no CSS, images or fonts.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 pub static EMPTY: std::sync::LazyLock<AssetBundle> = std::sync::LazyLock::new(AssetBundle::default);
 pub mod document;

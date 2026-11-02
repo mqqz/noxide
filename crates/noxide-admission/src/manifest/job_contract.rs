@@ -5,6 +5,7 @@ use anyhow::{Context, Result, ensure};
 use noxide_protocol::{Manifest, OperationKind, TargetSource, Value, jobs::*};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[allow(clippy::too_many_lines)]
 pub fn validate_contract(
     manifest: &Manifest,
     contract: &JobContract,

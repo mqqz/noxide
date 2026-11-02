@@ -1,6 +1,7 @@
 //! Typed guest API for isolated Noxide applications.
 //!
 //! Build application code only through the isolated build workflow.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 
 pub use noxide_protocol::{
     Container, Document, Fields, Instruction, Record, RequestKind, RequestView, ResponseIntent,

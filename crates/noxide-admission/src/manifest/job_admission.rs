@@ -109,6 +109,7 @@ fn recurring_inputs(manifest: &Manifest, schedule: &RecurringSchedule) -> Result
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn validate(manifest: &Manifest) -> Result<()> {
     let Some(jobs) = &manifest.jobs else {
         ensure!(

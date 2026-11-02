@@ -4,6 +4,7 @@
 //!
 //! No path here opens a file. Callers pass snapshotted bytes from the selected
 //! build executor; hostile source trees must use the disposable build VM.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 mod css;
 use anyhow::{Result, ensure};

@@ -148,6 +148,7 @@ impl QueueContext<'_> {
         self.checkpoint()?;
         Ok((grant, state.clone()))
     }
+    #[allow(clippy::too_many_lines)]
     async fn row(&mut self, claim: &Claim, lock: bool) -> Result<Row> {
         self.checkpoint()?;
         if lock {

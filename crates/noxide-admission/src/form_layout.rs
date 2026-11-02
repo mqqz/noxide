@@ -2,6 +2,7 @@ use anyhow::{Result, ensure};
 use noxide_protocol::*;
 use std::collections::BTreeSet;
 
+#[allow(clippy::too_many_lines)]
 pub fn validate(m: &Manifest, action: &Action, layout: &[FormInstruction]) -> Result<()> {
     ensure!(
         layout.len() <= MAX_NODES && serde_json::to_vec(&layout)?.len() <= MAX_IR_BYTES,

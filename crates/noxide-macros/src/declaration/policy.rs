@@ -24,6 +24,7 @@ pub(crate) struct RelatedDeclaration {
     conditions: Vec<(Ident, Expr)>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn policy(input: ParseStream<'_>) -> syn::Result<Vec<Vec<PolicyAtom>>> {
     let name: Ident = input.parse()?;
     match name.to_string().as_str() {

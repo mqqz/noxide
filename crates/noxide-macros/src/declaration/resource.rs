@@ -7,6 +7,7 @@ use syn::{
     Data, DeriveInput, Expr, Fields, Ident, LitInt, LitStr, Token, parenthesized, spanned::Spanned,
 };
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn expand_resource(input: DeriveInput) -> syn::Result<Tokens> {
     reject_generics(&input)?;
     let (persistent_key, expiry, unique, search) = authority_options(&input)?;

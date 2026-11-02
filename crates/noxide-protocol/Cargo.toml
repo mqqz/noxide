@@ -10,3 +10,6 @@ description = "Bounded semantic application protocol for Noxide"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+
+[lints]
+workspace = true

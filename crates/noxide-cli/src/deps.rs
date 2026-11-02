@@ -2,6 +2,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use std::{collections::BTreeSet, ffi::OsString, path::PathBuf};
 
+#[allow(clippy::too_many_lines)]
 pub async fn run(args: &[OsString]) -> Result<()> {
     let mode = args.first().and_then(|v| v.to_str()).unwrap_or("");
     ensure!(

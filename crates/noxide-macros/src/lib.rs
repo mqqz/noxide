@@ -1,6 +1,7 @@
 //! Declarations and templates for the Noxide guest SDK.
 //!
 //! Macro expansion happens inside the isolated application build.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 mod assets;
 mod convenience;
 mod declaration;

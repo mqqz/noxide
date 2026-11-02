@@ -350,6 +350,7 @@ impl BlobRuntime {
     }
 
     /// Plan one known row from its physical state. Returns whether it removed an object.
+    #[allow(clippy::too_many_lines)]
     async fn reconcile_row(
         &self,
         host: &impl ReconcileHost,

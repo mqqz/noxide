@@ -167,6 +167,7 @@ impl PrefixDecoder {
         }
         result
     }
+    #[allow(clippy::too_many_lines)]
     fn push_inner(&mut self, input: &[u8]) -> Result<PrefixProgress> {
         ensure!(
             input.len() <= TRANSFER_BUFFER_BYTES,

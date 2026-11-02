@@ -75,6 +75,7 @@ impl Application {
         .await
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn view_page_parameters(
         &self,
         cookie: Option<&str>,

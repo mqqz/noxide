@@ -32,3 +32,6 @@ sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-toki
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
 url = "2"
+
+[lints]
+workspace = true

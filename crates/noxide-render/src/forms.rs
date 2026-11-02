@@ -1,6 +1,7 @@
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 pub(super) fn form(
     out: &mut Buffer,
     m: &Manifest,
@@ -171,6 +172,7 @@ pub(super) fn hidden(out: &mut Buffer, name: &str, value: &str) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn render_field(
     out: &mut Buffer,
     action: &crate::manifest::WebAction<'_>,
@@ -388,6 +390,7 @@ fn option(out: &mut Buffer, value: &str, label: &str, selected: bool) -> Result<
 
 /// Query controls convey input only. Their next GET passes normal route and
 /// current read authorization; the form itself contains no grant or cursor.
+#[allow(clippy::too_many_lines)]
 pub(super) fn query_form(
     out: &mut Buffer,
     m: &Manifest,

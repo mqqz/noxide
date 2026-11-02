@@ -232,6 +232,7 @@ impl Database {
         let deadline = Instant::now() + Duration::from_secs(60);
         tokio::time::timeout_at(deadline.into(), self.connect(deadline, true, false, None)).await?
     }
+    #[allow(clippy::too_many_lines)]
     async fn connect(
         &self,
         deadline: Instant,

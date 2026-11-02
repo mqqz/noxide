@@ -83,6 +83,7 @@ impl QueueContext<'_> {
     /// Operator has installed this schedule row under the reviewed contract.
     /// Keep this transaction through query, enqueue and finish; cursor progress
     /// commits atomically with all jobs emitted by this bounded batch.
+    #[allow(clippy::too_many_lines)]
     pub async fn begin_recurrence(
         &mut self,
         scope: &JobScope,

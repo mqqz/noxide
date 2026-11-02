@@ -7,6 +7,7 @@
 //! This limits what follows a Wasmtime or host compromise; it is not the guest
 //! boundary. Landlock port rules name no address, so loopback-only connections
 //! remain a separate check in deployment configuration.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 use anyhow::Result;
 use std::path::PathBuf;

@@ -21,6 +21,7 @@ pub struct Values<'a> {
     pub current: Option<(&'a str, &'a StoredRecord)>,
 }
 impl Values<'_> {
+    #[allow(clippy::too_many_lines)]
     pub fn value(
         &self,
         value: &Value,

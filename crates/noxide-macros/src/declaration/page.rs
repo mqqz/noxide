@@ -102,6 +102,7 @@ pub(crate) fn generic_argument(ty: &Type) -> syn::Result<(&Ident, &Type)> {
     Ok((&segment.ident, inner))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn expand_page(declaration: PageDeclaration, item: syn::ItemFn) -> syn::Result<Tokens> {
     if item.sig.asyncness.is_some()
         || item.sig.unsafety.is_some()

@@ -1,5 +1,6 @@
 //! `sql!("SELECT {column} FROM t WHERE id=${}", n)`: `format!` syntax whose text
 //! must be a literal and whose arguments must implement `noxide_sql::SqlArg`.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 use proc_macro::{Delimiter, Group, Punct, Spacing, TokenStream, TokenTree};
 

@@ -9,3 +9,6 @@ description = "The storage calls a Noxide guest may make, without any guest runt
 
 [dependencies]
 anyhow.workspace = true
+
+[lints]
+workspace = true

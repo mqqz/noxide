@@ -7,6 +7,7 @@ use std::{
     process::Command,
 };
 
+#[allow(clippy::too_many_lines)]
 pub async fn build(command: &str, args: &[OsString]) -> Result<()> {
     // Local builds trust native application code; isolation is an explicit option.
     let mut framework = None;

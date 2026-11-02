@@ -181,6 +181,7 @@ fn action_request(
 }
 
 impl Application {
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn attempt_action(
         &self,
         mut tx: Transaction,

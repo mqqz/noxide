@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 // Shared fixtures are used selectively by each test target.
 #[allow(dead_code)]
@@ -5,6 +6,7 @@ pub mod record_actions;
 
 use noxide_protocol::*;
 
+#[allow(clippy::too_many_lines)]
 pub fn manifest() -> Manifest {
     let owner = Policy {
         any: vec![vec![Predicate::Owner]],

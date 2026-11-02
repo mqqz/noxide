@@ -1,5 +1,6 @@
 //! Source-level proof of the public SDK's anonymous upload/jobs/effects lowering.
 //! Host admission, limits, handover and actual delivery require integration tests.
+#![allow(clippy::too_many_lines)]
 // Guest pages and handlers are reachable only through the wasm export.
 #[allow(dead_code, unused_imports)]
 #[path = "../../../examples/expiring-paste/src/lib.rs"]

@@ -87,6 +87,7 @@ impl InspectionPage {
     /// Store identity/process come from the retained EXCLUSIVE store owner and
     /// verified pairing, not user input. Metadata absence must be rechecked in a
     /// fresh tx before quarantine accounting; a scan snapshot can lag reserve.
+    #[allow(clippy::too_many_lines)]
     pub fn plan(
         store: &ObjectKey,
         process: &ObjectKey,

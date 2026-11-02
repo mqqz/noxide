@@ -1,4 +1,5 @@
 //! Writes the fixture tools/test_asset_browser.py loads in a real browser.
+#![allow(clippy::too_many_lines)]
 use noxide_asset_admission::{AssetInput, admit};
 use noxide_assets::{
     AssetDeclaration, AssetMediaType, asset_path,

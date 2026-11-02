@@ -1,4 +1,5 @@
 //! Trusted execution, rendering, and persistence for Noxide applications.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 
 pub mod application;
@@ -29,9 +30,11 @@ pub use security::HostKeys;
 #[cfg(any(test, feature = "test-support"))]
 pub use test_account::test_account;
 
+#[cfg(all(test, feature = "query-metrics"))]
+pub(crate) use noxide_admission::membership;
 pub(crate) use noxide_admission::{action_contract, expiry, query_plan, routing, search};
 #[cfg(test)]
-pub(crate) use noxide_admission::{membership, policy, sql};
+pub(crate) use noxide_admission::{policy, sql};
 pub(crate) use noxide_authority::{auth, authority, limiter, operator_roles, security};
 pub(crate) use noxide_effects as effects;
 pub(crate) use noxide_jobs as jobs;

@@ -106,6 +106,7 @@ pub trait EffectOperatorTransaction {
 impl EffectOperatorTransaction for Transaction {
     /// Invoked only in startup's existing clock-locked maintenance transaction.
     /// Filesystem preparation has already produced the retained directory proof.
+    #[allow(clippy::too_many_lines)]
     async fn activate_effects(
         &mut self,
         generation: &str,

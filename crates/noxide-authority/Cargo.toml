@@ -33,3 +33,6 @@ tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
 sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
 url = "2"
+
+[lints]
+workspace = true

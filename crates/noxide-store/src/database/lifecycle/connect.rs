@@ -9,6 +9,7 @@ pub(super) async fn open(
     tokio::time::timeout_at(work, open_inner(database, lease, read_only)).await?
 }
 
+#[allow(clippy::too_many_lines)]
 async fn open_inner(
     database: Database,
     lease: ProviderLease,

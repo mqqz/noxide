@@ -1,5 +1,6 @@
 //! The Wasmtime boundary. The linker below is the complete guest import surface;
 //! everything a guest can ask of the host passes through [`HostCalls`].
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![deny(unsafe_code)]
 mod admission;
 pub mod worker;
@@ -182,6 +183,7 @@ impl<H: HostCalls> Runtime<H> {
     }
 
     /// The component's contract, which an artifact must also meet, and its linker.
+    #[allow(clippy::too_many_lines)]
     fn link(engine: Engine, component: Component, limits: Limits) -> Result<Self> {
         let ty = component.component_type();
         let Some(export) = ty.get_export(&engine, "handle") else {

@@ -102,6 +102,7 @@ impl Admission {
         self.walk(m, a, ValueSite::Effect, value, used, 1)
     }
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
     fn walk<'a>(
         &mut self,
         m: &Manifest,
@@ -473,6 +474,7 @@ pub struct ComputationDisclosure {
     pub rejection: Option<GuardRejection>,
     pub source: ComputationSource,
 }
+#[allow(clippy::too_many_lines)]
 pub fn action_disclosures(manifest: &Manifest, id: u32) -> Result<Vec<ComputationDisclosure>> {
     validate(manifest)?;
     let action = action(manifest, id)?;

@@ -1,6 +1,7 @@
 //! Delivers captured effects, outside the serving process. Holds no host keys,
 //! runs no guest code, and can reach only the store, its secret files and the
 //! local Tor proxy.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 #[path = "../config.rs"]
 mod config;

@@ -37,6 +37,7 @@ pub(crate) struct OperationDeclaration {
 }
 
 impl Parse for OperationDeclaration {
+    #[allow(clippy::too_many_lines)]
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let kind: Ident = input.parse()?;
         let resource;

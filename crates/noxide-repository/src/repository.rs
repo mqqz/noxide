@@ -387,6 +387,7 @@ pub async fn authorize_page_resource(
 }
 
 impl Effects {
+    #[allow(clippy::too_many_lines)]
     pub async fn execute_transaction(
         &mut self,
         action: crate::action_contract::ActionCore<'_>,
@@ -623,6 +624,7 @@ impl Effects {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn create_step(
         &mut self,
         op: &Operation,
@@ -1028,6 +1030,7 @@ impl Effects {
         Ok(available - envelope)
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn list_single(
         &mut self,
         op: &Operation,
@@ -1145,6 +1148,7 @@ impl Effects {
         }
         Ok(serde_json::to_vec(&records)?)
     }
+    #[allow(clippy::too_many_lines)]
     async fn list_merge(
         &mut self,
         op: &Operation,
@@ -1354,6 +1358,7 @@ impl Effects {
         self.follow_sources.push((resource, id));
         Ok(())
     }
+    #[allow(clippy::too_many_lines)]
     pub async fn follow(&mut self, operation: u32) -> Result<Vec<u8>> {
         ensure!(
             matches!(self.request.kind, RequestKind::Route(_)),
@@ -1544,6 +1549,7 @@ impl Effects {
     pub async fn invoke(&mut self, operation: u32, target: u64) -> Result<Vec<u8>> {
         self.invoke_internal(operation, target, false).await
     }
+    #[allow(clippy::too_many_lines)]
     async fn invoke_internal(
         &mut self,
         operation: u32,

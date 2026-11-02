@@ -1,5 +1,6 @@
 //! The store: connections, transactions, schema activation, storage layout, the
 //! request lifecycle and durable time. The only crate that links a database driver.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![cfg_attr(
     not(feature = "test-support"),
     doc = "```compile_fail

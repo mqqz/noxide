@@ -2,6 +2,7 @@
 //! binds its socket and activates the deployment, then confines itself before
 //! any thread exists to serve a request. Links no asset parsers and no outbound
 //! transport.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 #[path = "../config.rs"]
 mod config;
@@ -43,6 +44,7 @@ fn arguments() -> Result<Arguments> {
     Ok(parsed)
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
     let arguments = arguments()?;
     let (config, base) = config(&arguments.config)?;

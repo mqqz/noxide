@@ -1,4 +1,5 @@
 //! The deployed process tree holds its keys apart and is really confined.
+#![allow(clippy::too_many_lines)]
 #![cfg(target_os = "linux")]
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use noxide_test_support as support;

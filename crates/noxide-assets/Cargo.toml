@@ -11,3 +11,6 @@ description = "Compiled public assets served by Noxide. Parses no CSS, images or
 noxide-protocol.workspace = true
 anyhow.workspace = true
 sha2.workspace = true
+
+[lints]
+workspace = true

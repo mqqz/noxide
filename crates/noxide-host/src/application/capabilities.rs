@@ -12,6 +12,7 @@ impl Application {
             .ok_or_else(|| anyhow::anyhow!(RequestError::InvalidRequest))
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn capability_page(
         &self,
         resource: u32,
@@ -255,6 +256,7 @@ impl Application {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
     async fn prepare_rotation(
         &self,
         resource: u32,

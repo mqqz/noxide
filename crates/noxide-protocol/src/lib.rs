@@ -1,4 +1,5 @@
 //! Versioned semantic protocol shared by the guest SDK and trusted host.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 
 pub mod assets;

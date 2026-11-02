@@ -115,6 +115,7 @@ impl JobOperatorTransaction for Transaction {
     /// Called while the startup MaintenanceLease already holds the clock lock.
     /// The following lifecycle tick commits activation and its durable heartbeat
     /// together. Same-approval restart never rotates or revives paused work.
+    #[allow(clippy::too_many_lines)]
     async fn activate_jobs(
         &mut self,
         generation: &str,

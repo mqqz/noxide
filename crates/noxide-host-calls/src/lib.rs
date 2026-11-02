@@ -1,5 +1,6 @@
 //! The storage calls a guest may make. Separate from the sandbox so storage code
 //! can implement them without linking a guest runtime.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 use anyhow::Result;
 use std::future::Future;

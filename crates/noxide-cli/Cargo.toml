@@ -63,3 +63,6 @@ noxide-host-calls.workspace = true
 noxide-test-support.workspace = true
 tempfile = "3"
 wat = "1"
+
+[lints]
+workspace = true

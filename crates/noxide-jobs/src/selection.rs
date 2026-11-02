@@ -133,6 +133,7 @@ pub struct PreparedSelection<'a> {
     pub statements: u16,
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn prepare<'a>(request: SelectionRequest<'a>) -> Result<PreparedSelection<'a>> {
     let SelectionRequest {
         manifest,

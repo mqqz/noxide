@@ -1,5 +1,6 @@
 //! Holds the host keys for one serving process, over the socket on its stdin.
 //! Exits when that process does.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
 use noxide_keys::KeyMaterial;

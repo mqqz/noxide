@@ -81,3 +81,6 @@ debug = 0
 
 [profile.test]
 debug = 0
+
+[workspace.lints.clippy]
+too_many_lines = "warn"

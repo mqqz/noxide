@@ -51,6 +51,7 @@ pub(crate) fn action_label(identifier: &str) -> String {
         .join(" ")
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn expand_action(
     declaration: OperationDeclaration,
     item: syn::ItemStruct,
@@ -381,6 +382,7 @@ pub(crate) struct TransactionDeclaration {
     version: u32,
 }
 impl syn::parse::Parse for TransactionDeclaration {
+    #[allow(clippy::too_many_lines)]
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
         use syn::{Token, parenthesized};
         let mut inputs = Vec::new();
@@ -689,6 +691,7 @@ impl syn::parse::Parse for TransactionDeclaration {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn expand_transaction(
     declaration: TransactionDeclaration,
     item: syn::ItemStruct,
@@ -1140,6 +1143,7 @@ fn integer_literal(expr: &syn::Expr) -> bool {
     ) || matches!(expr, syn::Expr::Unary(syn::ExprUnary { op: syn::UnOp::Neg(_), expr, .. }) if matches!(&**expr, syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(_), .. })))
 }
 
+#[allow(clippy::too_many_lines)]
 fn value_expression(
     expr: &syn::Expr,
     inputs: &std::collections::BTreeSet<String>,

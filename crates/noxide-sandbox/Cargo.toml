@@ -20,3 +20,6 @@ wasmparser = "0.245"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 wat = "1"
+
+[lints]
+workspace = true

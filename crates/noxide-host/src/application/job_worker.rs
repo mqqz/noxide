@@ -50,6 +50,7 @@ impl Application {
 
     /// Trusted local operator control. Choices must remain within the current
     /// approved configuration; this entry point is never registered as HTTP.
+    #[allow(clippy::too_many_lines)]
     pub async fn operate_jobs(
         &self,
         command: crate::jobs::JobOperatorCommand,
@@ -270,6 +271,7 @@ impl Application {
 
     /// One due schedule and one bounded query frontier. Oldest due time gives
     /// other tenants/schedules a turn after each committed batch.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn run_recurrence_once(&self) -> std::result::Result<(), RequestError> {
         let Some(jobs) = &self.services.jobs else {
             return Ok(());

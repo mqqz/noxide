@@ -367,6 +367,7 @@ fn validate_contract_limits(m: &Manifest) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_resources(m: &Manifest) -> Result<()> {
     let mut resource_keys = BTreeSet::new();
     for r in &m.resources {
@@ -514,6 +515,7 @@ fn validate_resource_gates(m: &Manifest) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_operations(m: &Manifest) -> Result<()> {
     for op in &m.operations {
         ensure!(
@@ -704,6 +706,7 @@ fn validate_capability_operations(m: &Manifest) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_routes(m: &Manifest) -> Result<()> {
     let mut paths = BTreeSet::new();
     for r in &m.routes {
@@ -918,6 +921,7 @@ fn target_projection(
     );
     Ok(())
 }
+#[allow(clippy::too_many_lines)]
 fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
     ensure!(
         a.version > 0
@@ -1044,6 +1048,7 @@ fn validate_action(m: &Manifest, a: &Action) -> Result<()> {
 }
 
 /// One target's source, eligibility and projections.
+#[allow(clippy::too_many_lines)]
 fn validate_action_target(m: &Manifest, a: &Action, target: &ActionTarget) -> Result<()> {
     ensure!(identifier(&target.name), "invalid target name");
     resource(m, target.resource)?;
@@ -1153,6 +1158,7 @@ fn validate_action_target(m: &Manifest, a: &Action, target: &ActionTarget) -> Re
 
 /// One assignment against its destination field. Records the inputs it uses and any
 /// target that now needs exact review.
+#[allow(clippy::too_many_lines)]
 fn validate_assignment<'a>(
     m: &Manifest,
     a: &'a Action,

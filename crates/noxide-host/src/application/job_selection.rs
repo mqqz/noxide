@@ -30,6 +30,7 @@ fn candidate_cap(limit: u8, logical: u32, statements: u16, eligible_work: u32) -
 }
 impl Application {
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn select_recurring(
         &self,
         tx: &mut Transaction,

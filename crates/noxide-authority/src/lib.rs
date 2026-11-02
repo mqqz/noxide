@@ -1,5 +1,6 @@
 //! Identity, credentials and request authority: accounts, roles, tokens, admission
 //! limits and the per-attempt policy context. Key bytes stay in `noxide-keys`.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 pub mod auth;
 pub mod authority;

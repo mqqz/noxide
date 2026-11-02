@@ -17,6 +17,7 @@
 //! let text = String::from("SELECT 1");
 //! noxide_sql::sql!(text);
 //! ```
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![cfg_attr(
     not(feature = "test-support"),
     doc = "```compile_fail

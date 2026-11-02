@@ -17,6 +17,7 @@ struct Bundle {
     backend: String,
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn prepare(project: &Path, development: bool, approval: Option<&str>) -> Result<PathBuf> {
     let bundle: PathBuf = serde_json::from_slice(
         &super::read(&project.join("target/noxide/latest.json"), 16384)

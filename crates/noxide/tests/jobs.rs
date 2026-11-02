@@ -1,4 +1,5 @@
 //! Public SDK lowering only; host execution authority is independently admitted.
+#![allow(clippy::too_many_lines)]
 use noxide::__private::{Action, Operation, OperationKind, Policy, Predicate, Revision, Target};
 use noxide::{
     ActionType, ApplicationDefinition, CalculatedStep, Duration, Id, IntoActionResponse,

@@ -1,5 +1,6 @@
 //! Document IR to bytes. Pure: the caller grants its budget through
 //! [`RenderContext::checkpoint`].
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 use noxide_admission::{
     Presentation, action_contract, assets, form_layout, manifest, presentation, routing, search,
@@ -147,6 +148,7 @@ fn flow(stack: &[Container]) -> bool {
 
 pub use crate::routing::{match_path, paths_overlap, resolve, validate_path};
 
+#[allow(clippy::too_many_lines)]
 pub fn render(intent: &ResponseIntent, context: &RenderContext<'_>) -> Result<Rendered> {
     let (doc, status) = match intent {
         ResponseIntent::Page(d) => (d, 200),
@@ -448,6 +450,7 @@ pub enum Recovery<'a> {
 }
 
 /// Only host-authenticated scope and freshly authorized values reach this page.
+#[allow(clippy::too_many_lines)]
 pub fn recovery(
     presentation: &crate::Presentation,
     m: &Manifest,

@@ -1,5 +1,6 @@
 //! Guest execution shared by the sandbox and by a server using worker processes.
 //! This crate links no guest runtime, so the server can avoid one.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 pub mod broker;
 pub mod pool;

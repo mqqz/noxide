@@ -5,6 +5,7 @@ use proc_macro2::TokenStream as Tokens;
 use quote::{format_ident, quote};
 use syn::spanned::Spanned;
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn expand_query(
     declaration: OperationDeclaration,
     item: syn::ItemStruct,
@@ -363,6 +364,7 @@ fn query_operand(expression: &syn::Expr, resource: &syn::Type, hash: u32) -> syn
         )
     }
 }
+#[allow(clippy::too_many_lines)]
 fn expand_aggregate(
     declaration: OperationDeclaration,
     item: syn::ItemStruct,

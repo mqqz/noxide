@@ -28,3 +28,6 @@ test-support = []
 
 [dev-dependencies]
 noxide-test-support.workspace = true
+
+[lints]
+workspace = true

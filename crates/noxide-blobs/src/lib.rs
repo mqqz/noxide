@@ -1,5 +1,6 @@
 //! The blob directory and blob metadata. The only crate that opens stored objects;
 //! every object operation is descriptor-relative and bounded by an I/O pool.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 pub mod blob_deployment;
 pub mod inspect;

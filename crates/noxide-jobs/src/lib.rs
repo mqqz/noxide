@@ -2,6 +2,7 @@
 //!
 //! It never runs a component, authorizes a
 //! resource operation, commits a caller transaction, or invents a request scope.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 pub mod job_deployment;
 mod operator;

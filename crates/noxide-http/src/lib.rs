@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 pub(crate) use noxide_admission::{Presentation, manifest, routing};
 #[cfg(test)]
 pub(crate) use noxide_admission::{assets, policy, query_plan, schema};

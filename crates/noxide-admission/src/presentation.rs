@@ -46,6 +46,7 @@ impl Default for Presentation {
 }
 pub static DEFAULT: LazyLock<Presentation> = LazyLock::new(Presentation::default);
 impl Presentation {
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self, manifest: &Manifest) -> Result<()> {
         let cookies = [
             &self.session_cookie,

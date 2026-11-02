@@ -11,3 +11,6 @@ description = "Fixtures shared by Noxide tests. A dev-dependency only; never lin
 noxide-protocol.workspace = true
 serde_json.workspace = true
 wat = "1"
+
+[lints]
+workspace = true

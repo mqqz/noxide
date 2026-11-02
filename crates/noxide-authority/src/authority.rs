@@ -144,6 +144,7 @@ impl Authority {
     // Only full-validated rows or opaque InternalFacts enter this one evaluator.
     // Public visibility, parent gates, scope and selection remain repository
     // checks. A true result here is not a complete Read/output grant.
+    #[allow(clippy::too_many_lines)]
     async fn evaluate_policy_expiry(
         &mut self,
         tx: &mut Transaction,

@@ -165,6 +165,7 @@ pub fn field<'a>(resource: &'a Resource, key: &str) -> Result<&'a TextField> {
 }
 
 /// Resolve every structural change before touching data. No removal is inferred.
+#[allow(clippy::too_many_lines)]
 pub fn transition(
     source: &[Resource],
     target: &[Resource],

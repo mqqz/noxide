@@ -169,6 +169,7 @@ impl IndexRequirement {
 }
 
 type Shape = (String, IndexTable, Vec<IndexColumn>, IndexOrder);
+#[allow(clippy::too_many_lines)]
 pub fn required_indexes(m: &Manifest) -> Result<Vec<IndexRequirement>> {
     let mut keys: BTreeMap<Shape, Vec<u32>> = BTreeMap::new();
     for resource in m

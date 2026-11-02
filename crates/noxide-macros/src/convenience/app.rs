@@ -30,6 +30,7 @@ fn unconditional(attrs: &[Attribute]) -> syn::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn expand_app(mut module: syn::ItemMod) -> syn::Result<Tokens> {
     unconditional(&module.attrs)?;
     let (_, items) = module

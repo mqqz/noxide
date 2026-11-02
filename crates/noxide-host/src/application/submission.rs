@@ -134,6 +134,7 @@ impl Application {
             .await
     }
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
     pub async fn recover_form_with_capability(
         &self,
         cookie: &str,

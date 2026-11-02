@@ -80,6 +80,7 @@ impl Application {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
     pub(in crate::application) fn web_target_grants(
         &self,
         token: &Token,
@@ -262,6 +263,7 @@ impl Application {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
     pub(in crate::application) async fn resolve_action_targets(
         &self,
         tx: &mut Transaction,

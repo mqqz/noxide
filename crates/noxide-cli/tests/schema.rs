@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_lines)]
 use noxide_test_support as support;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};

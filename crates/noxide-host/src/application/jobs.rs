@@ -92,6 +92,7 @@ impl Application {
             .await
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn invoke_job_owned(
         &self,
         claim: &Claim,
@@ -478,6 +479,7 @@ impl Application {
     /// Fixed schedule effects share the mutation transaction and receipt. Scalar
     /// values come from initial snapshots; Created supplies identities only.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn enqueue_action_jobs(
         &self,
         effects: &mut Effects,

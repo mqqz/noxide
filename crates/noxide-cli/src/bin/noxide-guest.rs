@@ -3,6 +3,7 @@
 //! Exits when the socket closes. With `--broker`, runs no guest code at all: it
 //! starts workers for a server that can no longer start processes itself. With
 //! `--compile`, it admits and compiles the component for the broker, once.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
 use noxide_confine::{Mode, Policy};

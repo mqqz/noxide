@@ -4,6 +4,7 @@
 //! [`Keys::Local`] holds the material in this process, for operator commands.
 //! [`Keys::Remote`] asks a key service over an inherited socket, so a compromised
 //! serving process can use the keys while it runs but cannot read them.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 mod material;
 mod service;

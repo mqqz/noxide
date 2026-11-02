@@ -1,6 +1,7 @@
 //! Approved effects as data: deployment approval, the outbox and operator commands.
 //! Links no TLS client and opens no outbound socket; delivery is a separate crate
 //! that the serving process does not depend on.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 pub mod capture;
 pub mod directory;

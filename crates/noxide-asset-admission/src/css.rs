@@ -531,6 +531,7 @@ fn weight(v: &[&Atom]) -> bool {
         && (keywords(v, &["normal", "bold", "bolder", "lighter"])
             || matches!(v[0],Atom::Number(n) if (1.0..=1000.0).contains(n)))
 }
+#[allow(clippy::too_many_lines)]
 fn property(n: &str, v: &[&Atom], urls: &BTreeMap<String, super::AssetMediaType>) -> bool {
     match n {
         "color"

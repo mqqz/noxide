@@ -349,6 +349,7 @@ impl Transaction {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn apply_schema(
         &mut self,
         target: &noxide_protocol::Manifest,

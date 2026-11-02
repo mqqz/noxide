@@ -1,6 +1,7 @@
 //! Pure interpretation of an application contract: manifest admission, policy and
 //! query planning, SQL text generation and identity values. Performs no I/O and
 //! holds no authority; `noxide-host` enforces what this crate computes.
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 pub use noxide_assets as assets;
 pub mod action_contract;

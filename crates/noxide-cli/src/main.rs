@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::too_many_lines))]
 #![forbid(unsafe_code)]
 use noxide_host::AccountAdmin as _;
 mod config;
@@ -18,6 +19,7 @@ use noxide_host::{HostKeys, runtime::Limits};
 use std::path::Path;
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let command = args.first().and_then(|s| s.to_str()).unwrap_or("help");
