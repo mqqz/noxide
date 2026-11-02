@@ -2,7 +2,7 @@
 use super::{Backend, Transaction};
 use anyhow::{Context, Result, ensure};
 
-pub(super) const TABLES: &[super::blob_layout::Table] = &[
+pub(super) const TABLES: &[super::blobs_layout::Table] = &[
     (
         "nx_search_state",
         &[

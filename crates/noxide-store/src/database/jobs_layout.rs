@@ -1,7 +1,7 @@
 //! Fixed bounded jobs metadata; schema activation is coordinator-owned.
 use super::{Backend, Transaction};
 use anyhow::{Result, ensure};
-pub(super) const TABLES: &[super::blob_layout::Table] = &[
+pub(super) const TABLES: &[super::blobs_layout::Table] = &[
     (
         "nx_job_runtime",
         &[

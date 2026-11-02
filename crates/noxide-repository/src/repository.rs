@@ -134,7 +134,7 @@ pub const MAX_LIST_DATABASE_CALLS: usize = 4096;
 
 pub struct Effects {
     pub authority: crate::authority::Authority,
-    pub upload: Option<crate::blob_upload::UploadContext>,
+    pub upload: Option<noxide_blobs::upload::UploadContext>,
     pub blob_reads:
         std::collections::BTreeMap<(u32, u64, String), (String, noxide_protocol::blobs::BlobRef)>,
     pub provenance:
@@ -456,7 +456,7 @@ impl Effects {
                     let handle = noxide_protocol::blobs::UploadHandle::parse(raw.clone())
                         .map_err(anyhow::Error::msg)?;
                     let upload = self.upload.as_ref().ok_or(ReferenceUnavailable)?;
-                    let locked = crate::blob_metadata::MetadataContext { tx: &mut self.tx }
+                    let locked = noxide_blobs::metadata::MetadataContext { tx: &mut self.tx }
                         .lock_stage(&handle, &upload.binding, upload.now)
                         .await?;
                     ensure!(
@@ -548,10 +548,10 @@ impl Effects {
                     .tx
                     .storage_resource(&self.manifest, outcome.resource)
                     .await?;
-                crate::blob_metadata::MetadataContext { tx: &mut self.tx }
+                noxide_blobs::metadata::MetadataContext { tx: &mut self.tx }
                     .associate(
                         locked,
-                        crate::blob_state::Association {
+                        noxide_blobs::state::Association {
                             resource: storage_resource,
                             id: i64::try_from(outcome.id)?,
                             incarnation: outcome.incarnation.clone(),
@@ -951,7 +951,7 @@ impl Effects {
             }
         }
         if self.manifest.blobs.is_some() {
-            crate::blob_metadata::MetadataContext { tx: &mut self.tx }
+            noxide_blobs::metadata::MetadataContext { tx: &mut self.tx }
                 .detach_resource(
                     storage_resource,
                     i64::try_from(stored.record.id)?,

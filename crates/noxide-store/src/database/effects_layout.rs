@@ -1,7 +1,7 @@
 //! Fixed native outbox metadata. Epoch authority remains nx_job_runtime.
 use super::{Backend, Transaction};
 use anyhow::{Result, ensure};
-pub(super) const TABLES: &[super::blob_layout::Table] = &[
+pub(super) const TABLES: &[super::blobs_layout::Table] = &[
     (
         "nx_effect_queue",
         &[

@@ -1,5 +1,5 @@
 mod authority;
-mod blobs;
+mod blob_admission;
 mod computation;
 mod effect_admission;
 pub mod job_admission;
@@ -831,7 +831,7 @@ pub fn validate(m: &Manifest) -> Result<()> {
     }
     job_admission::validate(m)?;
     effect_admission::validate(m)?;
-    blobs::validate_blobs(m)?;
+    blob_admission::validate_blobs(m)?;
     Ok(())
 }
 

@@ -1,4 +1,4 @@
-mod blob_layout;
+mod blobs_layout;
 #[cfg(test)]
 mod bootstrap_close_tests;
 mod commit;
@@ -449,11 +449,11 @@ impl Database {
         if tx.storage_tables().await?.is_empty() {
             for sql in SCHEMA
                 .iter()
-                .chain(blob_layout::TABLE_SQL)
+                .chain(blobs_layout::TABLE_SQL)
                 .chain(search_layout::table_sql(&tx)?)
                 .chain(jobs_layout::table_sql(&tx)?)
                 .chain(effects_layout::table_sql(&tx)?)
-                .chain(blob_layout::INDEXES.iter().map(|(_, sql)| sql))
+                .chain(blobs_layout::INDEXES.iter().map(|(_, sql)| sql))
                 .chain(search_layout::INDEXES.iter().map(|(_, sql)| sql))
                 .chain(jobs_layout::INDEXES.iter().map(|(_, sql)| sql))
                 .chain(effects_layout::INDEXES.iter().map(|(_, sql)| sql))
@@ -608,7 +608,7 @@ impl Transaction {
         let mut tables = Vec::new();
         for &(table, columns) in TABLE_COLUMNS
             .iter()
-            .chain(blob_layout::TABLES)
+            .chain(blobs_layout::TABLES)
             .chain(search_layout::TABLES)
             .chain(jobs_layout::TABLES)
             .chain(effects_layout::TABLES)
@@ -788,7 +788,7 @@ impl Transaction {
         );
         let mut expected: Vec<_> = TABLE_COLUMNS
             .iter()
-            .chain(blob_layout::TABLES)
+            .chain(blobs_layout::TABLES)
             .chain(search_layout::TABLES)
             .chain(jobs_layout::TABLES)
             .chain(effects_layout::TABLES)
@@ -801,7 +801,7 @@ impl Transaction {
         );
         for &(table, columns) in TABLE_COLUMNS
             .iter()
-            .chain(blob_layout::TABLES)
+            .chain(blobs_layout::TABLES)
             .chain(search_layout::TABLES)
             .chain(jobs_layout::TABLES)
             .chain(effects_layout::TABLES)

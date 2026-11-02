@@ -6,7 +6,6 @@ use axum::{
 };
 use noxide_authority::authority;
 use noxide_blobs::metadata::MetadataContext;
-use noxide_blobs::store as blob_store;
 use noxide_blobs::store::{IoGuard, ObjectKey};
 use noxide_blobs::upload::Barrier;
 use noxide_host::application::blobs::*;
@@ -311,7 +310,7 @@ async fn flow(db: Database) {
     );
     assert_eq!(
         response.headers()["content-security-policy"],
-        crate::blob_transport::CSP
+        noxide_blobs::transport::CSP
     );
     assert_eq!(
         to_bytes(response.into_body(), 65536)
@@ -753,7 +752,7 @@ async fn sqlite_quota_race_reserves_before_bytes_and_reclaims_unstarted_upload()
     let case = Case::new(None, m).await;
     let a = prefix(&case.page().await, "one");
     let b = prefix(&case.page().await, "two");
-    let filename = crate::blob_transport::AttachmentName::normalize("file.bin").unwrap();
+    let filename = noxide_blobs::transport::AttachmentName::normalize("file.bin").unwrap();
     let (one, two) = tokio::join!(
         case.app
             .prepare_upload(&case.session, 1, &a, Some(filename.clone())),
@@ -769,7 +768,7 @@ async fn sqlite_quota_race_reserves_before_bytes_and_reclaims_unstarted_upload()
     );
     assert!(
         store
-            .scan(blob_store::ObjectLocation::Partial)
+            .scan(noxide_blobs::store::ObjectLocation::Partial)
             .unwrap()
             .next_batch(&guard)
             .unwrap()
@@ -815,7 +814,7 @@ async fn sqlite_unknown_file_is_charged_retained_and_blocks_new_uploads() {
                 &case.session,
                 1,
                 &prefix(&page, "note"),
-                Some(crate::blob_transport::AttachmentName::normalize("new.bin").unwrap())
+                Some(noxide_blobs::transport::AttachmentName::normalize("new.bin").unwrap())
             )
             .await
             .is_err()
@@ -961,7 +960,7 @@ async fn restart_after_finalize(db: Option<Database>, finalized: bool) {
             &case.session,
             1,
             &fields,
-            Some(crate::blob_transport::AttachmentName::normalize("file.bin").unwrap()),
+            Some(noxide_blobs::transport::AttachmentName::normalize("file.bin").unwrap()),
         )
         .await
         .unwrap();
@@ -1460,7 +1459,7 @@ async fn sqlite_live_stage_quota_is_per_account_across_sessions() {
                 session,
                 1,
                 &prefix(&page, "note"),
-                Some(crate::blob_transport::AttachmentName::normalize("file.bin").unwrap()),
+                Some(noxide_blobs::transport::AttachmentName::normalize("file.bin").unwrap()),
             )
             .await;
         if index < 4 {
@@ -1485,7 +1484,7 @@ async fn sqlite_canceled_committed_gc_claim_recovers_without_restart() {
             &case.session,
             1,
             &prefix(&case.page().await, "note"),
-            Some(crate::blob_transport::AttachmentName::normalize("file.bin").unwrap()),
+            Some(noxide_blobs::transport::AttachmentName::normalize("file.bin").unwrap()),
         )
         .await
         .unwrap();
@@ -2014,7 +2013,7 @@ async fn lifecycle_clock_safety(db: Option<Database>) {
             &case.session,
             1,
             &prefix(&fresh, "new"),
-            Some(crate::blob_transport::AttachmentName::normalize("new.bin").unwrap()),
+            Some(noxide_blobs::transport::AttachmentName::normalize("new.bin").unwrap()),
         )
         .await
         .err()
@@ -2087,7 +2086,7 @@ async fn absence_and_prefix_are_serialized(db: Option<Database>) {
         .await
     });
     barrier.entered.notified().await;
-    let filename = crate::blob_transport::AttachmentName::normalize("new.bin").unwrap();
+    let filename = noxide_blobs::transport::AttachmentName::normalize("new.bin").unwrap();
     let competing = case
         .app
         .prepare_upload(&case.session, 1, &fields, Some(filename));

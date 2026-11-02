@@ -1,17 +1,17 @@
 //! Host-owned blob authority and transport integration. All metadata statements
 //! share the enclosing request's actual SQL meter and original deadline.
 use super::*;
-#[cfg(any(test, feature = "test-support"))]
-use crate::blob_upload::Barrier;
-pub use crate::blob_upload::UploadScope;
-use crate::{
-    blob_inspect::{InventoryBatch, Snapshot},
-    blob_io::{IoPool, IoWitness},
-    blob_metadata::{MetadataContext, Reservation, ReservationOutcome},
-    blob_state::{Commitment, UploadBinding},
-    blob_store::{BlobStore, IoGuard, ObjectKey, PairStep},
-};
 use anyhow::Context;
+#[cfg(any(test, feature = "test-support"))]
+use noxide_blobs::upload::Barrier;
+pub use noxide_blobs::upload::UploadScope;
+use noxide_blobs::{
+    inspect::{InventoryBatch, Snapshot},
+    io::{IoPool, IoWitness},
+    metadata::{MetadataContext, Reservation, ReservationOutcome},
+    state::{Commitment, UploadBinding},
+    store::{BlobStore, IoGuard, ObjectKey, PairStep},
+};
 use noxide_protocol::blobs::*;
 use std::sync::{Mutex, atomic::AtomicBool};
 
@@ -19,7 +19,7 @@ pub struct BlobRuntime {
     pub store: BlobStore,
     pub policy: BlobPolicy,
     pub process: ObjectKey,
-    fence: crate::blob_store::ProcessFence,
+    fence: noxide_blobs::store::ProcessFence,
     pub uploads: Arc<IoPool>,
     pub downloads: Arc<IoPool>,
     pub streams: Arc<tokio::sync::Semaphore>,
@@ -97,7 +97,7 @@ impl Application {
             .uploads
             .try_start(
                 blobs.process.clone(),
-                crate::blob_state::Generation::parse(1)?,
+                noxide_blobs::state::Generation::parse(1)?,
                 deadline.into_std(),
                 cancelled.clone(),
                 move |guard| store.observe_pair(&guard),
@@ -126,7 +126,7 @@ impl Application {
                 .uploads
                 .try_start(
                     blobs.process.clone(),
-                    crate::blob_state::Generation::parse(1)?,
+                    noxide_blobs::state::Generation::parse(1)?,
                     deadline.into_std(),
                     cancelled,
                     move |guard| store.install_pair(&prepared.record, &guard),
@@ -202,12 +202,12 @@ impl Application {
 
 pub enum PreparedUpload {
     Existing { input: String, replay: bool },
-    Created(Box<crate::blob_metadata::BlobRow>, ReservationLease),
+    Created(Box<noxide_blobs::metadata::BlobRow>, ReservationLease),
     Absent,
 }
 impl Application {
-    pub fn multipart_spec(&self, binding: u32) -> Result<crate::blob_multipart::PrefixSpec> {
-        use crate::blob_multipart::{PrefixSpec, ScalarPart};
+    pub fn multipart_spec(&self, binding: u32) -> Result<noxide_blobs::multipart::PrefixSpec> {
+        use noxide_blobs::multipart::{PrefixSpec, ScalarPart};
         let action = manifest::web_action(&self.manifest, binding)?;
         let blobs = self.blobs.as_ref().context("blob deployment missing")?;
         let upload = blobs
@@ -297,7 +297,7 @@ impl Application {
         cookie: &str,
         binding: u32,
         values: &Fields,
-        filename: Option<crate::blob_transport::AttachmentName>,
+        filename: Option<noxide_blobs::transport::AttachmentName>,
     ) -> Result<PreparedUpload> {
         let blobs = self.blobs.as_ref().context("blobs unavailable")?;
         let action = manifest::web_action(&self.manifest, binding)?;
@@ -405,7 +405,7 @@ impl Application {
                     let replay = receipt.is_some();
                     ensure!(
                         replay
-                            || (row.metadata.state == crate::blob_state::State::Staged
+                            || (row.metadata.state == noxide_blobs::state::State::Staged
                                 && time.context("upload lifecycle time missing")?
                                     < row.metadata.expires),
                         "upload is not reusable"
@@ -485,8 +485,8 @@ impl Application {
     }
     pub async fn publish_upload(
         &self,
-        row: &crate::blob_metadata::BlobRow,
-        object: crate::blob_store::DurableObject,
+        row: &noxide_blobs::metadata::BlobRow,
+        object: noxide_blobs::store::DurableObject,
     ) -> Result<String> {
         let blobs = self.blobs.as_ref().context("blobs unavailable")?;
         let admission = self.admit_invocation(false).await?;
@@ -521,12 +521,12 @@ impl Application {
 }
 
 pub struct Download {
-    pub opened: crate::blob_store::OpenedObject,
+    pub opened: noxide_blobs::store::OpenedObject,
     pub permit: Arc<tokio::sync::OwnedSemaphorePermit>,
     pub key: ObjectKey,
-    pub generation: crate::blob_state::Generation,
+    pub generation: noxide_blobs::state::Generation,
     pub bytes: u64,
-    pub filename: crate::blob_transport::AttachmentName,
+    pub filename: noxide_blobs::transport::AttachmentName,
     pub cancelled: Arc<AtomicBool>,
     pub deadline: Instant,
 }
@@ -679,9 +679,9 @@ impl Application {
                     .context("download unavailable")?;
                 let storage_resource = tx.storage_resource(&self.manifest, op.resource).await?;
                 ensure!(
-                    row.metadata.state == crate::blob_state::State::Attached
+                    row.metadata.state == noxide_blobs::state::State::Attached
                         && row.metadata.association.as_ref()
-                            == Some(&crate::blob_state::Association {
+                            == Some(&noxide_blobs::state::Association {
                                 resource: storage_resource,
                                 id: i64::try_from(target.id)?,
                                 incarnation: target.incarnation,
@@ -736,11 +736,9 @@ impl Application {
                 })
             })
             .await;
-        if result
-            .as_ref()
-            .err()
-            .is_some_and(|error: &anyhow::Error| error.is::<crate::blob_store::PhysicalMismatch>())
-        {
+        if result.as_ref().err().is_some_and(|error: &anyhow::Error| {
+            error.is::<noxide_blobs::store::PhysicalMismatch>()
+        }) {
             blobs.quarantined.store(true, Ordering::Release);
         }
         result
@@ -780,13 +778,13 @@ impl Drop for ReservationLease {
 }
 
 struct Inventory {
-    scans: [crate::blob_store::ObjectScan; 2],
+    scans: [noxide_blobs::store::ObjectScan; 2],
     directory: usize,
     pending: std::collections::VecDeque<ObjectKey>,
 }
 impl Inventory {
     fn new(store: &BlobStore) -> Result<Self> {
-        use crate::blob_store::ObjectLocation;
+        use noxide_blobs::store::ObjectLocation;
         Ok(Self {
             scans: [
                 store.scan(ObjectLocation::Partial)?,
@@ -799,7 +797,7 @@ impl Inventory {
     fn batch(&mut self, store: &BlobStore, guard: &IoGuard) -> Result<InventoryBatch> {
         let mut items = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
-        while items.len() < crate::blob_inspect::INSPECTION_PAGE {
+        while items.len() < noxide_blobs::inspect::INSPECTION_PAGE {
             guard.check()?;
             if let Some(key) = self.pending.pop_front() {
                 if seen.insert(key.clone()) {
@@ -826,7 +824,7 @@ impl Application {
     /// One bounded maintenance page. Unknown objects are charged and retained;
     /// only authoritative known metadata can produce a fenced deletion claim.
     pub async fn reconcile_blobs(&self, deadline: Instant) -> Result<()> {
-        use crate::blob_inspect::{FindingKind, InspectionPage, SnapshotItem};
+        use noxide_blobs::inspect::{FindingKind, InspectionPage, SnapshotItem};
         let Some(blobs) = &self.blobs else {
             return Ok(());
         };
@@ -849,7 +847,7 @@ impl Application {
                             .uploads
                             .try_start(
                                 blobs.process.clone(),
-                                crate::blob_state::Generation::parse(1)?,
+                                noxide_blobs::state::Generation::parse(1)?,
                                 deadline.into_std(),
                                 Arc::new(AtomicBool::new(false)),
                                 move |guard| {
@@ -908,7 +906,7 @@ impl Application {
                         }
                         *blobs.metadata_cursor.lock().unwrap() = rows
                             .last()
-                            .filter(|_| rows.len() == crate::blob_inspect::INSPECTION_PAGE)
+                            .filter(|_| rows.len() == noxide_blobs::inspect::INSPECTION_PAGE)
                             .map(|r| r.metadata.binding.slot.as_str().into())
                             .unwrap_or_default();
                         // At most four deletions per page, always with committed CAS
@@ -1118,11 +1116,9 @@ impl Application {
                     .await
             })
             .await;
-        if result
-            .as_ref()
-            .err()
-            .is_some_and(|error: &anyhow::Error| error.is::<crate::blob_store::PhysicalMismatch>())
-        {
+        if result.as_ref().err().is_some_and(|error: &anyhow::Error| {
+            error.is::<noxide_blobs::store::PhysicalMismatch>()
+        }) {
             blobs.quarantined.store(true, Ordering::Release);
         }
         result
@@ -1130,7 +1126,7 @@ impl Application {
     async fn clean_tombstone(
         &self,
         blobs: &BlobRuntime,
-        row: &crate::blob_metadata::BlobRow,
+        row: &noxide_blobs::metadata::BlobRow,
         deadline: Instant,
     ) -> Result<()> {
         let mut tx = self.database.begin(deadline.into_std()).await?;
@@ -1141,7 +1137,7 @@ impl Application {
             .context("blob tombstone missing")?;
         ensure!(
             current.metadata.generation == row.metadata.generation
-                && current.metadata.state == crate::blob_state::State::Deleted,
+                && current.metadata.state == noxide_blobs::state::State::Deleted,
             "blob tombstone changed"
         );
         Self::blob_commit(&mut tx).await?;

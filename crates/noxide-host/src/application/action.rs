@@ -161,7 +161,7 @@ impl Application {
             .collect();
         let input_hash = identity.as_str();
         if let Some(scope) = &upload {
-            crate::blob_metadata::MetadataContext { tx: &mut tx }
+            noxide_blobs::metadata::MetadataContext { tx: &mut tx }
                 .lock_form(scope.store.identity())
                 .await?;
         }

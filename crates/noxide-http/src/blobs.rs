@@ -1,10 +1,8 @@
 use super::*;
-use crate::{
-    application::blobs::PreparedUpload,
-    blob_multipart::{Boundary, PrefixDecoder},
-};
+use crate::application::blobs::PreparedUpload;
 use anyhow::Context;
 use hyper::body::Body as _;
+use noxide_blobs::multipart::{Boundary, PrefixDecoder};
 use std::{pin::Pin, sync::atomic::AtomicBool};
 
 async fn next(
@@ -364,7 +362,7 @@ pub(super) async fn download(gateway: Arc<Gateway>, request: Request) -> Respons
             download.cancelled,
             move |guard| {
                 let _permit = native_permit;
-                let mut budget = crate::blob_transport::TransferBudget::new(
+                let mut budget = noxide_blobs::transport::TransferBudget::new(
                     std::time::Instant::now(),
                     download.deadline.into_std(),
                     length,
@@ -416,15 +414,15 @@ pub(super) async fn download(gateway: Arc<Gateway>, request: Request) -> Respons
         let headers = response.headers_mut();
         headers.insert(
             header::CONTENT_TYPE,
-            HeaderValue::from_static(crate::blob_transport::CONTENT_TYPE),
+            HeaderValue::from_static(noxide_blobs::transport::CONTENT_TYPE),
         );
         headers.insert(
             header::CACHE_CONTROL,
-            HeaderValue::from_static(crate::blob_transport::CACHE_CONTROL),
+            HeaderValue::from_static(noxide_blobs::transport::CACHE_CONTROL),
         );
         headers.insert(
             "x-content-type-options",
-            HeaderValue::from_static(crate::blob_transport::NOSNIFF),
+            HeaderValue::from_static(noxide_blobs::transport::NOSNIFF),
         );
         headers.insert(
             header::CONTENT_DISPOSITION,
@@ -436,7 +434,7 @@ pub(super) async fn download(gateway: Arc<Gateway>, request: Request) -> Respons
         );
         headers.insert(
             header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(crate::blob_transport::CSP),
+            HeaderValue::from_static(noxide_blobs::transport::CSP),
         );
         Ok(response)
     }
@@ -474,7 +472,7 @@ impl StreamLease {
 struct DownloadBody {
     lease: Arc<StreamLease>,
     receive: tokio::sync::mpsc::Receiver<axum::body::Bytes>,
-    job: Option<crate::blob_io::IoJob<()>>,
+    job: Option<noxide_blobs::io::IoJob<()>>,
     remaining: u64,
     failed: bool,
 }
@@ -533,7 +531,7 @@ impl Drop for DownloadBody {
     }
 }
 
-struct PublicationLease(crate::blob_io::IoWitness);
+struct PublicationLease(noxide_blobs::io::IoWitness);
 impl Drop for PublicationLease {
     fn drop(&mut self) {
         self.0.cancel();
