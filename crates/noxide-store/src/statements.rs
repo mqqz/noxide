@@ -1,5 +1,6 @@
 //! Every fixed statement the layers above the store may run. They cannot write
 //! their own: only this crate can construct a `Statement`.
+pub mod accounts;
 pub mod effects;
 pub mod jobs;
 

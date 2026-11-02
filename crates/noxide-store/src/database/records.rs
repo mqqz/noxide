@@ -44,4 +44,18 @@ impl Transaction {
         );
         self.fetch(scan.sql(), params).await
     }
+
+    /// Evaluate a membership predicate for each requested reference.
+    pub async fn membership_witnesses(
+        &mut self,
+        requested: &Sql,
+        predicate: &Sql,
+        limit: usize,
+        params: &[Param],
+    ) -> Result<Vec<[String; 2]>> {
+        let statement = sql!(
+            "WITH requested AS ({requested}) SELECT reference_id,CASE WHEN {predicate} THEN '1' ELSE '0' END FROM requested LIMIT {limit}"
+        );
+        self.fetch(statement, params).await
+    }
 }

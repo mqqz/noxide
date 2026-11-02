@@ -1,7 +1,7 @@
 //! Trusted operator APIs. These are deliberately absent from the guest interface.
-use crate::sql::sql;
 use crate::{Database, auth::MAX_ROLES, database::Transaction, manifest::identifier};
 use anyhow::{Context, Result, ensure};
+use noxide_store::statements::accounts as stmt;
 use std::time::{Duration, Instant};
 
 /// Global and tenant assignments are distinct policy authorities.
@@ -30,13 +30,8 @@ pub struct RoleAssignment {
 }
 
 async fn account(tx: &mut Transaction, user: &str) -> Result<String> {
-    let tenant = tx.bounded_text("tenant", 32);
-    let rows = tx
-        .fetch::<1>(
-            &sql!("SELECT {tenant} FROM nx_accounts WHERE id=$1 AND state<>'deleted'"),
-            &[user.into()],
-        )
-        .await?;
+    let query = stmt::account_tenant(tx);
+    let rows = tx.rows(&query, &[user.into()]).await?;
     let [tenant] = rows.first().context("account does not exist")?;
     ensure!(
         tenant.is_empty() || identifier(tenant),
@@ -46,9 +41,8 @@ async fn account(tx: &mut Transaction, user: &str) -> Result<String> {
 }
 
 pub async fn assignments(tx: &mut Transaction, user: &str) -> Result<Vec<RoleAssignment>> {
-    let name = tx.bounded_text("name", 32);
-    let tenant = tx.bounded_text("tenant", 32);
-    let rows = tx.fetch::<2>(&sql!("SELECT {name},{tenant} FROM nx_roles WHERE principal=$1 ORDER BY name,tenant LIMIT {}", MAX_ROLES + 1), &[user.into()]).await?;
+    let query = stmt::role_assignments(tx, MAX_ROLES + 1);
+    let rows = tx.rows(&query, &[user.into()]).await?;
     rows.into_iter()
         .map(|[name, tenant]| {
             ensure!(
@@ -90,8 +84,8 @@ impl RoleAdmin for Database {
         let changed = !roles.iter().any(|r| r.name == role && r.tenant == tenant);
         if changed {
             ensure!(roles.len() < MAX_ROLES, "role assignment limit reached");
-            tx.execute(
-                "INSERT INTO nx_roles(principal,name,tenant) VALUES($1,$2,$3)",
+            tx.run(
+                &stmt::INSERT_ROLE,
                 &[user.into(), role.into(), tenant.into()],
             )
             .await?;
@@ -111,8 +105,8 @@ impl RoleAdmin for Database {
         tx.check_storage().await?;
         account(&mut tx, user).await?;
         let changed = tx
-            .execute(
-                "DELETE FROM nx_roles WHERE principal=$1 AND name=$2 AND tenant=$3",
+            .run(
+                &stmt::DELETE_ROLE,
                 &[user.into(), role.into(), tenant.into()],
             )
             .await?

@@ -125,12 +125,14 @@ impl Witnesses {
                 false,
                 &mut params,
             )?;
-            let sql = sql!(
-                "WITH requested AS ({}) SELECT reference_id,CASE WHEN {predicate} THEN '1' ELSE '0' END FROM requested LIMIT {}",
-                requested.joined(" UNION ALL "),
-                MAX_BATCH
-            );
-            let witnesses = tx.fetch::<2>(&sql, &params).await?;
+            let witnesses = tx
+                .membership_witnesses(
+                    &requested.joined(" UNION ALL "),
+                    &predicate,
+                    MAX_BATCH,
+                    &params,
+                )
+                .await?;
             ensure!(
                 witnesses.len() == missing.len(),
                 "incomplete membership batch"
