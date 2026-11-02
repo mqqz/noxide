@@ -70,7 +70,12 @@ pub struct Worker {
 }
 
 impl Worker {
+    /// A worker runs one request at a time, whatever the server's total is.
     pub fn compile(component: &[u8], limits: Limits) -> Result<Self> {
+        let limits = Limits {
+            concurrency: 1,
+            ..limits
+        };
         Ok(Self {
             runtime: Runtime::compile(component, limits)?,
         })

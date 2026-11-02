@@ -3,6 +3,7 @@
 //! output itself. A worker that breaks the protocol is killed and never reused.
 use crate::{
     Attempt, GuestBusy, Limits,
+    broker::BrokerClient,
     wire::{self, FromWorker, Outcome, ToWorker},
 };
 use anyhow::{Context, Result, anyhow, ensure};
@@ -10,12 +11,14 @@ use noxide_host_calls::HostCalls;
 use noxide_protocol::{MAX_REQUEST_BYTES, RequestView, ResponseIntent, decode_response};
 use std::{
     io::Write,
-    os::{fd::OwnedFd, unix::net::UnixStream as StdStream},
-    path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    os::unix::net::UnixStream as StdStream,
+    path::Path,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
-use tokio::{net::UnixStream, time::Instant};
+use tokio::{net::UnixStream, sync::Semaphore, time::Instant};
 
 /// How long past the deadline a worker has to report it. A worker stops its guest at
 /// the deadline itself, and reporting keeps it usable; this only limits how long the
@@ -26,11 +29,12 @@ const WORKER_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
 pub const MAX_COMPONENT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Write what a new worker needs on its stdin socket.
-fn write_init(stream: &mut StdStream, component: &[u8], limits: &Limits) -> Result<()> {
+pub(crate) fn write_init(stream: &mut StdStream, component: &[u8], limits: &Limits) -> Result<()> {
     ensure!(component.len() <= MAX_COMPONENT_BYTES, "component limit");
     stream.write_all(&(limits.memory_bytes as u64).to_le_bytes())?;
     stream.write_all(&limits.fuel.to_le_bytes())?;
     stream.write_all(&limits.host_calls.to_le_bytes())?;
+    stream.write_all(&(limits.concurrency as u64).to_le_bytes())?;
     stream.write_all(&(limits.wall_time.as_millis() as u64).to_le_bytes())?;
     stream.write_all(&(component.len() as u64).to_le_bytes())?;
     stream.write_all(component)?;
@@ -48,6 +52,7 @@ pub fn read_init(stream: &mut impl std::io::Read) -> Result<(Limits, Vec<u8>)> {
     let fuel = u64(stream)?;
     let mut calls = [0; 4];
     stream.read_exact(&mut calls)?;
+    let concurrency = usize::try_from(u64(stream)?)?;
     let wall_time = std::time::Duration::from_millis(u64(stream)?);
     let length = usize::try_from(u64(stream)?)?;
     ensure!(length <= MAX_COMPONENT_BYTES, "component limit");
@@ -58,100 +63,63 @@ pub fn read_init(stream: &mut impl std::io::Read) -> Result<(Limits, Vec<u8>)> {
         fuel,
         host_calls: u32::from_le_bytes(calls),
         wall_time,
-        concurrency: 1,
+        concurrency,
     };
     Ok((limits, component))
 }
 
 struct Worker {
-    child: Child,
+    id: u32,
     stream: Option<StdStream>,
+    /// Absent only for a worker no broker started, in tests.
+    broker: Option<Arc<BrokerClient>>,
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        // Closing the socket also ends an idle worker if the kill is refused.
+        // Closing the socket ends a worker that follows the protocol; killing
+        // covers one that does not.
         drop(self.stream.take());
-        if self.child.kill().is_ok() {
-            let _ = self.child.wait();
+        if let Some(broker) = &self.broker {
+            broker.kill(self.id);
         }
     }
 }
 
 pub struct GuestPool {
     idle: Mutex<Vec<Worker>>,
+    /// One permit per idle worker.
+    available: Semaphore,
+    /// Workers idle, busy or starting.
+    live: AtomicUsize,
+    starting: AtomicUsize,
     limits: Limits,
-    spawner: Option<Spawner>,
+    broker: Option<Arc<BrokerClient>>,
 }
 
-struct Spawner {
-    program: PathBuf,
-    arguments: Vec<String>,
-    component: Arc<[u8]>,
-}
-
-impl Spawner {
-    fn spawn(&self, limits: &Limits) -> Result<Worker> {
-        let (mut ours, theirs) = StdStream::pair()?;
-        let child = Command::new(&self.program)
-            .args(&self.arguments)
-            .stdin(Stdio::from(OwnedFd::from(theirs)))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .env_clear()
-            .spawn()
-            .with_context(|| format!("cannot start {}", self.program.display()))?;
-        let mut worker = Worker {
-            child,
-            stream: None,
-        };
-        write_init(&mut ours, &self.component, limits)?;
-        let mut ready = [0];
-        std::io::Read::read_exact(&mut ours, &mut ready).context("worker did not start")?;
-        ensure!(&ready == b"R", "worker did not start");
-        worker.stream = Some(ours);
-        Ok(worker)
-    }
-}
+/// Workers kept ready before anyone needs them. More start on demand, up to
+/// `limits.concurrency`, each compiling the component on its way up.
+const WARM_WORKERS: usize = 2;
 
 impl GuestPool {
-    /// Start `limits.concurrency` workers at once. A confined
-    /// server cannot start processes, so call this before confining.
-    pub fn start(
-        program: &Path,
-        arguments: &[&str],
-        component: &[u8],
-        limits: Limits,
-    ) -> Result<Self> {
-        let spawner = Spawner {
-            program: program.to_owned(),
-            arguments: arguments
-                .iter()
-                .map(|argument| (*argument).to_owned())
-                .collect(),
-            component: component.into(),
+    /// Start a broker and one worker, which is the component's admission check. Call
+    /// before confining: this is the last time this process can start anything.
+    pub fn start(program: &Path, mode: &str, component: &[u8], limits: Limits) -> Result<Self> {
+        let broker = Arc::new(BrokerClient::start(program, mode, component, &limits)?);
+        let (id, stream) = broker.worker().context("the component was rejected")?;
+        let worker = Worker {
+            id,
+            stream: Some(stream),
+            broker: Some(broker.clone()),
         };
-        // Each worker compiles the component; these threads end before this returns,
-        // so they do not hold up the server's confinement.
-        let idle = std::thread::scope(|scope| {
-            let starting: Vec<_> = (0..limits.concurrency)
-                .map(|_| scope.spawn(|| spawner.spawn(&limits)))
-                .collect();
-            starting
-                .into_iter()
-                .map(|worker| worker.join().expect("worker start"))
-                .collect::<Result<Vec<_>>>()
-        })?;
         Ok(Self {
-            idle: Mutex::new(idle),
+            idle: Mutex::new(vec![worker]),
+            available: Semaphore::new(1),
+            live: AtomicUsize::new(1),
+            starting: AtomicUsize::new(0),
             limits,
-            spawner: Some(spawner),
+            broker: Some(broker),
         })
-    }
-
-    /// Stop replacing workers that fail, once this process can no longer start them.
-    pub fn stop_replacing(&mut self) {
-        self.spawner = None;
     }
 
     pub fn limits(&self) -> &Limits {
@@ -162,27 +130,82 @@ impl GuestPool {
         self.idle.lock().unwrap().len()
     }
 
-    /// Stop every idle worker; later requests report no capacity.
+    /// Stop every idle worker and accept no more requests.
     pub fn close(&self) {
+        self.available.close();
         self.idle.lock().unwrap().clear();
     }
 
-    fn checkout(&self) -> Option<Worker> {
-        self.idle.lock().unwrap().pop()
-    }
-
-    /// A replacement is compiled off the async executor and added when ready.
-    fn replace(self: &Arc<Self>) {
-        if self.spawner.is_none() {
+    /// Start a worker off the async executor, if there is room for one.
+    fn add_worker(self: &Arc<Self>) {
+        let Some(broker) = self.broker.clone() else {
+            return;
+        };
+        if self
+            .live
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
+                (live < self.limits.concurrency).then_some(live + 1)
+            })
+            .is_err()
+        {
             return;
         }
+        self.starting.fetch_add(1, Ordering::AcqRel);
         let pool = self.clone();
         tokio::task::spawn_blocking(move || {
-            let spawner = pool.spawner.as_ref().expect("checked above");
-            if let Ok(worker) = spawner.spawn(&pool.limits) {
-                pool.idle.lock().unwrap().push(worker);
+            let worker = broker.worker();
+            pool.starting.fetch_sub(1, Ordering::AcqRel);
+            match worker {
+                Ok((id, stream)) => pool.park(Worker {
+                    id,
+                    stream: Some(stream),
+                    broker: Some(broker),
+                }),
+                Err(_) => {
+                    pool.live.fetch_sub(1, Ordering::AcqRel);
+                }
             }
         });
+    }
+
+    fn park(&self, worker: Worker) {
+        self.idle.lock().unwrap().push(worker);
+        self.available.add_permits(1);
+    }
+
+    fn keep_warm(self: &Arc<Self>) {
+        let ready = self.idle_workers() + self.starting.load(Ordering::Acquire);
+        for _ in ready..WARM_WORKERS {
+            self.add_worker();
+        }
+    }
+
+    /// Wait for a worker, up to the deadline. The admission limit in front of this
+    /// bounds how many can wait.
+    async fn checkout(self: &Arc<Self>, deadline: Instant) -> Result<Worker> {
+        if self.idle_workers() == 0 {
+            if self.starting.load(Ordering::Acquire) == 0 {
+                self.add_worker();
+            }
+            if self.broker.is_none() {
+                return Err(GuestBusy::Capacity.into());
+            }
+        }
+        let permit = tokio::time::timeout_at(deadline, self.available.acquire())
+            .await
+            .map_err(|_| GuestBusy::Deadline)?
+            .map_err(|_| GuestBusy::Capacity)?;
+        permit.forget();
+        let worker = self.idle.lock().unwrap().pop();
+        self.keep_warm();
+        worker.ok_or_else(|| GuestBusy::Capacity.into())
+    }
+
+    /// Discard a worker and start its replacement.
+    fn discard(self: &Arc<Self>, worker: Worker) {
+        drop(worker);
+        self.live.fetch_sub(1, Ordering::AcqRel);
+        self.keep_warm();
     }
 
     pub async fn run<H: HostCalls>(
@@ -198,13 +221,16 @@ impl GuestPool {
             calls_left: calls,
             failure: None,
         };
-        let Some(mut worker) = self.checkout() else {
-            return Attempt {
-                result: Err(GuestBusy::Capacity.into()),
-                effects,
-                fuel_left: fuel,
-                calls_left: calls,
-            };
+        let mut worker = match self.checkout(deadline).await {
+            Ok(worker) => worker,
+            Err(error) => {
+                return Attempt {
+                    result: Err(error),
+                    effects,
+                    fuel_left: fuel,
+                    calls_left: calls,
+                };
+            }
         };
         let exchange = tokio::time::timeout_at(
             deadline + WORKER_GRACE,
@@ -221,11 +247,10 @@ impl GuestPool {
             Ok(Ok(Outcome::Failed)) => (true, Err(anyhow!("guest failed"))),
         };
         if reusable {
-            self.idle.lock().unwrap().push(worker);
+            self.park(worker);
         } else {
             // A broken exchange leaves the worker in an unknown state.
-            drop(worker);
-            self.replace();
+            self.discard(worker);
         }
         Attempt {
             result: match used.failure.take() {
@@ -402,14 +427,17 @@ mod tests {
     fn hostile() -> (Arc<GuestPool>, UnixStream) {
         let (ours, theirs) = StdStream::pair().unwrap();
         theirs.set_nonblocking(true).unwrap();
-        let child = Command::new("sleep").arg("30").spawn().unwrap();
         let pool = GuestPool {
             idle: Mutex::new(vec![Worker {
-                child,
+                id: 1,
                 stream: Some(ours),
+                broker: None,
             }]),
+            available: Semaphore::new(1),
+            live: AtomicUsize::new(1),
+            starting: AtomicUsize::new(0),
             limits: Limits::default(),
-            spawner: None,
+            broker: None,
         };
         (Arc::new(pool), UnixStream::from_std(theirs).unwrap())
     }

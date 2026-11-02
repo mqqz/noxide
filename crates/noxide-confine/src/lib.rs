@@ -34,6 +34,10 @@ pub struct Policy {
     pub readable: Vec<PathBuf>,
     pub tcp_bind: Vec<u16>,
     pub tcp_connect: Vec<u16>,
+    /// Keep the right to start programs, limited to `readable` by Landlock. Only for
+    /// the guest broker, whose whole purpose is starting workers. What it starts
+    /// inherits these limits.
+    pub spawn: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,20 +172,34 @@ mod imp {
         libc::SYS_vfork,
     ];
 
+    /// What `Policy::spawn` keeps available.
+    const SPAWNING: &[libc::c_long] = &[
+        libc::SYS_execve,
+        #[cfg(target_arch = "x86_64")]
+        libc::SYS_fork,
+        #[cfg(target_arch = "x86_64")]
+        libc::SYS_vfork,
+    ];
+
     fn seccomp(policy: &Policy) -> Result<()> {
         let arch = TargetArch::try_from(std::env::consts::ARCH).context("seccomp architecture")?;
-        let mut rules: BTreeMap<i64, Vec<SeccompRule>> =
-            DENIED.iter().map(|call| (*call, Vec::new())).collect();
+        let mut rules: BTreeMap<i64, Vec<SeccompRule>> = DENIED
+            .iter()
+            .filter(|call| !(policy.spawn && SPAWNING.contains(call)))
+            .map(|call| (*call, Vec::new()))
+            .collect();
         // A new process would leave this filter's view; threads share it.
-        rules.insert(
-            libc::SYS_clone,
-            vec![SeccompRule::new(vec![SeccompCondition::new(
-                0,
-                SeccompCmpArgLen::Qword,
-                SeccompCmpOp::MaskedEq(libc::CLONE_THREAD as u64),
-                0,
-            )?])?],
-        );
+        if !policy.spawn {
+            rules.insert(
+                libc::SYS_clone,
+                vec![SeccompRule::new(vec![SeccompCondition::new(
+                    0,
+                    SeccompCmpArgLen::Qword,
+                    SeccompCmpOp::MaskedEq(libc::CLONE_THREAD as u64),
+                    0,
+                )?])?],
+            );
+        }
         let mut families = vec![libc::AF_UNIX];
         if !policy.tcp_bind.is_empty() || !policy.tcp_connect.is_empty() {
             families.extend([libc::AF_INET, libc::AF_INET6]);
@@ -211,7 +229,9 @@ mod imp {
             arch,
         )?;
         seccompiler::apply_filter(&deny)?;
-        seccompiler::apply_filter(&clone3)?;
+        if !policy.spawn {
+            seccompiler::apply_filter(&clone3)?;
+        }
         Ok(())
     }
 

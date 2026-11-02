@@ -1546,6 +1546,7 @@ dependencies = [
  "anyhow",
  "noxide-host-calls",
  "noxide-protocol",
+ "rustix",
  "serde_json",
  "tokio",
 ]

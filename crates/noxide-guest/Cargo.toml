@@ -11,6 +11,7 @@ description = "Runs Noxide guests in separate processes: the wire protocol and t
 noxide-protocol.workspace = true
 noxide-host-calls.workspace = true
 anyhow.workspace = true
+rustix.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "sync", "time"] }
 

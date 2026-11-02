@@ -17,6 +17,7 @@ fn policy(root: &str, tcp: bool) -> Policy {
         readable: vec![root.join("public")],
         tcp_bind: if tcp { vec![48_731] } else { vec![] },
         tcp_connect: if tcp { vec![48_731] } else { vec![] },
+        spawn: false,
     }
 }
 

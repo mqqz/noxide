@@ -1,6 +1,7 @@
 //! Guest execution shared by the sandbox and by a server using worker processes.
 //! This crate links no guest runtime, so the server can avoid one.
 #![forbid(unsafe_code)]
+pub mod broker;
 pub mod pool;
 pub mod wire;
 

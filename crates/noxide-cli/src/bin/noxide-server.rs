@@ -106,14 +106,12 @@ fn main() -> Result<()> {
     .with_database_statement_limit(config.database_statement_limit)?
     .with_registration(config.registration);
     if config.guest_workers && !arguments.validate {
-        let mut pool = GuestPool::start(
+        let pool = GuestPool::start(
             &sibling("noxide-guest")?,
-            &[config.confinement.argument()],
+            config.confinement.argument(),
             &component,
             Limits::default(),
         )?;
-        // This process confines itself below, after which it cannot start any more.
-        pool.stop_replacing();
         app.use_guest_workers(Arc::new(pool));
     }
     let app = Arc::new(app);

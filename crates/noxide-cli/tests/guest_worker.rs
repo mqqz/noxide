@@ -82,7 +82,7 @@ fn pool(body: &str, concurrency: usize) -> Arc<GuestPool> {
     Arc::new(
         GuestPool::start(
             Path::new(env!("CARGO_BIN_EXE_noxide-guest")),
-            &["best_effort"],
+            "best_effort",
             &component(body),
             limits,
         )
@@ -250,7 +250,7 @@ async fn an_application_serves_and_writes_through_a_worker() {
     let pool = Arc::new(
         GuestPool::start(
             Path::new(env!("CARGO_BIN_EXE_noxide-guest")),
-            &["best_effort"],
+            "best_effort",
             &component,
             Limits {
                 concurrency: 1,
