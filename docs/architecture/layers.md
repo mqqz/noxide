@@ -13,7 +13,7 @@ the [explicit examples](../sdk-lowering.md).
 | `noxide-render` | Document IR to bytes, with its budget passed in |
 | `noxide-host-calls` | The storage calls a guest may make, as a trait with no runtime behind it |
 | `noxide-guest` | The worker wire protocol and the server's worker pool; links no guest runtime |
-| `noxide-sandbox` | The Wasmtime boundary and complete guest import surface, behind `HostCalls` |
+| `noxide-sandbox` | The Wasmtime boundary and complete guest import surface, behind `HostCalls`; compiles and loads guest code |
 | `noxide-keys` | Host key material and the key service protocol; callers never receive key bytes |
 | `noxide-confine` | Landlock and seccomp policy for deployed processes |
 | `noxide-test-support` | Test fixtures; a dev-dependency only |
@@ -109,11 +109,18 @@ host authorization of the destination and credential handover.
 
 Guest code runs in `noxide-guest` processes. The server links no Wasmtime, which
 `tools/check_binaries.py` enforces; in-process guests exist only for tests, behind
-`test-support`. A worker compiles the component and then gives up everything but the
-socket from its server. The server stays the authority: it checks storage access on
-every call, counts calls, limits each message, enforces the deadline and validates the
-output itself. A worker that breaks the protocol is killed and never reused. The first
-worker's compile is the component's admission check.
+`test-support`. The server stays the authority: it checks storage access on every call,
+counts calls, limits each message, enforces the deadline and validates the output
+itself. A worker that breaks the protocol is killed and never reused.
+
+**Compile once.** A compile process (`noxide-guest --compile`) confines itself, then
+admits and compiles the component, and exits. This is the component's admission check.
+The broker holds the compiled artifact in memory and sends it to each new worker, which
+loads it in under a millisecond, so a new account costs no compile. Nothing is written
+to disk. Loading is the one `unsafe` block in `noxide-sandbox`, because Wasmtime runs
+those bytes as machine code; `tools/check_layers.py` holds it to that one block and one
+caller. A compiler bug triggered by a hostile component could make an artifact hostile,
+so a worker confines itself before it loads one.
 
 **Isolation.** A worker serves one account or one service identity, never another, so
 a guest that escapes Wasmtime cannot read other accounts' requests. Anonymous requests
@@ -126,9 +133,10 @@ undumpable, and applies Landlock and seccomp with no filesystem, threads, new so
 or signals. The server kills a worker that misses its deadline.
 
 **The broker.** A confined server cannot start processes, so `noxide-guest --broker`
-starts workers and passes each socket back. It runs no guest code and never reads
-worker messages. It can run only its own binary and the dynamic linker, and read system
-libraries. If it dies the server stops with an error, so that a supervisor restarts both.
+starts the compile process and workers, and passes each worker's socket back. It runs no
+guest code and never reads worker messages. It can run only its own binary and the
+dynamic linker, and read system libraries. If it dies the server stops with an error, so
+that a supervisor restarts both.
 
 What this does not do:
 
@@ -143,11 +151,10 @@ What this does not do:
   hard total needs a cgroup, which is an operator's choice.
 - Landlock and seccomp reduce a kernel attack surface; they do not remove it. An escape
   from Wasmtime followed by a kernel exploit is outside this boundary.
-- Many accounts cost compiles: each new account takes a fresh worker, about 210 ms of
-  CPU and 22 MiB for a 175 KiB release-built application, measured on one machine.
-  The server starts four before listening and replaces them as they are used, but a
-  burst of new accounts can outrun that. A request that finds none ready waits, and
-  fails as busy at its deadline.
+- A burst of new accounts can still outrun worker starts. A request that finds none
+  ready waits, and fails as busy at its deadline. With stubbed storage and a 162 KiB
+  release-built application on one machine, new accounts ran at about 2100 per second,
+  and each worker used about 8 MiB.
 
 ## Mutation and navigation lifecycle
 

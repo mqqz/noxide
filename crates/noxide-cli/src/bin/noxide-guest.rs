@@ -1,11 +1,12 @@
 //! Runs one application's guest code, over the socket on its stdin. Holds no keys
 //! and no database, and is confined to that socket before any guest code runs.
 //! Exits when the socket closes. With `--broker`, runs no guest code at all: it
-//! starts workers for a server that can no longer start processes itself.
+//! starts workers for a server that can no longer start processes itself. With
+//! `--compile`, it admits and compiles the component for the broker, once.
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
 use noxide_confine::{Mode, Policy};
-use noxide_sandbox::worker::Worker;
+use noxide_sandbox::worker::{Worker, compile_artifact};
 use std::{
     ffi::OsString,
     os::{fd::AsFd, unix::net::UnixStream},
@@ -25,8 +26,10 @@ const LIBRARIES: &[&str] = &[
 /// Generous for the largest guest memory, its 128 MiB reservation, Wasmtime's own use
 /// and a compiled component, and small enough to stop a worker using up the machine.
 const WORKER_ADDRESS_SPACE: u64 = 2 * 1024 * 1024 * 1024;
-/// Compiling happens before these limits apply; this is startup and the idle loop.
+/// Startup and the idle loop.
 const WORKER_BASE_CPU_SECONDS: u64 = 30;
+/// Far beyond any component a server would accept, in a debug build.
+const COMPILE_CPU_SECONDS: u64 = 300;
 
 fn mode(argument: Option<&OsString>) -> Mode {
     match argument.and_then(|mode| mode.to_str()) {
@@ -45,31 +48,58 @@ fn main() -> Result<()> {
         ensure!(args.next().is_none(), "usage: noxide-guest --broker [MODE]");
         return broker(socket, selected);
     }
+    if first.as_deref().and_then(|argument| argument.to_str()) == Some("--compile") {
+        let selected = args.next();
+        ensure!(
+            args.next().is_none(),
+            "usage: noxide-guest --compile [MODE]"
+        );
+        return compile(socket, selected);
+    }
     ensure!(args.next().is_none(), "usage: noxide-guest [MODE]");
     let startup = noxide_guest::pool::read_init(&mut socket).context("startup")?;
     let cpu = cpu_seconds(&startup);
     let memory = startup.limits.memory_bytes as u64;
-    let worker = Worker::compile(&startup.component, startup.limits)?;
-    drop(startup.component);
     // Before confinement: Tokio's drivers make a socket pair, which it then forbids.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()?;
-    limit_resources(cpu, memory)?;
-    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)?;
+    give_up_authority(cpu, memory, first.as_ref())?;
+    let worker = Worker::load_from_broker(&startup.code, startup.limits)?;
+    drop(startup.code);
     std::io::Write::write_all(&mut socket, b"R")?;
-    noxide_confine::apply(&Policy {
-        mode: mode(first.as_ref()),
-        isolated: true,
-        ..Default::default()
-    })?;
     socket.set_nonblocking(true)?;
     runtime.block_on(async move {
         worker
             .serve(tokio::net::UnixStream::from_std(socket)?)
             .await
     })
+}
+
+/// Everything a worker or compile process keeps nothing beyond, before it touches code.
+fn give_up_authority(cpu: u64, memory: u64, selected: Option<&OsString>) -> Result<()> {
+    limit_resources(cpu, memory)?;
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)?;
+    noxide_confine::apply(&Policy {
+        mode: mode(selected),
+        isolated: true,
+        ..Default::default()
+    })?;
+    Ok(())
+}
+
+/// Compile for the broker. Confined first, since this parses and compiles an untrusted
+/// component, and limited, since that work is otherwise unbounded. Exits without writing
+/// anything if the component is rejected, which the broker reads as a closed socket.
+fn compile(mut socket: UnixStream, selected: Option<OsString>) -> Result<()> {
+    let startup = noxide_guest::pool::read_init(&mut socket).context("startup")?;
+    let memory = startup.limits.memory_bytes as u64;
+    give_up_authority(COMPILE_CPU_SECONDS, memory, selected.as_ref())?;
+    let artifact = compile_artifact(&startup.code, &startup.limits)?;
+    std::io::Write::write_all(&mut socket, &(artifact.len() as u64).to_le_bytes())?;
+    std::io::Write::write_all(&mut socket, &artifact)?;
+    Ok(())
 }
 
 /// Every request it may serve running for its whole time limit. Only an escaped guest

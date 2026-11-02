@@ -292,6 +292,26 @@ async fn a_guest_can_use_its_whole_memory_under_the_process_limit() {
     attempt.result.unwrap();
 }
 
+#[test]
+fn a_rejected_component_stops_startup() {
+    for component in [
+        b"not a component".to_vec(),
+        wat::parse_str("(component)").unwrap(),
+    ] {
+        let started = GuestPool::start(
+            Path::new(env!("CARGO_BIN_EXE_noxide-guest")),
+            "best_effort",
+            &component,
+            Limits {
+                concurrency: 1,
+                ..Limits::default()
+            },
+            1,
+        );
+        assert!(started.is_err());
+    }
+}
+
 #[tokio::test]
 async fn an_application_serves_and_writes_through_a_worker() {
     use noxide_host::{AccountAdmin as _, Application, Database, DeploymentResources, HostKeys};

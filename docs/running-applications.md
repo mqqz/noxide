@@ -264,10 +264,10 @@ its journal files. Keep keys outside application inputs and source control.
 Guest code runs in separate `noxide-guest` processes, which must be installed beside
 the server. A worker serves one account, and the optional `guest_worker_requests`
 setting is how many requests it serves before it is replaced. It defaults to 256. A
-value of `1` gives every request a new process, but each request then waits for a
-compile, about 200 ms for a small application on a fast machine, so use it only for low
-traffic. The server stops with an error if its guest broker dies, so run it under a
-supervisor that restarts it. See [guest workers](architecture/layers.md#guest-workers).
+value of `1` gives every request a new process, which also stops a guest that escapes
+Wasmtime from seeing later requests in that account. The server stops with an error if
+its guest broker dies, so run it under a supervisor that restarts it. See
+[guest workers](architecture/layers.md#guest-workers).
 
 The optional `database_statement_limit` is an integer from 1 through 256 and
 defaults to 256. It lowers the ordinary request's shared SQL statement ceiling,

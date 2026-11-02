@@ -1,6 +1,6 @@
 //! The Wasmtime boundary. The linker below is the complete guest import surface;
 //! everything a guest can ask of the host passes through [`HostCalls`].
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 mod admission;
 pub mod worker;
 
@@ -110,39 +110,79 @@ impl<H: HostCalls> Clone for Runtime<H> {
     }
 }
 
+fn check_limits(limits: &Limits) -> Result<()> {
+    ensure!(
+        (1..=64).contains(&limits.concurrency)
+            && (65_536..=128 * 1024 * 1024).contains(&limits.memory_bytes)
+            && (1..=100_000_000).contains(&limits.fuel)
+            && (1..=65_536).contains(&limits.host_calls)
+            && !limits.wall_time.is_zero()
+            && limits.wall_time <= Duration::from_secs(10),
+        "invalid runtime limits"
+    );
+    Ok(())
+}
+
+fn engine() -> Result<Engine> {
+    let mut config = Config::new();
+    config
+        .consume_fuel(true)
+        .async_stack_zeroing(true)
+        .max_wasm_stack(256 * 1024);
+    config.wasm_features(
+        WasmFeatures::THREADS
+            | WasmFeatures::SHARED_EVERYTHING_THREADS
+            | WasmFeatures::MEMORY64
+            | WasmFeatures::GC,
+        false,
+    );
+    config
+        .memory_reservation(128 * 1024 * 1024)
+        .memory_guard_size(64 * 1024);
+    Engine::new(&config).map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+/// Admit a component and compile it to code a worker can load. Running no guest code,
+/// this is the one compile a deployment needs.
+pub(crate) fn precompile(bytes: &[u8], limits: &Limits) -> Result<Vec<u8>> {
+    check_limits(limits)?;
+    admission::check(bytes)?;
+    engine()?
+        .precompile_component(bytes)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
 impl<H: HostCalls> Runtime<H> {
     /// Admission accepts portable binary components only and bounds component
     /// expansion before invoking Wasmtime. Compilation is synchronous; run it
     /// before listening for requests, within the deployment's process limits.
     pub fn compile(bytes: &[u8], limits: Limits) -> Result<Self> {
-        ensure!(
-            (1..=64).contains(&limits.concurrency)
-                && (65_536..=128 * 1024 * 1024).contains(&limits.memory_bytes)
-                && (1..=100_000_000).contains(&limits.fuel)
-                && (1..=65_536).contains(&limits.host_calls)
-                && !limits.wall_time.is_zero()
-                && limits.wall_time <= Duration::from_secs(10),
-            "invalid runtime limits"
-        );
+        check_limits(&limits)?;
         admission::check(bytes)?;
-        let mut config = Config::new();
-        config
-            .consume_fuel(true)
-            .async_stack_zeroing(true)
-            .max_wasm_stack(256 * 1024);
-        config.wasm_features(
-            WasmFeatures::THREADS
-                | WasmFeatures::SHARED_EVERYTHING_THREADS
-                | WasmFeatures::MEMORY64
-                | WasmFeatures::GC,
-            false,
-        );
-        config
-            .memory_reservation(128 * 1024 * 1024)
-            .memory_guard_size(64 * 1024);
-        let engine = Engine::new(&config).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let engine = engine()?;
         let component =
             Component::new(&engine, bytes).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Self::link(engine, component, limits)
+    }
+
+    /// Load code from [`precompile`]. The only `unsafe` in this crate, and
+    /// `tools/check_layers.py` keeps it so.
+    #[allow(unsafe_code)]
+    pub(crate) fn load(artifact: &[u8], limits: Limits) -> Result<Self> {
+        check_limits(&limits)?;
+        let engine = engine()?;
+        // SAFETY: Wasmtime requires bytes from a compatible `precompile_component`, as it
+        // runs them as machine code. These come only from the compile process, through
+        // the broker, over a socket no guest can reach. Wasmtime checks the version and
+        // configuration. A compiler bug could still make them hostile, which is why a
+        // worker confines itself before it calls this.
+        let component = unsafe { Component::deserialize(&engine, artifact) }
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Self::link(engine, component, limits)
+    }
+
+    /// The component's contract, which an artifact must also meet, and its linker.
+    fn link(engine: Engine, component: Component, limits: Limits) -> Result<Self> {
         let ty = component.component_type();
         let Some(export) = ty.get_export(&engine, "handle") else {
             anyhow::bail!("missing handle export")

@@ -142,8 +142,30 @@ def filter_failures():
     return failures
 
 
+# The one unsafe block outside test support, and the one caller of what it guards.
+UNSAFE_CODE = "crates/noxide-sandbox/src/lib.rs"
+ARTIFACT_LOADERS = {"crates/noxide-cli/src/bin/noxide-guest.rs", "crates/noxide-sandbox/src/worker.rs"}
+
+
+def artifact_failures():
+    failures = []
+    sandbox_allows = 0
+    for path in sorted((ROOT / "crates").rglob("*.rs")):
+        relative = path.relative_to(ROOT).as_posix()
+        text = production(path.read_text())
+        if relative.startswith("crates/noxide-sandbox/"):
+            sandbox_allows += text.count("allow(unsafe_code)")
+            if "unsafe" in text.replace("unsafe_code", "") and relative != UNSAFE_CODE:
+                failures.append(f"{relative}: unsafe code belongs in {UNSAFE_CODE} only")
+        if "load_from_broker" in text and relative not in ARTIFACT_LOADERS:
+            failures.append(f"{relative}: must not load compiled artifacts")
+    if sandbox_allows != 1:
+        failures.append(f"noxide-sandbox must allow unsafe exactly once, found {sandbox_allows}")
+    return failures
+
+
 def main():
-    failures = crate_failures() + filter_failures()
+    failures = crate_failures() + filter_failures() + artifact_failures()
     for path in sorted(SRC.rglob("*.rs")):
         relative = path.relative_to(SRC).as_posix()
         if SKIP.search("/" + relative) or relative == "lib.rs":

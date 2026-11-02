@@ -74,14 +74,17 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// A worker runs one request at a time, whatever the server's total is.
-    pub fn compile(component: &[u8], limits: Limits) -> Result<Self> {
+    /// Load code the compile process made, and only that: see `Runtime::load`. Confine
+    /// the process first, so hostile code would hold nothing. Only `noxide-guest` may
+    /// call this, which `tools/check_layers.py` enforces.
+    pub fn load_from_broker(artifact: &[u8], limits: Limits) -> Result<Self> {
+        // A worker runs one request at a time, whatever the server's total is.
         let limits = Limits {
             concurrency: 1,
             ..limits
         };
         Ok(Self {
-            runtime: Runtime::compile(component, limits)?,
+            runtime: Runtime::load(artifact, limits)?,
         })
     }
 
@@ -133,4 +136,12 @@ impl Worker {
             wire::send(&mut *stream.lock().await, &done.encode()?).await?;
         }
     }
+}
+
+/// Admit and compile a component, for the compile process. Its contract is checked by
+/// loading the result, as a worker will.
+pub fn compile_artifact(component: &[u8], limits: &Limits) -> Result<Vec<u8>> {
+    let artifact = crate::precompile(component, limits)?;
+    Worker::load_from_broker(&artifact, limits.clone())?;
+    Ok(artifact)
 }

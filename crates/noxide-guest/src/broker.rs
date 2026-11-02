@@ -4,7 +4,7 @@
 //! reads a worker's messages.
 use crate::{
     Limits,
-    pool::{Startup, write_init},
+    pool::{MAX_CODE_BYTES, Startup, write_init},
 };
 use anyhow::{Context, Result, bail, ensure};
 use rustix::net::{
@@ -167,7 +167,10 @@ fn reply(socket: &Mutex<UnixStream>, status: u8, id: u32, worker: Option<OwnedFd
 struct Broker {
     program: PathBuf,
     mode: String,
-    startup: Startup,
+    /// `None` when the component was rejected: every worker request then fails.
+    artifact: Option<Vec<u8>>,
+    limits: Limits,
+    retire_after: u32,
     /// Opened before confinement, which leaves `/dev/null` out of reach.
     null: OwnedFd,
     children: Mutex<HashMap<u32, Child>>,
@@ -179,6 +182,7 @@ struct Broker {
 
 impl Broker {
     fn start(&self, id: u32) -> Result<(Child, OwnedFd)> {
+        let artifact = self.artifact.as_ref().context("component rejected")?;
         let (mut ours, theirs) = UnixStream::pair()?;
         let mut child = Command::new(&self.program)
             .arg(&self.mode)
@@ -189,12 +193,7 @@ impl Broker {
             .spawn()
             .with_context(|| format!("cannot start worker {id}"))?;
         let started = (|| {
-            write_init(
-                &mut ours,
-                &self.startup.component,
-                &self.startup.limits,
-                self.startup.retire_after,
-            )?;
+            write_init(&mut ours, artifact, &self.limits, self.retire_after)?;
             let mut ready = [0];
             ours.read_exact(&mut ready)?;
             ensure!(&ready == b"R", "worker did not start");
@@ -216,6 +215,39 @@ impl Broker {
     }
 }
 
+/// Have a separate confined process admit and compile the component, once. A compiler
+/// bug triggered by a hostile component reaches only that process, whose one output is
+/// bounded here and goes only to workers, which confine themselves before loading it.
+fn compile(program: &Path, mode: &str, startup: &Startup, null: &OwnedFd) -> Result<Vec<u8>> {
+    let (mut ours, theirs) = UnixStream::pair()?;
+    let mut child = Command::new(program)
+        .args(["--compile", mode])
+        .stdin(Stdio::from(OwnedFd::from(theirs)))
+        .stdout(Stdio::from(null.try_clone()?))
+        .stderr(Stdio::from(null.try_clone()?))
+        .env_clear()
+        .spawn()
+        .context("cannot start the compile process")?;
+    let result = (|| {
+        write_init(
+            &mut ours,
+            &startup.code,
+            &startup.limits,
+            startup.retire_after,
+        )?;
+        let mut length = [0; 8];
+        ours.read_exact(&mut length)?;
+        let length = usize::try_from(u64::from_le_bytes(length))?;
+        ensure!(length <= MAX_CODE_BYTES, "code limit");
+        let mut artifact = vec![0; length];
+        ours.read_exact(&mut artifact)?;
+        Ok(artifact)
+    })();
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
 /// Serve one server until its socket closes. `startup` comes from
 /// [`read_init`](crate::pool::read_init), read before this process confined itself.
 pub fn serve(
@@ -226,10 +258,13 @@ pub fn serve(
     null: OwnedFd,
 ) -> Result<()> {
     let maximum = startup.limits.concurrency.saturating_mul(2).max(1);
+    let artifact = compile(&program, &mode, &startup, &null).ok();
     let broker = Arc::new(Broker {
         program,
         mode,
-        startup,
+        artifact,
+        limits: startup.limits,
+        retire_after: startup.retire_after,
         null,
         children: Mutex::new(HashMap::new()),
         starting: AtomicUsize::new(0),

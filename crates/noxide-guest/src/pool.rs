@@ -25,25 +25,25 @@ use tokio::{net::UnixStream, sync::watch, time::Instant};
 /// server waits for one that does not.
 const WORKER_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// Largest component a worker accepts during startup.
-pub const MAX_COMPONENT_BYTES: usize = 64 * 1024 * 1024;
+/// Largest component or compiled artifact a process accepts during startup.
+pub const MAX_CODE_BYTES: usize = 256 * 1024 * 1024;
 
 /// Write what a new worker needs on its stdin socket.
 pub(crate) fn write_init(
     stream: &mut StdStream,
-    component: &[u8],
+    code: &[u8],
     limits: &Limits,
     retire_after: u32,
 ) -> Result<()> {
-    ensure!(component.len() <= MAX_COMPONENT_BYTES, "component limit");
+    ensure!(code.len() <= MAX_CODE_BYTES, "code limit");
     stream.write_all(&(limits.memory_bytes as u64).to_le_bytes())?;
     stream.write_all(&limits.fuel.to_le_bytes())?;
     stream.write_all(&limits.host_calls.to_le_bytes())?;
     stream.write_all(&(limits.concurrency as u64).to_le_bytes())?;
     stream.write_all(&retire_after.to_le_bytes())?;
     stream.write_all(&(limits.wall_time.as_millis() as u64).to_le_bytes())?;
-    stream.write_all(&(component.len() as u64).to_le_bytes())?;
-    stream.write_all(component)?;
+    stream.write_all(&(code.len() as u64).to_le_bytes())?;
+    stream.write_all(code)?;
     Ok(())
 }
 
@@ -51,7 +51,8 @@ pub(crate) fn write_init(
 pub struct Startup {
     pub limits: Limits,
     pub retire_after: u32,
-    pub component: Vec<u8>,
+    /// The component for the broker and compile process; compiled code for a worker.
+    pub code: Vec<u8>,
 }
 
 /// Read the startup message in a worker. Its limits come from the trusted server.
@@ -70,9 +71,9 @@ pub fn read_init(stream: &mut impl std::io::Read) -> Result<Startup> {
     stream.read_exact(&mut retire_after)?;
     let wall_time = std::time::Duration::from_millis(u64(stream)?);
     let length = usize::try_from(u64(stream)?)?;
-    ensure!(length <= MAX_COMPONENT_BYTES, "component limit");
-    let mut component = vec![0; length];
-    stream.read_exact(&mut component)?;
+    ensure!(length <= MAX_CODE_BYTES, "code limit");
+    let mut code = vec![0; length];
+    stream.read_exact(&mut code)?;
     let limits = Limits {
         memory_bytes,
         fuel,
@@ -83,7 +84,7 @@ pub fn read_init(stream: &mut impl std::io::Read) -> Result<Startup> {
     Ok(Startup {
         limits,
         retire_after: u32::from_le_bytes(retire_after),
-        component,
+        code,
     })
 }
 
@@ -127,12 +128,12 @@ pub struct GuestPool {
 pub const DEFAULT_RETIRE_AFTER: u32 = 256;
 
 /// Unassigned workers kept ready before anyone needs them. More start on demand, up
-/// to `limits.concurrency`, each compiling the component on its way up.
+/// to `limits.concurrency`.
 const WARM_WORKERS: usize = 4;
 
 impl GuestPool {
-    /// Start a broker and the warm workers, whose compile is the component's admission
-    /// check. Call before confining: this is the last time this process can start anything.
+    /// Start a broker, which compiles the component once as its admission check, and the
+    /// warm workers. Call before confining: this is the last time this process can start anything.
     pub fn start(
         program: &Path,
         mode: &str,
