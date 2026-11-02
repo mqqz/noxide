@@ -45,6 +45,10 @@ impl Remote {
 }
 
 impl HostCalls for Remote {
+    /// The server chooses a worker's requests; a worker only runs them.
+    fn isolation(&self) -> noxide_host_calls::Isolation {
+        noxide_host_calls::Isolation::Single
+    }
     /// The server checks this on every call; it never trusts the worker's answer.
     fn storage_allowed(&self) -> bool {
         true

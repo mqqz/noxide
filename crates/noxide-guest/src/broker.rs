@@ -2,7 +2,10 @@
 //! processes. The broker holds the component and its right to start one program, and
 //! hands each new worker's socket to the server. It runs no guest code and never
 //! reads a worker's messages.
-use crate::{Limits, pool::write_init};
+use crate::{
+    Limits,
+    pool::{Startup, write_init},
+};
 use anyhow::{Context, Result, bail, ensure};
 use rustix::net::{
     RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
@@ -35,26 +38,61 @@ pub struct BrokerClient {
     child: Mutex<Child>,
     requests: Mutex<UnixStream>,
     replies: Mutex<UnixStream>,
+    /// Reads end of file when the broker stops: it holds the other end as its stdout.
+    liveness: Mutex<Option<UnixStream>>,
+    lost: tokio::sync::watch::Sender<bool>,
 }
 
 impl BrokerClient {
-    pub fn start(program: &Path, mode: &str, component: &[u8], limits: &Limits) -> Result<Self> {
+    pub fn start(
+        program: &Path,
+        mode: &str,
+        component: &[u8],
+        limits: &Limits,
+        retire_after: u32,
+    ) -> Result<Self> {
         let (mut ours, theirs) = UnixStream::pair()?;
+        let (liveness, held) = UnixStream::pair()?;
         let child = Command::new(program)
             .args(["--broker", mode])
             .stdin(Stdio::from(OwnedFd::from(theirs)))
-            .stdout(Stdio::null())
+            .stdout(Stdio::from(OwnedFd::from(held)))
             .stderr(Stdio::null())
             .env_clear()
             .spawn()
             .with_context(|| format!("cannot start {}", program.display()))?;
-        write_init(&mut ours, component, limits)?;
+        write_init(&mut ours, component, limits, retire_after)?;
         let replies = ours.try_clone()?;
         Ok(Self {
             child: Mutex::new(child),
             requests: Mutex::new(ours),
             replies: Mutex::new(replies),
+            liveness: Mutex::new(Some(liveness)),
+            lost: tokio::sync::watch::Sender::new(false),
         })
+    }
+
+    /// Completes when the broker stops. Must run on the serving runtime.
+    pub async fn lost(&self) {
+        let liveness = self.liveness.lock().unwrap().take();
+        if let Some(liveness) = liveness {
+            // A failure to watch counts as losing it: this fails closed.
+            let watched = async {
+                liveness.set_nonblocking(true)?;
+                let stream = tokio::net::UnixStream::from_std(liveness)?;
+                stream.readable().await?;
+                anyhow::Ok(())
+            };
+            let _ = watched.await;
+            self.lost.send_replace(true);
+            return;
+        }
+        let mut lost = self.lost.subscribe();
+        let _ = lost.wait_for(|lost| *lost).await;
+    }
+
+    pub fn stop(&self) {
+        let _ = self.child.lock().unwrap().kill();
     }
 
     /// Ask for a worker and wait for one. Replies are interchangeable, so whichever
@@ -129,8 +167,7 @@ fn reply(socket: &Mutex<UnixStream>, status: u8, id: u32, worker: Option<OwnedFd
 struct Broker {
     program: PathBuf,
     mode: String,
-    component: Vec<u8>,
-    limits: Limits,
+    startup: Startup,
     /// Opened before confinement, which leaves `/dev/null` out of reach.
     null: OwnedFd,
     children: Mutex<HashMap<u32, Child>>,
@@ -152,7 +189,12 @@ impl Broker {
             .spawn()
             .with_context(|| format!("cannot start worker {id}"))?;
         let started = (|| {
-            write_init(&mut ours, &self.component, &self.limits)?;
+            write_init(
+                &mut ours,
+                &self.startup.component,
+                &self.startup.limits,
+                self.startup.retire_after,
+            )?;
             let mut ready = [0];
             ours.read_exact(&mut ready)?;
             ensure!(&ready == b"R", "worker did not start");
@@ -174,22 +216,20 @@ impl Broker {
     }
 }
 
-/// Serve one server until its socket closes. `limits` and `component` come from
+/// Serve one server until its socket closes. `startup` comes from
 /// [`read_init`](crate::pool::read_init), read before this process confined itself.
 pub fn serve(
     socket: UnixStream,
     program: PathBuf,
     mode: String,
-    limits: Limits,
-    component: Vec<u8>,
+    startup: Startup,
     null: OwnedFd,
-    maximum: usize,
 ) -> Result<()> {
+    let maximum = startup.limits.concurrency.saturating_mul(2).max(1);
     let broker = Arc::new(Broker {
         program,
         mode,
-        component,
-        limits,
+        startup,
         null,
         children: Mutex::new(HashMap::new()),
         starting: AtomicUsize::new(0),

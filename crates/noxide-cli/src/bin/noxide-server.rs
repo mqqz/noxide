@@ -82,15 +82,14 @@ fn main() -> Result<()> {
     let store = database(&config.database, &base)?;
     let component = read(&base.join(&config.component), 2 * 1024 * 1024)?;
     // The first worker's compile is the component's admission check.
-    let pool = Arc::new(
-        GuestPool::start(
-            &sibling("noxide-guest")?,
-            config.confinement.argument(),
-            &component,
-            Limits::default(),
-        )?
-        .retire_after(config.guest_worker_requests)?,
-    );
+    let pool = Arc::new(GuestPool::start(
+        &sibling("noxide-guest")?,
+        config.confinement.argument(),
+        &component,
+        Limits::default(),
+        config.guest_worker_requests,
+    )?);
+    let workers = pool.clone();
     let app = Application::with_workers(
         pool,
         &component,
@@ -155,7 +154,24 @@ fn main() -> Result<()> {
     tokio::runtime::Runtime::new()?.block_on(async move {
         let _sidecars = store.hold_sidecars().await?;
         let shutdown = shutdown_signal()?;
+        let lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let noticed = lost.clone();
+        // Without its broker this server cannot replace a worker, so stop and let the
+        // supervisor restart everything.
+        let shutdown = async move {
+            tokio::select! {
+                () = shutdown => {}
+                () = workers.broker_lost() => {
+                    noticed.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+        };
         println!("Runtime listening with the approved application contract.");
-        noxide_http::serve(listener.start()?, app, origin, shutdown).await
+        noxide_http::serve(listener.start()?, app, origin, shutdown).await?;
+        ensure!(
+            !lost.load(std::sync::atomic::Ordering::Acquire),
+            "the guest broker stopped"
+        );
+        Ok(())
     })
 }

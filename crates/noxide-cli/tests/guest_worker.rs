@@ -1,7 +1,7 @@
 //! A real worker process against the same guest behaviour as the in-process runtime.
 use anyhow::Result;
 use noxide_guest::{GuestBusy, Limits, pool::GuestPool};
-use noxide_host_calls::HostCalls;
+use noxide_host_calls::{HostCalls, Isolation};
 use noxide_protocol::{RequestKind, RequestView, ResponseIntent, VERSION};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::time::Instant;
@@ -58,6 +58,9 @@ struct Storage {
     refuse: bool,
 }
 impl HostCalls for Storage {
+    fn isolation(&self) -> Isolation {
+        Isolation::Shared("account".into())
+    }
     fn storage_allowed(&self) -> bool {
         true
     }
@@ -85,6 +88,7 @@ fn pool(body: &str, concurrency: usize) -> Arc<GuestPool> {
             "best_effort",
             &component(body),
             limits,
+            noxide_guest::pool::DEFAULT_RETIRE_AFTER,
         )
         .unwrap(),
     )
@@ -186,6 +190,9 @@ async fn a_lost_worker_is_replaced() {
     // Hold up the reply past the grace period by making the storage call itself slow.
     struct Slow;
     impl HostCalls for Slow {
+        fn isolation(&self) -> Isolation {
+            Isolation::Shared("account".into())
+        }
         fn storage_allowed(&self) -> bool {
             true
         }
@@ -232,9 +239,8 @@ async fn workers_retire_after_their_requests() {
             "best_effort",
             &component(""),
             limits,
+            2,
         )
-        .unwrap()
-        .retire_after(2)
         .unwrap(),
     );
     for _ in 0..6 {
@@ -251,6 +257,39 @@ async fn workers_retire_after_their_requests() {
     }
     // The first, plus a replacement after requests two, four and six.
     assert_eq!(pool.workers_started(), 4);
+}
+
+#[tokio::test]
+async fn losing_the_broker_is_noticed() {
+    let pool = pool("", 1);
+    let watching = pool.clone();
+    let lost = tokio::spawn(async move { watching.broker_lost().await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!lost.is_finished());
+    pool.stop_broker();
+    tokio::time::timeout(Duration::from_secs(5), lost)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_guest_can_use_its_whole_memory_under_the_process_limit() {
+    // 60 MiB of the 64 MiB limit, past the point a tight address space limit would fail.
+    let pool = pool(
+        "i32.const 960 memory.grow i32.const -1 i32.eq if unreachable end",
+        1,
+    );
+    let attempt = pool
+        .run(
+            request(),
+            Some(Storage::default()),
+            1_000_000,
+            16,
+            deadline(),
+        )
+        .await;
+    attempt.result.unwrap();
 }
 
 #[tokio::test]
@@ -274,6 +313,7 @@ async fn an_application_serves_and_writes_through_a_worker() {
                 concurrency: 1,
                 ..Limits::default()
             },
+            noxide_guest::pool::DEFAULT_RETIRE_AFTER,
         )
         .unwrap(),
     );

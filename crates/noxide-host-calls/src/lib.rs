@@ -4,9 +4,21 @@
 use anyhow::Result;
 use std::future::Future;
 
+/// Which requests may share a guest worker. A guest that escapes Wasmtime can read
+/// every later request sent to its worker, so workers never cross this boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Isolation {
+    /// Only requests with the same key share a worker.
+    Shared(String),
+    /// This request gets a worker of its own, discarded afterwards.
+    Single,
+}
+
 /// Storage authority a host grants to one guest attempt. The sandbox only routes
 /// calls; authorization remains the implementor's, enforced outside the guest.
 pub trait HostCalls: Send + 'static {
+    /// Who else this attempt's worker may serve.
+    fn isolation(&self) -> Isolation;
     /// Whether this attempt is in a phase that may import storage.
     fn storage_allowed(&self) -> bool;
     fn invoke(
@@ -22,6 +34,9 @@ pub trait HostCalls: Send + 'static {
 /// runtime cannot carry a repository at all.
 pub enum NoHostCalls {}
 impl HostCalls for NoHostCalls {
+    fn isolation(&self) -> Isolation {
+        match *self {}
+    }
     fn storage_allowed(&self) -> bool {
         match *self {}
     }

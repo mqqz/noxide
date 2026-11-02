@@ -209,6 +209,7 @@ pub async fn build(command: &str, args: &[OsString]) -> Result<()> {
             "best_effort",
             &component,
             Default::default(),
+            noxide_guest::pool::DEFAULT_RETIRE_AFTER,
         )?;
         let app = noxide_host::Application::with_workers(
             std::sync::Arc::new(pool),

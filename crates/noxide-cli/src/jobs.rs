@@ -103,6 +103,7 @@ async fn load(path: &Path, restore_fork: bool) -> Result<Application> {
         config.confinement.argument(),
         &component,
         Default::default(),
+        noxide_guest::pool::DEFAULT_RETIRE_AFTER,
     )?;
     let app = Application::with_workers(
         std::sync::Arc::new(pool),

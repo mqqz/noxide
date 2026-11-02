@@ -34,10 +34,15 @@ pub struct Policy {
     pub readable: Vec<PathBuf>,
     pub tcp_bind: Vec<u16>,
     pub tcp_connect: Vec<u16>,
-    /// Keep the right to start programs, limited to `readable` by Landlock. Only for
-    /// the guest broker, whose whole purpose is starting workers. What it starts
-    /// inherits these limits.
-    pub spawn: bool,
+    /// Programs this process may start, which inherit these limits. Only for the guest
+    /// broker. Non-empty also removes the execute right from `readable`, so these are
+    /// the only files it can run: list the dynamic linker too.
+    pub spawn: Vec<PathBuf>,
+    /// For a guest worker: a single thread with one inherited socket. It gets no
+    /// threads, no new sockets and no way to signal anything. Skips the thread count,
+    /// which needs `/proc`: the broker's limits, which it inherits, exclude that, and
+    /// a test holds a worker to one thread.
+    pub isolated: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,7 +76,10 @@ mod imp {
     use std::collections::BTreeMap;
 
     pub(super) fn apply(policy: &Policy) -> Result<Outcome> {
-        ensure!(single_threaded()?, "confinement requires one thread");
+        ensure!(
+            policy.isolated || single_threaded()?,
+            "confinement requires one thread"
+        );
         let filesystem = landlock(policy)?;
         seccomp(policy)?;
         Ok(if filesystem {
@@ -100,9 +108,15 @@ mod imp {
             .handle_access(AccessFs::from_all(abi))?
             .handle_access(AccessNet::from_all(abi))?
             .create()?;
+        let readable = if policy.spawn.is_empty() {
+            AccessFs::from_read(abi)
+        } else {
+            AccessFs::from_read(abi) & !AccessFs::Execute
+        };
         for (paths, access) in [
             (&policy.writable, AccessFs::from_all(abi)),
-            (&policy.readable, AccessFs::from_read(abi)),
+            (&policy.readable, readable),
+            (&policy.spawn, AccessFs::Execute | AccessFs::ReadFile),
         ] {
             for path in paths {
                 let access = if path.is_dir() {
@@ -172,6 +186,23 @@ mod imp {
         libc::SYS_vfork,
     ];
 
+    /// What `Policy::isolated` also denies. A worker shares a user with its server, so
+    /// without this it could signal the server.
+    const ISOLATED: &[libc::c_long] = &[
+        libc::SYS_clone,
+        libc::SYS_socket,
+        libc::SYS_socketpair,
+        libc::SYS_bind,
+        libc::SYS_connect,
+        libc::SYS_listen,
+        libc::SYS_accept,
+        libc::SYS_accept4,
+        libc::SYS_kill,
+        libc::SYS_tkill,
+        libc::SYS_pidfd_open,
+        libc::SYS_pidfd_send_signal,
+    ];
+
     /// What `Policy::spawn` keeps available.
     const SPAWNING: &[libc::c_long] = &[
         libc::SYS_execve,
@@ -185,11 +216,11 @@ mod imp {
         let arch = TargetArch::try_from(std::env::consts::ARCH).context("seccomp architecture")?;
         let mut rules: BTreeMap<i64, Vec<SeccompRule>> = DENIED
             .iter()
-            .filter(|call| !(policy.spawn && SPAWNING.contains(call)))
+            .filter(|call| policy.spawn.is_empty() || !SPAWNING.contains(call))
             .map(|call| (*call, Vec::new()))
             .collect();
         // A new process would leave this filter's view; threads share it.
-        if !policy.spawn {
+        if policy.spawn.is_empty() {
             rules.insert(
                 libc::SYS_clone,
                 vec![SeccompRule::new(vec![SeccompCondition::new(
@@ -220,6 +251,9 @@ mod imp {
                     .collect::<std::result::Result<_, _>>()?,
             )?],
         );
+        if policy.isolated {
+            rules.extend(ISOLATED.iter().map(|call| (*call, Vec::new())));
+        }
         let deny = program(rules, libc::EPERM, arch)?;
         // clone3 hides its flags behind a pointer. ENOSYS makes libc fall back to
         // clone, whose flags the rule above can inspect.
@@ -229,7 +263,7 @@ mod imp {
             arch,
         )?;
         seccompiler::apply_filter(&deny)?;
-        if !policy.spawn {
+        if policy.spawn.is_empty() {
             seccompiler::apply_filter(&clone3)?;
         }
         Ok(())

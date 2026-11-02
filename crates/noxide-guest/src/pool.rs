@@ -7,7 +7,7 @@ use crate::{
     wire::{self, FromWorker, Outcome, ToWorker},
 };
 use anyhow::{Context, Result, anyhow, ensure};
-use noxide_host_calls::HostCalls;
+use noxide_host_calls::{HostCalls, Isolation};
 use noxide_protocol::{MAX_REQUEST_BYTES, RequestView, ResponseIntent, decode_response};
 use std::{
     io::Write,
@@ -15,10 +15,10 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
-use tokio::{net::UnixStream, sync::Semaphore, time::Instant};
+use tokio::{net::UnixStream, sync::watch, time::Instant};
 
 /// How long past the deadline a worker has to report it. A worker stops its guest at
 /// the deadline itself, and reporting keeps it usable; this only limits how long the
@@ -29,20 +29,33 @@ const WORKER_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
 pub const MAX_COMPONENT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Write what a new worker needs on its stdin socket.
-pub(crate) fn write_init(stream: &mut StdStream, component: &[u8], limits: &Limits) -> Result<()> {
+pub(crate) fn write_init(
+    stream: &mut StdStream,
+    component: &[u8],
+    limits: &Limits,
+    retire_after: u32,
+) -> Result<()> {
     ensure!(component.len() <= MAX_COMPONENT_BYTES, "component limit");
     stream.write_all(&(limits.memory_bytes as u64).to_le_bytes())?;
     stream.write_all(&limits.fuel.to_le_bytes())?;
     stream.write_all(&limits.host_calls.to_le_bytes())?;
     stream.write_all(&(limits.concurrency as u64).to_le_bytes())?;
+    stream.write_all(&retire_after.to_le_bytes())?;
     stream.write_all(&(limits.wall_time.as_millis() as u64).to_le_bytes())?;
     stream.write_all(&(component.len() as u64).to_le_bytes())?;
     stream.write_all(component)?;
     Ok(())
 }
 
+/// What a worker or broker is told when it starts.
+pub struct Startup {
+    pub limits: Limits,
+    pub retire_after: u32,
+    pub component: Vec<u8>,
+}
+
 /// Read the startup message in a worker. Its limits come from the trusted server.
-pub fn read_init(stream: &mut impl std::io::Read) -> Result<(Limits, Vec<u8>)> {
+pub fn read_init(stream: &mut impl std::io::Read) -> Result<Startup> {
     fn u64(stream: &mut impl std::io::Read) -> Result<u64> {
         let mut bytes = [0; 8];
         stream.read_exact(&mut bytes)?;
@@ -53,6 +66,8 @@ pub fn read_init(stream: &mut impl std::io::Read) -> Result<(Limits, Vec<u8>)> {
     let mut calls = [0; 4];
     stream.read_exact(&mut calls)?;
     let concurrency = usize::try_from(u64(stream)?)?;
+    let mut retire_after = [0; 4];
+    stream.read_exact(&mut retire_after)?;
     let wall_time = std::time::Duration::from_millis(u64(stream)?);
     let length = usize::try_from(u64(stream)?)?;
     ensure!(length <= MAX_COMPONENT_BYTES, "component limit");
@@ -65,12 +80,18 @@ pub fn read_init(stream: &mut impl std::io::Read) -> Result<(Limits, Vec<u8>)> {
         wall_time,
         concurrency,
     };
-    Ok((limits, component))
+    Ok(Startup {
+        limits,
+        retire_after: u32::from_le_bytes(retire_after),
+        component,
+    })
 }
 
 struct Worker {
     id: u32,
     served: u32,
+    /// The key this worker has served. It serves no other.
+    isolation: Option<String>,
     stream: Option<StdStream>,
     /// Absent only for a worker no broker started, in tests.
     broker: Option<Arc<BrokerClient>>,
@@ -89,8 +110,9 @@ impl Drop for Worker {
 
 pub struct GuestPool {
     idle: Mutex<Vec<Worker>>,
-    /// One permit per idle worker.
-    available: Semaphore,
+    /// Bumped whenever a worker becomes idle or the pool closes.
+    changed: watch::Sender<u64>,
+    closed: AtomicBool,
     /// Workers idle, busy or starting.
     live: AtomicUsize,
     starting: AtomicUsize,
@@ -101,45 +123,51 @@ pub struct GuestPool {
     broker: Option<Arc<BrokerClient>>,
 }
 
-/// Requests a worker serves before it is replaced. A guest that escapes Wasmtime can
-/// read later requests sent to its worker, so this limits how many it can see.
+/// Requests a worker serves before it is replaced.
 pub const DEFAULT_RETIRE_AFTER: u32 = 256;
 
-/// Workers kept ready before anyone needs them. More start on demand, up to
-/// `limits.concurrency`, each compiling the component on its way up.
-const WARM_WORKERS: usize = 2;
+/// Unassigned workers kept ready before anyone needs them. More start on demand, up
+/// to `limits.concurrency`, each compiling the component on its way up.
+const WARM_WORKERS: usize = 4;
 
 impl GuestPool {
     /// Start a broker and one worker, which is the component's admission check. Call
     /// before confining: this is the last time this process can start anything.
-    pub fn start(program: &Path, mode: &str, component: &[u8], limits: Limits) -> Result<Self> {
-        let broker = Arc::new(BrokerClient::start(program, mode, component, &limits)?);
+    pub fn start(
+        program: &Path,
+        mode: &str,
+        component: &[u8],
+        limits: Limits,
+        retire_after: u32,
+    ) -> Result<Self> {
+        ensure!(retire_after > 0, "a worker must serve at least one request");
+        let broker = Arc::new(BrokerClient::start(
+            program,
+            mode,
+            component,
+            &limits,
+            retire_after,
+        )?);
         let (id, stream) = broker.worker().context("the component was rejected")?;
         let worker = Worker {
             id,
             served: 0,
+            isolation: None,
             stream: Some(stream),
             broker: Some(broker.clone()),
         };
         Ok(Self {
             idle: Mutex::new(vec![worker]),
-            available: Semaphore::new(1),
+            changed: watch::Sender::new(0),
+            closed: AtomicBool::new(false),
             live: AtomicUsize::new(1),
             starting: AtomicUsize::new(0),
             waiting: AtomicUsize::new(0),
             started: AtomicUsize::new(1),
-            retire_after: DEFAULT_RETIRE_AFTER,
+            retire_after,
             limits,
             broker: Some(broker),
         })
-    }
-
-    /// Replace each worker after this many requests. `1` gives every request a new
-    /// process, at the cost of one compile per request.
-    pub fn retire_after(mut self, requests: u32) -> Result<Self> {
-        ensure!(requests > 0, "a worker must serve at least one request");
-        self.retire_after = requests;
-        Ok(self)
     }
 
     /// Workers started so far, including those since replaced.
@@ -157,8 +185,25 @@ impl GuestPool {
 
     /// Stop every idle worker and accept no more requests.
     pub fn close(&self) {
-        self.available.close();
+        self.closed.store(true, Ordering::Release);
         self.idle.lock().unwrap().clear();
+        self.changed.send_modify(|version| *version += 1);
+    }
+
+    /// Completes when the broker has stopped. No worker can be replaced after that,
+    /// so a server should stop too and let its supervisor restart it.
+    pub async fn broker_lost(&self) {
+        match &self.broker {
+            Some(broker) => broker.lost().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Stop the broker, as a crash would.
+    pub fn stop_broker(&self) {
+        if let Some(broker) = &self.broker {
+            broker.stop();
+        }
     }
 
     /// Start a worker off the async executor, if there is room for one.
@@ -185,11 +230,13 @@ impl GuestPool {
                 Ok((id, stream)) => pool.park(Worker {
                     id,
                     served: 0,
+                    isolation: None,
                     stream: Some(stream),
                     broker: Some(broker),
                 }),
                 Err(_) => {
                     pool.live.fetch_sub(1, Ordering::AcqRel);
+                    pool.changed.send_modify(|version| *version += 1);
                 }
             }
         });
@@ -197,36 +244,93 @@ impl GuestPool {
 
     fn park(&self, worker: Worker) {
         self.idle.lock().unwrap().push(worker);
-        self.available.add_permits(1);
+        self.changed.send_modify(|version| *version += 1);
     }
 
     fn keep_warm(self: &Arc<Self>) {
-        let ready = self.idle_workers() + self.starting.load(Ordering::Acquire);
+        let unassigned = self
+            .idle
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|worker| worker.isolation.is_none())
+            .count();
+        let ready = unassigned + self.starting.load(Ordering::Acquire);
         for _ in ready..WARM_WORKERS {
             self.add_worker();
         }
     }
 
-    /// Wait for a worker, up to the deadline. The admission limit in front of this
-    /// bounds how many can wait.
-    async fn checkout(self: &Arc<Self>, deadline: Instant) -> Result<Worker> {
-        if self.broker.is_none() && self.idle_workers() == 0 {
-            return Err(GuestBusy::Capacity.into());
+    /// A worker already serving this key, or one that has served nobody. Another
+    /// key's worker is never reused, only stopped to make room.
+    fn take(&self, isolation: &Isolation) -> Option<Worker> {
+        let mut idle = self.idle.lock().unwrap();
+        let position = match isolation {
+            Isolation::Shared(key) => idle
+                .iter()
+                .position(|worker| worker.isolation.as_deref() == Some(key.as_str())),
+            Isolation::Single => None,
         }
-        // Each waiter beyond the idle and starting workers needs another one.
+        .or_else(|| idle.iter().position(|worker| worker.isolation.is_none()))?;
+        Some(idle.swap_remove(position))
+    }
+
+    /// Make room for a new worker when every slot holds another key's idle worker.
+    fn evict_one(self: &Arc<Self>) {
+        if self.live.load(Ordering::Acquire) < self.limits.concurrency {
+            return;
+        }
+        let mut idle = self.idle.lock().unwrap();
+        let evicted = (!idle.is_empty()).then(|| idle.remove(0));
+        drop(idle);
+        if let Some(worker) = evicted {
+            drop(worker);
+            self.live.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    /// Wait for a suitable worker, up to the deadline. The admission limit in front
+    /// of this bounds how many can wait.
+    async fn checkout(
+        self: &Arc<Self>,
+        isolation: &Isolation,
+        deadline: Instant,
+    ) -> Result<Worker> {
         let waiting = self.waiting.fetch_add(1, Ordering::AcqRel) + 1;
-        if self.idle_workers() + self.starting.load(Ordering::Acquire) < waiting {
-            self.add_worker();
-        }
-        let permit = tokio::time::timeout_at(deadline, self.available.acquire()).await;
+        let result = self.wait_for_worker(isolation, deadline, waiting).await;
         self.waiting.fetch_sub(1, Ordering::AcqRel);
-        permit
-            .map_err(|_| GuestBusy::Deadline)?
-            .map_err(|_| GuestBusy::Capacity)?
-            .forget();
-        let worker = self.idle.lock().unwrap().pop();
-        self.keep_warm();
-        worker.ok_or_else(|| GuestBusy::Capacity.into())
+        result
+    }
+
+    async fn wait_for_worker(
+        self: &Arc<Self>,
+        isolation: &Isolation,
+        deadline: Instant,
+        waiting: usize,
+    ) -> Result<Worker> {
+        let mut changes = self.changed.subscribe();
+        loop {
+            changes.borrow_and_update();
+            if self.closed.load(Ordering::Acquire) {
+                return Err(GuestBusy::Capacity.into());
+            }
+            if let Some(worker) = self.take(isolation) {
+                self.keep_warm();
+                return Ok(worker);
+            }
+            if self.broker.is_none() {
+                return Err(GuestBusy::Capacity.into());
+            }
+            // Each waiter needs a worker of its own coming.
+            if self.starting.load(Ordering::Acquire) < waiting {
+                self.evict_one();
+                self.add_worker();
+            }
+            tokio::time::timeout_at(deadline, changes.changed())
+                .await
+                .map_err(|_| GuestBusy::Deadline)?
+                .map_err(|_| GuestBusy::Capacity)?;
+        }
     }
 
     /// Discard a worker and start its replacement.
@@ -251,7 +355,11 @@ impl GuestPool {
             calls_left: calls,
             failure: None,
         };
-        let mut worker = match self.checkout(deadline).await {
+        // With no storage grant there is nothing of anyone's to protect.
+        let isolation = effects
+            .as_ref()
+            .map_or(Isolation::Shared(String::new()), HostCalls::isolation);
+        let mut worker = match self.checkout(&isolation, deadline).await {
             Ok(worker) => worker,
             Err(error) => {
                 return Attempt {
@@ -277,11 +385,18 @@ impl GuestPool {
             Ok(Ok(Outcome::Failed)) => (true, Err(anyhow!("guest failed"))),
         };
         worker.served = worker.served.saturating_add(1);
-        if reusable && worker.served < self.retire_after {
+        let shared = match isolation {
+            Isolation::Shared(key) => {
+                worker.isolation = Some(key);
+                true
+            }
+            Isolation::Single => false,
+        };
+        if reusable && shared && worker.served < self.retire_after {
             self.park(worker);
         } else {
-            // A broken exchange leaves the worker in an unknown state; a retired one
-            // has seen as many requests as it may.
+            // A broken exchange leaves the worker in an unknown state; a retired or
+            // single-use one has seen as many requests as it may.
             self.discard(worker);
         }
         Attempt {
@@ -429,6 +544,9 @@ mod tests {
         refuse: bool,
     }
     impl HostCalls for Storage {
+        fn isolation(&self) -> Isolation {
+            Isolation::Shared("test".into())
+        }
         fn storage_allowed(&self) -> bool {
             self.allowed
         }
@@ -463,10 +581,12 @@ mod tests {
             idle: Mutex::new(vec![Worker {
                 id: 1,
                 served: 0,
+                isolation: None,
                 stream: Some(ours),
                 broker: None,
             }]),
-            available: Semaphore::new(1),
+            changed: watch::Sender::new(0),
+            closed: AtomicBool::new(false),
             live: AtomicUsize::new(1),
             starting: AtomicUsize::new(0),
             waiting: AtomicUsize::new(0),
@@ -671,10 +791,88 @@ mod tests {
         assert_eq!(pool.idle_workers(), 0);
     }
 
+    struct Keyed(Isolation);
+    impl HostCalls for Keyed {
+        fn isolation(&self) -> Isolation {
+            self.0.clone()
+        }
+        fn storage_allowed(&self) -> bool {
+            true
+        }
+        async fn invoke(&mut self, _: u32, _: u64) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+        fn follow_source(&mut self, _: u32, _: u64) -> Result<()> {
+            Ok(())
+        }
+        async fn follow(&mut self, _: u32) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn answered(pool: &Arc<GuestPool>, isolation: Isolation, script: &mut UnixStream) {
+        let (attempt, ()) = tokio::join!(
+            pool.run(request(), Some(Keyed(isolation)), 100, 8, deadline()),
+            async {
+                wire::receive(script).await.unwrap();
+                message(
+                    script,
+                    FromWorker::Done {
+                        fuel_left: 1,
+                        calls_left: 1,
+                        outcome: Outcome::Output(PAGE.to_vec()),
+                    },
+                )
+                .await;
+            }
+        );
+        attempt.result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_worker_never_serves_another_account() {
+        let (pool, mut script) = hostile();
+        let alice = Isolation::Shared("alice".into());
+        answered(&pool, alice.clone(), &mut script).await;
+        assert_eq!(pool.idle_workers(), 1);
+        answered(&pool, alice, &mut script).await;
+        let bob = pool
+            .run(
+                request(),
+                Some(Keyed(Isolation::Shared("bob".into()))),
+                100,
+                8,
+                deadline(),
+            )
+            .await;
+        assert!(matches!(
+            bob.result.unwrap_err().downcast_ref(),
+            Some(GuestBusy::Capacity)
+        ));
+        assert_eq!(pool.idle_workers(), 1, "alice's worker stayed hers");
+        let single = pool
+            .run(
+                request(),
+                Some(Keyed(Isolation::Single)),
+                100,
+                8,
+                deadline(),
+            )
+            .await;
+        assert!(single.result.is_err(), "a used worker is not single-use");
+    }
+
+    #[tokio::test]
+    async fn a_single_use_worker_is_discarded() {
+        let (pool, mut script) = hostile();
+        answered(&pool, Isolation::Single, &mut script).await;
+        assert_eq!(pool.idle_workers(), 0);
+    }
+
     #[tokio::test]
     async fn no_idle_worker_reports_capacity() {
         let (pool, _script) = hostile();
-        pool.idle.lock().unwrap().clear();
+        pool.close();
         let attempt = pool
             .run(request(), Some(storage()), 100, 8, deadline())
             .await;

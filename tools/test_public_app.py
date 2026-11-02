@@ -7,6 +7,8 @@ runtime. Database rows below are operator-controlled test fixtures.
 import argparse
 import http.client
 import json
+import os
+import signal
 from pathlib import Path
 import socket
 import sqlite3
@@ -16,6 +18,29 @@ import re
 from html import unescape
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def guest_processes(root):
+    """Every noxide-guest below this process, as (pid, is it the broker)."""
+    parents, names = {}, {}
+    for path in Path("/proc").iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            status = dict(line.split(":\t", 1) for line in (path / "status").read_text().splitlines()
+                          if ":\t" in line)
+        except OSError:
+            continue
+        parents[int(path.name)] = int(status["PPid"])
+        names[int(path.name)] = status["Name"]
+    def below(pid):
+        while pid in parents:
+            pid = parents[pid]
+            if pid == root:
+                return True
+        return False
+    return [(pid, names.get(parents[pid]) != "noxide-guest") for pid, name in names.items()
+            if name == "noxide-guest" and below(pid)]
 
 
 def main():
@@ -125,6 +150,26 @@ def main():
             for query in ("", "?category=unknown", "?category=Books", "?category=books&category=games", "?other=books", "?category=books&other=x", "?category=%GG"):
                 invalid = get("/categories" + query)
                 assert invalid[0] == missing[0] == 404 and invalid[2] == missing[2]
+            # A confined server replaces lost workers through its broker.
+            guests = guest_processes(server.pid)
+            workers = [pid for pid, broker in guests if not broker]
+            assert workers and len(workers) == len(guests) - 1, guests
+            for pid in workers:
+                os.kill(pid, signal.SIGKILL)
+            # A debug build compiles slowly, so a request may be busy until one is ready.
+            for _ in range(300):
+                if get("/")[0] == 200:
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError("no worker replaced a lost one")
+            # Without its broker the server stops, and says so, for its supervisor.
+            for pid, broker in guest_processes(server.pid):
+                if broker:
+                    os.kill(pid, signal.SIGKILL)
+            assert server.wait(timeout=30) != 0, "server survived losing its broker"
+            assert "guest broker stopped" in (args.output / "server.log").read_text()
+            assert not guest_processes(server.pid)
             (args.output / "results.json").write_text(json.dumps({
                 "public_list": True, "public_read": True, "unpublished_hidden": True,
                 "private_projection_hidden": True, "escaped": True,

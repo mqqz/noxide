@@ -93,6 +93,29 @@ pub fn create_prerequisites(operation: &Operation, principal: &Principal) -> boo
 }
 
 impl noxide_host_calls::HostCalls for Effects {
+    /// Accounts and service workers never share. Anonymous visitors share a worker for
+    /// reading pages, whose URLs an escaped guest could then see; anything they submit,
+    /// or reach through a capability, gets a worker of its own.
+    fn isolation(&self) -> noxide_host_calls::Isolation {
+        use crate::auth::PrincipalKey;
+        use noxide_host_calls::Isolation;
+        match self.principal.authority_key() {
+            PrincipalKey::User { id, tenant } => Isolation::Shared(format!("user\0{id}\0{tenant}")),
+            PrincipalKey::Service {
+                deployment, tenant, ..
+            } => Isolation::Shared(format!("service\0{deployment}\0{tenant}")),
+            PrincipalKey::Anonymous => {
+                if self.request.input.is_empty()
+                    && self.request.inspection.is_empty()
+                    && self.capability_grant.is_none()
+                {
+                    Isolation::Shared("anonymous".into())
+                } else {
+                    Isolation::Single
+                }
+            }
+        }
+    }
     fn storage_allowed(&self) -> bool {
         matches!(self.request.kind, RequestKind::Route(_))
     }
