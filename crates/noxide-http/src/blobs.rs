@@ -1,7 +1,7 @@
 use super::*;
 use anyhow::Context;
 use hyper::body::Body as _;
-use noxide_blobs::multipart::{Boundary, PrefixDecoder};
+use noxide_blobs::multipart::{Boundary, PrefixDecoder, ReadyPrefix};
 use noxide_host::PreparedUpload;
 use std::{pin::Pin, sync::atomic::AtomicBool};
 
@@ -42,7 +42,152 @@ fn failure(error: anyhow::Error, presentation: &crate::Presentation) -> Response
     }
     StatusCode::BAD_REQUEST.into_response()
 }
-#[allow(clippy::too_many_lines)]
+/// Read until the multipart prefix is complete. Bytes past it belong to the file.
+async fn read_prefix(
+    body: &mut axum::body::Body,
+    mut decoder: PrefixDecoder,
+    deadline: tokio::time::Instant,
+) -> Result<(ReadyPrefix, axum::body::Bytes)> {
+    let (ready, buffered) = loop {
+        let bytes = next(body, deadline)
+            .await?
+            .context("truncated multipart prefix")?;
+        let progress = decoder.push(&bytes)?;
+        if let Some(ready) = progress.ready {
+            break (ready, bytes.slice(progress.consumed..));
+        }
+    };
+    decoder.finish()?;
+    Ok((ready, buffered))
+}
+
+/// Remove the host's form fields, leaving the action's inputs.
+fn take_credentials(
+    values: &mut noxide_protocol::Fields,
+    presentation: &crate::Presentation,
+) -> Result<(String, String)> {
+    values.remove("_upload");
+    let csrf = values
+        .remove(&presentation.csrf_field)
+        .context("missing csrf")?;
+    let submission = values
+        .remove(&presentation.submission_field)
+        .context("missing submission")?;
+    Ok((csrf, submission))
+}
+
+/// Stream the file to its reservation. The returned lease must outlive publication.
+async fn transfer_file(
+    blobs: &noxide_blobs::runtime::BlobRuntime,
+    row: &noxide_blobs::metadata::BlobRow,
+    lease: noxide_blobs::runtime::ReservationLease,
+    ready: ReadyPrefix,
+    buffered: axum::body::Bytes,
+    body: &mut axum::body::Body,
+    transfer: &crate::database::lifecycle::RequestScope,
+) -> Result<(noxide_blobs::store::DurableObject, PublicationLease)> {
+    let store = blobs.store().clone();
+    let key = row.metadata.key.clone();
+    let limit = row.metadata.reserved;
+    let mut file_decoder = ready.into_body();
+    let (send, mut receive) = tokio::sync::mpsc::channel::<Option<axum::body::Bytes>>(1);
+    let runtime = tokio::runtime::Handle::current();
+    let deadline = transfer.work_deadline();
+    let job = blobs.uploads().try_start(
+        key.clone(),
+        row.metadata.generation,
+        deadline.into_std(),
+        Arc::new(AtomicBool::new(false)),
+        move |guard| {
+            let mut pending = store.begin(key, limit, guard.clone())?;
+            loop {
+                guard.check()?;
+                let idle = deadline.min(
+                    tokio::time::Instant::now()
+                        + Duration::from_millis(noxide_protocol::blobs::DOWNLOAD_IDLE_MILLIS),
+                );
+                let chunk = runtime
+                    .block_on(tokio::time::timeout_at(idle, receive.recv()))?
+                    .context("upload stream cancelled")?;
+                match chunk {
+                    Some(bytes) => file_decoder.push(&bytes, |bytes| pending.write_chunk(bytes))?,
+                    None => {
+                        file_decoder.finish()?;
+                        return pending.finalize();
+                    }
+                }
+            }
+        },
+    )?;
+    let publication = PublicationLease(job.witness());
+    blobs.record_worker(row, job.witness());
+    lease.dispatched();
+    let object = transfer
+        .run(async {
+            if !buffered.is_empty() {
+                send.send(Some(buffered)).await?;
+            }
+            loop {
+                let idle = deadline.min(
+                    tokio::time::Instant::now()
+                        + Duration::from_millis(noxide_protocol::blobs::DOWNLOAD_IDLE_MILLIS),
+                );
+                match next(body, idle).await? {
+                    Some(bytes) if bytes.is_empty() => continue,
+                    Some(bytes) => tokio::time::timeout_at(idle, send.send(Some(bytes))).await??,
+                    None => break,
+                }
+            }
+            tokio::time::timeout_at(deadline, send.send(None)).await??;
+            drop(send);
+            job.finish().await
+        })
+        .await?;
+    Ok((object, publication))
+}
+
+/// A retry or optional absence still needs a complete sole file part of zero bytes,
+/// never a second replacement.
+async fn expect_empty_file(
+    ready: ReadyPrefix,
+    buffered: &[u8],
+    body: &mut axum::body::Body,
+    transfer: &crate::database::lifecycle::RequestScope,
+) -> Result<u64> {
+    let mut file_decoder = ready.into_body();
+    transfer
+        .run(async {
+            file_decoder.push(buffered, |_| anyhow::bail!("unexpected upload bytes"))?;
+            while let Some(bytes) = next(
+                body,
+                transfer.work_deadline().min(
+                    tokio::time::Instant::now()
+                        + Duration::from_millis(noxide_protocol::blobs::DOWNLOAD_IDLE_MILLIS),
+                ),
+            )
+            .await?
+            {
+                file_decoder.push(&bytes, |_| anyhow::bail!("unexpected upload bytes"))?;
+            }
+            file_decoder.finish()
+        })
+        .await
+}
+
+/// The action input that carries this binding's file.
+fn upload_input(app: &Application, binding: u32) -> Result<String> {
+    Ok(app
+        .blobs()
+        .context("blob runtime missing")?
+        .policy()
+        .uploads
+        .iter()
+        .find(|u| u.web_binding == binding)
+        .context("upload declaration missing")?
+        .input
+        .clone())
+}
+
 pub(super) async fn upload(gateway: Arc<Gateway>, request: Request) -> Response {
     let app = gateway.app.clone();
     let presentation = app.presentation();
@@ -70,34 +215,16 @@ pub(super) async fn upload(gateway: Arc<Gateway>, request: Request) -> Response 
                 .context("missing multipart type")?
                 .to_str()?,
         )?;
-        let mut decoder = PrefixDecoder::new(boundary, app.multipart_spec(binding)?);
+        let decoder = PrefixDecoder::new(boundary, app.multipart_spec(binding)?);
         let prefix_deadline = crate::database::lifecycle::RequestScope::current_work_deadline()
             .context("upload outside request")?;
         let mut body = request.into_body();
-        let (ready, buffered) = loop {
-            let bytes = next(&mut body, prefix_deadline)
-                .await?
-                .context("truncated multipart prefix")?;
-            let progress = decoder.push(&bytes)?;
-            if let Some(ready) = progress.ready {
-                break (ready, bytes.slice(progress.consumed..));
-            }
-        };
-        decoder.finish()?;
+        let (ready, buffered) = read_prefix(&mut body, decoder, prefix_deadline).await?;
         let mut values = ready.values.clone();
         let prepared = app
             .prepare_upload(&cookie, binding, &values, ready.filename.clone())
             .await?;
-        let file = app
-            .blobs()
-            .context("blob runtime missing")?
-            .policy()
-            .uploads
-            .iter()
-            .find(|u| u.web_binding == binding)
-            .context("upload declaration missing")?
-            .input
-            .clone();
+        let file = upload_input(&app, binding)?;
         let transfer = app.blob_phase(Duration::from_millis(
             noxide_protocol::blobs::TRANSFER_TOTAL_MILLIS,
         ));
@@ -106,13 +233,7 @@ pub(super) async fn upload(gateway: Arc<Gateway>, request: Request) -> Response 
                 input,
                 replay: true,
             } => {
-                values.remove("_upload");
-                let csrf = values
-                    .remove(&presentation.csrf_field)
-                    .context("missing csrf")?;
-                let submission = values
-                    .remove(&presentation.submission_field)
-                    .context("missing submission")?;
+                let (csrf, submission) = take_credentials(&mut values, presentation)?;
                 values.insert(file, input);
                 let response = app
                     .submit(&cookie, binding, &submission, &csrf, values)
@@ -125,83 +246,14 @@ pub(super) async fn upload(gateway: Arc<Gateway>, request: Request) -> Response 
             }
             PreparedUpload::Created(row, lease) => {
                 let blobs = app.blobs().context("blob runtime missing")?;
-                let store = blobs.store().clone();
-                let key = row.metadata.key.clone();
-                let limit = row.metadata.reserved;
-                let mut file_decoder = ready.into_body();
-                let (send, mut receive) =
-                    tokio::sync::mpsc::channel::<Option<axum::body::Bytes>>(1);
-                let runtime = tokio::runtime::Handle::current();
-                let deadline = transfer.work_deadline();
-                let job = blobs.uploads().try_start(
-                    key.clone(),
-                    row.metadata.generation,
-                    deadline.into_std(),
-                    Arc::new(AtomicBool::new(false)),
-                    move |guard| {
-                        let mut pending = store.begin(key, limit, guard.clone())?;
-                        loop {
-                            guard.check()?;
-                            let idle = deadline.min(
-                                tokio::time::Instant::now()
-                                    + Duration::from_millis(
-                                        noxide_protocol::blobs::DOWNLOAD_IDLE_MILLIS,
-                                    ),
-                            );
-                            let chunk = runtime
-                                .block_on(tokio::time::timeout_at(idle, receive.recv()))?
-                                .context("upload stream cancelled")?;
-                            match chunk {
-                                Some(bytes) => {
-                                    file_decoder.push(&bytes, |bytes| pending.write_chunk(bytes))?
-                                }
-                                None => {
-                                    file_decoder.finish()?;
-                                    return pending.finalize();
-                                }
-                            }
-                        }
-                    },
-                )?;
-                let _publication = PublicationLease(job.witness());
-                blobs.record_worker(&row, job.witness());
-                lease.dispatched();
-                let object = transfer
-                    .run(async {
-                        if !buffered.is_empty() {
-                            send.send(Some(buffered)).await?;
-                        }
-                        loop {
-                            let idle = deadline.min(
-                                tokio::time::Instant::now()
-                                    + Duration::from_millis(
-                                        noxide_protocol::blobs::DOWNLOAD_IDLE_MILLIS,
-                                    ),
-                            );
-                            match next(&mut body, idle).await? {
-                                Some(bytes) if bytes.is_empty() => continue,
-                                Some(bytes) => {
-                                    tokio::time::timeout_at(idle, send.send(Some(bytes))).await??
-                                }
-                                None => break,
-                            }
-                        }
-                        tokio::time::timeout_at(deadline, send.send(None)).await??;
-                        drop(send);
-                        job.finish().await
-                    })
-                    .await?;
+                let (object, _publication) =
+                    transfer_file(blobs, &row, lease, ready, buffered, &mut body, &transfer)
+                        .await?;
                 let final_phase = app.blob_phase(app.blob_action_limit());
                 return final_phase
                     .run(async {
                         let handle = app.publish_upload(&row, object).await?;
-                        values.remove("_upload");
-                        let csrf = values
-                            .remove(&presentation.csrf_field)
-                            .context("missing csrf")?;
-                        let submission = values
-                            .remove(&presentation.submission_field)
-                            .context("missing submission")?;
+                        let (csrf, submission) = take_credentials(&mut values, presentation)?;
                         values.insert(file, handle);
                         submit(&gateway, &cookie, binding, &submission, &csrf, values).await
                     })
@@ -213,36 +265,11 @@ pub(super) async fn upload(gateway: Arc<Gateway>, request: Request) -> Response 
             } => input,
             PreparedUpload::Absent => String::new(),
         };
-        // A retry/optional absence still requires a syntactically complete sole
-        // final file part containing zero bytes, never a second replacement.
-        let mut file_decoder = ready.into_body();
-        transfer
-            .run(async {
-                file_decoder.push(&buffered, |_| anyhow::bail!("unexpected upload bytes"))?;
-                while let Some(bytes) = next(
-                    &mut body,
-                    transfer.work_deadline().min(
-                        tokio::time::Instant::now()
-                            + Duration::from_millis(noxide_protocol::blobs::DOWNLOAD_IDLE_MILLIS),
-                    ),
-                )
-                .await?
-                {
-                    file_decoder.push(&bytes, |_| anyhow::bail!("unexpected upload bytes"))?;
-                }
-                file_decoder.finish()
-            })
-            .await?;
+        expect_empty_file(ready, &buffered, &mut body, &transfer).await?;
         let final_phase = app.blob_phase(app.blob_action_limit());
         final_phase
             .run(async {
-                values.remove("_upload");
-                let csrf = values
-                    .remove(&presentation.csrf_field)
-                    .context("missing csrf")?;
-                let submission = values
-                    .remove(&presentation.submission_field)
-                    .context("missing submission")?;
+                let (csrf, submission) = take_credentials(&mut values, presentation)?;
                 values.insert(file, handle);
                 submit(&gateway, &cookie, binding, &submission, &csrf, values).await
             })
@@ -296,37 +323,96 @@ async fn submit(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+/// The ticket from a bodiless GET whose only query parameter is `ticket`.
+fn download_ticket(request: &Request) -> Result<String> {
+    ensure!(
+        request.method() == axum::http::Method::GET
+            && !request.headers().contains_key(header::RANGE),
+        "unsupported download request"
+    );
+    ensure!(
+        !request.headers().contains_key(header::TRANSFER_ENCODING)
+            && request
+                .headers()
+                .get_all(header::CONTENT_LENGTH)
+                .iter()
+                .all(|v| v.as_bytes() == b"0"),
+        "download body denied"
+    );
+    let query = request
+        .uri()
+        .query()
+        .context("download ticket missing")?
+        .to_owned();
+    ensure!(query.len() <= 8192, "download ticket limit");
+    let mut params = url::form_urlencoded::parse(query.as_bytes());
+    let (name, ticket) = params.next().context("download ticket missing")?;
+    ensure!(
+        name == "ticket" && params.next().is_none(),
+        "invalid download query"
+    );
+    let ticket = ticket.into_owned();
+    Ok(ticket)
+}
+
+/// End the stream when it makes no progress within the idle limit.
+fn spawn_idle_watchdog(lease: Arc<StreamLease>) {
+    let watchdog = lease;
+    tokio::spawn(async move {
+        loop {
+            let changed = watchdog.changed.notified();
+            let deadline = *watchdog.idle.lock().unwrap();
+            if watchdog.done.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            tokio::select! {
+                _ = changed => {},
+                _ = tokio::time::sleep_until(deadline) => {
+                    if tokio::time::Instant::now() >= *watchdog.idle.lock().unwrap() {
+                        watchdog.expired.store(true,std::sync::atomic::Ordering::Release);
+                        watchdog.finish();
+                        return;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Attachment headers that keep a browser from rendering the bytes.
+fn download_response(body: DownloadBody, disposition: &str, length: u64) -> Result<Response> {
+    let mut response = Response::new(axum::body::Body::new(body));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(noxide_blobs::transport::CONTENT_TYPE),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(noxide_blobs::transport::CACHE_CONTROL),
+    );
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static(noxide_blobs::transport::NOSNIFF),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(disposition)?,
+    );
+    headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&length.to_string())?,
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(noxide_blobs::transport::CSP),
+    );
+    Ok(response)
+}
+
 pub(super) async fn download(gateway: Arc<Gateway>, request: Request) -> Response {
     let result: Result<Response> = async {
-        ensure!(
-            request.method() == axum::http::Method::GET
-                && !request.headers().contains_key(header::RANGE),
-            "unsupported download request"
-        );
-        ensure!(
-            !request.headers().contains_key(header::TRANSFER_ENCODING)
-                && request
-                    .headers()
-                    .get_all(header::CONTENT_LENGTH)
-                    .iter()
-                    .all(|v| v.as_bytes() == b"0"),
-            "download body denied"
-        );
-        let query = request
-            .uri()
-            .query()
-            .context("download ticket missing")?
-            .to_owned();
-        ensure!(query.len() <= 8192, "download ticket limit");
-        let mut params = url::form_urlencoded::parse(query.as_bytes());
-        let (name, ticket) = params.next().context("download ticket missing")?;
-        ensure!(
-            name == "ticket" && params.next().is_none(),
-            "invalid download query"
-        );
-        let ticket = ticket.into_owned();
-        let _ = params;
+        let ticket = download_ticket(&request)?;
         let session = cookie(
             request.headers(),
             &gateway.app.presentation().session_cookie,
@@ -384,26 +470,7 @@ pub(super) async fn download(gateway: Arc<Gateway>, request: Request) -> Respons
                 Ok(())
             },
         )?;
-        let watchdog = lease.clone();
-        tokio::spawn(async move {
-            loop {
-                let changed = watchdog.changed.notified();
-                let deadline = *watchdog.idle.lock().unwrap();
-                if watchdog.done.load(std::sync::atomic::Ordering::Acquire) {
-                    return;
-                }
-                tokio::select! {
-                    _ = changed => {},
-                    _ = tokio::time::sleep_until(deadline) => {
-                        if tokio::time::Instant::now() >= *watchdog.idle.lock().unwrap() {
-                            watchdog.expired.store(true,std::sync::atomic::Ordering::Release);
-                            watchdog.finish();
-                            return;
-                        }
-                    }
-                }
-            }
-        });
+        spawn_idle_watchdog(lease.clone());
         let body = DownloadBody {
             receive,
             job: Some(job),
@@ -411,33 +478,7 @@ pub(super) async fn download(gateway: Arc<Gateway>, request: Request) -> Respons
             remaining: length,
             failed: false,
         };
-        let mut response = Response::new(axum::body::Body::new(body));
-        let headers = response.headers_mut();
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static(noxide_blobs::transport::CONTENT_TYPE),
-        );
-        headers.insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static(noxide_blobs::transport::CACHE_CONTROL),
-        );
-        headers.insert(
-            "x-content-type-options",
-            HeaderValue::from_static(noxide_blobs::transport::NOSNIFF),
-        );
-        headers.insert(
-            header::CONTENT_DISPOSITION,
-            HeaderValue::from_str(&disposition)?,
-        );
-        headers.insert(
-            header::CONTENT_LENGTH,
-            HeaderValue::from_str(&length.to_string())?,
-        );
-        headers.insert(
-            header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(noxide_blobs::transport::CSP),
-        );
-        Ok(response)
+        download_response(body, &disposition, length)
     }
     .await;
     match result {
