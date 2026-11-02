@@ -145,7 +145,9 @@ What this does not do:
   from Wasmtime followed by a kernel exploit is outside this boundary.
 - Many accounts cost compiles: each new account takes a fresh worker, about 210 ms of
   CPU and 22 MiB for a 175 KiB release-built application, measured on one machine.
-  A request that finds none ready waits, and fails as busy at its deadline.
+  The server starts four before listening and replaces them as they are used, but a
+  burst of new accounts can outrun that. A request that finds none ready waits, and
+  fails as busy at its deadline.
 
 ## Mutation and navigation lifecycle
 

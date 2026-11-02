@@ -131,8 +131,8 @@ pub const DEFAULT_RETIRE_AFTER: u32 = 256;
 const WARM_WORKERS: usize = 4;
 
 impl GuestPool {
-    /// Start a broker and one worker, which is the component's admission check. Call
-    /// before confining: this is the last time this process can start anything.
+    /// Start a broker and the warm workers, whose compile is the component's admission
+    /// check. Call before confining: this is the last time this process can start anything.
     pub fn start(
         program: &Path,
         mode: &str,
@@ -148,22 +148,36 @@ impl GuestPool {
             &limits,
             retire_after,
         )?);
-        let (id, stream) = broker.worker().context("the component was rejected")?;
-        let worker = Worker {
-            id,
-            served: 0,
-            isolation: None,
-            stream: Some(stream),
-            broker: Some(broker.clone()),
-        };
+        // Ready before the server listens, so the first accounts need no compile. These
+        // threads end before this returns, which confinement requires.
+        let warm = WARM_WORKERS.min(limits.concurrency);
+        let idle = std::thread::scope(|scope| {
+            let starting: Vec<_> = (0..warm).map(|_| scope.spawn(|| broker.worker())).collect();
+            starting
+                .into_iter()
+                .map(|worker| {
+                    let (id, stream) = worker
+                        .join()
+                        .expect("worker start")
+                        .context("the component was rejected")?;
+                    Ok(Worker {
+                        id,
+                        served: 0,
+                        isolation: None,
+                        stream: Some(stream),
+                        broker: Some(broker.clone()),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
         Ok(Self {
-            idle: Mutex::new(vec![worker]),
+            idle: Mutex::new(idle),
             changed: watch::Sender::new(0),
             closed: AtomicBool::new(false),
-            live: AtomicUsize::new(1),
+            live: AtomicUsize::new(warm),
             starting: AtomicUsize::new(0),
             waiting: AtomicUsize::new(0),
-            started: AtomicUsize::new(1),
+            started: AtomicUsize::new(warm),
             retire_after,
             limits,
             broker: Some(broker),
