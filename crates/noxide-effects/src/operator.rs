@@ -1,5 +1,4 @@
 //! Trusted operator controls; all changes serialize through the shared runtime.
-use crate::sql::sql;
 use crate::{
     database::Transaction,
     effect_deployment::{EffectiveEffectDeployment, EffectiveEffectGrant},
@@ -10,6 +9,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::time::{Duration, Timestamp};
+use noxide_store::statements::effects as stmt;
 use serde::Serialize;
 
 pub enum EffectOperatorCommand {
@@ -124,7 +124,9 @@ impl EffectOperatorTransaction for Transaction {
             opaque(owner_directory),
             "invalid effect owner directory proof"
         );
-        let runtime=self.fetch::<3>("SELECT contract,epoch,state FROM nx_job_runtime WHERE singleton=1 AND deployment=$1 AND EXISTS(SELECT 1 FROM nx_deployment WHERE singleton=1 AND generation=$1)",&[generation.into()]).await?;
+        let runtime = self
+            .rows(&stmt::RUNTIME_FOR_DEPLOYMENT, &[generation.into()])
+            .await?;
         let [current, epoch, state] = runtime
             .first()
             .context("shared effect runtime unavailable")?;
@@ -132,16 +134,21 @@ impl EffectOperatorTransaction for Transaction {
             current == contract && opaque(epoch),
             "effect approval differs from shared runtime"
         );
-        let rows = self
-            .fetch::<2>(
-                "SELECT store_id,owner_directory FROM nx_effect_queue WHERE singleton=1",
-                &[],
-            )
-            .await?;
+        let rows = self.rows(&stmt::QUEUE_OWNER, &[]).await?;
         match rows.first() {
             None => {
                 let store_id = crate::ids::random_id()?;
-                self.execute("INSERT INTO nx_effect_queue(singleton,claim_seq,store_id,owner_directory,pending_limit,tenant_limit,concurrency) VALUES(1,0,$1,$2,$3,$4,$5)",&[store_id.into(),owner_directory.into(),i64::from(effective.limits.pending_per_app).into(),i64::from(effective.limits.pending_per_tenant).into(),i64::from(effective.limits.worker_concurrency).into()]).await?;
+                self.run(
+                    &stmt::INSERT_QUEUE,
+                    &[
+                        store_id.into(),
+                        owner_directory.into(),
+                        i64::from(effective.limits.pending_per_app).into(),
+                        i64::from(effective.limits.pending_per_tenant).into(),
+                        i64::from(effective.limits.worker_concurrency).into(),
+                    ],
+                )
+                .await?;
             }
             Some([store_id, stored_directory]) => {
                 ensure!(opaque(store_id), "invalid effect store identity");
@@ -154,10 +161,22 @@ impl EffectOperatorTransaction for Transaction {
                         "effect database belongs to another owner directory"
                     );
                     let store_id = crate::ids::random_id()?;
-                    self.execute("UPDATE nx_effect_queue SET store_id=$1,owner_directory=$2 WHERE singleton=1",&[store_id.into(),owner_directory.into()]).await?;
+                    self.run(
+                        &stmt::SET_QUEUE_OWNER,
+                        &[store_id.into(), owner_directory.into()],
+                    )
+                    .await?;
                     self.pause_effects_for_epoch().await?;
                 }
-                self.execute("UPDATE nx_effect_queue SET pending_limit=$1,tenant_limit=$2,concurrency=$3 WHERE singleton=1",&[i64::from(effective.limits.pending_per_app).into(),i64::from(effective.limits.pending_per_tenant).into(),i64::from(effective.limits.worker_concurrency).into()]).await?;
+                self.run(
+                    &stmt::SET_QUEUE_LIMITS,
+                    &[
+                        i64::from(effective.limits.pending_per_app).into(),
+                        i64::from(effective.limits.pending_per_tenant).into(),
+                        i64::from(effective.limits.worker_concurrency).into(),
+                    ],
+                )
+                .await?;
             }
         }
         // A paused generation (clock recovery or restore) stays paused. Same
@@ -169,7 +188,12 @@ impl EffectOperatorTransaction for Transaction {
         };
         for secret in &effective.secrets {
             self.maintenance_checkpoint()?;
-            let rows=self.fetch::<3>("SELECT CAST(version AS TEXT),contract,epoch FROM nx_effect_secrets WHERE deployment=$1 AND slot=$2",&[generation.into(),secret.slot.as_str().into()]).await?;
+            let rows = self
+                .rows(
+                    &stmt::SECRET,
+                    &[generation.into(), secret.slot.as_str().into()],
+                )
+                .await?;
             if rows
                 .first()
                 .is_some_and(|[_, c, e]| c == contract && e == epoch)
@@ -182,11 +206,31 @@ impl EffectOperatorTransaction for Transaction {
                     .context("secret grant version exhausted")?,
                 None => 1,
             };
-            self.execute("INSERT INTO nx_effect_secrets(deployment,slot,version,contract,epoch,state) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(deployment,slot) DO UPDATE SET version=$3,contract=$4,epoch=$5,state=$6",&[generation.into(),secret.slot.as_str().into(),version.into(),contract.into(),epoch.as_str().into(),initial_state.into()]).await?;
+            self.run(
+                &stmt::UPSERT_SECRET,
+                &[
+                    generation.into(),
+                    secret.slot.as_str().into(),
+                    version.into(),
+                    contract.into(),
+                    epoch.as_str().into(),
+                    initial_state.into(),
+                ],
+            )
+            .await?;
         }
         for binding in &effective.grants {
             self.maintenance_checkpoint()?;
-            let rows=self.fetch::<4>("SELECT CAST(version AS TEXT),contract,epoch,declaration FROM nx_effect_grants WHERE deployment=$1 AND tenant=$2 AND endpoint=$3",&[generation.into(),binding.tenant.as_str().into(),binding.endpoint.name.as_str().into()]).await?;
+            let rows = self
+                .rows(
+                    &stmt::GRANT,
+                    &[
+                        generation.into(),
+                        binding.tenant.as_str().into(),
+                        binding.endpoint.name.as_str().into(),
+                    ],
+                )
+                .await?;
             if let Some([_, c, e, payload]) = rows.first()
                 && c == contract
                 && e == epoch
@@ -204,7 +248,20 @@ impl EffectOperatorTransaction for Transaction {
                     .context("endpoint version exhausted")?,
                 None => 1,
             };
-            self.execute("INSERT INTO nx_effect_grants(deployment,tenant,endpoint,version,contract,epoch,state,declaration) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(deployment,tenant,endpoint) DO UPDATE SET version=$4,contract=$5,epoch=$6,state=$7,declaration=$8",&[generation.into(),binding.tenant.as_str().into(),binding.endpoint.name.as_str().into(),version.into(),contract.into(),epoch.as_str().into(),initial_state.into(),serde_json::to_string(binding)?.into()]).await?;
+            self.run(
+                &stmt::UPSERT_GRANT,
+                &[
+                    generation.into(),
+                    binding.tenant.as_str().into(),
+                    binding.endpoint.name.as_str().into(),
+                    version.into(),
+                    contract.into(),
+                    epoch.as_str().into(),
+                    initial_state.into(),
+                    serde_json::to_string(binding)?.into(),
+                ],
+            )
+            .await?;
         }
         Ok(())
     }
@@ -213,14 +270,9 @@ impl EffectOperatorTransaction for Transaction {
     async fn lock_effect_operator(&mut self, generation: &str) -> Result<(String, String)> {
         checkpoint(self)?;
         ensure!(opaque(generation), "invalid effect generation");
-        let n=self.execute("UPDATE nx_job_runtime SET state=state WHERE singleton=1 AND deployment=$1 AND EXISTS(SELECT 1 FROM nx_deployment WHERE singleton=1 AND generation=$1)",&[generation.into()]).await?;
+        let n = self.run(&stmt::LOCK_RUNTIME, &[generation.into()]).await?;
         ensure!(n == 1, "effect runtime retired");
-        let rows = self
-            .fetch::<2>(
-                "SELECT contract,epoch FROM nx_job_runtime WHERE singleton=1",
-                &[],
-            )
-            .await?;
+        let rows = self.rows(&stmt::RUNTIME_CONTRACT, &[]).await?;
         let [contract, epoch] = rows.first().context("effect runtime missing")?;
         ensure!(opaque(contract) && opaque(epoch), "invalid effect runtime");
         Ok((contract.clone(), epoch.clone()))
@@ -235,7 +287,7 @@ impl EffectOperatorTransaction for Transaction {
             after.is_empty() || opaque(after),
             "invalid effect inspection cursor"
         );
-        let rows=self.fetch::<8>("SELECT id,deployment,tenant,endpoint,state,CAST(attempts AS TEXT),CAST(round AS TEXT),CAST(eligible_ms AS TEXT) FROM nx_outbox WHERE id>$1 ORDER BY id LIMIT 100",&[after.into()]).await?;
+        let rows = self.rows(&stmt::LIST_CAPTURES, &[after.into()]).await?;
         rows.into_iter()
             .map(
                 |[
@@ -265,7 +317,7 @@ impl EffectOperatorTransaction for Transaction {
     async fn cancel_effect(&mut self, generation: &str, id: &str) -> Result<()> {
         self.lock_effect_operator(generation).await?;
         ensure!(opaque(id), "invalid effect identity");
-        let n=self.execute("UPDATE nx_outbox SET state='cancelled',reason='operator_cancelled',lease_until_ms=0 WHERE id=$1 AND state IN ('pending','running','paused','dead')",&[id.into()]).await?;
+        let n = self.run(&stmt::CANCEL_CAPTURE, &[id.into()]).await?;
         ensure!(n == 1, "effect unavailable for cancellation");
         Ok(())
     }
@@ -276,14 +328,25 @@ impl EffectOperatorTransaction for Transaction {
         endpoint: &str,
     ) -> Result<()> {
         self.lock_effect_operator(generation).await?;
-        let n=self.execute("UPDATE nx_effect_grants SET state='revoked',version=version+1 WHERE deployment=$1 AND tenant=$2 AND endpoint=$3 AND version<9223372036854775807",&[generation.into(),tenant.into(),endpoint.into()]).await?;
+        let n = self
+            .run(
+                &stmt::REVOKE_GRANT,
+                &[generation.into(), tenant.into(), endpoint.into()],
+            )
+            .await?;
         ensure!(n == 1, "endpoint grant missing");
-        self.execute("UPDATE nx_outbox SET state='paused',reason='endpoint_revoked',lease_until_ms=0 WHERE tenant=$1 AND endpoint=$2 AND state IN ('pending','running')",&[tenant.into(),endpoint.into()]).await?;
+        self.run(
+            &stmt::PAUSE_REVOKED_ENDPOINT,
+            &[tenant.into(), endpoint.into()],
+        )
+        .await?;
         Ok(())
     }
     async fn revoke_effect_secret(&mut self, generation: &str, slot: &str) -> Result<()> {
         self.lock_effect_operator(generation).await?;
-        let n=self.execute("UPDATE nx_effect_secrets SET state='revoked',version=version+1 WHERE deployment=$1 AND slot=$2 AND version<9223372036854775807",&[generation.into(),slot.into()]).await?;
+        let n = self
+            .run(&stmt::REVOKE_SECRET, &[generation.into(), slot.into()])
+            .await?;
         ensure!(n == 1, "secret grant missing");
         self.pause_effect_secret_rows(generation, slot, "secret_revoked")
             .await
@@ -296,12 +359,18 @@ impl EffectOperatorTransaction for Transaction {
     ) -> Result<()> {
         // Endpoint declarations contain no value/path. JSON extraction is not
         // needed: the bounded current grant list supplies exact endpoint pairs.
-        let rows=self.fetch::<3>("SELECT tenant,endpoint,declaration FROM nx_effect_grants WHERE deployment=$1 ORDER BY tenant,endpoint LIMIT 65",&[generation.into()]).await?;
+        let rows = self
+            .rows(&stmt::DEPLOYMENT_GRANTS, &[generation.into()])
+            .await?;
         ensure!(rows.len() <= 64, "effect grant limit");
         for [tenant, endpoint, payload] in rows {
             let binding: EffectiveEffectGrant = serde_json::from_str(&payload)?;
             if binding.endpoint.secret_slot.as_deref() == Some(slot) {
-                self.execute("UPDATE nx_outbox SET state='paused',reason=$1,lease_until_ms=0 WHERE tenant=$2 AND endpoint=$3 AND state IN ('pending','running')",&[reason.into(),tenant.into(),endpoint.into()]).await?;
+                self.run(
+                    &stmt::PAUSE_ENDPOINT,
+                    &[reason.into(), tenant.into(), endpoint.into()],
+                )
+                .await?;
             }
         }
         Ok(())
@@ -314,14 +383,29 @@ impl EffectOperatorTransaction for Transaction {
     ) -> Result<()> {
         let (current, epoch) = self.lock_effect_operator(generation).await?;
         ensure!(current == contract, "effect approval changed");
-        let n=self.execute("UPDATE nx_effect_grants SET state='active',version=version+1,contract=$1,epoch=$2 WHERE deployment=$3 AND tenant=$4 AND endpoint=$5 AND declaration=$6 AND version<9223372036854775807",&[contract.into(),epoch.into(),generation.into(),binding.tenant.as_str().into(),binding.endpoint.name.as_str().into(),serde_json::to_string(binding)?.into()]).await?;
+        let n = self
+            .run(
+                &stmt::ACTIVATE_GRANT,
+                &[
+                    contract.into(),
+                    epoch.into(),
+                    generation.into(),
+                    binding.tenant.as_str().into(),
+                    binding.endpoint.name.as_str().into(),
+                    serde_json::to_string(binding)?.into(),
+                ],
+            )
+            .await?;
         ensure!(n == 1, "endpoint is not currently approved");
-        self.execute("UPDATE nx_outbox SET state='paused',reason='grant_changed',lease_until_ms=0 WHERE tenant=$1 AND endpoint=$2 AND state IN ('pending','running')",&[binding.tenant.as_str().into(),binding.endpoint.name.as_str().into()]).await?;
-        self.execute(
-            "UPDATE nx_job_runtime SET state='active' WHERE singleton=1",
-            &[],
+        self.run(
+            &stmt::PAUSE_CHANGED_ENDPOINT,
+            &[
+                binding.tenant.as_str().into(),
+                binding.endpoint.name.as_str().into(),
+            ],
         )
         .await?;
+        self.run(&stmt::ACTIVATE_RUNTIME, &[]).await?;
         Ok(())
     }
     async fn grant_effect_secret(
@@ -336,7 +420,17 @@ impl EffectOperatorTransaction for Transaction {
             current == contract && effective.secrets.iter().any(|s| s.slot == slot),
             "secret slot is not currently approved"
         );
-        let n=self.execute("UPDATE nx_effect_secrets SET state='active',version=version+1,contract=$1,epoch=$2 WHERE deployment=$3 AND slot=$4 AND version<9223372036854775807",&[contract.into(),epoch.into(),generation.into(),slot.into()]).await?;
+        let n = self
+            .run(
+                &stmt::ACTIVATE_SECRET,
+                &[
+                    contract.into(),
+                    epoch.into(),
+                    generation.into(),
+                    slot.into(),
+                ],
+            )
+            .await?;
         ensure!(n == 1, "secret grant missing");
         self.pause_effect_secret_rows(generation, slot, "grant_changed")
             .await
@@ -348,13 +442,8 @@ impl EffectOperatorTransaction for Transaction {
     ) -> Result<CapturedEffect> {
         self.lock_effect_operator(generation).await?;
         ensure!(opaque(id), "invalid effect identity");
-        let payload = self.bounded_text("payload", MAX_CAPTURE_BYTES);
-        let rows = self
-            .fetch::<2>(
-                &sql!("SELECT {payload},payload_digest FROM nx_outbox WHERE id=$1"),
-                &[id.into()],
-            )
-            .await?;
+        let query = stmt::capture_payload(self);
+        let rows = self.rows(&query, &[id.into()]).await?;
         let [payload, digest] = rows.first().context("effect missing")?;
         let capture: CapturedEffect = serde_json::from_str(payload)?;
         capture.validate()?;
@@ -414,7 +503,7 @@ impl EffectOperatorTransaction for Transaction {
             contract,
         )
         .await?;
-        let rows=self.fetch::<4>("SELECT state,CAST(attempts AS TEXT),CAST(first_eligible_ms AS TEXT),CAST(round AS TEXT) FROM nx_outbox WHERE id=$1",&[id.into()]).await?;
+        let rows = self.rows(&stmt::CAPTURE_RETRY_STATE, &[id.into()]).await?;
         let [state, attempts, first, round] = rows.first().context("effect missing")?;
         ensure!(
             if retry {
@@ -445,8 +534,33 @@ impl EffectOperatorTransaction for Transaction {
         }
         .check_operator_quota(&source.scope.tenant, state != "paused")
         .await?;
-        self.execute("INSERT INTO nx_effect_tenants(deployment,tenant,claim_seq) VALUES($1,$2,0) ON CONFLICT(deployment,tenant) DO NOTHING",&[generation.into(),source.scope.tenant.as_str().into()]).await?;
-        let changed=self.execute("UPDATE nx_outbox SET deployment=$1,contract=$2,epoch=$3,grant_version=$4,secret_version=$5,state='pending',reason='',eligible_ms=$6,first_eligible_ms=$7,attempts=$8,lease_until_ms=0,round=$9,fence=fence+1 WHERE id=$10 AND fence<9223372036854775807",&[generation.into(),contract.into(),proof.grant.epoch.as_str().into(),proof.grant.version.into(),proof.grant.secret_version.into(),now.unix_millis().into(),if retry {now.unix_millis()} else {integer(first)?}.into(),if retry {0} else {integer(attempts)?}.into(),round.into(),id.into()]).await?;
+        self.run(
+            &stmt::ENSURE_TENANT,
+            &[generation.into(), source.scope.tenant.as_str().into()],
+        )
+        .await?;
+        let changed = self
+            .run(
+                &stmt::RESCHEDULE_CAPTURE,
+                &[
+                    generation.into(),
+                    contract.into(),
+                    proof.grant.epoch.as_str().into(),
+                    proof.grant.version.into(),
+                    proof.grant.secret_version.into(),
+                    now.unix_millis().into(),
+                    if retry {
+                        now.unix_millis()
+                    } else {
+                        integer(first)?
+                    }
+                    .into(),
+                    if retry { 0 } else { integer(attempts)? }.into(),
+                    round.into(),
+                    id.into(),
+                ],
+            )
+            .await?;
         ensure!(changed == 1, "effect fence exhausted");
         Ok(())
     }

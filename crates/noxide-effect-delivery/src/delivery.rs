@@ -341,10 +341,7 @@ impl EffectDelivery {
         let runtime = &self.runtime;
         let mut tx = self.database.begin_read(deadline).await?;
         let rows = tx
-            .fetch::<2>(
-                "SELECT store_id,owner_directory FROM nx_effect_queue WHERE singleton=1",
-                &[],
-            )
+            .rows(&noxide_store::statements::effects::QUEUE_OWNER, &[])
             .await?;
         let [store_id, directory_digest] =
             rows.first().context("effect database binding missing")?;

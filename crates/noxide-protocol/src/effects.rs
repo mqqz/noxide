@@ -5,6 +5,8 @@
 use crate::{Input, Value};
 use serde::{Deserialize, Serialize};
 
+/// Upper bound on one captured effect payload.
+pub const MAX_CAPTURE_BYTES: usize = 196_608;
 pub const MAX_EFFECTS_PER_ACTION: usize = 2;
 pub const MAX_ENDPOINTS: usize = 32;
 pub const MAX_PAYLOAD_FIELDS: usize = 32;

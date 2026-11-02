@@ -9,7 +9,7 @@ use std::{
     fmt,
 };
 
-pub(super) const MAX_CAPTURE_BYTES: usize = 196_608;
+pub(super) use noxide_protocol::effects::MAX_CAPTURE_BYTES;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EffectScope {

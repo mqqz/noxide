@@ -1,15 +1,12 @@
 //! Short transactional outbox operations. No network, file reads or commits.
-use crate::sql::sql;
+use crate::database::{Transaction, lifecycle::RequestScope};
 use crate::types::*;
-use crate::{
-    database::{Transaction, lifecycle::RequestScope},
-    query_plan::NativeProvider,
-};
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::{
     effects::*,
     time::{Duration, Timestamp},
 };
+use noxide_store::statements::effects as stmt;
 use sha2::{Digest, Sha256};
 
 pub struct OutboxContext<'a> {
@@ -80,12 +77,8 @@ impl OutboxContext<'_> {
     ) -> Result<(String, String, String)> {
         scope.validate()?;
         self.checkpoint()?;
-        let suffix = if matches!(self.tx.query_provider()?, NativeProvider::Postgres) {
-            " FOR SHARE"
-        } else {
-            ""
-        };
-        let rows=self.tx.fetch::<4>(&sql!("SELECT deployment,contract,epoch,state FROM nx_job_runtime WHERE singleton=1 AND EXISTS(SELECT 1 FROM nx_deployment WHERE singleton=1 AND generation=nx_job_runtime.deployment){suffix}"),&[]).await?;
+        let query = stmt::locked_runtime(self.tx)?;
+        let rows = self.tx.rows(&query, &[]).await?;
         let [generation, contract, epoch, state] =
             rows.first().context("effect runtime unavailable")?;
         ensure!(
@@ -108,13 +101,18 @@ impl OutboxContext<'_> {
         endpoint: &str,
     ) -> Result<Option<(EndpointGrant, String)>> {
         self.checkpoint()?;
-        let suffix = if matches!(self.tx.query_provider()?, NativeProvider::Postgres) {
-            " FOR SHARE"
-        } else {
-            ""
-        };
-        let declaration = self.tx.bounded_text("declaration", 16384);
-        let rows=self.tx.fetch::<5>(&sql!("SELECT {declaration},state,CAST(version AS TEXT),contract,epoch FROM nx_effect_grants WHERE deployment=$1 AND tenant=$2 AND endpoint=$3{suffix}"),&[scope.deployment.as_str().into(),scope.tenant.as_str().into(),endpoint.into()]).await?;
+        let query = stmt::locked_grant(self.tx)?;
+        let rows = self
+            .tx
+            .rows(
+                &query,
+                &[
+                    scope.deployment.as_str().into(),
+                    scope.tenant.as_str().into(),
+                    endpoint.into(),
+                ],
+            )
+            .await?;
         let Some([declaration, state, version, contract, epoch]) = rows.first() else {
             return Ok(None);
         };
@@ -127,7 +125,14 @@ impl OutboxContext<'_> {
         let mut secret_version = 0;
         let mut state = state.clone();
         if let Some(slot) = &binding.endpoint.secret_slot {
-            let rows=self.tx.fetch::<4>(&sql!("SELECT CAST(version AS TEXT),state,contract,epoch FROM nx_effect_secrets WHERE deployment=$1 AND slot=$2{suffix}"),&[scope.deployment.as_str().into(),slot.as_str().into()]).await?;
+            let query = stmt::locked_secret(self.tx)?;
+            let rows = self
+                .tx
+                .rows(
+                    &query,
+                    &[scope.deployment.as_str().into(), slot.as_str().into()],
+                )
+                .await?;
             match rows.first() {
                 Some([version, secret_state, secret_contract, secret_epoch]) => {
                     secret_version = integer(version)?;
@@ -184,13 +189,7 @@ impl OutboxContext<'_> {
             state == "active" && contract == capture.contract && epoch == capture.epoch,
             "effect runtime changed"
         );
-        let changed = self
-            .tx
-            .execute(
-                "UPDATE nx_effect_queue SET claim_seq=claim_seq WHERE singleton=1",
-                &[],
-            )
-            .await?;
+        let changed = self.tx.run(&stmt::LOCK_QUEUE, &[]).await?;
         ensure!(changed == 1, "effect queue unavailable");
         let (grant, state) = self
             .grant(&capture.scope, &capture.binding.endpoint.name)
@@ -204,10 +203,7 @@ impl OutboxContext<'_> {
         let digest = capture.capture_digest()?;
         let rows = self
             .tx
-            .fetch::<1>(
-                "SELECT payload_digest FROM nx_outbox WHERE id=$1",
-                &[id.as_str().into()],
-            )
+            .rows(&stmt::CAPTURE_DIGEST, &[id.as_str().into()])
             .await?;
         if let Some([stored]) = rows.first() {
             ensure!(
@@ -216,7 +212,13 @@ impl OutboxContext<'_> {
             );
             return Ok(());
         }
-        let counts=self.tx.fetch::<4>("SELECT CAST(COUNT(*) AS TEXT),CAST(COALESCE(SUM(CASE WHEN tenant=$1 THEN 1 ELSE 0 END),0) AS TEXT),CAST((SELECT pending_limit FROM nx_effect_queue WHERE singleton=1) AS TEXT),CAST((SELECT tenant_limit FROM nx_effect_queue WHERE singleton=1) AS TEXT) FROM (SELECT tenant FROM nx_outbox WHERE state IN ('pending','running','paused') LIMIT 1001) AS active_effects",&[capture.scope.tenant.as_str().into()]).await?;
+        let counts = self
+            .tx
+            .rows(
+                &stmt::ACTIVE_COUNTS,
+                &[capture.scope.tenant.as_str().into()],
+            )
+            .await?;
         let [app, tenant, app_limit, tenant_limit] =
             counts.first().context("effect quota unavailable")?;
         ensure!(
@@ -226,8 +228,35 @@ impl OutboxContext<'_> {
                 && integer(tenant_limit)? <= integer(app_limit)?,
             "effect queue full"
         );
-        self.tx.execute("INSERT INTO nx_effect_tenants(deployment,tenant,claim_seq) VALUES($1,$2,0) ON CONFLICT(deployment,tenant) DO NOTHING",&[capture.scope.deployment.as_str().into(),capture.scope.tenant.as_str().into()]).await?;
-        self.tx.execute("INSERT INTO nx_outbox(id,deployment,tenant,origin,ordinal,endpoint,contract,epoch,grant_version,secret_version,payload,payload_digest,eligible_ms,first_eligible_ms,attempts,fence,lease_until_ms,round,state,reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,0,0,0,0,'pending','')",&[id.into(),capture.scope.deployment.as_str().into(),capture.scope.tenant.as_str().into(),capture.origin.as_str().into(),i64::from(capture.ordinal).into(),capture.binding.endpoint.name.as_str().into(),capture.contract.as_str().into(),capture.epoch.as_str().into(),capture.grant_version.into(),capture.secret_version.into(),serde_json::to_string(capture)?.into(),digest.into(),now.unix_millis().into()]).await?;
+        self.tx
+            .run(
+                &stmt::ENSURE_TENANT,
+                &[
+                    capture.scope.deployment.as_str().into(),
+                    capture.scope.tenant.as_str().into(),
+                ],
+            )
+            .await?;
+        self.tx
+            .run(
+                &stmt::INSERT_CAPTURE,
+                &[
+                    id.into(),
+                    capture.scope.deployment.as_str().into(),
+                    capture.scope.tenant.as_str().into(),
+                    capture.origin.as_str().into(),
+                    i64::from(capture.ordinal).into(),
+                    capture.binding.endpoint.name.as_str().into(),
+                    capture.contract.as_str().into(),
+                    capture.epoch.as_str().into(),
+                    capture.grant_version.into(),
+                    capture.secret_version.into(),
+                    serde_json::to_string(capture)?.into(),
+                    digest.into(),
+                    now.unix_millis().into(),
+                ],
+            )
+            .await?;
         Ok(())
     }
     /// Called only while the exclusive DB-bound owner and a physical slot live.
@@ -256,26 +285,34 @@ impl OutboxContext<'_> {
         ensure!(
             !self
                 .tx
-                .fetch::<1>(
-                    "SELECT CAST(singleton AS TEXT) FROM nx_effect_queue WHERE singleton=1 AND owner_directory=$1",
-                    &[owner_directory.into()],
-                )
+                .rows(&stmt::QUEUE_FOR_OWNER, &[owner_directory.into()],)
                 .await?
                 .is_empty(),
             "effect queue unavailable or owned by another directory"
         );
-        let suffix = if matches!(self.tx.query_provider()?, NativeProvider::Postgres) {
-            " FOR UPDATE OF o SKIP LOCKED"
-        } else {
-            ""
-        };
-        let rows=self.tx.fetch::<4>(&sql!("SELECT o.id,o.tenant,CAST(o.fence AS TEXT),CAST(o.attempts AS TEXT) FROM nx_outbox o JOIN nx_effect_tenants t ON t.deployment=o.deployment AND t.tenant=o.tenant WHERE o.deployment=$1 AND ((o.state='pending' AND o.eligible_ms<=$2) OR (o.state='running' AND o.lease_until_ms<=$2)) AND o.id<>$3 AND o.id<>$4 AND $5<(SELECT concurrency FROM nx_effect_queue WHERE singleton=1) ORDER BY t.claim_seq,o.eligible_ms,o.id LIMIT 1{suffix}"),&[generation.into(),now.unix_millis().into(),active.first().map(String::as_str).unwrap_or("").into(),active.get(1).map(String::as_str).unwrap_or("").into(),i64::try_from(active.len())?.into()]).await?;
+        let query = stmt::next_claimable(self.tx)?;
+        let rows = self
+            .tx
+            .rows(
+                &query,
+                &[
+                    generation.into(),
+                    now.unix_millis().into(),
+                    active.first().map(String::as_str).unwrap_or("").into(),
+                    active.get(1).map(String::as_str).unwrap_or("").into(),
+                    i64::try_from(active.len())?.into(),
+                ],
+            )
+            .await?;
         // An empty poll writes nothing. Bumping the shared sequence on every poll
         // made concurrent workers abort each other's preflight under SERIALIZABLE.
         let Some([id, tenant, fence, attempts]) = rows.first() else {
             return Ok(None);
         };
-        let changed=self.tx.execute("UPDATE nx_effect_queue SET claim_seq=claim_seq+1 WHERE singleton=1 AND owner_directory=$1 AND claim_seq<9223372036854775807",&[owner_directory.into()]).await?;
+        let changed = self
+            .tx
+            .run(&stmt::ADVANCE_CLAIM_SEQUENCE, &[owner_directory.into()])
+            .await?;
         ensure!(
             changed == 1,
             "effect queue unavailable or owned by another directory"
@@ -285,9 +322,26 @@ impl OutboxContext<'_> {
             .checked_add(1)
             .context("effect fence exhausted")?;
         let lease = now.checked_add(Duration::from_millis(EFFECT_LEASE_MILLIS)?)?;
-        let changed=self.tx.execute("UPDATE nx_outbox SET state='running',fence=$1,lease_until_ms=$2,attempts=CASE WHEN attempts<5 THEN attempts+1 ELSE attempts END WHERE id=$3 AND deployment=$4 AND fence=$5",&[fence.into(),lease.unix_millis().into(),id.as_str().into(),generation.into(),(fence-1).into()]).await?;
+        let changed = self
+            .tx
+            .run(
+                &stmt::CLAIM_CAPTURE,
+                &[
+                    fence.into(),
+                    lease.unix_millis().into(),
+                    id.as_str().into(),
+                    generation.into(),
+                    (fence - 1).into(),
+                ],
+            )
+            .await?;
         ensure!(changed == 1, "effect claim raced");
-        self.tx.execute("UPDATE nx_effect_tenants SET claim_seq=(SELECT claim_seq FROM nx_effect_queue WHERE singleton=1) WHERE deployment=$1 AND tenant=$2",&[generation.into(),tenant.as_str().into()]).await?;
+        self.tx
+            .run(
+                &stmt::RECORD_TENANT_CLAIM,
+                &[generation.into(), tenant.as_str().into()],
+            )
+            .await?;
         Ok(Some(EffectClaim {
             id: id.clone(),
             scope: EffectScope {
@@ -303,13 +357,35 @@ impl OutboxContext<'_> {
     async fn row(&mut self, claim: &EffectClaim, lock: bool) -> Result<Option<Row>> {
         self.checkpoint()?;
         if lock {
-            let n=self.tx.execute("UPDATE nx_outbox SET fence=fence WHERE id=$1 AND deployment=$2 AND tenant=$3 AND fence=$4",&[claim.id.as_str().into(),claim.scope.deployment.as_str().into(),claim.scope.tenant.as_str().into(),claim.fence.into()]).await?;
+            let n = self
+                .tx
+                .run(
+                    &stmt::LOCK_FENCE,
+                    &[
+                        claim.id.as_str().into(),
+                        claim.scope.deployment.as_str().into(),
+                        claim.scope.tenant.as_str().into(),
+                        claim.fence.into(),
+                    ],
+                )
+                .await?;
             if n == 0 {
                 return Ok(None);
             }
         }
-        let payload = self.tx.bounded_text("payload", MAX_CAPTURE_BYTES);
-        let rows=self.tx.fetch::<15>(&sql!("SELECT {payload},payload_digest,state,CAST(attempts AS TEXT),CAST(first_eligible_ms AS TEXT),CAST(eligible_ms AS TEXT),contract,epoch,CAST(grant_version AS TEXT),CAST(secret_version AS TEXT),CAST(lease_until_ms AS TEXT),origin,CAST(ordinal AS TEXT),endpoint,CAST(fence AS TEXT) FROM nx_outbox WHERE id=$1 AND deployment=$2 AND tenant=$3 AND fence=$4"),&[claim.id.as_str().into(),claim.scope.deployment.as_str().into(),claim.scope.tenant.as_str().into(),claim.fence.into()]).await?;
+        let query = stmt::claimed_capture(self.tx);
+        let rows = self
+            .tx
+            .rows(
+                &query,
+                &[
+                    claim.id.as_str().into(),
+                    claim.scope.deployment.as_str().into(),
+                    claim.scope.tenant.as_str().into(),
+                    claim.fence.into(),
+                ],
+            )
+            .await?;
         let Some(
             [
                 payload,
@@ -383,7 +459,21 @@ impl OutboxContext<'_> {
         reason: &str,
         eligible: Timestamp,
     ) -> Result<()> {
-        let changed=self.tx.execute("UPDATE nx_outbox SET state=$1,reason=$2,eligible_ms=$3,lease_until_ms=0 WHERE id=$4 AND deployment=$5 AND tenant=$6 AND state='running' AND fence=$7",&[state.into(),reason.into(),eligible.unix_millis().into(),claim.id.as_str().into(),claim.scope.deployment.as_str().into(),claim.scope.tenant.as_str().into(),claim.fence.into()]).await?;
+        let changed = self
+            .tx
+            .run(
+                &stmt::FINISH_RUNNING,
+                &[
+                    state.into(),
+                    reason.into(),
+                    eligible.unix_millis().into(),
+                    claim.id.as_str().into(),
+                    claim.scope.deployment.as_str().into(),
+                    claim.scope.tenant.as_str().into(),
+                    claim.fence.into(),
+                ],
+            )
+            .await?;
         ensure!(changed == 1, "effect finalization superseded");
         Ok(())
     }
@@ -458,7 +548,18 @@ impl OutboxContext<'_> {
     /// settlement or a newer claim is untouched. The attempt is refunded.
     pub async fn release_unsent(&mut self, claim: &EffectClaim) -> Result<()> {
         self.charge()?;
-        self.tx.execute("UPDATE nx_outbox SET state='pending',reason='preflight_unavailable',lease_until_ms=0,attempts=attempts-$1 WHERE id=$2 AND deployment=$3 AND tenant=$4 AND state='running' AND fence=$5",&[i64::from(!claim.exhausted).into(),claim.id.as_str().into(),claim.scope.deployment.as_str().into(),claim.scope.tenant.as_str().into(),claim.fence.into()]).await?;
+        self.tx
+            .run(
+                &stmt::RELEASE_AFTER_PREFLIGHT,
+                &[
+                    i64::from(!claim.exhausted).into(),
+                    claim.id.as_str().into(),
+                    claim.scope.deployment.as_str().into(),
+                    claim.scope.tenant.as_str().into(),
+                    claim.fence.into(),
+                ],
+            )
+            .await?;
         Ok(())
     }
     /// An unknown acknowledgment is resolved by probing this fenced row later;
@@ -480,7 +581,20 @@ impl OutboxContext<'_> {
             if runtime.2 == "changed" || runtime.1 != claim.epoch || row.epoch != claim.epoch {
                 return Ok(Finalized::Superseded);
             }
-            let changed=self.tx.execute("UPDATE nx_outbox SET state='delivered',reason='',lease_until_ms=0,eligible_ms=$1 WHERE id=$2 AND deployment=$3 AND tenant=$4 AND fence=$5 AND epoch=$6",&[now.max(row.eligible).unix_millis().into(),claim.id.as_str().into(),claim.scope.deployment.as_str().into(),claim.scope.tenant.as_str().into(),claim.fence.into(),claim.epoch.as_str().into()]).await?;
+            let changed = self
+                .tx
+                .run(
+                    &stmt::MARK_DELIVERED,
+                    &[
+                        now.max(row.eligible).unix_millis().into(),
+                        claim.id.as_str().into(),
+                        claim.scope.deployment.as_str().into(),
+                        claim.scope.tenant.as_str().into(),
+                        claim.fence.into(),
+                        claim.epoch.as_str().into(),
+                    ],
+                )
+                .await?;
             ensure!(changed == 1, "delivery observation superseded");
             return Ok(Finalized::Delivered);
         }
@@ -532,18 +646,12 @@ impl OutboxContext<'_> {
         tenant: &str,
         increment: bool,
     ) -> Result<()> {
-        let n = self
-            .tx
-            .execute(
-                "UPDATE nx_effect_queue SET claim_seq=claim_seq WHERE singleton=1",
-                &[],
-            )
-            .await?;
+        let n = self.tx.run(&stmt::LOCK_QUEUE, &[]).await?;
         ensure!(n == 1, "effect queue unavailable");
         if !increment {
             return Ok(());
         }
-        let rows=self.tx.fetch::<4>("SELECT CAST(COUNT(*) AS TEXT),CAST(COALESCE(SUM(CASE WHEN tenant=$1 THEN 1 ELSE 0 END),0) AS TEXT),CAST((SELECT pending_limit FROM nx_effect_queue WHERE singleton=1) AS TEXT),CAST((SELECT tenant_limit FROM nx_effect_queue WHERE singleton=1) AS TEXT) FROM (SELECT tenant FROM nx_outbox WHERE state IN ('pending','running','paused') LIMIT 1001) AS active_effects",&[tenant.into()]).await?;
+        let rows = self.tx.rows(&stmt::ACTIVE_COUNTS, &[tenant.into()]).await?;
         let [app, tenant, app_limit, tenant_limit] =
             rows.first().context("effect quota unavailable")?;
         ensure!(
