@@ -70,6 +70,7 @@ pub fn read_init(stream: &mut impl std::io::Read) -> Result<(Limits, Vec<u8>)> {
 
 struct Worker {
     id: u32,
+    served: u32,
     stream: Option<StdStream>,
     /// Absent only for a worker no broker started, in tests.
     broker: Option<Arc<BrokerClient>>,
@@ -93,9 +94,15 @@ pub struct GuestPool {
     /// Workers idle, busy or starting.
     live: AtomicUsize,
     starting: AtomicUsize,
+    started: AtomicUsize,
+    retire_after: u32,
     limits: Limits,
     broker: Option<Arc<BrokerClient>>,
 }
+
+/// Requests a worker serves before it is replaced. A guest that escapes Wasmtime can
+/// read later requests sent to its worker, so this limits how many it can see.
+pub const DEFAULT_RETIRE_AFTER: u32 = 256;
 
 /// Workers kept ready before anyone needs them. More start on demand, up to
 /// `limits.concurrency`, each compiling the component on its way up.
@@ -109,6 +116,7 @@ impl GuestPool {
         let (id, stream) = broker.worker().context("the component was rejected")?;
         let worker = Worker {
             id,
+            served: 0,
             stream: Some(stream),
             broker: Some(broker.clone()),
         };
@@ -117,9 +125,24 @@ impl GuestPool {
             available: Semaphore::new(1),
             live: AtomicUsize::new(1),
             starting: AtomicUsize::new(0),
+            started: AtomicUsize::new(1),
+            retire_after: DEFAULT_RETIRE_AFTER,
             limits,
             broker: Some(broker),
         })
+    }
+
+    /// Replace each worker after this many requests. `1` gives every request a new
+    /// process, at the cost of one compile per request.
+    pub fn retire_after(mut self, requests: u32) -> Result<Self> {
+        ensure!(requests > 0, "a worker must serve at least one request");
+        self.retire_after = requests;
+        Ok(self)
+    }
+
+    /// Workers started so far, including those since replaced.
+    pub fn workers_started(&self) -> usize {
+        self.started.load(Ordering::Acquire)
     }
 
     pub fn limits(&self) -> &Limits {
@@ -151,6 +174,7 @@ impl GuestPool {
             return;
         }
         self.starting.fetch_add(1, Ordering::AcqRel);
+        self.started.fetch_add(1, Ordering::AcqRel);
         let pool = self.clone();
         tokio::task::spawn_blocking(move || {
             let worker = broker.worker();
@@ -158,6 +182,7 @@ impl GuestPool {
             match worker {
                 Ok((id, stream)) => pool.park(Worker {
                     id,
+                    served: 0,
                     stream: Some(stream),
                     broker: Some(broker),
                 }),
@@ -246,10 +271,12 @@ impl GuestPool {
             Ok(Ok(Outcome::Deadline)) => (true, Err(GuestBusy::Deadline.into())),
             Ok(Ok(Outcome::Failed)) => (true, Err(anyhow!("guest failed"))),
         };
-        if reusable {
+        worker.served = worker.served.saturating_add(1);
+        if reusable && worker.served < self.retire_after {
             self.park(worker);
         } else {
-            // A broken exchange leaves the worker in an unknown state.
+            // A broken exchange leaves the worker in an unknown state; a retired one
+            // has seen as many requests as it may.
             self.discard(worker);
         }
         Attempt {
@@ -430,12 +457,15 @@ mod tests {
         let pool = GuestPool {
             idle: Mutex::new(vec![Worker {
                 id: 1,
+                served: 0,
                 stream: Some(ours),
                 broker: None,
             }]),
             available: Semaphore::new(1),
             live: AtomicUsize::new(1),
             starting: AtomicUsize::new(0),
+            started: AtomicUsize::new(1),
+            retire_after: DEFAULT_RETIRE_AFTER,
             limits: Limits::default(),
             broker: None,
         };

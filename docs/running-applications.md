@@ -261,9 +261,10 @@ SQLite databases must be private; the CLI creates them with mode 0600 and reject
 group/world-readable existing files. Use a private directory for the database and
 its journal files. Keep keys outside application inputs and source control.
 
-The optional `guest_workers` setting runs guest code in separate `noxide-guest`
-processes, which must be installed beside the server. It defaults to `false`. See
-[guest workers](architecture/layers.md#guest-workers) for its current limits.
+Guest code runs in separate `noxide-guest` processes, which must be installed beside
+the server. The optional `guest_worker_requests` setting is how many requests a worker
+serves before it is replaced. It defaults to 256; `1` gives every request a new
+process. See [guest workers](architecture/layers.md#guest-workers).
 
 The optional `database_statement_limit` is an integer from 1 through 256 and
 defaults to 256. It lowers the ordinary request's shared SQL statement ceiling,

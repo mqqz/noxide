@@ -221,6 +221,39 @@ async fn a_lost_worker_is_replaced() {
 }
 
 #[tokio::test]
+async fn workers_retire_after_their_requests() {
+    let limits = Limits {
+        concurrency: 1,
+        ..Limits::default()
+    };
+    let pool = Arc::new(
+        GuestPool::start(
+            Path::new(env!("CARGO_BIN_EXE_noxide-guest")),
+            "best_effort",
+            &component(""),
+            limits,
+        )
+        .unwrap()
+        .retire_after(2)
+        .unwrap(),
+    );
+    for _ in 0..6 {
+        let attempt = pool
+            .run(
+                request(),
+                Some(Storage::default()),
+                1_000_000,
+                16,
+                deadline(),
+            )
+            .await;
+        attempt.result.unwrap();
+    }
+    // The first, plus a replacement after requests two, four and six.
+    assert_eq!(pool.workers_started(), 4);
+}
+
+#[tokio::test]
 async fn an_application_serves_and_writes_through_a_worker() {
     use noxide_host::{AccountAdmin as _, Application, Database, DeploymentResources, HostKeys};
     use noxide_test_support as fixture;

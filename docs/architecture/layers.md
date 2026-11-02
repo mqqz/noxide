@@ -72,9 +72,9 @@ validates and compiles assets, then runs:
 
 | Process | Holds | Can reach after startup | Links none of |
 | --- | --- | --- | --- |
-| `noxide-server` | Guest runtime, database connections, blob store, listener | Database files or loopback database port, blob directory, its key service | `rustls`, SOCKS, `cssparser`, `image` |
+| `noxide-server` | Database connections, blob store, listener | Database files or loopback database port, blob directory, its key service | `rustls`, SOCKS, `cssparser`, `image` |
 | `noxide-keyd` | Host key material | Its one socket | Network, database, Wasmtime, Tokio |
-| `noxide-guest` (optional) | One compiled guest | Its one socket | Keys, database, HTTP, TLS |
+| `noxide-guest` | One compiled guest | Its one socket | Keys, database, HTTP, TLS |
 | `noxide-effects-worker` | Effect secret paths, database connections | Database, secret files, loopback Tor proxy port | Host keys, HTTP server, login |
 
 The server and worker start on one thread, bind and activate, then confine
@@ -86,10 +86,6 @@ A compromised server can still use the keys through its service while it runs, r
 and write everything in its database, and run job actions: jobs still run in the
 server process. Landlock port rules name no address, so loopback-only database and
 proxy connections rest on the checks in `Database::postgres` and `TorProxy::loopback`.
-
-`noxide-effects-worker` shares `noxide-cli`'s configuration code, which uses types
-from `noxide-host`, so its binary still carries unreachable Wasmtime support code. It
-compiles no guest and calls no Wasmtime entry point.
 
 The SDK and host use the canonical protocol. Macro implementation follows
 `convenience -> explicit declaration parser/expander -> generated SDK code and
@@ -112,23 +108,32 @@ host authorization of the destination and credential handover.
 
 ### Guest workers
 
-With `guest_workers: true`, guest code runs in `noxide-guest` processes. A worker
-compiles the component, confines itself to the socket from its server, and sends each
-storage call to the server. The server stays the authority: it checks storage access
-on every call, counts calls, limits each message, enforces the deadline and validates
-the output itself. A worker that breaks the protocol is killed and never reused. This
-is off by default and is not yet a finished boundary:
+Guest code runs in `noxide-guest` processes. The server links no Wasmtime, which
+`tools/check_binaries.py` enforces; in-process guests exist only for tests, behind
+`test-support`. A worker compiles the component, confines itself to the socket from
+its server, and sends each storage call to the server. The server stays the authority:
+it checks storage access on every call, counts calls, limits each message, enforces
+the deadline and validates the output itself. A worker that breaks the protocol is
+killed and never reused. The first worker's compile is the component's admission check.
 
-- The server still links Wasmtime and compiles the component as its admission check.
-  An escape from a worker no longer reaches the server, but this deployment still has
-  that code in the server.
-- A confined server cannot start processes, so it starts all workers up front and
-  cannot replace one it loses. Repeated protocol violations or worker crashes use up
-  capacity until restart, and those requests get a busy response.
-- Workers serve many requests. A guest that escapes Wasmtime can read later requests
-  sent to that worker, including those of other accounts.
+A confined server cannot start processes, so a broker (`noxide-guest --broker`) starts
+workers and passes each socket back. It runs no guest code and never reads worker
+messages. Workers start on demand up to the concurrency limit, and a request waits for
+one up to its deadline. A worker is replaced after `guest_worker_requests` requests.
+
+What this does not do:
+
+- Workers still serve several requests by default, so a guest that escapes Wasmtime
+  can read later requests sent to that worker, including those of other accounts,
+  until it is retired. `guest_worker_requests: 1` prevents that at the cost of one
+  compile per request.
 - Only the server's deadline binds a compromised worker. Its memory and CPU limits are
   enforced inside the worker, so they need an operating system limit to hold.
+- The broker keeps the right to start programs. Landlock limits that to its own binary
+  and system libraries, and it can read `/proc`, because each new worker counts its
+  threads there before confining itself.
+- A broker that dies takes replacement with it: running workers carry on, and requests
+  fail once they are gone.
 - Each worker costs about 210 ms of startup CPU and 22 MiB for a 175 KiB release-built
   application. Those figures are from one machine, and larger components cost more.
 

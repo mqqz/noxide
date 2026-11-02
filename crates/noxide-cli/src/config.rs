@@ -39,6 +39,10 @@ impl Confinement {
 pub struct Config {
     #[serde(default)]
     pub confinement: Confinement,
+    /// Requests a guest worker serves before it is replaced. `1` gives each request
+    /// a new process.
+    #[serde(default = "default_guest_worker_requests")]
+    pub guest_worker_requests: u32,
     /// Digest of the compiled asset pack, from `noxide assets-compile`.
     #[serde(default)]
     pub approved_assets: Option<String>,
@@ -124,6 +128,10 @@ fn database_statement_limit<'de, D: serde::Deserializer<'de>>(
     }
     Ok(value)
 }
+fn default_guest_worker_requests() -> u32 {
+    noxide_guest::pool::DEFAULT_RETIRE_AFTER
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum DatabaseConfig {

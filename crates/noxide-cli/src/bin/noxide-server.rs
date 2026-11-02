@@ -82,12 +82,15 @@ fn main() -> Result<()> {
     let store = database(&config.database, &base)?;
     let component = read(&base.join(&config.component), 2 * 1024 * 1024)?;
     // The first worker's compile is the component's admission check.
-    let pool = Arc::new(GuestPool::start(
-        &sibling("noxide-guest")?,
-        config.confinement.argument(),
-        &component,
-        Limits::default(),
-    )?);
+    let pool = Arc::new(
+        GuestPool::start(
+            &sibling("noxide-guest")?,
+            config.confinement.argument(),
+            &component,
+            Limits::default(),
+        )?
+        .retire_after(config.guest_worker_requests)?,
+    );
     let app = Application::with_workers(
         pool,
         &component,

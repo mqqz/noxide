@@ -97,13 +97,20 @@ async fn load(path: &Path, restore_fork: bool) -> Result<Application> {
     };
     let component = super::read(&base.join(&config.component), 2 * 1024 * 1024)?;
     let keys = super::host_keys(&base.join(&config.keys))?;
-    let app = Application::without_guests(
+    // Running a job runs guest code, in workers as it would in the server.
+    let pool = noxide_guest::pool::GuestPool::start(
+        &super::sibling("noxide-guest")?,
+        config.confinement.argument(),
+        &component,
+        Default::default(),
+    )?;
+    let app = Application::with_workers(
+        std::sync::Arc::new(pool),
         &component,
         &declarations,
         approved,
         super::database(&config.database, &base)?,
         keys,
-        Default::default(),
         noxide_host::DeploymentResources {
             effects: config.effect_deployment(&base),
             assets,
