@@ -25,8 +25,20 @@ pub(super) fn adjust(
         })
 }
 
+/// What one transaction step needs from the transaction around it.
+#[derive(Clone, Copy)]
+pub(super) struct StepScope<'a> {
+    action: crate::action_contract::ActionCore<'a>,
+    step: &'a Step,
+    op: &'a Operation,
+    context: &'a computation::Context,
+    outcomes: &'a [MutationOutcome],
+}
+
+/// Locked blobs, by field, to associate with the row once it is written.
+type Attachments = Vec<(String, noxide_blobs::metadata::LockedStage)>;
+
 impl Effects {
-    #[allow(clippy::too_many_lines)]
     pub async fn execute_transaction(
         &mut self,
         action: crate::action_contract::ActionCore<'_>,
@@ -46,21 +58,7 @@ impl Effects {
             ensure!(self.calls > 0, "database call budget");
             self.calls -= 1;
             let op = manifest::operation(&self.manifest, step.operation)?.clone();
-            let stored = match &step.target {
-                Target::None => None,
-                Target::Named(name) => {
-                    let grant = self.grants.get(name).ok_or(ReferenceUnavailable)?;
-                    ensure!(grant.resource == op.resource, ReferenceUnavailable);
-                    let stored = load(&mut self.tx, &self.manifest, op.resource, grant.id)
-                        .await?
-                        .ok_or(ReferenceUnavailable)?;
-                    ensure!(
-                        stored.incarnation == grant.incarnation,
-                        ReferenceUnavailable
-                    );
-                    Some(stored)
-                }
-            };
+            let stored = self.step_target(step, &op).await?;
             self.authorize_step(&op, stored.as_ref()).await?;
             if op.kind != OperationKind::Create {
                 self.current_guard_authority(action, step, stored.as_ref())
@@ -68,139 +66,16 @@ impl Effects {
                 self.computation_values(&context, &outcomes, step, stored.as_ref())
                     .guards(step, action)?;
             }
-            let mut values = Fields::new();
-            let mut attachments = Vec::new();
-            let mut assignments: Vec<_> = step.assign.iter().collect();
-            assignments.sort_by(|a, b| a.field.cmp(&b.field));
-            for assignment in assignments {
-                let destination = manifest::resource(&self.manifest, op.resource)?
-                    .fields
-                    .iter()
-                    .find(|f| f.name == assignment.field)
-                    .ok_or(ReferenceUnavailable)?;
-                if let FieldKind::Blob { max_bytes } = destination.kind {
-                    ensure!(op.kind == OperationKind::Create, ReferenceUnavailable);
-                    let Change::Set(Value::Input(name)) = &assignment.change else {
-                        anyhow::bail!(ReferenceUnavailable);
-                    };
-                    let raw = self.request.input.get(name).ok_or(ReferenceUnavailable)?;
-                    if raw.is_empty() && destination.optional {
-                        self.upload
-                            .as_ref()
-                            .ok_or(ReferenceUnavailable)?
-                            .absent(&mut self.tx)
-                            .await?;
-                        values.insert(assignment.field.clone(), String::new());
-                        continue;
-                    }
-                    let handle = noxide_protocol::blobs::UploadHandle::parse(raw.clone())
-                        .map_err(anyhow::Error::msg)?;
-                    let upload = self.upload.as_ref().ok_or(ReferenceUnavailable)?;
-                    let locked = noxide_blobs::metadata::MetadataContext { tx: &mut self.tx }
-                        .lock_stage(&handle, &upload.binding, upload.now)
-                        .await?;
-                    ensure!(
-                        locked.row().metadata.bytes <= max_bytes,
-                        ReferenceUnavailable
-                    );
-                    let row = locked.row();
-                    // The stage lock excludes GC. Only a checked immutable descriptor
-                    // proves bytes exist before canonical proposed-row authorization.
-                    upload.verify(row).await?;
-                    values.insert(assignment.field.clone(), locked.blob().as_str().to_owned());
-                    attachments.push((assignment.field.clone(), locked));
-                    continue;
-                }
-                let value = match &assignment.change {
-                    Change::Set(value) => self
-                        .computation_values(&context, &outcomes, step, stored.as_ref())
-                        .value(value, action)?
-                        .encode(),
-                    Change::Decrease { by, rejection } | Change::Increase { by, rejection } => {
-                        let record = stored
-                            .as_ref()
-                            .ok_or_else(|| anyhow::anyhow!("adjustment requires target"))?;
-                        let resource = manifest::resource(&self.manifest, op.resource)?;
-                        let field = resource
-                            .fields
-                            .iter()
-                            .find(|f| f.name == assignment.field)
-                            .ok_or_else(|| anyhow::anyhow!("unknown adjustment field"))?;
-                        let FieldKind::Integer {
-                            min: Some(min),
-                            max: Some(max),
-                        } = field.kind
-                        else {
-                            anyhow::bail!("unbounded adjustment")
-                        };
-                        let current: i64 = record
-                            .record
-                            .fields
-                            .get(&assignment.field)
-                            .ok_or_else(|| anyhow::anyhow!("missing adjustment field"))?
-                            .parse()?;
-                        let computation::Scalar::Integer(amount) = self
-                            .computation_values(&context, &outcomes, step, Some(record))
-                            .value(by, action)?
-                        else {
-                            anyhow::bail!(CalculationUnavailable)
-                        };
-                        ensure!(amount > 0, CalculationUnavailable);
-                        adjust(
-                            current,
-                            amount,
-                            min,
-                            max,
-                            matches!(assignment.change, Change::Increase { .. }),
-                            rejection,
-                        )?
-                        .to_string()
-                    }
-                };
-                ensure!(
-                    values.insert(assignment.field.clone(), value).is_none(),
-                    "duplicate assignment"
-                );
-            }
-            let (outcome, written) = match op.kind {
-                OperationKind::Create => {
-                    let (outcome, row) = self
-                        .create_step(&op, step, values, &outcomes, action, &context)
-                        .await?;
-                    (outcome, Some(row))
-                }
-                OperationKind::Update => {
-                    let (outcome, row) = self
-                        .update_step(&op, stored.as_ref().ok_or(ReferenceUnavailable)?, values)
-                        .await?;
-                    (outcome, Some(row))
-                }
-                OperationKind::Delete => (
-                    self.delete_step(&op, stored.as_ref().ok_or(ReferenceUnavailable)?)
-                        .await?,
-                    None,
-                ),
-                _ => anyhow::bail!("transaction requires mutation"),
+            let scope = StepScope {
+                action,
+                step,
+                op: &op,
+                context: &context,
+                outcomes: &outcomes,
             };
-            for (field, locked) in attachments {
-                let now = self.upload.as_ref().ok_or(ReferenceUnavailable)?.now;
-                let storage_resource = self
-                    .tx
-                    .storage_resource(&self.manifest, outcome.resource)
-                    .await?;
-                noxide_blobs::metadata::MetadataContext { tx: &mut self.tx }
-                    .associate(
-                        locked,
-                        noxide_blobs::state::Association {
-                            resource: storage_resource,
-                            id: i64::try_from(outcome.id)?,
-                            incarnation: outcome.incarnation.clone(),
-                            field,
-                        },
-                        now,
-                    )
-                    .await?;
-            }
+            let (values, attachments) = self.step_assignments(&scope, stored.as_ref()).await?;
+            let (outcome, written) = self.apply_step(&scope, stored.as_ref(), values).await?;
+            self.associate_attachments(&outcome, attachments).await?;
             self.authority.invalidate();
             self.target_rows.remove(&(outcome.resource, outcome.id));
             match written {
@@ -214,6 +89,223 @@ impl Effects {
             crate::database::fault::after_effect(&mut self.tx).await?;
         }
         Ok(outcomes)
+    }
+    /// The row a step acts on, which must still be the one its grant named.
+    async fn step_target(&mut self, step: &Step, op: &Operation) -> Result<Option<StoredRecord>> {
+        Ok(match &step.target {
+            Target::None => None,
+            Target::Named(name) => {
+                let grant = self.grants.get(name).ok_or(ReferenceUnavailable)?;
+                ensure!(grant.resource == op.resource, ReferenceUnavailable);
+                let stored = load(&mut self.tx, &self.manifest, op.resource, grant.id)
+                    .await?
+                    .ok_or(ReferenceUnavailable)?;
+                ensure!(
+                    stored.incarnation == grant.incarnation,
+                    ReferenceUnavailable
+                );
+                Some(stored)
+            }
+        })
+    }
+    /// Each assignment's value, in field order, and the blobs to attach after the write.
+    async fn step_assignments(
+        &mut self,
+        scope: &StepScope<'_>,
+        stored: Option<&StoredRecord>,
+    ) -> Result<(Fields, Attachments)> {
+        let StepScope {
+            action,
+            step,
+            op,
+            context,
+            outcomes,
+        } = *scope;
+        let mut values = Fields::new();
+        let mut attachments = Vec::new();
+        let mut assignments: Vec<_> = step.assign.iter().collect();
+        assignments.sort_by(|a, b| a.field.cmp(&b.field));
+        for assignment in assignments {
+            let destination = manifest::resource(&self.manifest, op.resource)?
+                .fields
+                .iter()
+                .find(|f| f.name == assignment.field)
+                .ok_or(ReferenceUnavailable)?;
+            if let FieldKind::Blob { max_bytes } = destination.kind {
+                let optional = destination.optional;
+                self.blob_assignment(
+                    op,
+                    assignment,
+                    max_bytes,
+                    optional,
+                    &mut values,
+                    &mut attachments,
+                )
+                .await?;
+                continue;
+            }
+            let value = match &assignment.change {
+                Change::Set(value) => self
+                    .computation_values(context, outcomes, step, stored)
+                    .value(value, action)?
+                    .encode(),
+                Change::Decrease { by, rejection } | Change::Increase { by, rejection } => {
+                    self.adjusted_value(scope, assignment, stored, by, rejection)?
+                }
+            };
+            ensure!(
+                values.insert(assignment.field.clone(), value).is_none(),
+                "duplicate assignment"
+            );
+        }
+        Ok((values, attachments))
+    }
+    /// Lock and verify an uploaded blob; a stage lock excludes collection.
+    async fn blob_assignment(
+        &mut self,
+        op: &Operation,
+        assignment: &Assignment,
+        max_bytes: u64,
+        optional: bool,
+        values: &mut Fields,
+        attachments: &mut Attachments,
+    ) -> Result<()> {
+        ensure!(op.kind == OperationKind::Create, ReferenceUnavailable);
+        let Change::Set(Value::Input(name)) = &assignment.change else {
+            anyhow::bail!(ReferenceUnavailable);
+        };
+        let raw = self.request.input.get(name).ok_or(ReferenceUnavailable)?;
+        if raw.is_empty() && optional {
+            self.upload
+                .as_ref()
+                .ok_or(ReferenceUnavailable)?
+                .absent(&mut self.tx)
+                .await?;
+            values.insert(assignment.field.clone(), String::new());
+            return Ok(());
+        }
+        let handle =
+            noxide_protocol::blobs::UploadHandle::parse(raw.clone()).map_err(anyhow::Error::msg)?;
+        let upload = self.upload.as_ref().ok_or(ReferenceUnavailable)?;
+        let locked = noxide_blobs::metadata::MetadataContext { tx: &mut self.tx }
+            .lock_stage(&handle, &upload.binding, upload.now)
+            .await?;
+        ensure!(
+            locked.row().metadata.bytes <= max_bytes,
+            ReferenceUnavailable
+        );
+        let row = locked.row();
+        // The stage lock excludes GC. Only a checked immutable descriptor
+        // proves bytes exist before canonical proposed-row authorization.
+        upload.verify(row).await?;
+        values.insert(assignment.field.clone(), locked.blob().as_str().to_owned());
+        attachments.push((assignment.field.clone(), locked));
+        Ok(())
+    }
+    /// Apply a checked increase or decrease within the field's bounds.
+    fn adjusted_value(
+        &self,
+        scope: &StepScope<'_>,
+        assignment: &Assignment,
+        stored: Option<&StoredRecord>,
+        by: &Value,
+        rejection: &GuardRejection,
+    ) -> Result<String> {
+        let StepScope {
+            action,
+            step,
+            op,
+            context,
+            outcomes,
+        } = *scope;
+        let record = stored.ok_or_else(|| anyhow::anyhow!("adjustment requires target"))?;
+        let resource = manifest::resource(&self.manifest, op.resource)?;
+        let field = resource
+            .fields
+            .iter()
+            .find(|f| f.name == assignment.field)
+            .ok_or_else(|| anyhow::anyhow!("unknown adjustment field"))?;
+        let FieldKind::Integer {
+            min: Some(min),
+            max: Some(max),
+        } = field.kind
+        else {
+            anyhow::bail!("unbounded adjustment")
+        };
+        let current: i64 = record
+            .record
+            .fields
+            .get(&assignment.field)
+            .ok_or_else(|| anyhow::anyhow!("missing adjustment field"))?
+            .parse()?;
+        let computation::Scalar::Integer(amount) = self
+            .computation_values(context, outcomes, step, Some(record))
+            .value(by, action)?
+        else {
+            anyhow::bail!(CalculationUnavailable)
+        };
+        ensure!(amount > 0, CalculationUnavailable);
+        Ok(adjust(
+            current,
+            amount,
+            min,
+            max,
+            matches!(assignment.change, Change::Increase { .. }),
+            rejection,
+        )?
+        .to_string())
+    }
+    async fn apply_step(
+        &mut self,
+        scope: &StepScope<'_>,
+        stored: Option<&StoredRecord>,
+        values: Fields,
+    ) -> Result<(MutationOutcome, Option<StoredRecord>)> {
+        let op = scope.op;
+        Ok(match op.kind {
+            OperationKind::Create => {
+                let (outcome, row) = self.create_step(scope, values).await?;
+                (outcome, Some(row))
+            }
+            OperationKind::Update => {
+                let (outcome, row) = self
+                    .update_step(op, stored.ok_or(ReferenceUnavailable)?, values)
+                    .await?;
+                (outcome, Some(row))
+            }
+            OperationKind::Delete => (
+                self.delete_step(op, stored.ok_or(ReferenceUnavailable)?)
+                    .await?,
+                None,
+            ),
+            _ => anyhow::bail!("transaction requires mutation"),
+        })
+    }
+    async fn associate_attachments(
+        &mut self,
+        outcome: &MutationOutcome,
+        attachments: Attachments,
+    ) -> Result<()> {
+        for (field, locked) in attachments {
+            let now = self.upload.as_ref().ok_or(ReferenceUnavailable)?.now;
+            let storage_resource = self
+                .tx
+                .storage_resource(&self.manifest, outcome.resource)
+                .await?;
+            noxide_blobs::metadata::MetadataContext { tx: &mut self.tx }
+                .associate(
+                    locked,
+                    noxide_blobs::state::Association {
+                        resource: storage_resource,
+                        id: i64::try_from(outcome.id)?,
+                        incarnation: outcome.incarnation.clone(),
+                        field,
+                    },
+                    now,
+                )
+                .await?;
+        }
+        Ok(())
     }
     /// Every reused final row must equal what a fresh load would return.
     #[cfg(any(test, feature = "test-support"))]
@@ -260,96 +352,23 @@ impl Effects {
         }
         Ok(())
     }
-    #[allow(clippy::too_many_lines)]
     pub(super) async fn create_step(
         &mut self,
-        op: &Operation,
-        step: &Step,
+        scope: &StepScope<'_>,
         mut fields: Fields,
-        outcomes: &[MutationOutcome],
-        action: crate::action_contract::ActionCore<'_>,
-        context: &computation::Context,
     ) -> Result<(MutationOutcome, StoredRecord)> {
+        let StepScope {
+            action,
+            step,
+            op,
+            context,
+            outcomes,
+        } = *scope;
         let m = self.manifest.clone();
         let resource = manifest::resource(&m, op.resource)?;
         for reference in manifest::reference_fields(resource) {
-            let parent = manifest::reference_resource(&m, op.resource, &reference.name)?
-                .expect("admitted reference");
-            let id: u64 = fields
-                .get(&reference.name)
-                .ok_or(ReferenceUnavailable)?
-                .parse()?;
-            let cached = self
-                .written_rows
-                .get(&(parent.id, id))
-                .or_else(|| self.target_rows.get(&(parent.id, id)));
-            let stored = if let Some(stored) = cached {
-                #[cfg(any(test, feature = "test-support"))]
-                if self.written_rows.contains_key(&(parent.id, id)) {
-                    let loaded = load(&mut self.tx, &m, parent.id, id).await?;
-                    assert_eq!(
-                        loaded.as_ref(),
-                        Some(stored),
-                        "reused reference row diverged"
-                    );
-                }
-                stored.clone()
-            } else {
-                ensure!(self.calls >= 2, "database call budget");
-                self.calls -= 2;
-                let stored = load(&mut self.tx, &m, parent.id, id)
-                    .await?
-                    .ok_or(ReferenceUnavailable)?;
-                self.target_rows.insert((parent.id, id), stored.clone());
-                stored
-            };
-            let assignment = step
-                .assign
-                .iter()
-                .find(|a| a.field == reference.name)
-                .ok_or_else(|| anyhow::anyhow!("missing reference assignment"))?;
-            let expected_incarnation = match &assignment.change {
-                Change::Set(Value::Target(name)) => {
-                    let grant = self.grants.get(name).ok_or(ReferenceUnavailable)?;
-                    ensure!(
-                        grant.resource == parent.id && grant.id == id,
-                        ReferenceUnavailable
-                    );
-                    &grant.incarnation
-                }
-                Change::Set(Value::Created(index)) => {
-                    let outcome = outcomes
-                        .get(usize::from(*index))
-                        .ok_or(ReferenceUnavailable)?;
-                    ensure!(
-                        outcome.kind == MutationKind::Created
-                            && outcome.resource == parent.id
-                            && outcome.id == id,
-                        ReferenceUnavailable
-                    );
-                    &outcome.incarnation
-                }
-                _ => anyhow::bail!("invalid reference assignment"),
-            };
-            ensure!(
-                &stored.incarnation == expected_incarnation,
-                ReferenceUnavailable
-            );
-            let eligible = manifest::operation(
-                &m,
-                *op.bind
-                    .get(&reference.name)
-                    .ok_or_else(|| anyhow::anyhow!("missing binding eligibility"))?,
-            )?;
-            ensure!(
-                authorize_stored_read(&mut self.read_context(), eligible, &stored).await?
-                    && (resource
-                        .gate
-                        .as_ref()
-                        .is_none_or(|gate| gate.field != reference.name)
-                        || manifest::gate_permits(resource, &stored.record.fields, true)),
-                ReferenceUnavailable
-            );
+            self.check_create_reference(scope, resource, reference, &fields)
+                .await?;
         }
         for field in &resource.fields {
             if let Some(value) = &field.initial {
@@ -377,6 +396,140 @@ impl Effects {
         } else {
             Some(self.principal.user()?.clone())
         };
+        self.check_account_fields(resource, &fields).await?;
+        self.authorize_create_row(op, &fields).await?;
+        self.computation_values(context, outcomes, step, None)
+            .guards(step, action)?;
+        let storage_resource = self.tx.storage_resource(&m, op.resource).await?;
+        if let Some(user) = &user {
+            let used = self
+                .tx
+                .rows(
+                    &stmt::OWNER_RECORD_QUOTA,
+                    &[storage_resource.into(), user.id.as_str().into()],
+                )
+                .await?;
+            ensure!(used[0][0].parse::<usize>()? < 10_000, "record quota");
+        }
+        let (id, incarnation) = self
+            .insert_record(storage_resource, public, user.as_ref(), &fields)
+            .await?;
+        self.update_search(op.resource, storage_resource, id, &incarnation, 1, &fields)
+            .await?;
+        let (owner, tenant) = user.map_or_else(Default::default, |user| (user.id, user.tenant));
+        let row = StoredRecord {
+            record: Record {
+                resource: op.resource,
+                id,
+                fields,
+            },
+            owner,
+            tenant,
+            incarnation: incarnation.clone(),
+            revision: 1,
+            cap_version: public.then_some(1),
+        };
+        let outcome = MutationOutcome {
+            kind: MutationKind::Created,
+            resource: op.resource,
+            id,
+            incarnation,
+        };
+        Ok((outcome, row))
+    }
+    /// A created row's parent must exist, match its grant and be readable by this request.
+    async fn check_create_reference(
+        &mut self,
+        scope: &StepScope<'_>,
+        resource: &Resource,
+        reference: &TextField,
+        fields: &Fields,
+    ) -> Result<()> {
+        let StepScope {
+            step, op, outcomes, ..
+        } = *scope;
+        let m = self.manifest.clone();
+        let parent = manifest::reference_resource(&m, op.resource, &reference.name)?
+            .expect("admitted reference");
+        let id: u64 = fields
+            .get(&reference.name)
+            .ok_or(ReferenceUnavailable)?
+            .parse()?;
+        let cached = self
+            .written_rows
+            .get(&(parent.id, id))
+            .or_else(|| self.target_rows.get(&(parent.id, id)));
+        let stored = if let Some(stored) = cached {
+            #[cfg(any(test, feature = "test-support"))]
+            if self.written_rows.contains_key(&(parent.id, id)) {
+                let loaded = load(&mut self.tx, &m, parent.id, id).await?;
+                assert_eq!(
+                    loaded.as_ref(),
+                    Some(stored),
+                    "reused reference row diverged"
+                );
+            }
+            stored.clone()
+        } else {
+            ensure!(self.calls >= 2, "database call budget");
+            self.calls -= 2;
+            let stored = load(&mut self.tx, &m, parent.id, id)
+                .await?
+                .ok_or(ReferenceUnavailable)?;
+            self.target_rows.insert((parent.id, id), stored.clone());
+            stored
+        };
+        let assignment = step
+            .assign
+            .iter()
+            .find(|a| a.field == reference.name)
+            .ok_or_else(|| anyhow::anyhow!("missing reference assignment"))?;
+        let expected_incarnation = match &assignment.change {
+            Change::Set(Value::Target(name)) => {
+                let grant = self.grants.get(name).ok_or(ReferenceUnavailable)?;
+                ensure!(
+                    grant.resource == parent.id && grant.id == id,
+                    ReferenceUnavailable
+                );
+                &grant.incarnation
+            }
+            Change::Set(Value::Created(index)) => {
+                let outcome = outcomes
+                    .get(usize::from(*index))
+                    .ok_or(ReferenceUnavailable)?;
+                ensure!(
+                    outcome.kind == MutationKind::Created
+                        && outcome.resource == parent.id
+                        && outcome.id == id,
+                    ReferenceUnavailable
+                );
+                &outcome.incarnation
+            }
+            _ => anyhow::bail!("invalid reference assignment"),
+        };
+        ensure!(
+            &stored.incarnation == expected_incarnation,
+            ReferenceUnavailable
+        );
+        let eligible = manifest::operation(
+            &m,
+            *op.bind
+                .get(&reference.name)
+                .ok_or_else(|| anyhow::anyhow!("missing binding eligibility"))?,
+        )?;
+        ensure!(
+            authorize_stored_read(&mut self.read_context(), eligible, &stored).await?
+                && (resource
+                    .gate
+                    .as_ref()
+                    .is_none_or(|gate| gate.field != reference.name)
+                    || manifest::gate_permits(resource, &stored.record.fields, true)),
+            ReferenceUnavailable
+        );
+        Ok(())
+    }
+    /// Account fields must name active accounts in the creator's tenant.
+    async fn check_account_fields(&mut self, resource: &Resource, fields: &Fields) -> Result<()> {
         if resource
             .fields
             .iter()
@@ -408,20 +561,16 @@ impl Effects {
                 );
             }
         }
-        self.authorize_create_row(op, &fields).await?;
-        self.computation_values(context, outcomes, step, None)
-            .guards(step, action)?;
-        let storage_resource = self.tx.storage_resource(&m, op.resource).await?;
-        if let Some(user) = &user {
-            let used = self
-                .tx
-                .rows(
-                    &stmt::OWNER_RECORD_QUOTA,
-                    &[storage_resource.into(), user.id.as_str().into()],
-                )
-                .await?;
-            ensure!(used[0][0].parse::<usize>()? < 10_000, "record quota");
-        }
+        Ok(())
+    }
+    /// Insert the row, owned by `user` unless the operation is public.
+    async fn insert_record(
+        &mut self,
+        storage_resource: i64,
+        public: bool,
+        user: Option<&noxide_admission::principal::User>,
+        fields: &Fields,
+    ) -> Result<(u64, String)> {
         let id = crate::security::record_id()?;
         let incarnation = crate::security::random_id()?;
         let created_seq = self.tx.allocate_creation().await?;
@@ -432,14 +581,14 @@ impl Effects {
                     &[
                         storage_resource.into(),
                         (id as i64).into(),
-                        serde_json::to_string(&fields)?.into(),
+                        serde_json::to_string(fields)?.into(),
                         incarnation.as_str().into(),
                         created_seq.into(),
                     ],
                 )
                 .await?;
         } else {
-            let user = user.as_ref().expect("authorized private creation");
+            let user = user.expect("authorized private creation");
             self.tx
                 .run(
                     &stmt::INSERT_OWNED_RECORD,
@@ -448,35 +597,14 @@ impl Effects {
                         (id as i64).into(),
                         user.id.as_str().into(),
                         user.tenant.as_str().into(),
-                        serde_json::to_string(&fields)?.into(),
+                        serde_json::to_string(fields)?.into(),
                         incarnation.as_str().into(),
                         created_seq.into(),
                     ],
                 )
                 .await?;
         }
-        self.update_search(op.resource, storage_resource, id, &incarnation, 1, &fields)
-            .await?;
-        let (owner, tenant) = user.map_or_else(Default::default, |user| (user.id, user.tenant));
-        let row = StoredRecord {
-            record: Record {
-                resource: op.resource,
-                id,
-                fields,
-            },
-            owner,
-            tenant,
-            incarnation: incarnation.clone(),
-            revision: 1,
-            cap_version: public.then_some(1),
-        };
-        let outcome = MutationOutcome {
-            kind: MutationKind::Created,
-            resource: op.resource,
-            id,
-            incarnation,
-        };
-        Ok((outcome, row))
+        Ok((id, incarnation))
     }
     pub(super) async fn update_step(
         &mut self,

@@ -67,7 +67,6 @@ impl Effects {
         );
         Ok(available - envelope)
     }
-    #[allow(clippy::too_many_lines)]
     pub(super) async fn list_single(
         &mut self,
         op: &Operation,
@@ -84,21 +83,7 @@ impl Effects {
         let mut params = vec![Param::Number(storage_resource)];
         let filter = self.authority_filter(op, &mut params).await?;
         let visibility = self.visibility_clause(op, &mut params)?;
-        let mut parent_clause = Sql::empty();
-        if let Some(scope) = &plan.scope {
-            let id = self
-                .request
-                .target
-                .ok_or_else(|| anyhow::anyhow!("missing parent target"))?;
-            params.push(id.to_string().into());
-            // A catalog-derived constant lets PostgreSQL's generic plans
-            // prove the partial-index predicate despite resource=$1.
-            parent_clause = sql!(
-                " AND resource={storage_resource} AND {}=${}",
-                self.tx.field_expression(scope)?,
-                params.len()
-            );
-        }
+        let parent_clause = self.scoped_parent_clause(plan, storage_resource, &mut params)?;
         let selection =
             plan.selection_sql(self.tx.query_provider()?, &mut params, &self.request.params)?;
         let mut records = Vec::new();
@@ -126,23 +111,7 @@ impl Effects {
             self.charge_list_calls(1)?;
             let rows = self.tx.scan_records::<5>(scan, &page_params).await?;
             let count = rows.len();
-            let parsed: Vec<Fields> = rows
-                .iter()
-                .map(|row| serde_json::from_str(&row[4]))
-                .collect::<std::result::Result<_, _>>()?;
-            let policy_rows: Vec<_> = rows
-                .iter()
-                .zip(&parsed)
-                .map(|(row, fields)| {
-                    Ok(crate::authority::Row {
-                        id: row[1].parse()?,
-                        owner: &row[2],
-                        tenant: &row[3],
-                        fields,
-                    })
-                })
-                .collect::<Result<_>>()?;
-            let decisions = self.authorize_rows(op, &policy_rows).await?;
+            let decisions = self.authorize_scanned(op, &rows).await?;
             for ([seq, id, _owner, _tenant, fields], permitted) in rows.into_iter().zip(decisions) {
                 plan.check_selection(&serde_json::from_str(&fields)?, &self.request.params)?;
                 ensure!(permitted, "policy invariant");
@@ -185,7 +154,6 @@ impl Effects {
         }
         Ok(serde_json::to_vec(&records)?)
     }
-    #[allow(clippy::too_many_lines)]
     pub(super) async fn list_merge(
         &mut self,
         op: &Operation,
@@ -194,73 +162,14 @@ impl Effects {
         scans: &[crate::policy::ScanRule],
     ) -> Result<Vec<u8>> {
         let size = plan.limit as usize;
-        let direction = plan.direction();
         let cursor = if plan.preview {
             None
         } else {
             self.cursor.clone()
         };
-        let mut candidates = std::collections::BTreeMap::new();
-        let mut boundary = if plan.descending() { 0 } else { u64::MAX };
-        let mut bounded_more = false;
-        for scan in scans {
-            let exact = scan.exact;
-            let scan_policy = crate::policy::scan_policy(&op.policy, scan);
-            let mut scan_params = vec![Param::Number(storage_resource)];
-            let filter = crate::policy::filter(
-                self.tx.query_provider()?,
-                &scan_policy,
-                &self.principal,
-                &mut scan_params,
-            );
-            let selection = plan.selection_sql(
-                self.tx.query_provider()?,
-                &mut scan_params,
-                &self.request.params,
-            )?;
-            let mut parent_clause = Sql::empty();
-            if let Some(parent) = &plan.scope {
-                let target = self
-                    .request
-                    .target
-                    .ok_or_else(|| anyhow::anyhow!("missing parent target"))?;
-                scan_params.push(target.to_string().into());
-                parent_clause = sql!(
-                    " AND {}=${}",
-                    self.tx.field_expression(parent)?,
-                    scan_params.len()
-                );
-            }
-            let visibility = self.visibility_clause(op, &mut scan_params)?;
-            let keyset = plan.keyset(cursor.as_ref(), &mut scan_params)?;
-            let limit = if exact {
-                size + 1
-            } else {
-                (256 / op.policy.any.len()).min(64)
-            };
-            let scan = RecordScan {
-                columns: Sql::statement("CAST(created_seq AS TEXT),CAST(id AS TEXT)"),
-                storage: storage_resource,
-                filter: &filter,
-                restrictions: sql!("{visibility}{parent_clause}{selection}{keyset}"),
-                order: sql!("nx_records.created_seq {direction}"),
-                limit,
-            };
-            self.charge_list_calls(1)?;
-            let rows = self.tx.scan_records::<2>(scan, &scan_params).await?;
-            if !exact && rows.len() == limit {
-                let last = rows.last().expect("nonempty")[0].parse()?;
-                boundary = if plan.descending() {
-                    boundary.max(last)
-                } else {
-                    boundary.min(last)
-                };
-                bounded_more = true;
-            }
-            for [seq, id] in rows {
-                candidates.insert(seq.parse::<u64>()?, id.parse::<u64>()?);
-            }
-        }
+        let (candidates, boundary, bounded_more) = self
+            .merge_candidates(op, storage_resource, plan, scans, cursor.as_ref())
+            .await?;
         let mut records = Vec::new();
         let mut last = cursor.clone();
         self.more = None;
@@ -349,6 +258,129 @@ impl Effects {
                 });
         }
         Ok(serde_json::to_vec(&records)?)
+    }
+    /// Restrict a single scan to the requested parent, when the list has one.
+    fn scoped_parent_clause(
+        &self,
+        plan: &crate::query_plan::ListPlan,
+        storage_resource: i64,
+        params: &mut Vec<Param>,
+    ) -> Result<Sql> {
+        let mut parent_clause = Sql::empty();
+        if let Some(scope) = &plan.scope {
+            let id = self
+                .request
+                .target
+                .ok_or_else(|| anyhow::anyhow!("missing parent target"))?;
+            params.push(id.to_string().into());
+            // A catalog-derived constant lets PostgreSQL's generic plans
+            // prove the partial-index predicate despite resource=$1.
+            parent_clause = sql!(
+                " AND resource={storage_resource} AND {}=${}",
+                self.tx.field_expression(scope)?,
+                params.len()
+            );
+        }
+        Ok(parent_clause)
+    }
+    /// Policy decisions for one batch of scanned rows, in order.
+    async fn authorize_scanned(
+        &mut self,
+        op: &Operation,
+        rows: &[[String; 5]],
+    ) -> Result<Vec<bool>> {
+        let parsed: Vec<Fields> = rows
+            .iter()
+            .map(|row| serde_json::from_str(&row[4]))
+            .collect::<std::result::Result<_, _>>()?;
+        let policy_rows: Vec<_> = rows
+            .iter()
+            .zip(&parsed)
+            .map(|(row, fields)| {
+                Ok(crate::authority::Row {
+                    id: row[1].parse()?,
+                    owner: &row[2],
+                    tenant: &row[3],
+                    fields,
+                })
+            })
+            .collect::<Result<_>>()?;
+        self.authorize_rows(op, &policy_rows).await
+    }
+    /// Every scan's candidate rows by creation sequence, and how far a truncated inexact
+    /// scan lets the merge safely go.
+    async fn merge_candidates(
+        &mut self,
+        op: &Operation,
+        storage_resource: i64,
+        plan: &crate::query_plan::ListPlan,
+        scans: &[crate::policy::ScanRule],
+        cursor: Option<&CursorKey>,
+    ) -> Result<(std::collections::BTreeMap<u64, u64>, u64, bool)> {
+        let size = plan.limit as usize;
+        let direction = plan.direction();
+        let mut candidates = std::collections::BTreeMap::new();
+        let mut boundary = if plan.descending() { 0 } else { u64::MAX };
+        let mut bounded_more = false;
+        for scan in scans {
+            let exact = scan.exact;
+            let scan_policy = crate::policy::scan_policy(&op.policy, scan);
+            let mut scan_params = vec![Param::Number(storage_resource)];
+            let filter = crate::policy::filter(
+                self.tx.query_provider()?,
+                &scan_policy,
+                &self.principal,
+                &mut scan_params,
+            );
+            let selection = plan.selection_sql(
+                self.tx.query_provider()?,
+                &mut scan_params,
+                &self.request.params,
+            )?;
+            let mut parent_clause = Sql::empty();
+            if let Some(parent) = &plan.scope {
+                let target = self
+                    .request
+                    .target
+                    .ok_or_else(|| anyhow::anyhow!("missing parent target"))?;
+                scan_params.push(target.to_string().into());
+                parent_clause = sql!(
+                    " AND {}=${}",
+                    self.tx.field_expression(parent)?,
+                    scan_params.len()
+                );
+            }
+            let visibility = self.visibility_clause(op, &mut scan_params)?;
+            let keyset = plan.keyset(cursor, &mut scan_params)?;
+            let limit = if exact {
+                size + 1
+            } else {
+                (256 / op.policy.any.len()).min(64)
+            };
+            let scan = RecordScan {
+                columns: Sql::statement("CAST(created_seq AS TEXT),CAST(id AS TEXT)"),
+                storage: storage_resource,
+                filter: &filter,
+                restrictions: sql!("{visibility}{parent_clause}{selection}{keyset}"),
+                order: sql!("nx_records.created_seq {direction}"),
+                limit,
+            };
+            self.charge_list_calls(1)?;
+            let rows = self.tx.scan_records::<2>(scan, &scan_params).await?;
+            if !exact && rows.len() == limit {
+                let last = rows.last().expect("nonempty")[0].parse()?;
+                boundary = if plan.descending() {
+                    boundary.max(last)
+                } else {
+                    boundary.min(last)
+                };
+                bounded_more = true;
+            }
+            for [seq, id] in rows {
+                candidates.insert(seq.parse::<u64>()?, id.parse::<u64>()?);
+            }
+        }
+        Ok((candidates, boundary, bounded_more))
     }
     pub(super) fn visibility_clause(&self, op: &Operation, params: &mut Vec<Param>) -> Result<Sql> {
         if !manifest::is_public(op) {
