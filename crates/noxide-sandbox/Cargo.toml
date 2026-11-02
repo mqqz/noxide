@@ -10,6 +10,7 @@ description = "Wasmtime boundary and complete guest import surface for Noxide"
 [dependencies]
 noxide-protocol.workspace = true
 noxide-host-calls.workspace = true
+noxide-guest.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }

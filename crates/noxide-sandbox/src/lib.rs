@@ -2,6 +2,7 @@
 //! everything a guest can ask of the host passes through [`HostCalls`].
 #![forbid(unsafe_code)]
 mod admission;
+pub mod worker;
 
 use anyhow::{Result, ensure};
 use noxide_protocol::*;
@@ -9,26 +10,6 @@ use std::{sync::Arc, time::Duration};
 use tokio::{sync::Semaphore, time::Instant};
 use wasmtime::component::{Component, InstancePre, Linker};
 use wasmtime::{Config, Engine, ResourceLimiter, Store, StoreContextMut, WasmFeatures};
-
-#[derive(Clone, Debug)]
-pub struct Limits {
-    pub memory_bytes: usize,
-    pub fuel: u64,
-    pub host_calls: u32,
-    pub wall_time: Duration,
-    pub concurrency: usize,
-}
-impl Default for Limits {
-    fn default() -> Self {
-        Self {
-            memory_bytes: 64 * 1024 * 1024,
-            fuel: 10_000_000,
-            host_calls: 32_768,
-            wall_time: Duration::from_secs(2),
-            concurrency: 16,
-        }
-    }
-}
 
 struct MemoryBudget {
     maximum: usize,
@@ -69,23 +50,7 @@ impl ResourceLimiter for MemoryBudget {
     }
 }
 
-/// The guest stopped for lack of time or capacity, not because of what it did. The
-/// same request can succeed later, so callers report busy and not a rejection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GuestBusy {
-    Deadline,
-    Capacity,
-}
-impl std::fmt::Display for GuestBusy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Deadline => "guest deadline",
-            Self::Capacity => "runtime capacity",
-        })
-    }
-}
-impl std::error::Error for GuestBusy {}
-
+pub use noxide_guest::{Attempt, GuestBusy, Limits};
 pub use noxide_host_calls::{HostCalls, NoHostCalls};
 
 struct State<H> {
@@ -121,6 +86,13 @@ fn chunk(bytes: &[u8], offset: u32) -> wasmtime::Result<u64> {
     Ok(u64::from_le_bytes(value))
 }
 
+pub struct Output<H> {
+    pub bytes: Result<Vec<u8>>,
+    pub effects: Option<H>,
+    pub fuel_left: u64,
+    pub calls_left: u32,
+}
+
 pub struct Runtime<H: HostCalls> {
     engine: Engine,
     instance: Arc<InstancePre<State<H>>>,
@@ -136,13 +108,6 @@ impl<H: HostCalls> Clone for Runtime<H> {
             permits: self.permits.clone(),
         }
     }
-}
-
-pub struct Attempt<H> {
-    pub result: Result<ResponseIntent>,
-    pub effects: Option<H>,
-    pub fuel_left: u64,
-    pub calls_left: u32,
 }
 
 impl<H: HostCalls> Runtime<H> {
@@ -348,22 +313,51 @@ impl<H: HostCalls> Runtime<H> {
             fuel_left: fuel,
             calls_left: calls,
         };
-        attempt.result = self.run_inner(request, &mut attempt, deadline).await;
+        attempt.result = async {
+            let request = serde_json::to_vec(&request)?;
+            ensure!(request.len() <= MAX_REQUEST_BYTES, "request limit");
+            let output = self.execute(request, &mut attempt, deadline).await?;
+            decode_response(&output).map_err(anyhow::Error::msg)
+        }
+        .await;
         attempt
     }
 
-    async fn run_inner(
+    /// Run a serialized request and return the guest's output without decoding
+    /// it. A worker process uses this: only the server decides what output means.
+    pub async fn run_output(
         &self,
-        request: RequestView,
+        request: Vec<u8>,
+        effects: H,
+        fuel: u64,
+        calls: u32,
+        deadline: Instant,
+    ) -> Output<H> {
+        let mut attempt = Attempt {
+            result: Err(anyhow::anyhow!("runtime initialization")),
+            effects: Some(effects),
+            fuel_left: fuel,
+            calls_left: calls,
+        };
+        let bytes = self.execute(request, &mut attempt, deadline).await;
+        Output {
+            bytes,
+            effects: attempt.effects,
+            fuel_left: attempt.fuel_left,
+            calls_left: attempt.calls_left,
+        }
+    }
+
+    async fn execute(
+        &self,
+        request: Vec<u8>,
         attempt: &mut Attempt<H>,
         deadline: Instant,
-    ) -> Result<ResponseIntent> {
+    ) -> Result<Vec<u8>> {
         let _permit = self
             .permits
             .try_acquire()
             .map_err(|_| GuestBusy::Capacity)?;
-        let request = serde_json::to_vec(&request)?;
-        ensure!(request.len() <= MAX_REQUEST_BYTES, "request limit");
         let mut store = Store::new(
             &self.engine,
             State {
@@ -408,6 +402,6 @@ impl<H: HostCalls> Runtime<H> {
         execution
             .map_err(|_| GuestBusy::Deadline)?
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        decode_response(&state.output).map_err(anyhow::Error::msg)
+        Ok(state.output)
     }
 }

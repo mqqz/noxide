@@ -1470,10 +1470,13 @@ dependencies = [
  "noxide-assets",
  "noxide-confine",
  "noxide-effect-delivery",
+ "noxide-guest",
  "noxide-host",
+ "noxide-host-calls",
  "noxide-http",
  "noxide-keys",
  "noxide-protocol",
+ "noxide-sandbox",
  "noxide-test-support",
  "rustix",
  "serde",
@@ -1534,6 +1537,17 @@ dependencies = [
  "sha2",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "noxide-guest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "noxide-host-calls",
+ "noxide-protocol",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1709,6 +1723,7 @@ name = "noxide-sandbox"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "noxide-guest",
  "noxide-host-calls",
  "noxide-protocol",
  "serde_json",

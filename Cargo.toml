@@ -10,6 +10,7 @@ members = [
     "crates/noxide-keys",
     "crates/noxide-store",
     "crates/noxide-authority",
+    "crates/noxide-guest",
     "crates/noxide-host-calls",
     "crates/noxide-http",
     "crates/noxide-jobs",
@@ -49,6 +50,7 @@ noxide-sql-macros = { path = "crates/noxide-sql-macros", version = "0.1.0" }
 noxide-effects = { path = "crates/noxide-effects", version = "0.1.0" }
 noxide-effect-delivery = { path = "crates/noxide-effect-delivery", version = "0.1.0" }
 noxide-blobs = { path = "crates/noxide-blobs", version = "0.1.0" }
+noxide-guest = { path = "crates/noxide-guest", version = "0.1.0" }
 noxide-host-calls = { path = "crates/noxide-host-calls", version = "0.1.0" }
 noxide-http = { path = "crates/noxide-http", version = "0.1.0" }
 noxide-jobs = { path = "crates/noxide-jobs", version = "0.1.0" }

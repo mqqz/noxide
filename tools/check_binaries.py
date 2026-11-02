@@ -14,6 +14,8 @@ FORBIDDEN = {
     "noxide-server": ["rustls", "webpki", "cssparser", "image::codecs", "noxide_asset_admission"],
     # The worker holds no keys, runs no HTTP and handles no logins.
     "noxide-effects-worker": ["noxide_keys", "hyper", "axum", "argon2", "cssparser"],
+    # A guest worker holds only its socket: no keys, database, HTTP or transport.
+    "noxide-guest": ["noxide_keys", "sqlx", "hyper", "axum", "rustls", "argon2", "noxide_store"],
     # The key service has no network, no database and no guest runtime.
     "noxide-keyd": ["rustls", "sqlx", "wasmtime", "hyper", "tokio"],
 }
