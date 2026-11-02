@@ -1,6 +1,18 @@
 use super::*;
 use noxide_store::statements::records as stmt;
 
+/// One rotation attempt's verified identity and target.
+#[derive(Clone, Copy)]
+struct RotationClaim<'a> {
+    nonce: &'a str,
+    subject: &'a str,
+    input: &'a str,
+    secret: &'a str,
+    resource: u32,
+    id: u64,
+    target: &'a RecordTarget,
+}
+
 impl Application {
     fn capability_route(&self, resource: u32) -> Result<u32> {
         self.identity
@@ -12,7 +24,6 @@ impl Application {
             .ok_or_else(|| anyhow::anyhow!(RequestError::InvalidRequest))
     }
 
-    #[allow(clippy::too_many_lines)]
     pub async fn capability_page(
         &self,
         resource: u32,
@@ -96,61 +107,8 @@ impl Application {
                                 )
                                 .map_err(|_| RequestError::Rejected);
                             }
-                            let (anonymous, new_cookie) =
-                                match cookie.and_then(|c| self.keys.anonymous(c, now).ok()) {
-                                    Some(token) => (token, None),
-                                    None => {
-                                        let (token, cookie) = self
-                                            .keys
-                                            .issue(
-                                                TokenKind::Anonymous,
-                                                "",
-                                                now,
-                                                security::ANONYMOUS_TTL,
-                                            )
-                                            .map_err(|_| RequestError::Rejected)?;
-                                        (token, Some(cookie))
-                                    }
-                                };
-                            let target = RecordTarget {
-                                resource,
-                                id,
-                                route: Some(route),
-                                incarnation: record.incarnation,
-                                revision: record.revision,
-                            };
-                            let (_, submission) = self
-                                .keys
-                                .issue(
-                                    TokenKind::AnonymousSubmission {
-                                        contract: self.submission_contract(),
-                                        action: 0,
-                                        version: 1,
-                                        targets: BTreeMap::from([("target".into(), target)]),
-                                    },
-                                    &anonymous.nonce,
-                                    now,
-                                    security::ANONYMOUS_TTL,
-                                )
-                                .map_err(|_| RequestError::Rejected)?;
-                            let mut page = render::capability_rotation(
-                                &self.web.presentation,
-                                &FormCredentials {
-                                    upload_ticket: None,
-                                    selections: Default::default(),
-                                    selected: Default::default(),
-                                    csrf: self
-                                        .keys
-                                        .csrf(&anonymous.nonce)
-                                        .map_err(|_| RequestError::Busy)?,
-                                    submission,
-                                    values: Fields::new(),
-                                },
-                                resource,
-                                id,
-                            )
-                            .map_err(|_| RequestError::Rejected)?;
-                            page.anonymous_cookie = new_cookie;
+                            let page =
+                                self.rotation_page(resource, id, route, record, cookie, now)?;
                             Self::finish_commit(&mut tx, page).await
                         })
                         .await
@@ -159,6 +117,166 @@ impl Application {
                     .await
             })
             .await
+    }
+
+    /// The rotation form, with an anonymous cookie when the visitor has no valid one.
+    fn rotation_page(
+        &self,
+        resource: u32,
+        id: u64,
+        route: u32,
+        record: repository::StoredRecord,
+        cookie: Option<&str>,
+        now: i64,
+    ) -> Result<Rendered, RequestError> {
+        let (anonymous, new_cookie) = match cookie.and_then(|c| self.keys.anonymous(c, now).ok()) {
+            Some(token) => (token, None),
+            None => {
+                let (token, cookie) = self
+                    .keys
+                    .issue(TokenKind::Anonymous, "", now, security::ANONYMOUS_TTL)
+                    .map_err(|_| RequestError::Rejected)?;
+                (token, Some(cookie))
+            }
+        };
+        let target = RecordTarget {
+            resource,
+            id,
+            route: Some(route),
+            incarnation: record.incarnation,
+            revision: record.revision,
+        };
+        let (_, submission) = self
+            .keys
+            .issue(
+                TokenKind::AnonymousSubmission {
+                    contract: self.submission_contract(),
+                    action: 0,
+                    version: 1,
+                    targets: BTreeMap::from([("target".into(), target)]),
+                },
+                &anonymous.nonce,
+                now,
+                security::ANONYMOUS_TTL,
+            )
+            .map_err(|_| RequestError::Rejected)?;
+        let mut page = render::capability_rotation(
+            &self.web.presentation,
+            &FormCredentials {
+                upload_ticket: None,
+                selections: Default::default(),
+                selected: Default::default(),
+                csrf: self
+                    .keys
+                    .csrf(&anonymous.nonce)
+                    .map_err(|_| RequestError::Busy)?,
+                submission,
+                values: Fields::new(),
+            },
+            resource,
+            id,
+        )
+        .map_err(|_| RequestError::Rejected)?;
+        page.anonymous_cookie = new_cookie;
+        Ok(page)
+    }
+
+    /// A claim that already exists must be this visitor's identical request.
+    async fn verify_rotation_receipt(
+        &self,
+        tx: &mut Transaction,
+        claim: &RotationClaim<'_>,
+    ) -> Result<EditReceipt> {
+        let query = stmt::receipt(tx, 1024);
+        let rows = tx.rows(&query, &[claim.nonce.into()]).await?;
+        let [subject, contract, digest, outcome] =
+            rows.first().ok_or(RequestError::InvalidRequest)?;
+        ensure!(
+            subject == claim.subject
+                && contract == &self.identity.contract
+                && digest == claim.input,
+            RequestError::InvalidRequest
+        );
+        let receipt: EditReceipt = serde_json::from_str(outcome)?;
+        ensure!(
+            receipt.resource == claim.resource
+                && receipt.id == claim.id
+                && receipt.incarnation == claim.target.incarnation,
+            RequestError::InvalidRequest
+        );
+        Ok(receipt)
+    }
+
+    /// Prove the secret against the current row, then move its capability version on.
+    async fn advance_capability(
+        &self,
+        tx: &mut Transaction,
+        claim: &RotationClaim<'_>,
+        budget: &mut ExecutionBudget,
+    ) -> Result<EditReceipt> {
+        let RotationClaim {
+            secret,
+            resource,
+            id,
+            target,
+            ..
+        } = *claim;
+        let time = if crate::authority::uses_time(&self.identity.manifest) {
+            budget.spend(1)?;
+            Some(self.temporal_after_admission(tx).await?)
+        } else {
+            None
+        };
+        let stored = repository::load(tx, &self.identity.manifest, resource, id)
+            .await?
+            .ok_or(RequestError::InvalidRequest)?;
+        ensure!(
+            stored.incarnation == target.incarnation,
+            RequestError::InvalidRequest
+        );
+        ensure!(
+            crate::expiry::available(
+                manifest::resource(&self.identity.manifest, resource)?,
+                &stored.record.fields,
+                time
+            )?,
+            RequestError::InvalidRequest
+        );
+        let current = stored.cap_version.ok_or(RequestError::InvalidRequest)?;
+        let storage = tx
+            .storage_resource(&self.identity.manifest, resource)
+            .await?;
+        self.keys
+            .verify_edit(secret, u32::try_from(storage)?, id, current)
+            .map_err(|_| RequestError::InvalidRequest)?;
+        let next = current.checked_add(1).ok_or(RequestError::Rejected)?;
+        ensure!(
+            tx.run(
+                &stmt::ADVANCE_CAPABILITY_VERSION,
+                &[
+                    next.into(),
+                    storage.into(),
+                    (id as i64).into(),
+                    current.into()
+                ]
+            )
+            .await?
+                == 1,
+            "capability changed"
+        );
+        let receipt = EditReceipt {
+            resource,
+            id,
+            incarnation: stored.incarnation.clone(),
+            cap_version: next as u64,
+            key_id: self.keys.signing_edit_key()?,
+        };
+        tx.run(
+            &stmt::SET_RECEIPT_OUTCOME,
+            &[serde_json::to_string(&receipt)?.into(), claim.nonce.into()],
+        )
+        .await?;
+        Ok(receipt)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -256,7 +374,6 @@ impl Application {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_lines)]
     async fn prepare_rotation(
         &self,
         resource: u32,
@@ -306,6 +423,15 @@ impl Application {
         let input = URL_SAFE_NO_PAD.encode(Sha256::digest(serde_json::to_vec(&(
             VERSION, resource, id, secret,
         ))?));
+        let claim = RotationClaim {
+            nonce: &token.nonce,
+            subject: &anonymous.nonce,
+            input: &input,
+            secret,
+            resource,
+            id,
+            target,
+        };
         let claimed = tx
             .run(
                 &stmt::CLAIM_CAPABILITY_RECEIPT,
@@ -319,84 +445,14 @@ impl Application {
             )
             .await?;
         if claimed == 0 {
-            let query = stmt::receipt(&tx, 1024);
-            let rows = tx.rows(&query, &[token.nonce.as_str().into()]).await?;
-            let [subject, contract, digest, outcome] =
-                rows.first().ok_or(RequestError::InvalidRequest)?;
-            ensure!(
-                subject == &anonymous.nonce
-                    && contract == &self.identity.contract
-                    && digest == &input,
-                RequestError::InvalidRequest
-            );
-            let receipt: EditReceipt = serde_json::from_str(outcome)?;
-            ensure!(
-                receipt.resource == resource
-                    && receipt.id == id
-                    && receipt.incarnation == target.incarnation,
-                RequestError::InvalidRequest
-            );
+            let receipt = self.verify_rotation_receipt(&mut tx, &claim).await?;
             // Verified original receipt proves commitment; current target checks
             // still exclusively govern whether a secret handover can be emitted.
             *receipt_commit = true;
             let page = self.edit_handover(&mut tx, &receipt, target.route).await?;
             return Ok((tx, page));
         }
-        let time = if crate::authority::uses_time(&self.identity.manifest) {
-            budget.spend(1)?;
-            Some(self.temporal_after_admission(&mut tx).await?)
-        } else {
-            None
-        };
-        let stored = repository::load(&mut tx, &self.identity.manifest, resource, id)
-            .await?
-            .ok_or(RequestError::InvalidRequest)?;
-        ensure!(
-            stored.incarnation == target.incarnation,
-            RequestError::InvalidRequest
-        );
-        ensure!(
-            crate::expiry::available(
-                manifest::resource(&self.identity.manifest, resource)?,
-                &stored.record.fields,
-                time
-            )?,
-            RequestError::InvalidRequest
-        );
-        let current = stored.cap_version.ok_or(RequestError::InvalidRequest)?;
-        let storage = tx
-            .storage_resource(&self.identity.manifest, resource)
-            .await?;
-        self.keys
-            .verify_edit(secret, u32::try_from(storage)?, id, current)
-            .map_err(|_| RequestError::InvalidRequest)?;
-        let next = current.checked_add(1).ok_or(RequestError::Rejected)?;
-        ensure!(
-            tx.run(
-                &stmt::ADVANCE_CAPABILITY_VERSION,
-                &[
-                    next.into(),
-                    storage.into(),
-                    (id as i64).into(),
-                    current.into()
-                ]
-            )
-            .await?
-                == 1,
-            "capability changed"
-        );
-        let receipt = EditReceipt {
-            resource,
-            id,
-            incarnation: stored.incarnation.clone(),
-            cap_version: next as u64,
-            key_id: self.keys.signing_edit_key()?,
-        };
-        tx.run(
-            &stmt::SET_RECEIPT_OUTCOME,
-            &[serde_json::to_string(&receipt)?.into(), token.nonce.into()],
-        )
-        .await?;
+        let receipt = self.advance_capability(&mut tx, &claim, budget).await?;
         let page = self.edit_handover(&mut tx, &receipt, target.route).await?;
         Ok((tx, page))
     }
