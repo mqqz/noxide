@@ -392,6 +392,7 @@ impl Case {
         let mut input = Fields::from([("body".into(), body.into())]);
         if self
             .app
+            .identity
             .manifest
             .actions
             .iter()
@@ -450,7 +451,7 @@ impl Case {
         let mut rows = Vec::new();
         for [id] in ids {
             rows.push(
-                repository::load(&mut tx, &self.app.manifest, 1, id.parse().unwrap())
+                repository::load(&mut tx, &self.app.identity.manifest, 1, id.parse().unwrap())
                     .await
                     .unwrap()
                     .unwrap(),
@@ -471,7 +472,7 @@ impl Case {
         if self.clock.is_some() {
             self.stop_clock().await;
         }
-        if let Some(jobs) = &self.app.jobs {
+        if let Some(jobs) = &self.app.services.jobs {
             jobs.lifecycle.drain().await.unwrap();
         }
         self.app.request_lifecycle.drain().await.unwrap();
@@ -626,7 +627,7 @@ async fn real_combined_budget(database: Option<Database>) {
         "combined 4 mutations/2 jobs/2 emits budget refusal meter: {:?}",
         roots[0].statement_snapshot()
     );
-    if let Some(jobs) = &case.app.jobs {
+    if let Some(jobs) = &case.app.services.jobs {
         jobs.lifecycle.drain().await.unwrap();
     }
     let (records, receipts, outbox, rows) = case.state().await;

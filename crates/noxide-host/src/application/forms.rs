@@ -11,7 +11,7 @@ impl Application {
         csrf: &str,
         now: i64,
     ) -> Result<(Token, Token, auth::Principal)> {
-        let op = manifest::operation(&self.manifest, action.first_operation())?;
+        let op = manifest::operation(&self.identity.manifest, action.first_operation())?;
         if manifest::anonymous_action(op) {
             let anonymous = self
                 .keys
@@ -56,7 +56,8 @@ impl Application {
         receipt: &EditReceipt,
         route: Option<u32>,
     ) -> Result<Rendered> {
-        let record = repository::load(tx, &self.manifest, receipt.resource, receipt.id).await?;
+        let record =
+            repository::load(tx, &self.identity.manifest, receipt.resource, receipt.id).await?;
         if record
             .as_ref()
             .is_none_or(|r| r.incarnation != receipt.incarnation)
@@ -70,7 +71,7 @@ impl Application {
             return render::capability_handover(None, None);
         }
         let storage = u32::try_from(
-            tx.storage_resource(&self.manifest, receipt.resource)
+            tx.storage_resource(&self.identity.manifest, receipt.resource)
                 .await?,
         )?;
         let Ok(secret) =
@@ -82,7 +83,7 @@ impl Application {
         let link = route
             .map(|route| {
                 render::resolve(
-                    &self.manifest,
+                    &self.identity.manifest,
                     &RouteRef {
                         params: Default::default(),
                         route,
@@ -119,6 +120,7 @@ impl Application {
         };
         let (_, submission) = self.keys.issue(kind, &session.nonce, now, 900)?;
         let upload_ticket = self
+            .services
             .blobs
             .as_ref()
             .filter(|blobs| {
@@ -151,7 +153,7 @@ impl Application {
             return Ok(false);
         }
         let route = route
-            .map(|id| manifest::route(&self.manifest, id))
+            .map(|id| manifest::route(&self.identity.manifest, id))
             .transpose()?;
         for target in action
             .targets
@@ -171,7 +173,7 @@ impl Application {
             {
                 if repository::authorize_stored_read(
                     context,
-                    manifest::operation(&self.manifest, *id)?,
+                    manifest::operation(&self.identity.manifest, *id)?,
                     stored,
                 )
                 .await?
@@ -189,7 +191,7 @@ impl Application {
             {
                 if !repository::authorize_stored_read(
                     context,
-                    manifest::operation(&self.manifest, projection.operation)?,
+                    manifest::operation(&self.identity.manifest, projection.operation)?,
                     stored,
                 )
                 .await?
@@ -198,7 +200,7 @@ impl Application {
                 }
             }
             for step in action.steps {
-                let op = manifest::operation(&self.manifest, step.operation)?;
+                let op = manifest::operation(&self.identity.manifest, step.operation)?;
                 if matches!(&step.target, Target::Named(name) if name == &target.name)
                     && !manifest::is_capability(op)
                     && !context.authorize(op, stored).await?
@@ -209,18 +211,18 @@ impl Application {
                     if matches!(&assignment.change, Change::Set(Value::Target(name)) if name == &target.name)
                     {
                         let eligible = manifest::operation(
-                            &self.manifest,
+                            &self.identity.manifest,
                             *op.bind
                                 .get(&assignment.field)
                                 .ok_or(repository::ReferenceUnavailable)?,
                         )?;
                         if !repository::authorize_stored_read(context, eligible, stored).await?
-                            || manifest::resource(&self.manifest, op.resource)?
+                            || manifest::resource(&self.identity.manifest, op.resource)?
                                 .gate
                                 .as_ref()
                                 .is_some_and(|gate| gate.field == assignment.field)
                                 && !manifest::gate_permits(
-                                    manifest::resource(&self.manifest, op.resource)?,
+                                    manifest::resource(&self.identity.manifest, op.resource)?,
                                     &stored.record.fields,
                                     true,
                                 )
@@ -247,21 +249,21 @@ impl Application {
         principal: &auth::Principal,
         now: i64,
     ) -> Result<BTreeMap<u32, Option<FormCredentials>>> {
-        let r = manifest::route(&self.manifest, route)?;
+        let r = manifest::route(&self.identity.manifest, route)?;
         let stored = match (r.resource, target) {
             (Some(resource), Some(id)) => {
                 *database_calls = database_calls
                     .checked_sub(2)
                     .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
-                repository::load(tx, &self.manifest, resource, id).await?
+                repository::load(tx, &self.identity.manifest, resource, id).await?
             }
             _ => None,
         };
         let mut forms = BTreeMap::new();
         for id in &r.forms {
-            let action = manifest::web_action(&self.manifest, *id)?;
+            let action = manifest::web_action(&self.identity.manifest, *id)?;
             let op = manifest::operation(
-                &self.manifest,
+                &self.identity.manifest,
                 ActionCore::of(action.core)?.first_operation(),
             )?;
             let subject = if manifest::anonymous_action(op) {
@@ -278,61 +280,62 @@ impl Application {
                 forms.insert(*id, None);
                 continue;
             };
-            let credentials = if manifest::signed_resource(&self.manifest, &action)?.is_some() {
-                if let Some(record) = &stored {
-                    if crate::expiry::available(
-                        manifest::resource(&self.manifest, record.record.resource)?,
-                        &record.record.fields,
-                        authority.time(),
-                    )? && ((manifest::is_capability(op) && record.cap_version.is_some())
-                        || self
-                            .target_allowed(
-                                &mut repository::ReadContext {
-                                    tx,
-                                    manifest: &self.manifest,
-                                    principal,
-                                    authority,
-                                    budget: repository::ReadBudget::Query(database_calls),
-                                },
-                                ActionCore::of(action.core)?,
-                                Some(route),
-                                record,
-                            )
-                            .await?)
-                    {
-                        let grant = RecordTarget {
-                            resource: record.record.resource,
-                            id: record.record.id,
-                            incarnation: record.incarnation.clone(),
-                            revision: record.revision,
-                            route: Some(route),
-                        };
-                        let values = if manifest::is_capability(op) {
-                            Fields::new()
+            let credentials =
+                if manifest::signed_resource(&self.identity.manifest, &action)?.is_some() {
+                    if let Some(record) = &stored {
+                        if crate::expiry::available(
+                            manifest::resource(&self.identity.manifest, record.record.resource)?,
+                            &record.record.fields,
+                            authority.time(),
+                        )? && ((manifest::is_capability(op) && record.cap_version.is_some())
+                            || self
+                                .target_allowed(
+                                    &mut repository::ReadContext {
+                                        tx,
+                                        manifest: &self.identity.manifest,
+                                        principal,
+                                        authority,
+                                        budget: repository::ReadBudget::Query(database_calls),
+                                    },
+                                    ActionCore::of(action.core)?,
+                                    Some(route),
+                                    record,
+                                )
+                                .await?)
+                        {
+                            let grant = RecordTarget {
+                                resource: record.record.resource,
+                                id: record.record.id,
+                                incarnation: record.incarnation.clone(),
+                                revision: record.revision,
+                                route: Some(route),
+                            };
+                            let values = if manifest::is_capability(op) {
+                                Fields::new()
+                            } else {
+                                self.action_values(&action, &record.record.fields)
+                            };
+                            Some(self.credentials(
+                                &action,
+                                subject,
+                                now,
+                                Self::page_grants(action.core, &grant),
+                                values,
+                            )?)
                         } else {
-                            self.action_values(&action, &record.record.fields)
-                        };
-                        Some(self.credentials(
-                            &action,
-                            subject,
-                            now,
-                            Self::page_grants(action.core, &grant),
-                            values,
-                        )?)
+                            None
+                        }
                     } else {
                         None
                     }
+                } else if self
+                    .authorize_create(ActionCore::of(action.core)?, principal)
+                    .is_ok()
+                {
+                    Some(self.credentials(&action, subject, now, BTreeMap::new(), Fields::new())?)
                 } else {
                     None
-                }
-            } else if self
-                .authorize_create(ActionCore::of(action.core)?, principal)
-                .is_ok()
-            {
-                Some(self.credentials(&action, subject, now, BTreeMap::new(), Fields::new())?)
-            } else {
-                None
-            };
+                };
             forms.insert(*id, credentials);
         }
         Ok(forms)
@@ -377,7 +380,7 @@ impl Application {
             Fields::new(),
         )?;
         let operation = manifest::operation(
-            &self.manifest,
+            &self.identity.manifest,
             ActionCore::of(action.core)?.first_operation(),
         )?;
         let current = if manifest::is_capability(operation) {
@@ -388,8 +391,8 @@ impl Application {
             self.action_values(action, &stored.record.fields)
         };
         render::recovery(
-            &self.presentation,
-            &self.manifest,
+            &self.web.presentation,
+            &self.identity.manifest,
             action.id,
             &credentials,
             input,

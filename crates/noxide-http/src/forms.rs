@@ -59,7 +59,7 @@ async fn read_form(
     request: Request,
     registering: bool,
 ) -> std::result::Result<Submitted, Box<Response>> {
-    let presentation = &gateway.app.presentation;
+    let presentation = &gateway.app.web.presentation;
     let headers = request.headers();
     if headers.get_all(header::CONTENT_TYPE).iter().count() != 1
         || headers
@@ -114,7 +114,7 @@ async fn read_form(
 }
 
 async fn registration(gateway: &Gateway, submitted: Submitted) -> Response {
-    let presentation = &gateway.app.presentation;
+    let presentation = &gateway.app.web.presentation;
     let Submitted {
         mut form,
         csrf,
@@ -125,13 +125,13 @@ async fn registration(gateway: &Gateway, submitted: Submitted) -> Response {
     else {
         return registration_failed(presentation);
     };
-    let invite = if gateway.app.registration == crate::Registration::Invite {
+    let invite = if gateway.app.web.registration == crate::Registration::Invite {
         form.remove("invite")
     } else {
         None
     };
     if !form.is_empty()
-        || (gateway.app.registration == crate::Registration::Invite && invite.is_none())
+        || (gateway.app.web.registration == crate::Registration::Invite && invite.is_none())
     {
         return registration_failed(presentation);
     }
@@ -163,7 +163,7 @@ async fn registration(gateway: &Gateway, submitted: Submitted) -> Response {
 }
 
 async fn login(gateway: &Gateway, submitted: Submitted) -> Response {
-    let presentation = &gateway.app.presentation;
+    let presentation = &gateway.app.web.presentation;
     let Submitted {
         mut form,
         csrf,
@@ -212,7 +212,7 @@ async fn login(gateway: &Gateway, submitted: Submitted) -> Response {
 }
 
 async fn capability(gateway: &Gateway, submitted: Submitted, resource: u32, id: u64) -> Response {
-    let presentation = &gateway.app.presentation;
+    let presentation = &gateway.app.web.presentation;
     let Submitted {
         mut form,
         csrf,
@@ -246,7 +246,7 @@ async fn capability(gateway: &Gateway, submitted: Submitted, resource: u32, id: 
 }
 
 async fn logout(gateway: &Gateway, submitted: Submitted) -> Response {
-    let presentation = &gateway.app.presentation;
+    let presentation = &gateway.app.web.presentation;
     let Submitted {
         form,
         csrf,
@@ -278,7 +278,7 @@ async fn action(
     action: u32,
     op: &noxide_protocol::Operation,
 ) -> Response {
-    let presentation = &gateway.app.presentation;
+    let presentation = &gateway.app.web.presentation;
     let Submitted {
         mut form,
         csrf,

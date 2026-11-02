@@ -277,7 +277,10 @@ async fn contract(db: Option<Database>) {
         .begin_read(std::time::Instant::now() + Duration::from_secs(3))
         .await
         .unwrap();
-    let storage = tx.storage_resource(&case.app.manifest, 2).await.unwrap();
+    let storage = tx
+        .storage_resource(&case.app.identity.manifest, 2)
+        .await
+        .unwrap();
     let rows = tx
         .fetch::<1>(
             "SELECT fields FROM nx_records WHERE resource=$1",
@@ -560,7 +563,7 @@ async fn delete_credentials(case: &Case, page: &str) -> (crate::render::FormCred
     let credentials = case
         .app
         .credentials(
-            &manifest::web_action(&case.app.manifest, 2).unwrap(),
+            &manifest::web_action(&case.app.identity.manifest, 2).unwrap(),
             &session,
             now,
             Default::default(),
@@ -605,7 +608,10 @@ async fn reference_integrity(db: Option<Database>) {
             .begin(std::time::Instant::now() + Duration::from_secs(3))
             .await
             .unwrap();
-        let storage = tx.storage_resource(&case.app.manifest, 2).await.unwrap();
+        let storage = tx
+            .storage_resource(&case.app.identity.manifest, 2)
+            .await
+            .unwrap();
         tx.execute(
             "DELETE FROM nx_records WHERE resource=$1",
             &[storage.into()],
@@ -630,11 +636,11 @@ async fn reference_integrity(db: Option<Database>) {
             .status,
         303
     );
-    let mut target = (*case.app.manifest).clone();
+    let mut target = (*case.app.identity.manifest).clone();
     target.resources[0].fields[0].max_bytes = 2048;
     let migration = crate::schema::Migration {
         version: 1,
-        from: crate::schema::digest(&case.app.manifest.resources).unwrap(),
+        from: crate::schema::digest(&case.app.identity.manifest.resources).unwrap(),
         to: crate::schema::digest(&target.resources).unwrap(),
         operations: vec![crate::schema::MigrationOp::ChangeField {
             resource: "notes".into(),
@@ -652,7 +658,10 @@ async fn reference_integrity(db: Option<Database>) {
             .begin(std::time::Instant::now() + Duration::from_secs(3))
             .await
             .unwrap();
-        let storage = tx.storage_resource(&case.app.manifest, 2).await.unwrap();
+        let storage = tx
+            .storage_resource(&case.app.identity.manifest, 2)
+            .await
+            .unwrap();
         tx.execute(
             "UPDATE nx_records SET fields=$1 WHERE resource=$2",
             &[serde_json::to_string(&refs).unwrap().into(), storage.into()],
@@ -674,7 +683,10 @@ async fn reference_integrity(db: Option<Database>) {
         .begin(std::time::Instant::now() + Duration::from_secs(3))
         .await
         .unwrap();
-    let storage = tx.storage_resource(&case.app.manifest, 2).await.unwrap();
+    let storage = tx
+        .storage_resource(&case.app.identity.manifest, 2)
+        .await
+        .unwrap();
     tx.execute(
         "DELETE FROM nx_records WHERE resource=$1",
         &[storage.into()],
@@ -702,8 +714,14 @@ async fn reference_integrity(db: Option<Database>) {
         .begin_read(std::time::Instant::now() + Duration::from_secs(3))
         .await
         .unwrap();
-    let notes = tx.storage_resource(&case.app.manifest, 1).await.unwrap();
-    let links = tx.storage_resource(&case.app.manifest, 2).await.unwrap();
+    let notes = tx
+        .storage_resource(&case.app.identity.manifest, 1)
+        .await
+        .unwrap();
+    let links = tx
+        .storage_resource(&case.app.identity.manifest, 2)
+        .await
+        .unwrap();
     let rows=tx.fetch::<2>("SELECT CAST((SELECT COUNT(*) FROM nx_records WHERE resource=$1 AND id=1) AS TEXT),CAST((SELECT COUNT(*) FROM nx_records WHERE resource=$2) AS TEXT)",&[notes.into(),links.into()]).await.unwrap();
     assert_eq!(rows[0][0], rows[0][1]);
     tx.commit().await.unwrap();
@@ -784,7 +802,10 @@ async fn created_contract(db: Option<Database>) {
         .begin_read(std::time::Instant::now() + Duration::from_secs(3))
         .await
         .unwrap();
-    let storage = tx.storage_resource(&case.app.manifest, 2).await.unwrap();
+    let storage = tx
+        .storage_resource(&case.app.identity.manifest, 2)
+        .await
+        .unwrap();
     let rows = tx
         .fetch::<1>(
             "SELECT fields FROM nx_records WHERE resource=$1",
@@ -864,7 +885,10 @@ async fn derived_target_seals_reference_projection_and_rechecks_destination_auth
         .begin(std::time::Instant::now() + Duration::from_secs(3))
         .await
         .unwrap();
-    let storage = tx.storage_resource(&case.app.manifest, 2).await.unwrap();
+    let storage = tx
+        .storage_resource(&case.app.identity.manifest, 2)
+        .await
+        .unwrap();
     tx.allocate_creation().await.unwrap();
     tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,10,(SELECT id FROM nx_accounts WHERE login_name='alice'),'team',$2,'link',1,(SELECT value FROM nx_creation_counter WHERE singleton=1))",&[storage.into(),r#"{"a":"1","b":"1","c":"1","d":"1"}"#.into()]).await.unwrap();
     tx.commit().await.unwrap();
@@ -880,7 +904,10 @@ async fn derived_target_seals_reference_projection_and_rechecks_destination_auth
         .begin(std::time::Instant::now() + Duration::from_secs(3))
         .await
         .unwrap();
-    let storage = tx.storage_resource(&case.app.manifest, 1).await.unwrap();
+    let storage = tx
+        .storage_resource(&case.app.identity.manifest, 1)
+        .await
+        .unwrap();
     tx.execute("UPDATE nx_records SET owner=(SELECT id FROM nx_accounts WHERE login_name='bob') WHERE resource=$1",&[storage.into()]).await.unwrap();
     tx.commit().await.unwrap();
     assert_eq!(
@@ -988,7 +1015,10 @@ async fn sequential_alias_mutations_share_identity_without_self_conflicting() {
         .begin_read(std::time::Instant::now() + Duration::from_secs(3))
         .await
         .unwrap();
-    let storage = tx.storage_resource(&case.app.manifest, 1).await.unwrap();
+    let storage = tx
+        .storage_resource(&case.app.identity.manifest, 1)
+        .await
+        .unwrap();
     let row = tx
         .fetch::<2>(
             "SELECT fields,CAST(revision AS TEXT) FROM nx_records WHERE resource=$1 AND id=1",
@@ -1070,7 +1100,10 @@ async fn public_picker_visibility_does_not_revoke_explicit_private_eligibility()
         .begin(std::time::Instant::now() + Duration::from_secs(3))
         .await
         .unwrap();
-    let storage = tx.storage_resource(&case.app.manifest, 1).await.unwrap();
+    let storage = tx
+        .storage_resource(&case.app.identity.manifest, 1)
+        .await
+        .unwrap();
     let fields = Fields::from([
         ("body".into(), "hidden from public query".into()),
         ("published".into(), "false".into()),
@@ -1143,7 +1176,10 @@ async fn follow_provenance_keeps_each_reference_field_separate() {
         .begin_read(std::time::Instant::now() + Duration::from_secs(3))
         .await
         .unwrap();
-    let storage = tx.storage_resource(&case.app.manifest, 2).await.unwrap();
+    let storage = tx
+        .storage_resource(&case.app.identity.manifest, 2)
+        .await
+        .unwrap();
     let id: u64 = tx
         .fetch::<1>(
             "SELECT CAST(id AS TEXT) FROM nx_records WHERE resource=$1",
@@ -1174,8 +1210,8 @@ async fn follow_provenance_keeps_each_reference_field_separate() {
         truncated: false,
         see_all: vec![],
         tx,
-        manifest: case.app.manifest.clone(),
-        plans: case.app.plans.clone(),
+        manifest: case.app.identity.manifest.clone(),
+        plans: case.app.identity.plans.clone(),
         principal,
         request: RequestView {
             version: VERSION,
@@ -1291,8 +1327,8 @@ async fn picker_query_ignores_and_preserves_unrelated_route_pagination() {
         truncated: true,
         see_all: vec![],
         tx,
-        manifest: case.app.manifest.clone(),
-        plans: case.app.plans.clone(),
+        manifest: case.app.identity.manifest.clone(),
+        plans: case.app.identity.plans.clone(),
         principal,
         request: RequestView {
             version: VERSION,

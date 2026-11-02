@@ -15,7 +15,7 @@ impl Application {
         time: Option<crate::lifecycle_clock::AttemptTime>,
         origin: &str,
     ) -> Result<()> {
-        let Some(contract) = &self.manifest.effects else {
+        let Some(contract) = &self.identity.manifest.effects else {
             return Ok(());
         };
         let emissions = emissions_for(contract, action.id)?;
@@ -25,6 +25,7 @@ impl Application {
         let now = time.ok_or(repository::CalculationUnavailable)?.timestamp();
         let scope = EffectScope {
             deployment: self
+                .identity
                 .generation
                 .get()
                 .ok_or_else(|| anyhow::anyhow!("application is not activated"))?
@@ -36,7 +37,7 @@ impl Application {
             },
         };
         let values = repository::ScheduleValues {
-            manifest: &self.manifest,
+            manifest: &self.identity.manifest,
             input: &effects.request.input,
             principal: &effects.principal,
             grants: &effects.grants,
@@ -47,7 +48,7 @@ impl Application {
         };
         ActionCapture {
             scope: &scope,
-            contract: &self.contract,
+            contract: &self.identity.contract,
             origin,
             source_action_version: action.version,
             now,

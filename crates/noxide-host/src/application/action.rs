@@ -171,7 +171,7 @@ impl Application {
                 &[
                     nonce.as_str().into(),
                     subject.as_str().into(),
-                    self.contract.as_str().into(),
+                    self.identity.contract.as_str().into(),
                     Param::Number(a.id.into()),
                     input_hash.into(),
                     Param::Number(expires),
@@ -196,18 +196,23 @@ impl Application {
         let time = if admitted_time.is_some() {
             admitted_time
         } else if a.uses_time()
-            || crate::authority::uses_time(&self.manifest)
-            || self.manifest.jobs.as_ref().is_some_and(|jobs| {
+            || crate::authority::uses_time(&self.identity.manifest)
+            || self.identity.manifest.jobs.as_ref().is_some_and(|jobs| {
                 jobs.schedules
                     .iter()
                     .any(|schedule| schedule.source_action == a.id)
             })
-            || self.manifest.effects.as_ref().is_some_and(|effects| {
-                effects
-                    .emissions
-                    .iter()
-                    .any(|emission| emission.source_action == a.id)
-            })
+            || self
+                .identity
+                .manifest
+                .effects
+                .as_ref()
+                .is_some_and(|effects| {
+                    effects
+                        .emissions
+                        .iter()
+                        .any(|emission| emission.source_action == a.id)
+                })
         {
             budget.spend(1)?;
             Some(self.temporal_after_admission(&mut tx).await?)
@@ -246,10 +251,14 @@ impl Application {
                 {
                     let target = grants[&a.targets[0].name].target.clone();
                     budget.spend(2)?;
-                    let stored =
-                        repository::load(&mut tx, &self.manifest, target.resource, target.id)
-                            .await?
-                            .ok_or(repository::ReferenceUnavailable)?;
+                    let stored = repository::load(
+                        &mut tx,
+                        &self.identity.manifest,
+                        target.resource,
+                        target.id,
+                    )
+                    .await?
+                    .ok_or(repository::ReferenceUnavailable)?;
                     tx.rollback().await?;
                     return Ok(Attempt::Settled(Settled::Conflict { target, stored }));
                 }
@@ -265,7 +274,7 @@ impl Application {
         };
         let gated_destination = navigation
             .and_then(|plan| plan.destination_resource)
-            .map(|id| manifest::resource(&self.manifest, id))
+            .map(|id| manifest::resource(&self.identity.manifest, id))
             .transpose()?
             .is_some_and(|resource| resource.gate.is_some());
         if navigation.is_some() {
@@ -316,9 +325,9 @@ impl Application {
             result_limit: noxide_protocol::MAX_RESULT_BYTES,
             truncated: false,
             see_all: Vec::new(),
-            plans: self.plans.clone(),
+            plans: self.identity.plans.clone(),
             tx,
-            manifest: self.manifest.clone(),
+            manifest: self.identity.manifest.clone(),
             principal,
             request: request.clone(),
             capability_grant,
@@ -330,7 +339,8 @@ impl Application {
             more: None,
         };
         budget.wasm = Some(
-            self.admission_limits
+            self.limits
+                .admission
                 .wasm()
                 .acquire()
                 .await
@@ -371,7 +381,7 @@ impl Application {
         {
             effects.tx.rollback().await?;
             let rejection = match ValidatedActionRejection::new(
-                manifest::action(&self.manifest, a.id)?,
+                manifest::action(&self.identity.manifest, a.id)?,
                 ActionRejection::Rejected {
                     field_errors: field_errors.clone(),
                     message: message.clone(),
@@ -403,7 +413,7 @@ impl Application {
                 }
                 if let Some(guard) = error.downcast_ref::<repository::GuardFailure>() {
                     let rejection = ValidatedActionRejection::new(
-                        manifest::action(&self.manifest, a.id)?,
+                        manifest::action(&self.identity.manifest, a.id)?,
                         ActionRejection::GuardRejected {
                             input: guard.input.clone(),
                             message: guard.message.clone(),
@@ -448,7 +458,8 @@ impl Application {
             .iter()
             .zip(a.steps)
             .find_map(|(outcome, step)| {
-                let operation = manifest::operation(&self.manifest, step.operation).ok()?;
+                let operation =
+                    manifest::operation(&self.identity.manifest, step.operation).ok()?;
                 (manifest::is_public(operation) && operation.kind == OperationKind::Create)
                     .then_some(outcome)
             })
@@ -493,13 +504,13 @@ impl Application {
         canonical: &CanonicalActionInput,
         capability: Option<&str>,
     ) -> Result<(InvocationContext<'a>, Token, i64)> {
-        let binding = manifest::web_binding(&self.manifest, binding)?;
-        let action = manifest::action(&self.manifest, binding.action)?;
+        let binding = manifest::web_binding(&self.identity.manifest, binding)?;
+        let action = manifest::action(&self.identity.manifest, binding.action)?;
         let core = ActionCore::of(action)?;
         ensure!(
             canonical.action == action.id
                 && canonical.version == action.version
-                && canonical.contract == self.contract,
+                && canonical.contract == self.identity.contract,
             RequestError::InvalidRequest
         );
         let input = canonical.fields.clone();
@@ -529,7 +540,7 @@ impl Application {
             nonce: token.nonce,
             subject: session.nonce.clone(),
             expires: token.expires,
-            navigation: Some(NavigationPlan::web(&self.manifest, binding)?),
+            navigation: Some(NavigationPlan::web(&self.identity.manifest, binding)?),
             time: None,
         };
         Ok((context, session, now))
@@ -544,13 +555,14 @@ impl Application {
         time: crate::lifecycle_clock::AttemptTime,
     ) -> Result<InvocationContext<'a>> {
         let (id, version) = verified.action();
-        let action = manifest::action(&self.manifest, id)?;
+        let action = manifest::action(&self.identity.manifest, id)?;
         ensure!(
-            action.version == version && verified.captured().contract() == self.contract,
+            action.version == version && verified.captured().contract() == self.identity.contract,
             repository::ReferenceUnavailable
         );
-        let canonical = manifest::canonical_input(&self.manifest, action, verified.input())?;
-        manifest::validate_input(&self.manifest, action, &canonical)?;
+        let canonical =
+            manifest::canonical_input(&self.identity.manifest, action, verified.input())?;
+        manifest::validate_input(&self.identity.manifest, action, &canonical)?;
         ensure!(
             &canonical == verified.input(),
             "noncanonical captured job input"
@@ -613,17 +625,14 @@ impl Application {
             );
         }
         ensure!(
-            action
-                .steps
-                .iter()
-                .all(
-                    |step| manifest::operation(&self.manifest, step.operation).is_ok_and(
-                        |operation| matches!(
-                            operation.kind,
-                            OperationKind::Update | OperationKind::Delete
-                        )
-                    )
-                ),
+            action.steps.iter().all(|step| manifest::operation(
+                &self.identity.manifest,
+                step.operation
+            )
+            .is_ok_and(|operation| matches!(
+                operation.kind,
+                OperationKind::Update | OperationKind::Delete
+            ))),
             repository::ReferenceUnavailable
         );
         Ok(InvocationContext {
@@ -661,7 +670,7 @@ impl Application {
             auth::Principal::Service(_) => anyhow::bail!(RequestError::InvalidRequest),
             auth::Principal::User(user) => ("user", user.id.as_str(), user.tenant.as_str()),
         };
-        let action = manifest::action(&self.manifest, binding.action)?;
+        let action = manifest::action(&self.identity.manifest, binding.action)?;
         // Existing receipt columns persist this digest. It binds every execution
         // identity field; changing an adapter or binding cannot reuse its claim.
         let mut targets = targets.clone();
@@ -712,7 +721,7 @@ impl Application {
         principal: &auth::Principal,
     ) -> Result<()> {
         for step in action.steps {
-            let op = manifest::operation(&self.manifest, step.operation)?;
+            let op = manifest::operation(&self.identity.manifest, step.operation)?;
             if op.kind != OperationKind::Create {
                 continue;
             }
@@ -807,14 +816,16 @@ impl Application {
         anonymous: bool,
     ) -> std::result::Result<InvocationAdmission, RequestError> {
         let request = self
-            .admission_limits
+            .limits
+            .admission
             .requests()
             .request()
             .await
             .map_err(|_| RequestError::Busy)?;
         let anonymous_write = self.anonymous_write(anonymous).await?;
         let database = self
-            .admission_limits
+            .limits
+            .admission
             .database()
             .acquire()
             .await

@@ -40,11 +40,11 @@ impl JobRuntime {
 
 impl Application {
     pub(super) fn job_request_scope(&self) -> std::result::Result<RequestScope, RequestError> {
-        let jobs = self.jobs.as_ref().ok_or(RequestError::Rejected)?;
+        let jobs = self.services.jobs.as_ref().ok_or(RequestError::Rejected)?;
         Ok(RequestScope::current_or_new(
             jobs.lifecycle.clone(),
             self.runtime.limits().wall_time,
-            self.database_statement_limit,
+            self.limits.database_statements,
         ))
     }
 
@@ -68,7 +68,8 @@ impl Application {
                             .await
                             .map_err(RequestError::database)?;
                         let time = self.temporal_attempt(&mut tx).await?;
-                        let generation = self.generation.get().ok_or(RequestError::Busy)?;
+                        let generation =
+                            self.identity.generation.get().ok_or(RequestError::Busy)?;
                         let output = match command {
                             Command::Inspect { after } => Output::Jobs(
                                 tx.inspect_jobs(generation, &after)
@@ -89,6 +90,7 @@ impl Application {
                             }
                             Command::Grant { tenant, worker } => {
                                 let configured = self
+                                    .services
                                     .jobs
                                     .as_ref()
                                     .ok_or(RequestError::Rejected)?
@@ -101,13 +103,18 @@ impl Application {
                                     .ok_or(RequestError::Rejected)?;
                                 tx.grant_job_service(
                                     generation,
-                                    &self.contract,
+                                    &self.identity.contract,
                                     configured,
-                                    self.manifest.jobs.as_ref().ok_or(RequestError::Rejected)?,
+                                    self.identity
+                                        .manifest
+                                        .jobs
+                                        .as_ref()
+                                        .ok_or(RequestError::Rejected)?,
                                 )
                                 .await
                                 .map_err(RequestError::database)?;
                                 let recurring_resumed = self
+                                    .identity
                                     .manifest
                                     .jobs
                                     .as_ref()
@@ -132,7 +139,8 @@ impl Application {
                                 Output::Done
                             }
                             Command::Reconcile { id } => {
-                                let jobs = self.jobs.as_ref().ok_or(RequestError::Rejected)?;
+                                let jobs =
+                                    self.services.jobs.as_ref().ok_or(RequestError::Rejected)?;
                                 let previous = tx
                                     .reconciliation_source(generation, &id)
                                     .await
@@ -148,7 +156,7 @@ impl Application {
                                         tenant: previous.scope().tenant.clone(),
                                     },
                                     previous.worker(),
-                                    &self.contract,
+                                    &self.identity.contract,
                                 )
                                 .await
                                 .map_err(RequestError::database)?;
@@ -166,8 +174,9 @@ impl Application {
                                     )
                                     .await
                                     .map_err(RequestError::database)?;
-                                let action = manifest::action(&self.manifest, previous.action().0)
-                                    .map_err(RequestError::database)?;
+                                let action =
+                                    manifest::action(&self.identity.manifest, previous.action().0)
+                                        .map_err(RequestError::database)?;
                                 let id = QueueContext {
                                     tx: &mut tx,
                                     calls: &mut calls,
@@ -198,7 +207,7 @@ impl Application {
     pub(super) async fn admit_job_invocation_work(
         &self,
     ) -> std::result::Result<action::InvocationAdmission, RequestError> {
-        let jobs = self.jobs.as_ref().ok_or(RequestError::Rejected)?;
+        let jobs = self.services.jobs.as_ref().ok_or(RequestError::Rejected)?;
         let request = WORKER_SLOT
             .try_with(|slot| Arc::ptr_eq(&slot.owner, &jobs.workers).then(|| slot.permit.clone()))
             .ok()
@@ -243,7 +252,7 @@ impl Application {
                     .map_err(RequestError::database)?;
                 // Deployment admission precedes the fresh durable lifecycle sample.
                 let now = self.temporal_attempt(&mut tx).await?.timestamp();
-                let generation = self.generation.get().ok_or(RequestError::Busy)?;
+                let generation = self.identity.generation.get().ok_or(RequestError::Busy)?;
                 // The durable time read and queue claim consume the same
                 // logical allowance as the following action invocation.
                 let mut calls = 15;
@@ -262,10 +271,11 @@ impl Application {
     /// One due schedule and one bounded query frontier. Oldest due time gives
     /// other tenants/schedules a turn after each committed batch.
     pub(crate) async fn run_recurrence_once(&self) -> std::result::Result<(), RequestError> {
-        let Some(jobs) = &self.jobs else {
+        let Some(jobs) = &self.services.jobs else {
             return Ok(());
         };
         if self
+            .identity
             .manifest
             .jobs
             .as_ref()
@@ -286,7 +296,8 @@ impl Application {
                             .await
                             .map_err(RequestError::database)?;
                         let time = self.temporal_attempt(&mut tx).await?;
-                        let generation = self.generation.get().ok_or(RequestError::Busy)?;
+                        let generation =
+                            self.identity.generation.get().ok_or(RequestError::Busy)?;
                         let rows = tx
                             .rows(
                                 &noxide_store::statements::jobs::NEXT_DUE_RECURRING,
@@ -301,6 +312,7 @@ impl Application {
                             return Self::finish_commit(&mut tx, ()).await;
                         };
                         let declaration = self
+                            .identity
                             .manifest
                             .jobs
                             .as_ref()
@@ -322,7 +334,7 @@ impl Application {
                             tx: &mut tx,
                             calls: &mut calls,
                         }
-                        .schedule_grant(&scope, &declaration.worker, &self.contract)
+                        .schedule_grant(&scope, &declaration.worker, &self.identity.contract)
                         .await
                         .map_err(RequestError::database)?;
                         let Some(mut batch) = (QueueContext {
@@ -355,7 +367,7 @@ impl Application {
                         let input = self
                             .canonical_job_input(declaration.action, &input)
                             .map_err(RequestError::database)?;
-                        let version = manifest::action(&self.manifest, declaration.action)
+                        let version = manifest::action(&self.identity.manifest, declaration.action)
                             .map_err(RequestError::database)?
                             .version;
                         let next = if declaration.selection.is_some() {
@@ -452,7 +464,7 @@ impl Application {
     pub async fn run_job_once(
         &self,
     ) -> std::result::Result<Option<super::jobs::JobRunOutcome>, RequestError> {
-        let jobs = self.jobs.as_ref().ok_or(RequestError::Rejected)?;
+        let jobs = self.services.jobs.as_ref().ok_or(RequestError::Rejected)?;
         let slot = Arc::new(
             jobs.workers
                 .clone()
@@ -479,11 +491,11 @@ impl Application {
     }
 
     pub fn start_job_service(self: &Arc<Self>) -> Result<Option<JobService>> {
-        let Some(jobs) = &self.jobs else {
+        let Some(jobs) = &self.services.jobs else {
             return Ok(None);
         };
         ensure!(
-            self.generation.get().is_some(),
+            self.identity.generation.get().is_some(),
             "application is not activated"
         );
         jobs.lifecycle.ensure_idle()?;
@@ -529,6 +541,7 @@ impl Application {
             // cleanup still owns its request and database permits. The same
             // registry waits for physical stop using original admitted deadlines.
             let drained = app
+                .services
                 .jobs
                 .as_ref()
                 .expect("worker runtime")
@@ -539,7 +552,8 @@ impl Application {
                 anyhow::bail!("job worker task failed; ownership quarantined");
             }
             drained?;
-            app.jobs
+            app.services
+                .jobs
                 .as_ref()
                 .expect("worker runtime")
                 .running

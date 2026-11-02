@@ -55,8 +55,8 @@ impl Application {
         input: &Fields,
     ) -> Result<Prepared> {
         Ok(Prepared::ready(render::recovery(
-            &self.presentation,
-            &self.manifest,
+            &self.web.presentation,
+            &self.identity.manifest,
             action.id,
             &FormCredentials {
                 upload_ticket: self.bound_upload_ticket(action.id, submission),
@@ -102,22 +102,24 @@ impl Application {
                 let source = if outcome.kind == MutationKind::Deleted {
                     original.get(&(outcome.resource, outcome.id)).cloned()
                 } else {
-                    repository::load(tx, &self.manifest, outcome.resource, outcome.id).await?
+                    repository::load(tx, &self.identity.manifest, outcome.resource, outcome.id)
+                        .await?
                 }
                 .ok_or_else(|| anyhow::anyhow!("missing reference source"))?;
                 ensure!(
                     source.incarnation == outcome.incarnation,
                     "navigation source changed"
                 );
-                let parent = manifest::reference_resource(&self.manifest, outcome.resource, field)?
-                    .ok_or_else(|| anyhow::anyhow!("missing reference schema"))?;
+                let parent =
+                    manifest::reference_resource(&self.identity.manifest, outcome.resource, field)?
+                        .ok_or_else(|| anyhow::anyhow!("missing reference schema"))?;
                 let id = source
                     .record
                     .fields
                     .get(field)
                     .ok_or_else(|| anyhow::anyhow!("missing reference value"))?
                     .parse()?;
-                let destination = repository::load(tx, &self.manifest, parent.id, id)
+                let destination = repository::load(tx, &self.identity.manifest, parent.id, id)
                     .await?
                     .ok_or_else(|| anyhow::anyhow!("missing reference destination"))?;
                 (parent.id, id, destination.incarnation)
@@ -152,7 +154,7 @@ impl Application {
             "receipt contract differs"
         );
         for (outcome, step) in receipt.outcomes.iter().zip(action.steps) {
-            let op = manifest::operation(&self.manifest, step.operation)?;
+            let op = manifest::operation(&self.identity.manifest, step.operation)?;
             let kind = match op.kind {
                 OperationKind::Create => MutationKind::Created,
                 OperationKind::Update => MutationKind::Updated,
@@ -181,7 +183,7 @@ impl Application {
             }
         }
         let public_create = action.steps.iter().position(|step| {
-            manifest::operation(&self.manifest, step.operation)
+            manifest::operation(&self.identity.manifest, step.operation)
                 .is_ok_and(|op| op.kind == OperationKind::Create && manifest::is_public(op))
         });
         ensure!(
@@ -212,7 +214,7 @@ impl Application {
             receipt.source.as_ref() == Some(&action.redirect.source),
             "receipt navigation source differs"
         );
-        let route = manifest::route(&self.manifest, action.redirect.route())?;
+        let route = manifest::route(&self.identity.manifest, action.redirect.route())?;
         if let Some(destination) = &receipt.destination {
             ensure!(
                 route.resource == Some(destination.resource) && destination.route == route.id,
@@ -252,7 +254,7 @@ impl Application {
         } else {
             success()
         };
-        let route = manifest::route(&self.manifest, action.redirect.route())?;
+        let route = manifest::route(&self.identity.manifest, action.redirect.route())?;
         if let Some(destination) = receipt.destination {
             Ok(Prepared {
                 fallback,
@@ -273,8 +275,8 @@ impl Application {
                 }),
                 &RenderContext {
                     checkpoint: crate::database::lifecycle::RequestScope::checkpoint_current,
-                    presentation: &self.presentation,
-                    manifest: Some(&self.manifest),
+                    presentation: &self.web.presentation,
+                    manifest: Some(&self.identity.manifest),
                     ..RenderContext::empty()
                 },
             )?))
@@ -308,7 +310,7 @@ impl Application {
                 .ok_or_else(|| anyhow::anyhow!("navigation database call budget"))?;
             let mut tx = self.database.begin_read(deadline.into_std()).await?;
             self.admission(&mut tx, false).await?;
-            let time = if crate::authority::uses_time(&self.manifest) {
+            let time = if crate::authority::uses_time(&self.identity.manifest) {
                 database_calls = database_calls
                     .checked_sub(1)
                     .ok_or_else(|| anyhow::anyhow!("navigation clock call budget"))?;
@@ -317,7 +319,7 @@ impl Application {
                 None
             };
             let mut authority = self.authority_context(time)?;
-            let route = manifest::route(&self.manifest, destination.route)?;
+            let route = manifest::route(&self.identity.manifest, destination.route)?;
             let principal = if route.access == Access::Public {
                 auth::Principal::Anonymous
             } else {
@@ -331,7 +333,7 @@ impl Application {
             let record = repository::authorize_page_resource(
                 &mut repository::ReadContext {
                     tx: &mut tx,
-                    manifest: &self.manifest,
+                    manifest: &self.identity.manifest,
                     principal: &principal,
                     authority: &mut authority,
                     budget: repository::ReadBudget::Action(&mut database_calls),
@@ -350,7 +352,7 @@ impl Application {
                 return Ok(None);
             }
             Ok(Some(render::resolve(
-                &self.manifest,
+                &self.identity.manifest,
                 &RouteRef {
                     params: Default::default(),
                     route: destination.route,

@@ -70,7 +70,7 @@ async fn provider_contract(database: Database) {
     let mut requests = Vec::new();
     while let Ok(Ok(permit)) = tokio::time::timeout(
         Duration::from_millis(10),
-        app.admission_limits.requests().request(),
+        app.limits.admission.requests().request(),
     )
     .await
     {
@@ -79,7 +79,7 @@ async fn provider_contract(database: Database) {
     let mut connections = Vec::new();
     while let Ok(Ok(permit)) = tokio::time::timeout(
         Duration::from_millis(10),
-        app.admission_limits.database().acquire(),
+        app.limits.admission.database().acquire(),
     )
     .await
     {
@@ -92,7 +92,7 @@ async fn provider_contract(database: Database) {
     let mut wasm = Vec::new();
     while let Ok(Ok(permit)) = tokio::time::timeout(
         Duration::from_millis(10),
-        app.admission_limits.wasm().acquire(),
+        app.limits.admission.wasm().acquire(),
     )
     .await
     {
@@ -229,7 +229,7 @@ async fn startup_unknown_commit_never_publishes_temporal_readiness() {
         1,
         "commit happened but acknowledgement was lost"
     );
-    assert!(app.generation.get().is_none());
+    assert!(app.identity.generation.get().is_none());
     assert!(temporal(&app).await.is_err());
     assert!(app.start_clock_service().is_err());
     app.activate().await.unwrap();
@@ -283,7 +283,7 @@ async fn blocked_tick_deadline_cancellation_and_service_drain_are_bounded() {
             .unwrap_err()
             .is_cancelled()
     );
-    assert!(app.maintenance.try_acquire().is_ok());
+    assert!(app.time.maintenance.try_acquire().is_ok());
     let service = app.start_clock_service().unwrap();
     assert!(app.start_clock_service().is_err());
     tokio::time::sleep(Duration::from_millis(1_020)).await;
@@ -291,15 +291,15 @@ async fn blocked_tick_deadline_cancellation_and_service_drain_are_bounded() {
         .await
         .unwrap()
         .unwrap();
-    assert!(!app.maintenance_running.load(Ordering::Acquire));
-    assert!(app.maintenance.try_acquire().is_ok());
+    assert!(!app.time.maintenance_running.load(Ordering::Acquire));
+    assert!(app.time.maintenance.try_acquire().is_ok());
     writer.rollback().await.unwrap();
     app.tick_clock().await.unwrap();
     assert_eq!(clock(&database).await[2], before[2] + 1);
     let restarted = app.start_clock_service().unwrap();
     drop(restarted); // Early serve cancellation/error uses this path.
     tokio::time::timeout(tick_wait(), async {
-        while app.maintenance_running.load(Ordering::Acquire) {
+        while app.time.maintenance_running.load(Ordering::Acquire) {
             tokio::task::yield_now().await;
         }
     })
@@ -314,7 +314,7 @@ async fn unavailable_maintenance_capacity_cannot_renew_stale_time() {
     let app = Arc::new(build(database.clone(), HostKeys::generate().unwrap()).await);
     app.activate().await.unwrap();
     let startup = clock(&database).await;
-    let reserved = app.maintenance.try_acquire().unwrap();
+    let reserved = app.time.maintenance.try_acquire().unwrap();
     let service = app.start_clock_service().unwrap();
     tokio::time::sleep(Duration::from_millis(5_050)).await;
     assert_eq!(clock(&database).await, startup);
@@ -426,11 +426,11 @@ async fn postgres_lost_control_quarantines_capacity_and_service_readiness() {
         .unwrap();
     assert!(service.shutdown().await.is_err());
     assert!(
-        app.maintenance.try_acquire().is_err(),
+        app.time.maintenance.try_acquire().is_err(),
         "unknown cleanup must not release its reserved slot"
     );
     assert!(
-        app.maintenance_running.load(Ordering::Acquire),
+        app.time.maintenance_running.load(Ordering::Acquire),
         "unknown cleanup must not release service ownership"
     );
     assert!(app.start_clock_service().is_err());
@@ -451,7 +451,7 @@ async fn aborted_service_keeps_unknown_owner_and_temporal_readiness_quarantined(
     let service = app.start_clock_service().unwrap();
     service.task.as_ref().unwrap().abort();
     assert!(service.shutdown().await.is_err());
-    assert!(app.maintenance_running.load(Ordering::Acquire));
+    assert!(app.time.maintenance_running.load(Ordering::Acquire));
     assert!(matches!(temporal(&app).await, Err(RequestError::Busy)));
     assert!(app.start_clock_service().is_err());
 }

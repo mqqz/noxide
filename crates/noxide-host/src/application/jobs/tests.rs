@@ -204,7 +204,7 @@ impl Case {
         if let Some(clock) = self.clock.take() {
             clock.shutdown().await.unwrap();
         }
-        if let Some(jobs) = &self.app.jobs {
+        if let Some(jobs) = &self.app.services.jobs {
             jobs.lifecycle.drain().await.unwrap();
         }
         self.app.request_lifecycle.drain().await.unwrap();
@@ -213,6 +213,7 @@ impl Case {
     pub(in crate::application) async fn form(&self) -> (String, String) {
         let route = self
             .app
+            .identity
             .manifest
             .routes
             .iter()
@@ -281,7 +282,7 @@ impl Case {
                             tx: &mut tx,
                             calls: &mut calls,
                         }
-                        .claim(self.app.generation.get().unwrap(), now)
+                        .claim(self.app.identity.generation.get().unwrap(), now)
                         .await
                         .unwrap();
                         tx.commit().await.unwrap();
@@ -315,10 +316,15 @@ impl Case {
             .await
             .unwrap();
         let target = &job.targets()["record"];
-        let stored = repository::load(&mut tx, &self.app.manifest, target.resource, target.id)
-            .await
-            .unwrap()
-            .unwrap();
+        let stored = repository::load(
+            &mut tx,
+            &self.app.identity.manifest,
+            target.resource,
+            target.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let receipts = tx
             .fetch::<1>(
                 "SELECT CAST(COUNT(*) AS TEXT) FROM nx_receipts WHERE nonce=$1",
@@ -355,17 +361,21 @@ impl Case {
             .unwrap();
         let target = &job.targets()["record"];
         let storage = tx
-            .storage_resource(&self.app.manifest, target.resource)
+            .storage_resource(&self.app.identity.manifest, target.resource)
             .await
             .unwrap();
         if expiry {
-            let mut fields =
-                repository::load(&mut tx, &self.app.manifest, target.resource, target.id)
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .record
-                    .fields;
+            let mut fields = repository::load(
+                &mut tx,
+                &self.app.identity.manifest,
+                target.resource,
+                target.id,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .record
+            .fields;
             fields.insert("expires_at".into(), "0".into());
             tx.execute(
                 "UPDATE nx_records SET fields=$1,revision=revision+1 WHERE resource=$2 AND id=$3",
@@ -413,7 +423,7 @@ async fn success(database: Option<Database>) {
         ("succeeded".into(), "finished".into(), 1)
     );
     case.revoke().await;
-    case.app.lifecycle_clock.quarantine();
+    case.app.time.freshness.quarantine();
     assert!(
         matches!(
             case.app.invoke_job(&claim).await.unwrap(),
@@ -458,7 +468,7 @@ async fn rejection(database: Option<Database>) {
         .await
         .unwrap();
     assert!(matches!(
-        ValidatedActionRejection::from_stored(&case.app.manifest.actions[1], &rows[0][0])
+        ValidatedActionRejection::from_stored(&case.app.identity.manifest.actions[1], &rows[0][0])
             .unwrap()
             .as_rejection(),
         ActionRejection::GuardRejected { input: None, .. }
@@ -753,10 +763,15 @@ async fn known_retry(database: Option<Database>) {
         .begin_read(std::time::Instant::now() + std::time::Duration::from_secs(2))
         .await
         .unwrap();
-    let row = repository::load(&mut tx, &case.app.manifest, 1, job.targets()["record"].id)
-        .await
-        .unwrap()
-        .unwrap();
+    let row = repository::load(
+        &mut tx,
+        &case.app.identity.manifest,
+        1,
+        job.targets()["record"].id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(
         row.revision, 2,
         "known aborted guest rerun commits only once"
@@ -922,7 +937,10 @@ async fn derived_targets(database: Option<Database>, failure: Option<&str>) {
         .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
         .await
         .unwrap();
-    let storage = tx.storage_resource(&case.app.manifest, 2).await.unwrap();
+    let storage = tx
+        .storage_resource(&case.app.identity.manifest, 2)
+        .await
+        .unwrap();
     for id in 1..=2i64 {
         let sequence = tx.allocate_creation().await.unwrap();
         tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,$3,'team',$4,$5,1,$6)", &[storage.into(), id.into(), owner.as_str().into(), serde_json::to_string(&Fields::from([("label".into(), "Folder".into())])).unwrap().into(), format!("folder_{id}").into(), sequence.into()]).await.unwrap();
@@ -1188,10 +1206,15 @@ async fn maximum_effects_mode(database: Option<Database>, via_worker: bool) {
         );
         assert_eq!(followup.targets()["record"].revision, 0);
     }
-    let stored = repository::load(&mut tx, &case.app.manifest, 1, job.targets()["record"].id)
-        .await
-        .unwrap()
-        .unwrap();
+    let stored = repository::load(
+        &mut tx,
+        &case.app.identity.manifest,
+        1,
+        job.targets()["record"].id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(stored.revision, 5);
     tx.commit().await.unwrap();
     if let Some(claim) = &claim {

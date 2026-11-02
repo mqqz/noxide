@@ -25,17 +25,19 @@ impl Application {
         let entry_scope = self.request_scope(std::time::Duration::from_secs(3));
         entry_scope
             .run(async {
-                if self.registration == auth::Registration::Closed {
+                if self.web.registration == auth::Registration::Closed {
                     return Err(RequestError::InvalidRequest);
                 }
                 let request = self
-                    .admission_limits
+                    .limits
+                    .admission
                     .requests()
                     .request()
                     .await
                     .map_err(|_| RequestError::deadline())?;
                 let database = Arc::new(
-                    self.admission_limits
+                    self.limits
+                        .admission
                         .database()
                         .acquire()
                         .await
@@ -76,23 +78,24 @@ impl Application {
                             self.keys
                                 .verify_csrf(&token.nonce, csrf)
                                 .map_err(|_| RequestError::InvalidRequest)?;
-                            if !self.admission_limits.argon2_attempts.allow() {
+                            if !self.limits.admission.argon2_attempts.allow() {
                                 return Err(RequestError::Busy);
                             }
                             let permit = self
-                                .admission_limits
+                                .limits
+                                .admission
                                 .argon2
                                 .acquire()
                                 .await
                                 .map_err(|_| RequestError::deadline())?;
-                            let permits = self.admission_limits.hash_permits(
+                            let permits = self.limits.admission.hash_permits(
                                 permit,
                                 request.clone(),
                                 database.clone(),
                             );
                             auth::register(
                                 &mut tx,
-                                self.registration,
+                                self.web.registration,
                                 username,
                                 password,
                                 invite,
@@ -127,13 +130,15 @@ impl Application {
         entry_scope
             .run(async {
                 let _request = self
-                    .admission_limits
+                    .limits
+                    .admission
                     .requests()
                     .request()
                     .await
                     .map_err(|_| RequestError::deadline())?;
                 let _database = self
-                    .admission_limits
+                    .limits
+                    .admission
                     .database()
                     .acquire()
                     .await
@@ -157,10 +162,11 @@ impl Application {
                                 .await
                                 .map_err(RequestError::database)?;
                             let wall = security::now().map_err(|_| RequestError::Rejected)?;
-                            let now = security::observe_clock_read(&mut tx, wall, &self.clock)
-                                .await
-                                .map_err(RequestError::database)?;
-                            self.clock.fetch_max(now, Ordering::Relaxed);
+                            let now =
+                                security::observe_clock_read(&mut tx, wall, &self.time.observed)
+                                    .await
+                                    .map_err(RequestError::database)?;
+                            self.time.observed.fetch_max(now, Ordering::Relaxed);
                             let (_, principal) = self
                                 .route_identity(&mut tx, &Access::Authenticated, Some(cookie), now)
                                 .await?
@@ -191,13 +197,15 @@ impl Application {
                 let deadline = scope.work_deadline();
                 timeout_at(deadline, async {
                     let _request = self
-                        .admission_limits
+                        .limits
+                        .admission
                         .session_requests()
                         .acquire()
                         .await
                         .map_err(|_| RequestError::deadline())?;
                     let _database = self
-                        .admission_limits
+                        .limits
+                        .admission
                         .session_database()
                         .acquire()
                         .await
@@ -215,7 +223,7 @@ impl Application {
                             // authorization inside its own transaction.
                             let now = security::now()
                                 .map_err(|_| RequestError::Rejected)?
-                                .max(self.clock.load(Ordering::Relaxed));
+                                .max(self.time.observed.load(Ordering::Relaxed));
                             let principal =
                                 match auth::authenticate(&mut tx, &self.keys, cookie, now).await {
                                     Ok((_, auth::Principal::User(user))) => Some(user.id),
@@ -237,7 +245,7 @@ impl Application {
             .ok()
             .and_then(|now| {
                 self.keys
-                    .verify(cookie, now.max(self.clock.load(Ordering::Relaxed)))
+                    .verify(cookie, now.max(self.time.observed.load(Ordering::Relaxed)))
                     .ok()
             })
             .is_some_and(|t| t.kind == TokenKind::Session)
@@ -248,13 +256,15 @@ impl Application {
         entry_scope
             .run(async {
                 let _request = self
-                    .admission_limits
+                    .limits
+                    .admission
                     .requests()
                     .request()
                     .await
                     .map_err(|_| RequestError::deadline())?;
                 let _database = self
-                    .admission_limits
+                    .limits
+                    .admission
                     .database()
                     .acquire()
                     .await
@@ -277,10 +287,10 @@ impl Application {
                             .await
                             .map_err(RequestError::database)?;
                         let now = security::now().map_err(|_| RequestError::Rejected)?;
-                        let now = security::observe_clock_read(&mut tx, now, &self.clock)
+                        let now = security::observe_clock_read(&mut tx, now, &self.time.observed)
                             .await
                             .map_err(RequestError::database)?;
-                        self.clock.fetch_max(now, Ordering::Relaxed);
+                        self.time.observed.fetch_max(now, Ordering::Relaxed);
 
                         let (token, cookie) = self
                             .keys
@@ -314,13 +324,15 @@ impl Application {
         entry_scope
             .run(async {
                 let request = self
-                    .admission_limits
+                    .limits
+                    .admission
                     .requests()
                     .request()
                     .await
                     .map_err(|_| RequestError::deadline())?;
                 let database = Arc::new(
-                    self.admission_limits
+                    self.limits
+                        .admission
                         .database()
                         .acquire()
                         .await
@@ -360,16 +372,17 @@ impl Application {
                                 .verify_csrf(&token.nonce, csrf)
                                 .map_err(|_| RequestError::InvalidRequest)?;
 
-                            if !self.admission_limits.argon2_attempts.allow() {
+                            if !self.limits.admission.argon2_attempts.allow() {
                                 return Err(RequestError::Busy);
                             }
                             let permit = self
-                                .admission_limits
+                                .limits
+                                .admission
                                 .argon2
                                 .acquire()
                                 .await
                                 .map_err(|_| RequestError::deadline())?;
-                            let permits = self.admission_limits.hash_permits(
+                            let permits = self.limits.admission.hash_permits(
                                 permit,
                                 request.clone(),
                                 database.clone(),
@@ -400,13 +413,15 @@ impl Application {
         entry_scope
             .run(async {
                 let _request = self
-                    .admission_limits
+                    .limits
+                    .admission
                     .requests()
                     .request()
                     .await
                     .map_err(|_| RequestError::deadline())?;
                 let _database = self
-                    .admission_limits
+                    .limits
+                    .admission
                     .database()
                     .acquire()
                     .await

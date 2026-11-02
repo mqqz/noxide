@@ -25,9 +25,9 @@ impl Application {
         let entry_scope = self.request_scope(self.runtime.limits().wall_time);
         entry_scope
             .run(async {
-                let binding = manifest::web_action(&self.manifest, action)
+                let binding = manifest::web_action(&self.identity.manifest, action)
                     .map_err(|_| RequestError::InvalidRequest)?;
-                let op = manifest::operation(&self.manifest, binding.steps[0].operation)
+                let op = manifest::operation(&self.identity.manifest, binding.steps[0].operation)
                     .map_err(|_| RequestError::InvalidRequest)?;
                 let admission = self
                     .admit_invocation(manifest::anonymous_action(op))
@@ -35,7 +35,7 @@ impl Application {
                 let owner = admission.owner;
                 owner
                     .run(async {
-                        let a = manifest::web_action(&self.manifest, action)
+                        let a = manifest::web_action(&self.identity.manifest, action)
                             .map_err(|_| RequestError::InvalidRequest)?;
                         let canonical = self
                             .canonical_action_input(a.core.id, &input)
@@ -148,13 +148,15 @@ impl Application {
         entry_scope
             .run(async {
                 let _request = self
-                    .admission_limits
+                    .limits
+                    .admission
                     .requests()
                     .request()
                     .await
                     .map_err(|_| RequestError::Busy)?;
                 let _database = self
-                    .admission_limits
+                    .limits
+                    .admission
                     .database()
                     .acquire()
                     .await
@@ -171,9 +173,9 @@ impl Application {
                         let mut budget = ExecutionBudget::new(self.runtime.limits(), deadline);
                         let mut retained_response = None;
                         let prepared = timeout_at(deadline, async {
-                            let a = manifest::web_action(&self.manifest, action)?;
+                            let a = manifest::web_action(&self.identity.manifest, action)?;
                             let core = ActionCore::of(a.core)?;
-                            let binding = manifest::web_binding(&self.manifest, action)?;
+                            let binding = manifest::web_binding(&self.identity.manifest, action)?;
                             let mut tx = self.database.begin(deadline.into_std()).await?;
                             self.admission(&mut tx, false).await?;
                             let now = security::now()?;
@@ -232,13 +234,13 @@ impl Application {
                                 } else {
                                     retained_response = Some(navigation::Prepared::ready(
                                         render::form_already_used(
-                                            &self.presentation,
-                                            &self.manifest,
+                                            &self.web.presentation,
+                                            &self.identity.manifest,
                                         )?,
                                     ));
                                     navigation::Prepared::ready(render::form_already_used(
-                                        &self.presentation,
-                                        &self.manifest,
+                                        &self.web.presentation,
+                                        &self.identity.manifest,
                                     )?)
                                 };
                                 if tx.commit().await.is_err() {
@@ -246,7 +248,7 @@ impl Application {
                                 }
                                 return Ok(response);
                             }
-                            let time = if crate::authority::uses_time(&self.manifest) {
+                            let time = if crate::authority::uses_time(&self.identity.manifest) {
                                 budget.spend(1)?;
                                 Some(self.temporal_after_admission(&mut tx).await?)
                             } else {
@@ -275,7 +277,7 @@ impl Application {
                                         let target = targets[&a.targets[0].name].clone();
                                         let stored = repository::load(
                                             &mut tx,
-                                            &self.manifest,
+                                            &self.identity.manifest,
                                             target.resource,
                                             target.id,
                                         )
@@ -319,8 +321,8 @@ impl Application {
                                 values: Fields::new(),
                             };
                             let rendered = render::recovery(
-                                &self.presentation,
-                                &self.manifest,
+                                &self.web.presentation,
+                                &self.identity.manifest,
                                 action,
                                 &credentials,
                                 input,
@@ -376,10 +378,10 @@ impl Application {
         budget: &mut ExecutionBudget,
         receipt_commit: &mut Option<navigation::Prepared>,
     ) -> Result<(Option<Transaction>, navigation::Prepared)> {
-        let a = manifest::web_action(&self.manifest, action)?;
+        let a = manifest::web_action(&self.identity.manifest, action)?;
         let input = canonical.web_fields();
         let input = &input;
-        let binding = manifest::web_binding(&self.manifest, action)?;
+        let binding = manifest::web_binding(&self.identity.manifest, action)?;
         let mut tx = self.database.begin(budget.deadline.into_std()).await?;
         self.admission(&mut tx, false).await?;
         let (context, session, now) = self
@@ -439,7 +441,9 @@ impl Application {
     ) -> Result<Rendered> {
         use action::Settled;
         let (errors, message) = match outcome {
-            Settled::Unavailable => return render::unavailable(&self.presentation, &self.manifest),
+            Settled::Unavailable => {
+                return render::unavailable(&self.web.presentation, &self.identity.manifest);
+            }
             Settled::TargetConflict => return Ok(render::target_conflict()),
             Settled::Conflict { target, stored } => {
                 let (session, now) =
@@ -465,8 +469,8 @@ impl Application {
             },
         };
         render::recovery(
-            &self.presentation,
-            &self.manifest,
+            &self.web.presentation,
+            &self.identity.manifest,
             a.id,
             &FormCredentials {
                 upload_ticket: self.bound_upload_ticket(a.id, submission),
@@ -498,7 +502,7 @@ impl Application {
             return Ok(None);
         };
         ensure!(
-            stored_subject == subject && contract == self.contract,
+            stored_subject == subject && contract == self.identity.contract,
             RequestError::InvalidRequest
         );
         Ok(Some([digest, outcome]))

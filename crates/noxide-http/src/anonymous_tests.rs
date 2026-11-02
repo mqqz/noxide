@@ -705,7 +705,8 @@ async fn anonymous_http_csrf_cookie_flags_rotation_and_write_limits() {
         assert_eq!(rows(&db).await, before);
     }
     let held = app
-        .admission_limits
+        .limits
+        .admission
         .anonymous_writes
         .acquire()
         .await
@@ -804,7 +805,7 @@ async fn anonymous_http_csrf_cookie_flags_rotation_and_write_limits() {
     )
     .unwrap();
     assert!(!rotation.contains(&old));
-    while app.admission_limits.anonymous_write_attempts.allow() {}
+    while app.limits.admission.anonymous_write_attempts.allow() {}
     assert_eq!(
         post(
             router.clone(),
@@ -1262,7 +1263,10 @@ async fn capability_conflict_projection_contract(db: Database) {
         .begin(Instant::now() + Duration::from_secs(2))
         .await
         .unwrap();
-    let storage = tx.storage_resource(&app.manifest, 1).await.unwrap();
+    let storage = tx
+        .storage_resource(&app.identity.manifest, 1)
+        .await
+        .unwrap();
     let changed = Fields::from([
         ("body".into(), "current_public_value".into()),
         ("published".into(), "true".into()),

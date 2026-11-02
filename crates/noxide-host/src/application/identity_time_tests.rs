@@ -25,7 +25,7 @@ fn candidate_classification_uses_memory_effective_time_without_database_access()
         .unwrap();
     assert!(app.keys.verify(&cookie, now).is_ok());
     assert!(app.session_envelope(&cookie));
-    app.clock.fetch_max(now + 20, Ordering::Relaxed);
+    app.time.observed.fetch_max(now + 20, Ordering::Relaxed);
     assert!(!app.session_envelope(&cookie));
     assert!(!temp.path().join("absent.db").exists());
 }

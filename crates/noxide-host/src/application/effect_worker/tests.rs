@@ -30,19 +30,19 @@ impl Application {
         u16,
         Option<rustls::RootCertStore>,
     ) {
-        let runtime = self.effects.as_ref().expect("effect runtime");
+        let runtime = self.services.effects.as_ref().expect("effect runtime");
         (
-            self.manifest.clone(),
-            self.deployment.clone(),
-            self.contract.clone(),
+            self.identity.manifest.clone(),
+            self.identity.deployment.clone(),
+            self.identity.contract.clone(),
             runtime.effective.clone(),
-            self.database_statement_limit,
+            self.limits.database_statements,
             runtime.test_roots.lock().unwrap().clone(),
         )
     }
     /// One delivery context per test application, standing in for the worker process.
     pub(crate) async fn effect_delivery(&self) -> Arc<EffectDelivery> {
-        let runtime = self.effects.as_ref().expect("effect runtime");
+        let runtime = self.services.effects.as_ref().expect("effect runtime");
         runtime
             .delivery
             .get_or_init(|| async {
@@ -233,6 +233,7 @@ async fn case(db: Option<Database>, proxy: SocketAddr, secret: bool) -> Case {
     let case = Case::configured(db, manifest, deployment).await;
     *case
         .app
+        .services
         .effects
         .as_ref()
         .unwrap()

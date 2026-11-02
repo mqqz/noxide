@@ -20,7 +20,7 @@ pub enum JobRunOutcome {
 impl Application {
     fn job_receipt(&self, job: &CapturedJob, payload: &str) -> Result<navigation::SemanticReceipt> {
         let (id, version) = job.action();
-        let action = manifest::action(&self.manifest, id)?;
+        let action = manifest::action(&self.identity.manifest, id)?;
         ensure!(
             action.version == version,
             "job receipt action version differs"
@@ -297,9 +297,9 @@ impl Application {
     }
 
     pub(crate) fn canonical_job_input(&self, id: u32, input: &Fields) -> Result<Fields> {
-        let action = manifest::action(&self.manifest, id)?;
-        let canonical = manifest::canonical_input(&self.manifest, action, input)?;
-        manifest::validate_input(&self.manifest, action, &canonical)?;
+        let action = manifest::action(&self.identity.manifest, id)?;
+        let canonical = manifest::canonical_input(&self.identity.manifest, action, input)?;
+        manifest::validate_input(&self.identity.manifest, action, &canonical)?;
         Ok(canonical)
     }
 
@@ -323,7 +323,7 @@ impl Application {
         self.seal_job_target_rows(
             &mut repository::ReadContext {
                 tx,
-                manifest: &self.manifest,
+                manifest: &self.identity.manifest,
                 principal: &principal,
                 authority: &mut authority,
                 budget: repository::ReadBudget::Action(calls),
@@ -358,9 +358,14 @@ impl Application {
                     .checked_sub(2)
                     .ok_or_else(|| anyhow::anyhow!("database call budget"))?;
                 entry.insert(
-                    repository::load(tx, &self.manifest, candidate.resource, candidate.id)
-                        .await?
-                        .ok_or(repository::ReferenceUnavailable)?,
+                    repository::load(
+                        tx,
+                        &self.identity.manifest,
+                        candidate.resource,
+                        candidate.id,
+                    )
+                    .await?
+                    .ok_or(repository::ReferenceUnavailable)?,
                 );
             }
             let stored = &cache[&key];
@@ -385,11 +390,11 @@ impl Application {
     ) -> Result<BTreeMap<String, SealedTarget>> {
         let grant = locked.grant();
         ensure!(
-            Some(&grant.scope.deployment) == self.generation.get()
-                && grant.contract == self.contract,
+            Some(&grant.scope.deployment) == self.identity.generation.get()
+                && grant.contract == self.identity.contract,
             repository::ReferenceUnavailable
         );
-        let action = manifest::action(&self.manifest, id)?;
+        let action = manifest::action(&self.identity.manifest, id)?;
         let rule = grant
             .worker
             .actions
@@ -403,7 +408,7 @@ impl Application {
         ensure!(
             context.principal.authority_key()
                 == crate::jobs::locked_grant_principal(locked).authority_key()
-                && std::ptr::eq(context.manifest, self.manifest.as_ref()),
+                && std::ptr::eq(context.manifest, self.identity.manifest.as_ref()),
             repository::ReferenceUnavailable
         );
         let mut targets = BTreeMap::new();
@@ -432,7 +437,7 @@ impl Application {
                     && stored.revision > 0,
                 repository::ReferenceUnavailable
             );
-            let read = manifest::operation(&self.manifest, eligible)?;
+            let read = manifest::operation(&self.identity.manifest, eligible)?;
             ensure!(
                 repository::authorize_stored_read(context, read, stored).await?,
                 repository::ReferenceUnavailable
@@ -482,7 +487,7 @@ impl Application {
         time: Option<crate::lifecycle_clock::AttemptTime>,
         origin: &str,
     ) -> Result<()> {
-        let Some(contract) = &self.manifest.jobs else {
+        let Some(contract) = &self.identity.manifest.jobs else {
             return Ok(());
         };
         let schedules: Vec<_> = contract
@@ -500,6 +505,7 @@ impl Application {
         let time = time.ok_or(repository::CalculationUnavailable)?;
         let scope = JobScope {
             deployment: self
+                .identity
                 .generation
                 .get()
                 .ok_or_else(|| anyhow::anyhow!("application is not activated"))?
@@ -516,17 +522,18 @@ impl Application {
         let mut final_rows = effects.written_rows.clone();
         #[cfg(test)]
         for ((resource, id), row) in &final_rows {
-            let loaded = repository::load(&mut effects.tx, &self.manifest, *resource, *id).await?;
+            let loaded =
+                repository::load(&mut effects.tx, &self.identity.manifest, *resource, *id).await?;
             assert_eq!(loaded.as_ref(), Some(row), "reused job target row diverged");
         }
         // These are authoritative row-lock proofs within this transaction, not
         // configuration metadata. No resource writes occur between fixed effects.
         let mut locked_grants = BTreeMap::new();
         for schedule in schedules {
-            let destination = manifest::action(&self.manifest, schedule.action)?;
+            let destination = manifest::action(&self.identity.manifest, schedule.action)?;
             let (due, raw) = {
                 let values = repository::ScheduleValues {
-                    manifest: &self.manifest,
+                    manifest: &self.identity.manifest,
                     input: &effects.request.input,
                     principal: &effects.principal,
                     grants: &effects.grants,
@@ -546,8 +553,8 @@ impl Application {
                 }
                 (due, raw)
             };
-            let input = manifest::canonical_input(&self.manifest, destination, &raw)?;
-            manifest::validate_input(&self.manifest, destination, &input)?;
+            let input = manifest::canonical_input(&self.identity.manifest, destination, &raw)?;
+            manifest::validate_input(&self.identity.manifest, destination, &input)?;
             if let std::collections::btree_map::Entry::Vacant(entry) =
                 locked_grants.entry(schedule.worker.as_str())
             {
@@ -556,7 +563,7 @@ impl Application {
                         tx: &mut effects.tx,
                         calls: &mut effects.calls,
                     }
-                    .schedule_grant(&scope, &schedule.worker, &self.contract)
+                    .schedule_grant(&scope, &schedule.worker, &self.identity.contract)
                     .await?,
                 );
             }
@@ -606,7 +613,7 @@ impl Application {
                 .seal_job_target_rows(
                     &mut repository::ReadContext {
                         tx: &mut effects.tx,
-                        manifest: &self.manifest,
+                        manifest: &self.identity.manifest,
                         principal: &principal,
                         authority: &mut authority,
                         budget: repository::ReadBudget::Action(&mut effects.calls),

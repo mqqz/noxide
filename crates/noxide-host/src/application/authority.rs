@@ -19,7 +19,7 @@ impl Application {
         self.target_allowed(
             &mut repository::ReadContext {
                 tx: &mut tx,
-                manifest: &self.manifest,
+                manifest: &self.identity.manifest,
                 principal,
                 authority: &mut authority,
                 budget: repository::ReadBudget::Query(&mut calls),
@@ -52,9 +52,10 @@ impl Application {
         Ok(crate::authority::Authority::new(
             time,
             crate::authority::DeploymentScope {
-                contract: self.deployment.clone(),
+                contract: self.identity.deployment.clone(),
                 incarnation: self.keys.incarnation().into(),
                 generation: self
+                    .identity
                     .generation
                     .get()
                     .ok_or_else(|| anyhow::anyhow!("application is not activated"))?

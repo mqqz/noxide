@@ -246,9 +246,9 @@ fn request(app: &Application) -> crate::database::lifecycle::AdmissionOwner {
 async fn provider(database: Database) {
     use crate::jobs::{JobScope, QueueContext};
     let app = Arc::new(app_fixture(&database).await);
-    let schedule = app.manifest.jobs.as_ref().unwrap().recurring[0].clone();
+    let schedule = app.identity.manifest.jobs.as_ref().unwrap().recurring[0].clone();
     let scope = JobScope {
-        deployment: app.generation.get().unwrap().clone(),
+        deployment: app.identity.generation.get().unwrap().clone(),
         tenant: "alpha".into(),
     };
     let (cutoff, cutoff_seq, cursor) = request(&app)
@@ -265,7 +265,7 @@ async fn provider(database: Database) {
                 tx: &mut tx,
                 calls: &mut calls,
             }
-            .schedule_grant(&scope, "expiry", &app.contract)
+            .schedule_grant(&scope, "expiry", &app.identity.contract)
             .await
             .unwrap();
             let mut batch = QueueContext {
@@ -342,7 +342,10 @@ async fn provider(database: Database) {
             .begin(std::time::Instant::now() + Duration::from_secs(5))
             .await
             .unwrap();
-        let storage = tx.storage_resource(&app.manifest, 1).await.unwrap();
+        let storage = tx
+            .storage_resource(&app.identity.manifest, 1)
+            .await
+            .unwrap();
         let ready = tx.field_expression("ready").unwrap();
         let sql = format!(
             "SELECT id FROM nx_records WHERE resource={storage} AND tenant='alpha' AND {ready}='true' AND created_seq<={cutoff_seq} ORDER BY created_seq ASC,id ASC LIMIT 2"
@@ -394,7 +397,7 @@ async fn provider(database: Database) {
     insertion.await.unwrap();
     app.checkpoint_clock().await.unwrap();
     request(&app).run(async {
-        let mut tx=database.begin(std::time::Instant::now()+app.runtime.limits().wall_time).await.unwrap();app.admission(&mut tx,false).await.unwrap();let mut calls=16;calls-=1;let time=app.temporal_after_admission(&mut tx).await.unwrap();let locked=QueueContext{tx:&mut tx,calls:&mut calls}.schedule_grant(&scope,"expiry",&app.contract).await.unwrap();
+        let mut tx=database.begin(std::time::Instant::now()+app.runtime.limits().wall_time).await.unwrap();app.admission(&mut tx,false).await.unwrap();let mut calls=16;calls-=1;let time=app.temporal_after_admission(&mut tx).await.unwrap();let locked=QueueContext{tx:&mut tx,calls:&mut calls}.schedule_grant(&scope,"expiry",&app.identity.contract).await.unwrap();
         calls-=1;
         let stored=tx.fetch::<3>("SELECT CAST(cutoff_ms AS TEXT),CAST(cutoff_seq AS TEXT),cursor FROM nx_job_recurring WHERE deployment=$1 AND tenant='alpha' AND name='repair'",&[scope.deployment.as_str().into()]).await.unwrap();assert_eq!(stored[0],[cutoff.unix_millis().to_string(),cutoff_seq.to_string(),cursor.clone()]);
         // Inspect the persisted selector continuation directly; the worker's
@@ -422,7 +425,7 @@ async fn provider(database: Database) {
                 tx: &mut tx,
                 calls: &mut calls,
             }
-            .schedule_grant(&beta, "expiry", &app.contract)
+            .schedule_grant(&beta, "expiry", &app.identity.contract)
             .await
             .unwrap();
             assert!(
@@ -459,7 +462,7 @@ async fn provider(database: Database) {
                 tx: &mut tx,
                 calls: &mut calls,
             }
-            .schedule_grant(&scope, "expiry", &app.contract)
+            .schedule_grant(&scope, "expiry", &app.identity.contract)
             .await
             .unwrap();
             // Three remaining logical calls cannot fund a candidate plus emit and
@@ -498,7 +501,14 @@ async fn provider(database: Database) {
         crate::database::lifecycle::observe_roots(app.run_recurrence_once()).await;
     result.unwrap();
     assert_eq!(roots.len(), 1);
-    app.jobs.as_ref().unwrap().lifecycle.drain().await.unwrap();
+    app.services
+        .jobs
+        .as_ref()
+        .unwrap()
+        .lifecycle
+        .drain()
+        .await
+        .unwrap();
     let (_, reserved, spent) = roots[0].statement_snapshot();
     assert_eq!(reserved, 0);
     assert!(spent <= 256);

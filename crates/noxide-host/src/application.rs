@@ -17,6 +17,7 @@ mod guests;
 mod jobs;
 mod navigation;
 mod page;
+mod state;
 mod submission;
 pub use accounts::LoginChallenge;
 pub use jobs::JobRunOutcome;
@@ -57,29 +58,15 @@ pub(crate) fn guest_error(error: anyhow::Error) -> anyhow::Error {
 }
 
 pub struct Application {
-    pub presentation: crate::Presentation,
-    pub assets: Arc<crate::assets::AssetBundle>,
-    pub blobs: Option<blobs::BlobRuntime>,
-    pub asset_responses: Arc<tokio::sync::Semaphore>,
-    pub registration: auth::Registration,
-    pub manifest: Arc<Manifest>,
-    pub(crate) plans: BTreeMap<u32, Arc<crate::query_plan::ListPlan>>,
+    pub identity: state::Identity,
+    pub web: state::Web,
+    pub limits: state::RequestLimits,
+    pub services: state::Services,
+    time: state::Time,
     pub(crate) keys: Arc<HostKeys>,
     database: Database,
-    jobs: Option<job_worker::JobRuntime>,
-    effects: Option<effect_worker::EffectRuntime>,
     runtime: guests::Guests,
-    contract: String,
-    deployment: String,
-    generation: OnceLock<String>,
-    clock: AtomicI64,
-    checkpointed: AtomicI64,
-    lifecycle_clock: crate::lifecycle_clock::Freshness,
-    maintenance: Arc<tokio::sync::Semaphore>,
-    maintenance_running: std::sync::atomic::AtomicBool,
-    pub admission_limits: AdmissionLimits,
     pub(crate) request_lifecycle: Arc<Registry>,
-    database_statement_limit: u16,
     #[cfg(any(test, feature = "test-support"))]
     pub postcommit_barrier:
         std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
@@ -104,17 +91,17 @@ impl Application {
 
     #[cfg(feature = "test-support")]
     pub fn test_clock(&self) -> &AtomicI64 {
-        &self.clock
+        &self.time.observed
     }
 
     #[cfg(feature = "test-support")]
     pub fn test_maintenance(&self) -> &Arc<tokio::sync::Semaphore> {
-        &self.maintenance
+        &self.time.maintenance
     }
 
     #[cfg(feature = "test-support")]
     pub fn test_maintenance_running(&self) -> &std::sync::atomic::AtomicBool {
-        &self.maintenance_running
+        &self.time.maintenance_running
     }
 
     /// Key access for tests of signed values; a deployed binary has no such route.
@@ -130,7 +117,7 @@ impl Application {
         RequestScope::current_or_new(
             self.request_lifecycle.clone(),
             cap,
-            self.database_statement_limit,
+            self.limits.database_statements,
         )
     }
     fn owned_request(
@@ -154,7 +141,7 @@ impl Application {
             self.request_lifecycle.clone(),
             outer,
             cap,
-            self.database_statement_limit,
+            self.limits.database_statements,
         )
     }
     async fn finish_commit<T>(
@@ -171,7 +158,7 @@ impl Application {
             (1..=256).contains(&limit),
             "database statement limit must be between 1 and 256"
         );
-        self.database_statement_limit = limit;
+        self.limits.database_statements = limit;
         Ok(self)
     }
     /// Operator restore fencing only: activation may adopt an effect queue copied
@@ -181,15 +168,16 @@ impl Application {
         self
     }
     pub fn with_registration(mut self, registration: auth::Registration) -> Self {
-        self.registration = registration;
+        self.web.registration = registration;
         self
     }
     pub fn with_signed_in_reserve(mut self, reserve: u8) -> Result<Self> {
         self.request_lifecycle.ensure_idle()?;
         ensure!(reserve <= 50, "signed_in_reserve must be between 0 and 50");
-        self.admission_limits = AdmissionLimits::new(
+        self.limits.admission = AdmissionLimits::new(
             reserve,
-            self.manifest
+            self.identity
+                .manifest
                 .routes
                 .iter()
                 .any(|r| r.access != noxide_protocol::Access::Public),
@@ -202,12 +190,12 @@ impl Application {
     /// Data requests repeat this fence inside their transaction.
     async fn admission(&self, tx: &mut Transaction, activate: bool) -> Result<()> {
         tx.check_storage().await?;
-        tx.check_schema(&self.manifest).await?;
+        tx.check_schema(&self.identity.manifest).await?;
         let generation = tx
-            .deployment(&self.deployment, self.keys.incarnation(), activate)
+            .deployment(&self.identity.deployment, self.keys.incarnation(), activate)
             .await?;
         ensure!(
-            self.generation.get() == Some(&generation),
+            self.identity.generation.get() == Some(&generation),
             "application is unactivated or retired"
         );
         Ok(())
@@ -216,20 +204,20 @@ impl Application {
     async fn observe_clock_write(&self, tx: &mut Transaction, now: i64) -> Result<i64> {
         // Check raw wall time against both watermarks before substituting the
         // effective time. Only the clock tick persists the mark.
-        let effective = security::observe_clock_bounded(tx, now, &self.clock).await?;
-        self.clock.fetch_max(effective, Ordering::Relaxed);
+        let effective = security::observe_clock_bounded(tx, now, &self.time.observed).await?;
+        self.time.observed.fetch_max(effective, Ordering::Relaxed);
         Ok(effective)
     }
 
     #[cfg(test)]
     pub(crate) async fn checkpoint_clock(&self) -> Result<()> {
-        let m = self.clock.load(Ordering::Relaxed);
-        if m <= self.checkpointed.load(Ordering::Relaxed) {
+        let m = self.time.observed.load(Ordering::Relaxed);
+        if m <= self.time.checkpointed.load(Ordering::Relaxed) {
             return Ok(());
         }
         let deadline = Instant::now() + security::CLOCK_CHECKPOINT_BEGIN_DEADLINE;
         timeout_at(deadline, async {
-            let _maintenance = self.maintenance.try_acquire()?;
+            let _maintenance = self.time.maintenance.try_acquire()?;
             let mut tx = self.database.begin(deadline.into_std()).await?;
             self.admission(&mut tx, false).await?;
             tx.execute(
@@ -238,7 +226,7 @@ impl Application {
             )
             .await?;
             tx.commit().await?;
-            self.checkpointed.fetch_max(m, Ordering::Relaxed);
+            self.time.checkpointed.fetch_max(m, Ordering::Relaxed);
             Ok(())
         })
         .await?
@@ -247,8 +235,11 @@ impl Application {
     fn submission_contract(&self) -> String {
         format!(
             "{}:{}",
-            self.contract,
-            self.generation.get().expect("admission precedes token use")
+            self.identity.contract,
+            self.identity
+                .generation
+                .get()
+                .expect("admission precedes token use")
         )
     }
     /// An application that runs guest code in `pool`'s workers. The pool compiled
@@ -364,31 +355,41 @@ impl Application {
         )
         .with_wasm_capacity(concurrency);
         Ok(Self {
-            presentation: crate::Presentation::default(),
-            assets: Arc::new(resources.assets),
-            blobs,
-            jobs: approval.effective_jobs.map(job_worker::JobRuntime::new),
-            effects: approval
-                .effective_effects
-                .map(effect_worker::EffectRuntime::new),
-            asset_responses: Arc::new(tokio::sync::Semaphore::new(8)),
-            registration: auth::Registration::Closed,
-            plans: crate::query_plan::compile_all(&m)?,
-            manifest: Arc::new(m),
+            web: state::Web {
+                presentation: crate::Presentation::default(),
+                assets: Arc::new(resources.assets),
+                asset_responses: Arc::new(tokio::sync::Semaphore::new(8)),
+                registration: auth::Registration::Closed,
+            },
+            services: state::Services {
+                blobs,
+                jobs: approval.effective_jobs.map(job_worker::JobRuntime::new),
+                effects: approval
+                    .effective_effects
+                    .map(effect_worker::EffectRuntime::new),
+            },
+            identity: state::Identity {
+                plans: crate::query_plan::compile_all(&m)?,
+                manifest: Arc::new(m),
+                contract: URL_SAFE_NO_PAD.encode(digest),
+                deployment,
+                generation: OnceLock::new(),
+            },
+            time: state::Time {
+                observed: AtomicI64::new(0),
+                checkpointed: AtomicI64::new(0),
+                freshness: crate::lifecycle_clock::Freshness::default(),
+                maintenance: Arc::new(tokio::sync::Semaphore::new(1)),
+                maintenance_running: std::sync::atomic::AtomicBool::new(false),
+            },
+            limits: state::RequestLimits {
+                admission: admission_limits,
+                database_statements: 256,
+            },
             keys: Arc::new(keys),
             database,
             runtime,
-            contract: URL_SAFE_NO_PAD.encode(digest),
-            deployment,
-            generation: OnceLock::new(),
-            clock: AtomicI64::new(0),
-            checkpointed: AtomicI64::new(0),
-            lifecycle_clock: crate::lifecycle_clock::Freshness::default(),
-            maintenance: Arc::new(tokio::sync::Semaphore::new(1)),
-            maintenance_running: std::sync::atomic::AtomicBool::new(false),
-            admission_limits,
             request_lifecycle: Arc::new(Registry::default()),
-            database_statement_limit: 256,
             restore_fork: false,
             #[cfg(any(test, feature = "test-support"))]
             postcommit_barrier: std::sync::Mutex::new(None),
@@ -397,7 +398,7 @@ impl Application {
 
     /// Configure trusted HTTP presentation before sharing or activating the application.
     pub fn with_presentation(mut self, presentation: crate::Presentation) -> Result<Self> {
-        presentation.validate(&self.manifest)?;
+        presentation.validate(&self.identity.manifest)?;
         ensure!(
             [
                 &presentation.csrf_field,
@@ -422,7 +423,7 @@ impl Application {
             .all(|path| path.as_str() != "/_noxide/download"),
             "reserved download path"
         );
-        self.presentation = presentation;
+        self.web.presentation = presentation;
         Ok(self)
     }
 
@@ -433,10 +434,11 @@ impl Application {
         if !required {
             return Ok(None);
         }
-        if !self.admission_limits.anonymous_write_attempts.allow() {
+        if !self.limits.admission.anonymous_write_attempts.allow() {
             return Err(RequestError::Busy);
         }
-        self.admission_limits
+        self.limits
+            .admission
             .anonymous_writes
             .acquire()
             .await

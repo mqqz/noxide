@@ -53,11 +53,11 @@ impl Application {
             mut frontier,
             statements,
         } = prepare(SelectionRequest {
-            manifest: &self.manifest,
-            plans: &self.plans,
-            contract: &self.contract,
-            deployment: &self.deployment,
-            generation: self.generation.get(),
+            manifest: &self.identity.manifest,
+            plans: &self.identity.plans,
+            contract: &self.identity.contract,
+            deployment: &self.identity.deployment,
+            generation: self.identity.generation.get(),
             locked,
             schedule,
             now: time.timestamp(),
@@ -70,15 +70,15 @@ impl Application {
         // Authorize the source before deriving, then seal every alias using its
         // independent read. Reserve both source checks and all derived loads.
         let binding_work = called.targets.iter().try_fold(
-            read_work(&self.manifest, eligible)?,
+            read_work(&self.identity.manifest, eligible)?,
             |work, declared| -> Result<u32> {
                 let binding = action
                     .targets
                     .get(&declared.name)
                     .ok_or(repository::ReferenceUnavailable)?;
-                let read = manifest::operation(&self.manifest, binding.eligible)?;
+                let read = manifest::operation(&self.identity.manifest, binding.eligible)?;
                 Ok(work
-                    + read_work(&self.manifest, read)?
+                    + read_work(&self.identity.manifest, read)?
                     + if declared.name == selection.target {
                         0
                     } else {
@@ -98,12 +98,12 @@ impl Application {
             .checked_sub(1)
             .ok_or_else(|| anyhow::anyhow!("recurring catalog budget"))?;
         let storage = tx
-            .storage_resource(&self.manifest, operation.resource)
+            .storage_resource(&self.identity.manifest, operation.resource)
             .await?;
         let principal = crate::jobs::locked_grant_principal(locked);
         let window = FrontierContext {
             tx,
-            manifest: &self.manifest,
+            manifest: &self.identity.manifest,
             principal: &principal,
             budget: ReadBudget::Action(&mut *budget),
             params: &Fields::new(),
@@ -116,7 +116,7 @@ impl Application {
         let mut authority = self.authority_context(Some(time))?;
         let mut context = ReadContext {
             tx,
-            manifest: &self.manifest,
+            manifest: &self.identity.manifest,
             principal: &principal,
             authority: &mut authority,
             budget: ReadBudget::Action(&mut *budget),

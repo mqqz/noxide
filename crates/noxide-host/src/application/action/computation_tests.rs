@@ -251,9 +251,10 @@ impl Case {
         }
     }
     pub(super) async fn form(&self, cookie: &str, name: &str, target: u64) -> (String, String) {
-        let binding = binding(&self.app.manifest, name);
+        let binding = binding(&self.app.identity.manifest, name);
         let route = self
             .app
+            .identity
             .manifest
             .routes
             .iter()
@@ -284,7 +285,7 @@ impl Case {
         self.app
             .submit(
                 cookie,
-                binding(&self.app.manifest, name),
+                binding(&self.app.identity.manifest, name),
                 &form.0,
                 &form.1,
                 input,
@@ -298,7 +299,10 @@ impl Case {
             .await
             .unwrap();
         let storage = tx
-            .storage_resource(&self.app.manifest, resource(&self.app.manifest, name))
+            .storage_resource(
+                &self.app.identity.manifest,
+                resource(&self.app.identity.manifest, name),
+            )
             .await
             .unwrap();
         let rows=tx.fetch::<3>("SELECT CAST(id AS TEXT),fields,CAST(revision AS TEXT) FROM nx_records WHERE resource=$1 ORDER BY id",&[storage.into()]).await.unwrap();
@@ -330,13 +334,16 @@ impl Case {
             .await
             .unwrap();
         let storage = tx
-            .storage_resource(&self.app.manifest, resource(&self.app.manifest, "products"))
+            .storage_resource(
+                &self.app.identity.manifest,
+                resource(&self.app.identity.manifest, "products"),
+            )
             .await
             .unwrap();
         let stored = repository::load(
             &mut tx,
-            &self.app.manifest,
-            resource(&self.app.manifest, "products"),
+            &self.app.identity.manifest,
+            resource(&self.app.identity.manifest, "products"),
             42,
         )
         .await
@@ -495,7 +502,7 @@ async fn rollback_contract(db: Option<Database>) {
     assert_eq!(case.counts().await, (2, 1));
     // A stale/unavailable lifecycle clock cannot undo or re-execute committed work.
     let fresh = case.form(&case.bob, "Reserve", 42).await;
-    case.app.lifecycle_clock.quarantine();
+    case.app.time.freshness.quarantine();
     assert_eq!(
         case.submit(&case.bob, "Reserve", &committed, quantity("1"))
             .await

@@ -57,14 +57,19 @@ impl Application {
                             .await
                             .map_err(RequestError::database)?;
                         let time = self.temporal_attempt(&mut tx).await?.timestamp();
-                        let generation = self.generation.get().ok_or(RequestError::Busy)?;
+                        let generation =
+                            self.identity.generation.get().ok_or(RequestError::Busy)?;
                         let output = effects::operator::run_command(
                             &mut tx,
                             effects::operator::OperatorContext {
                                 generation,
-                                contract: &self.contract,
-                                manifest: &self.manifest,
-                                effective: self.effects.as_ref().map(|runtime| &runtime.effective),
+                                contract: &self.identity.contract,
+                                manifest: &self.identity.manifest,
+                                effective: self
+                                    .services
+                                    .effects
+                                    .as_ref()
+                                    .map(|runtime| &runtime.effective),
                                 time,
                             },
                             command,
@@ -77,7 +82,7 @@ impl Application {
             .await
     }
     pub(super) async fn prepare_effect_delivery(&self, deadline: std::time::Instant) -> Result<()> {
-        let Some(runtime) = &self.effects else {
+        let Some(runtime) = &self.services.effects else {
             return Ok(());
         };
         DirectoryPreparation::prepare(&runtime.directory, &runtime.effective, deadline).await

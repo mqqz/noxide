@@ -8,7 +8,7 @@ async fn read_advance(app: &Application, now: i64) {
         .begin_read(std::time::Instant::now() + Duration::from_secs(2))
         .await
         .unwrap();
-    security::observe_clock_read(&mut tx, now, &app.clock)
+    security::observe_clock_read(&mut tx, now, &app.time.observed)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -228,7 +228,7 @@ async fn sqlite_idle_checkpoint_takes_no_writer_lock() {
     )
     .unwrap();
     app.activate().await.unwrap();
-    assert!(app.checkpointed.load(Ordering::Relaxed) >= activated_wall);
+    assert!(app.time.checkpointed.load(Ordering::Relaxed) >= activated_wall);
     let mut writer = db
         .begin(std::time::Instant::now() + Duration::from_secs(2))
         .await
@@ -239,10 +239,10 @@ async fn sqlite_idle_checkpoint_takes_no_writer_lock() {
         .unwrap();
     writer.rollback().await.unwrap();
 
-    let high = app.checkpointed.load(Ordering::Relaxed) + 1;
+    let high = app.time.checkpointed.load(Ordering::Relaxed) + 1;
     read_advance(&app, high).await;
     app.checkpoint_clock().await.unwrap();
-    assert_eq!(app.checkpointed.load(Ordering::Relaxed), high);
+    assert_eq!(app.time.checkpointed.load(Ordering::Relaxed), high);
     assert_eq!(stored_clock(&db).await, high);
     let mut writer = db
         .begin(std::time::Instant::now() + Duration::from_secs(2))
@@ -256,10 +256,10 @@ async fn sqlite_idle_checkpoint_takes_no_writer_lock() {
         .unwrap();
     read_advance(&app, high + 1).await;
     assert!(app.checkpoint_clock().await.is_err());
-    assert_eq!(app.checkpointed.load(Ordering::Relaxed), high);
+    assert_eq!(app.time.checkpointed.load(Ordering::Relaxed), high);
     writer.rollback().await.unwrap();
     app.checkpoint_clock().await.unwrap();
-    assert_eq!(app.checkpointed.load(Ordering::Relaxed), high + 1);
+    assert_eq!(app.time.checkpointed.load(Ordering::Relaxed), high + 1);
     assert_eq!(stored_clock(&db).await, high + 1);
 }
 

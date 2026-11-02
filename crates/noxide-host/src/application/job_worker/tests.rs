@@ -26,7 +26,7 @@ async fn background_worker_executes_real_action_and_drains() {
         case.stored(&job).await,
         ("succeeded".into(), "finished".into(), 1)
     );
-    let runtime = case.app.jobs.as_ref().unwrap();
+    let runtime = case.app.services.jobs.as_ref().unwrap();
     assert!(!runtime.running.load(Ordering::Acquire));
     assert_eq!(runtime.workers.available_permits(), 2);
     assert_eq!(runtime.database.available_permits(), 2);
@@ -47,7 +47,7 @@ async fn shutdown_waits_for_in_flight_effect_and_actual_provider_drain() {
     tokio::time::timeout(case.app.runtime.limits().wall_time, gate.wait_reached())
         .await
         .unwrap();
-    let runtime = case.app.jobs.as_ref().unwrap();
+    let runtime = case.app.services.jobs.as_ref().unwrap();
     let capacity = usize::from(runtime.effective.limits.worker_concurrency);
     assert!(runtime.workers.available_permits() < capacity);
     assert!(runtime.database.available_permits() < capacity);
@@ -157,8 +157,8 @@ async fn operator_regrant_requires_linked_reconciliation_and_current_authority()
 async fn inherited_worker_slot_cannot_bypass_another_application_capacity() {
     let first = Case::new(None, false).await;
     let second = Case::new(None, false).await;
-    let first_runtime = first.app.jobs.as_ref().unwrap();
-    let second_runtime = second.app.jobs.as_ref().unwrap();
+    let first_runtime = first.app.services.jobs.as_ref().unwrap();
+    let second_runtime = second.app.services.jobs.as_ref().unwrap();
     let slot = WorkerSlot {
         owner: first_runtime.workers.clone(),
         permit: Arc::new(first_runtime.workers.clone().try_acquire_owned().unwrap()),

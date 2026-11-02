@@ -18,17 +18,17 @@ impl Application {
         action: u32,
         raw: &Fields,
     ) -> Result<CanonicalActionInput> {
-        let action = manifest::action(&self.manifest, action)?;
+        let action = manifest::action(&self.identity.manifest, action)?;
         let (scalar, selections) = self.action_input(action, raw)?;
-        let fields = manifest::canonical_input(&self.manifest, action, &scalar)
+        let fields = manifest::canonical_input(&self.identity.manifest, action, &scalar)
             .map_err(|_| RequestError::InvalidRequest)?;
-        manifest::validate_input(&self.manifest, action, &fields)
+        manifest::validate_input(&self.identity.manifest, action, &fields)
             .map_err(|_| RequestError::InvalidRequest)?;
         let digest = input_digest(ActionCore::of(action)?, &fields)?;
         Ok(CanonicalActionInput {
             action: action.id,
             version: action.version,
-            contract: self.contract.clone(),
+            contract: self.identity.contract.clone(),
             fields,
             selections,
             digest,
@@ -128,7 +128,7 @@ impl Application {
             );
             if matches!(declaration.source, TargetSource::Page { .. }) {
                 let route = manifest::route(
-                    &self.manifest,
+                    &self.identity.manifest,
                     target.route.ok_or(RequestError::InvalidRequest)?,
                 )?;
                 ensure!(
@@ -246,11 +246,11 @@ impl Application {
         stored: &StoredRecord,
         budget: &mut ExecutionBudget,
     ) -> Result<bool> {
-        let read = manifest::operation(&self.manifest, operation)?;
+        let read = manifest::operation(&self.identity.manifest, operation)?;
         repository::authorize_stored_read(
             &mut repository::ReadContext {
                 tx,
-                manifest: &self.manifest,
+                manifest: &self.identity.manifest,
                 principal,
                 authority,
                 budget: repository::ReadBudget::Action(&mut budget.database_calls),
@@ -301,7 +301,7 @@ impl Application {
                     budget.spend(2)?;
                 }
                 entry.insert(
-                    repository::load(tx, &self.manifest, target.resource, target.id)
+                    repository::load(tx, &self.identity.manifest, target.resource, target.id)
                         .await?
                         .ok_or(repository::ReferenceUnavailable)?,
                 );
@@ -309,13 +309,13 @@ impl Application {
             let stored = &records[&key];
             let eligible = match &declaration.source {
                 TargetSource::Service { eligible } | TargetSource::Reference { eligible, .. } => {
-                    Some(manifest::operation(&self.manifest, *eligible)?)
+                    Some(manifest::operation(&self.identity.manifest, *eligible)?)
                 }
                 _ => None,
             };
             let unexpired = if let Some(operation) = eligible {
                 crate::expiry::available_to(
-                    manifest::resource(&self.manifest, stored.record.resource)?,
+                    manifest::resource(&self.identity.manifest, stored.record.resource)?,
                     &stored.record.fields,
                     authority.time(),
                     operation,
@@ -323,7 +323,7 @@ impl Application {
                 )?
             } else {
                 crate::expiry::available(
-                    manifest::resource(&self.manifest, stored.record.resource)?,
+                    manifest::resource(&self.identity.manifest, stored.record.resource)?,
                     &stored.record.fields,
                     authority.time(),
                 )?
@@ -340,12 +340,14 @@ impl Application {
             }
             let edit = action.steps.iter().any(|step| {
                 matches!(&step.target, Target::Named(name) if name == &declaration.name)
-                    && manifest::operation(&self.manifest, step.operation)
+                    && manifest::operation(&self.identity.manifest, step.operation)
                         .is_ok_and(manifest::is_capability)
             });
             if edit {
-                let storage =
-                    u32::try_from(tx.storage_resource(&self.manifest, target.resource).await?)?;
+                let storage = u32::try_from(
+                    tx.storage_resource(&self.identity.manifest, target.resource)
+                        .await?,
+                )?;
                 let (Some(secret), Some(version)) = (capability, stored.cap_version) else {
                     anyhow::bail!(repository::ReferenceUnavailable)
                 };
@@ -382,7 +384,7 @@ impl Application {
                 }
                 TargetSource::Page { reads } if !edit => {
                     let route = manifest::route(
-                        &self.manifest,
+                        &self.identity.manifest,
                         target.route.ok_or(repository::ReferenceUnavailable)?,
                     )?;
                     let mut permitted = false;
@@ -393,7 +395,8 @@ impl Application {
                         .collect();
                     reads.sort_by_key(|id| {
                         (
-                            manifest::operation(&self.manifest, *id).is_ok_and(manifest::is_public),
+                            manifest::operation(&self.identity.manifest, *id)
+                                .is_ok_and(manifest::is_public),
                             *id,
                         )
                     });
@@ -441,14 +444,14 @@ impl Application {
             let proof = &grants[&declaration.name].target;
             let stored = &records[&(proof.resource, proof.id)];
             for step in action.steps {
-                let operation = manifest::operation(&self.manifest, step.operation)?;
+                let operation = manifest::operation(&self.identity.manifest, step.operation)?;
                 if matches!(&step.target, Target::Named(name) if name == &declaration.name)
                     && !manifest::is_capability(operation)
                 {
                     ensure!(
                         repository::ReadContext {
                             tx,
-                            manifest: &self.manifest,
+                            manifest: &self.identity.manifest,
                             principal,
                             authority,
                             budget: repository::ReadBudget::Action(&mut budget.database_calls)
@@ -473,7 +476,8 @@ impl Application {
                                 .await?,
                             repository::ReferenceUnavailable
                         );
-                        let resource = manifest::resource(&self.manifest, operation.resource)?;
+                        let resource =
+                            manifest::resource(&self.identity.manifest, operation.resource)?;
                         ensure!(
                             resource.gate.as_ref().is_none_or(|gate| gate.field
                                 != assignment.field
@@ -682,14 +686,14 @@ impl Application {
                 .get_mut(&id)
                 .ok_or_else(|| anyhow::anyhow!("form outside route grant"))?;
             let Some(form) = entry else { continue };
-            let binding = manifest::web_binding(&self.manifest, id)?;
-            let action = manifest::action(&self.manifest, binding.action)?;
+            let binding = manifest::web_binding(&self.identity.manifest, id)?;
+            let action = manifest::action(&self.identity.manifest, binding.action)?;
             if !action.targets.iter().any(|target| {
                 !matches!(target.source, TargetSource::Page { .. }) || target.projection.is_some()
             }) {
                 continue;
             }
-            let first = manifest::operation(&self.manifest, action.steps[0].operation)?;
+            let first = manifest::operation(&self.identity.manifest, action.steps[0].operation)?;
             let subject = if manifest::anonymous_action(first) {
                 anonymous
             } else {
@@ -814,7 +818,7 @@ impl Application {
             form.selections.insert(declaration.name.clone(), options);
         }
         let renewed = self.credentials(
-            &manifest::web_action(&self.manifest, binding.id)?,
+            &manifest::web_action(&self.identity.manifest, binding.id)?,
             subject,
             now,
             targets,

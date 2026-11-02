@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicBool;
 
 impl Application {
     pub(super) async fn activate_blobs(&self, deadline: Instant) -> Result<()> {
-        match &self.blobs {
+        match &self.services.blobs {
             Some(blobs) => blobs.activate(&self.database, deadline).await,
             None => Ok(()),
         }
@@ -38,14 +38,14 @@ impl Application {
         host: &impl ReconcileHost,
         deadline: Instant,
     ) -> Result<()> {
-        let Some(blobs) = &self.blobs else {
+        let Some(blobs) = &self.services.blobs else {
             return Ok(());
         };
         let scope = RequestScope::new(
             self.request_lifecycle.clone(),
             deadline,
             self.runtime.limits().wall_time,
-            self.database_statement_limit,
+            self.limits.database_statements,
         );
         scope
             .run(async {
@@ -64,7 +64,7 @@ impl Application {
         session: &Token,
         principal: &auth::Principal,
     ) -> Result<Option<UploadScope>> {
-        let Some(blobs) = &self.blobs else {
+        let Some(blobs) = &self.services.blobs else {
             return Ok(None);
         };
         let Some(upload) = blobs
@@ -77,12 +77,13 @@ impl Application {
         };
         let subject = match principal {
             auth::Principal::Service(_) => anyhow::bail!(RequestError::InvalidRequest),
-            auth::Principal::User(user) => {
-                commitment("noxide/upload-account/v1", &[&self.deployment, &user.id])?
-            }
+            auth::Principal::User(user) => commitment(
+                "noxide/upload-account/v1",
+                &[&self.identity.deployment, &user.id],
+            )?,
             auth::Principal::Anonymous => commitment(
                 "noxide/upload-capability/v1",
-                &[&self.deployment, &session.nonce],
+                &[&self.identity.deployment, &session.nonce],
             )?,
         };
         let binding_id = binding.to_string();
@@ -90,7 +91,7 @@ impl Application {
             blobs.store().clone(),
             blobs.uploads().clone(),
             UploadBinding {
-                slot: commitment("noxide/upload-slot/v1", &[&self.deployment, nonce])?,
+                slot: commitment("noxide/upload-slot/v1", &[&self.identity.deployment, nonce])?,
                 subject,
                 context: commitment(
                     "noxide/upload-context/v1",
@@ -119,8 +120,12 @@ pub enum PreparedUpload {
 impl Application {
     pub fn multipart_spec(&self, binding: u32) -> Result<noxide_blobs::multipart::PrefixSpec> {
         use noxide_blobs::multipart::{PrefixSpec, ScalarPart};
-        let action = manifest::web_action(&self.manifest, binding)?;
-        let blobs = self.blobs.as_ref().context("blob deployment missing")?;
+        let action = manifest::web_action(&self.identity.manifest, binding)?;
+        let blobs = self
+            .services
+            .blobs
+            .as_ref()
+            .context("blob deployment missing")?;
         let upload = blobs
             .policy()
             .uploads
@@ -137,12 +142,12 @@ impl Application {
         };
         let mut fields = vec![
             ScalarPart {
-                name: self.presentation.csrf_field.clone(),
+                name: self.web.presentation.csrf_field.clone(),
                 max_bytes: 128,
                 required: true,
             },
             ScalarPart {
-                name: self.presentation.submission_field.clone(),
+                name: self.web.presentation.submission_field.clone(),
                 max_bytes: 8192,
                 required: true,
             },
@@ -210,8 +215,8 @@ impl Application {
         values: &Fields,
         filename: Option<noxide_blobs::transport::AttachmentName>,
     ) -> Result<PreparedUpload> {
-        let blobs = self.blobs.as_ref().context("blobs unavailable")?;
-        let action = manifest::web_action(&self.manifest, binding)?;
+        let blobs = self.services.blobs.as_ref().context("blobs unavailable")?;
+        let action = manifest::web_action(&self.identity.manifest, binding)?;
         let upload = blobs
             .policy()
             .uploads
@@ -224,10 +229,10 @@ impl Application {
             .find(|i| i.name == upload.input)
             .context("upload input missing")?;
         let submission = values
-            .get(&self.presentation.submission_field)
+            .get(&self.web.presentation.submission_field)
             .context("missing submission")?;
         let csrf = values
-            .get(&self.presentation.csrf_field)
+            .get(&self.web.presentation.csrf_field)
             .context("missing CSRF")?;
         let ticket = values.get("_upload").context("missing upload ticket")?;
         self.keys.verify_csrf(
@@ -253,8 +258,8 @@ impl Application {
                     .iter()
                     .filter(|(name, _)| {
                         !matches!(name.as_str(), "_upload")
-                            && *name != &self.presentation.csrf_field
-                            && *name != &self.presentation.submission_field
+                            && *name != &self.web.presentation.csrf_field
+                            && *name != &self.web.presentation.submission_field
                     })
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
@@ -279,7 +284,7 @@ impl Application {
                 self.web_target_grants(
                     &token,
                     core,
-                    manifest::web_binding(&self.manifest, binding)?,
+                    manifest::web_binding(&self.identity.manifest, binding)?,
                     &selections,
                     &session,
                     &principal,
@@ -384,7 +389,7 @@ impl Application {
         row: &noxide_blobs::metadata::BlobRow,
         object: noxide_blobs::store::DurableObject,
     ) -> Result<String> {
-        let blobs = self.blobs.as_ref().context("blobs unavailable")?;
+        let blobs = self.services.blobs.as_ref().context("blobs unavailable")?;
         let admission = self.admit_invocation(false).await?;
         let owner = admission.owner;
         owner
@@ -440,7 +445,7 @@ impl Application {
             .blob_reads
             .iter()
             .map(|((read, id, field), (incarnation, blob))| {
-                let operation = manifest::operation(&self.manifest, *read)?;
+                let operation = manifest::operation(&self.identity.manifest, *read)?;
                 ensure!(
                     operation.kind == OperationKind::Read && operation.via.is_none(),
                     "download requires direct Read"
@@ -471,7 +476,7 @@ impl Application {
             .collect()
     }
     pub async fn open_download(&self, cookie: Option<&str>, ticket: &str) -> Result<Download> {
-        let blobs = self.blobs.as_ref().context("blobs unavailable")?;
+        let blobs = self.services.blobs.as_ref().context("blobs unavailable")?;
         ensure!(blobs.is_ready(), "blobs unavailable");
         let permit = Arc::new(
             blobs
@@ -489,7 +494,8 @@ impl Application {
                 let mut tx = self.database.begin_read(deadline.into_std()).await?;
                 self.admission(&mut tx, false).await?;
                 let now =
-                    security::observe_clock_read(&mut tx, security::now()?, &self.clock).await?;
+                    security::observe_clock_read(&mut tx, security::now()?, &self.time.observed)
+                        .await?;
                 let token = self.keys.verify(ticket, now)?;
                 let TokenKind::Download {
                     contract,
@@ -506,10 +512,10 @@ impl Application {
                     "retired download ticket"
                 );
                 let route = manifest::route(
-                    &self.manifest,
+                    &self.identity.manifest,
                     target.route.context("download source route missing")?,
                 )?;
-                let op = manifest::operation(&self.manifest, read)?;
+                let op = manifest::operation(&self.identity.manifest, read)?;
                 ensure!(
                     route.operations.contains(&read)
                         && op.kind == OperationKind::Read
@@ -529,7 +535,7 @@ impl Application {
                     "foreign download session"
                 );
                 let mut calls = repository::MAX_LIST_DATABASE_CALLS;
-                let time = if crate::authority::uses_time(&self.manifest) {
+                let time = if crate::authority::uses_time(&self.identity.manifest) {
                     calls -= 1;
                     Some(self.temporal_after_admission(&mut tx).await?)
                 } else {
@@ -538,7 +544,7 @@ impl Application {
                 let mut authority = self.authority_context(time)?;
                 let mut context = repository::ReadContext {
                     tx: &mut tx,
-                    manifest: &self.manifest,
+                    manifest: &self.identity.manifest,
                     principal: &principal,
                     authority: &mut authority,
                     budget: repository::ReadBudget::Query(&mut calls),
@@ -559,7 +565,7 @@ impl Application {
                     "blob outside Read projection"
                 );
                 ensure!(
-                    manifest::resource(&self.manifest, op.resource)?
+                    manifest::resource(&self.identity.manifest, op.resource)?
                         .fields
                         .iter()
                         .any(|f| f.name == field && matches!(f.kind, FieldKind::Blob { .. })),
@@ -573,7 +579,9 @@ impl Application {
                     .reference(&blob)
                     .await?
                     .context("download unavailable")?;
-                let storage_resource = tx.storage_resource(&self.manifest, op.resource).await?;
+                let storage_resource = tx
+                    .storage_resource(&self.identity.manifest, op.resource)
+                    .await?;
                 ensure!(
                     row.metadata.state == noxide_blobs::state::State::Attached
                         && row.metadata.association.as_ref()
@@ -643,7 +651,8 @@ impl Application {
 
 impl Application {
     pub(super) fn bound_upload_ticket(&self, binding: u32, submission: &str) -> Option<String> {
-        self.blobs
+        self.services
+            .blobs
             .as_ref()
             .filter(|blobs| {
                 blobs

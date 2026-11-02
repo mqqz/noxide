@@ -40,12 +40,12 @@ async fn replace_fields(case: &Case, name: &str, id: u64, change: impl FnOnce(&m
         .begin(Instant::now() + Duration::from_secs(3))
         .await
         .unwrap();
-    let schema = resource(&case.app.manifest, name);
+    let schema = resource(&case.app.identity.manifest, name);
     let storage = tx
-        .storage_resource(&case.app.manifest, schema)
+        .storage_resource(&case.app.identity.manifest, schema)
         .await
         .unwrap();
-    let mut fields = repository::load(&mut tx, &case.app.manifest, schema, id)
+    let mut fields = repository::load(&mut tx, &case.app.identity.manifest, schema, id)
         .await
         .unwrap()
         .unwrap()
@@ -98,7 +98,7 @@ async fn bootstrap_contract(db: Option<Database>) {
         case.app
             .view(
                 &case.bob,
-                route(&case.app.manifest, "workspaces"),
+                route(&case.app.identity.manifest, "workspaces"),
                 Some(workspace)
             )
             .await,
@@ -183,7 +183,7 @@ async fn bootstrap_contract(db: Option<Database>) {
         case.app
             .view(
                 &case.bob,
-                route(&case.app.manifest, "documents"),
+                route(&case.app.identity.manifest, "documents"),
                 Some(document)
             )
             .await
@@ -206,8 +206,8 @@ async fn bootstrap_contract(db: Option<Database>) {
         .unwrap();
     let storage = tx
         .storage_resource(
-            &case.app.manifest,
-            resource(&case.app.manifest, "memberships"),
+            &case.app.identity.manifest,
+            resource(&case.app.identity.manifest, "memberships"),
         )
         .await
         .unwrap();
@@ -226,7 +226,7 @@ async fn bootstrap_contract(db: Option<Database>) {
         case.app
             .view(
                 &case.bob,
-                route(&case.app.manifest, "memberships"),
+                route(&case.app.identity.manifest, "memberships"),
                 Some(member)
             )
             .await,
@@ -252,7 +252,7 @@ async fn bootstrap_contract(db: Option<Database>) {
         case.app
             .view(
                 &case.bob,
-                route(&case.app.manifest, "documents"),
+                route(&case.app.identity.manifest, "documents"),
                 Some(document)
             )
             .await,
@@ -430,15 +430,15 @@ async fn sequential_contract(db: Option<Database>, boundary: Boundary, after: Af
         .unwrap();
     let workspace = tx
         .storage_resource(
-            &case.app.manifest,
-            resource(&case.app.manifest, "workspaces"),
+            &case.app.identity.manifest,
+            resource(&case.app.identity.manifest, "workspaces"),
         )
         .await
         .unwrap();
     let member = tx
         .storage_resource(
-            &case.app.manifest,
-            resource(&case.app.manifest, "memberships"),
+            &case.app.identity.manifest,
+            resource(&case.app.identity.manifest, "memberships"),
         )
         .await
         .unwrap();
@@ -492,7 +492,7 @@ async fn sequential_contract(db: Option<Database>, boundary: Boundary, after: Af
             case.app
                 .view(
                     &case.alice,
-                    route(&case.app.manifest, "memberships"),
+                    route(&case.app.identity.manifest, "memberships"),
                     Some(2)
                 )
                 .await,
@@ -555,6 +555,7 @@ async fn temporal_routes_contract(db: Option<Database>) {
     tx.commit().await.unwrap();
     let root = case
         .app
+        .identity
         .manifest
         .routes
         .iter()
@@ -569,7 +570,7 @@ async fn temporal_routes_contract(db: Option<Database>) {
         case.app
             .view(
                 &case.alice,
-                route(&case.app.manifest, "documents"),
+                route(&case.app.identity.manifest, "documents"),
                 Some(document)
             )
             .await

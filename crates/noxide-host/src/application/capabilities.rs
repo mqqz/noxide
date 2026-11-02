@@ -3,7 +3,8 @@ use noxide_store::statements::records as stmt;
 
 impl Application {
     fn capability_route(&self, resource: u32) -> Result<u32> {
-        self.manifest
+        self.identity
+            .manifest
             .routes
             .iter()
             .find(|r| r.resource == Some(resource))
@@ -21,13 +22,15 @@ impl Application {
         entry_scope
             .run(async {
                 let _request = self
-                    .admission_limits
+                    .limits
+                    .admission
                     .requests()
                     .request()
                     .await
                     .map_err(|_| RequestError::deadline())?;
                 let _database = self
-                    .admission_limits
+                    .limits
+                    .admission
                     .database()
                     .acquire()
                     .await
@@ -54,36 +57,43 @@ impl Application {
                             let now = security::observe_clock_read(
                                 &mut tx,
                                 security::now().map_err(|_| RequestError::Rejected)?,
-                                &self.clock,
+                                &self.time.observed,
                             )
                             .await
                             .map_err(RequestError::database)?;
                             let route = self
                                 .capability_route(resource)
                                 .map_err(|_| RequestError::InvalidRequest)?;
-                            let time = if crate::authority::uses_time(&self.manifest) {
+                            let time = if crate::authority::uses_time(&self.identity.manifest) {
                                 budget.spend(1).map_err(RequestError::database)?;
                                 Some(self.temporal_after_admission(&mut tx).await?)
                             } else {
                                 None
                             };
-                            let record = repository::load(&mut tx, &self.manifest, resource, id)
-                                .await
-                                .map_err(RequestError::database)?;
+                            let record =
+                                repository::load(&mut tx, &self.identity.manifest, resource, id)
+                                    .await
+                                    .map_err(RequestError::database)?;
                             let Some(record) = record.filter(|r| r.cap_version.is_some()) else {
-                                return render::unavailable(&self.presentation, &self.manifest)
-                                    .map_err(|_| RequestError::Rejected);
+                                return render::unavailable(
+                                    &self.web.presentation,
+                                    &self.identity.manifest,
+                                )
+                                .map_err(|_| RequestError::Rejected);
                             };
                             if !crate::expiry::available(
-                                manifest::resource(&self.manifest, resource)
+                                manifest::resource(&self.identity.manifest, resource)
                                     .map_err(RequestError::database)?,
                                 &record.record.fields,
                                 time,
                             )
                             .map_err(RequestError::database)?
                             {
-                                return render::unavailable(&self.presentation, &self.manifest)
-                                    .map_err(|_| RequestError::Rejected);
+                                return render::unavailable(
+                                    &self.web.presentation,
+                                    &self.identity.manifest,
+                                )
+                                .map_err(|_| RequestError::Rejected);
                             }
                             let (anonymous, new_cookie) =
                                 match cookie.and_then(|c| self.keys.anonymous(c, now).ok()) {
@@ -123,7 +133,7 @@ impl Application {
                                 )
                                 .map_err(|_| RequestError::Rejected)?;
                             let mut page = render::capability_rotation(
-                                &self.presentation,
+                                &self.web.presentation,
                                 &FormCredentials {
                                     upload_ticket: None,
                                     selections: Default::default(),
@@ -164,14 +174,14 @@ impl Application {
         entry_scope
             .run(async {
                 let _request = self
-                    .admission_limits
+                    .limits.admission
                     .requests()
                     .request()
                     .await
                     .map_err(|_| RequestError::deadline())?;
                 let _anonymous_write = self.anonymous_write(true).await?;
                 let _database = self
-                    .admission_limits
+                    .limits.admission
                     .database()
                     .acquire()
                     .await
@@ -300,7 +310,7 @@ impl Application {
                 &[
                     token.nonce.as_str().into(),
                     anonymous.nonce.as_str().into(),
-                    self.contract.as_str().into(),
+                    self.identity.contract.as_str().into(),
                     input.as_str().into(),
                     token.expires.into(),
                 ],
@@ -312,7 +322,9 @@ impl Application {
             let [subject, contract, digest, outcome] =
                 rows.first().ok_or(RequestError::InvalidRequest)?;
             ensure!(
-                subject == &anonymous.nonce && contract == &self.contract && digest == &input,
+                subject == &anonymous.nonce
+                    && contract == &self.identity.contract
+                    && digest == &input,
                 RequestError::InvalidRequest
             );
             let receipt: EditReceipt = serde_json::from_str(outcome)?;
@@ -328,13 +340,13 @@ impl Application {
             let page = self.edit_handover(&mut tx, &receipt, target.route).await?;
             return Ok((tx, page));
         }
-        let time = if crate::authority::uses_time(&self.manifest) {
+        let time = if crate::authority::uses_time(&self.identity.manifest) {
             budget.spend(1)?;
             Some(self.temporal_after_admission(&mut tx).await?)
         } else {
             None
         };
-        let stored = repository::load(&mut tx, &self.manifest, resource, id)
+        let stored = repository::load(&mut tx, &self.identity.manifest, resource, id)
             .await?
             .ok_or(RequestError::InvalidRequest)?;
         ensure!(
@@ -343,14 +355,16 @@ impl Application {
         );
         ensure!(
             crate::expiry::available(
-                manifest::resource(&self.manifest, resource)?,
+                manifest::resource(&self.identity.manifest, resource)?,
                 &stored.record.fields,
                 time
             )?,
             RequestError::InvalidRequest
         );
         let current = stored.cap_version.ok_or(RequestError::InvalidRequest)?;
-        let storage = tx.storage_resource(&self.manifest, resource).await?;
+        let storage = tx
+            .storage_resource(&self.identity.manifest, resource)
+            .await?;
         self.keys
             .verify_edit(secret, u32::try_from(storage)?, id, current)
             .map_err(|_| RequestError::InvalidRequest)?;

@@ -106,7 +106,7 @@ async fn status(app: &Arc<Application>, method: &str, path: &str, kind: Kind) ->
         }
         Kind::Form | Kind::NoOrigin => {
             request = request.header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
-            Body::from(format!("{}=x", app.presentation.csrf_field))
+            Body::from(format!("{}=x", app.web.presentation.csrf_field))
         }
     };
     router(app.clone(), Origin::parse(origin).unwrap())

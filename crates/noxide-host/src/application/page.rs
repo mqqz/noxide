@@ -87,13 +87,13 @@ impl Application {
         let entry_scope = self.request_scope(self.runtime.limits().wall_time);
         entry_scope.run(async {
         let _request = self
-            .admission_limits
+            .limits.admission
             .requests()
             .request()
             .await
             .map_err(|_| RequestError::deadline())?;
         let _database = self
-            .admission_limits
+            .limits.admission
             .database()
             .acquire()
             .await
@@ -102,11 +102,11 @@ impl Application {
             return Err(RequestError::InvalidCursor);
         }
         let mut params = params;
-        let route_definition = manifest::route(&self.manifest, route)
+        let route_definition = manifest::route(&self.identity.manifest, route)
             .map_err(|_| RequestError::InvalidRequest)?;
-        manifest::validate_params(&self.manifest, route_definition, &params)
+        manifest::validate_params(&self.identity.manifest, route_definition, &params)
             .map_err(|_| RequestError::InvalidRequest)?;
-        for (name, field) in manifest::parameter_fields(&self.manifest, route_definition)
+        for (name, field) in manifest::parameter_fields(&self.identity.manifest, route_definition)
             .map_err(|_| RequestError::InvalidRequest)? {
             if matches!(field, manifest::ParameterField::Search) {
                 let raw = params.get(&name).ok_or(RequestError::InvalidRequest)?;
@@ -120,7 +120,7 @@ impl Application {
             route,
             target,
         };
-        render::resolve(&self.manifest, &reference).map_err(|_| RequestError::InvalidRequest)?;
+        render::resolve(&self.identity.manifest, &reference).map_err(|_| RequestError::InvalidRequest)?;
         let owner = self.owned_request(
             _request,
             Arc::new(_database),
@@ -140,12 +140,12 @@ impl Application {
                 .await
                 .map_err(RequestError::database)?;
             let now = security::now().map_err(|_| RequestError::Rejected)?;
-            let now = security::observe_clock_read(&mut tx, now, &self.clock)
+            let now = security::observe_clock_read(&mut tx, now, &self.time.observed)
                 .await
                 .map_err(RequestError::database)?;
-            self.clock.fetch_max(now, Ordering::Relaxed);
+            self.time.observed.fetch_max(now, Ordering::Relaxed);
 
-            let access = &manifest::route(&self.manifest, route)
+            let access = &manifest::route(&self.identity.manifest, route)
                 .map_err(|_| RequestError::InvalidRequest)?
                 .access;
             let authenticated = self.route_identity(&mut tx, access, cookie, now).await?;
@@ -154,34 +154,34 @@ impl Application {
                 None => (None, auth::Principal::Anonymous),
             };
             let mut database_calls = crate::repository::MAX_LIST_DATABASE_CALLS;
-            let time = if crate::authority::uses_time(&self.manifest) {
+            let time = if crate::authority::uses_time(&self.identity.manifest) {
                 database_calls = database_calls.checked_sub(1).ok_or(RequestError::Busy)?;
                 Some(self.temporal_after_admission(&mut tx).await?)
             } else { None };
             let mut authority = self.authority_context(time).map_err(RequestError::database)?;
-            let list = manifest::route(&self.manifest,route).map_err(|_| RequestError::InvalidRequest)?.operations.iter().filter_map(|id| manifest::operation(&self.manifest,*id).ok()).find(|op| op.kind==OperationKind::List && !manifest::is_preview(op));
+            let list = manifest::route(&self.identity.manifest,route).map_err(|_| RequestError::InvalidRequest)?.operations.iter().filter_map(|id| manifest::operation(&self.identity.manifest,*id).ok()).find(|op| op.kind==OperationKind::List && !manifest::is_preview(op));
             let scope_incarnation = if let (Some(target),Some(op)) = (target,list) {
-                if let Some(parent)=op.scope.as_deref().map(|field| manifest::reference_resource(&self.manifest,op.resource,field)).transpose().map_err(|_| RequestError::Rejected)?.flatten() {
+                if let Some(parent)=op.scope.as_deref().map(|field| manifest::reference_resource(&self.identity.manifest,op.resource,field)).transpose().map_err(|_| RequestError::Rejected)?.flatten() {
                     database_calls = database_calls.checked_sub(2).ok_or(RequestError::Busy)?;
-                    crate::repository::load(&mut tx,&self.manifest,parent.id,target).await.map_err(RequestError::database)?.map(|r|r.incarnation)
+                    crate::repository::load(&mut tx,&self.identity.manifest,parent.id,target).await.map_err(RequestError::database)?.map(|r|r.incarnation)
                 } else {None}
             } else {None};
             let subject=principal.user().map(|u|u.id.as_str()).unwrap_or("");
-            let scope=cursor_scope((&self.contract,&self.deployment),route,target,scope_incarnation,list,subject,&params).map_err(|_|RequestError::Rejected)?;
+            let scope=cursor_scope((&self.identity.contract,&self.identity.deployment),route,target,scope_incarnation,list,subject,&params).map_err(|_|RequestError::Rejected)?;
             // A fixed-size digest binds every approved setting without exposing it in URLs.
             let scope=URL_SAFE_NO_PAD.encode(Sha256::digest(scope.as_bytes()));
-            let preview_only = list.is_none() && manifest::route(&self.manifest, route).map_err(|_| RequestError::InvalidRequest)?.operations.iter().any(|id| manifest::operation(&self.manifest,*id).is_ok_and(manifest::is_preview));
+            let preview_only = list.is_none() && manifest::route(&self.identity.manifest, route).map_err(|_| RequestError::InvalidRequest)?.operations.iter().any(|id| manifest::operation(&self.identity.manifest,*id).is_ok_and(manifest::is_preview));
             if preview_only && cursor.is_some() { return Err(RequestError::InvalidCursor); }
             let cursor = cursor.map(|encoded| {
                 let token = self.keys.verify_cursor(encoded, now).map_err(|_| RequestError::InvalidCursor)?;
                 let TokenKind::Cursor { scope: bound, after } = token.kind else { return Err(RequestError::InvalidCursor); };
                 let op = list.ok_or(RequestError::InvalidCursor)?;
                 if bound != scope { return Err(RequestError::InvalidCursor); }
-                self.plans.get(&op.id).ok_or(RequestError::InvalidCursor)?
-                    .validate_cursor(&self.manifest, &after).map_err(|_| RequestError::InvalidCursor)?;
+                self.identity.plans.get(&op.id).ok_or(RequestError::InvalidCursor)?
+                    .validate_cursor(&self.identity.manifest, &after).map_err(|_| RequestError::InvalidCursor)?;
                 Ok(after)
             }).transpose()?;
-            let needs_anonymous = manifest::route(&self.manifest, route).map_err(|_| RequestError::InvalidRequest)?.forms.iter().any(|id| manifest::web_action(&self.manifest,*id).ok().and_then(|a| ActionCore::of(a.core).ok()).and_then(|a| manifest::operation(&self.manifest,a.first_operation()).ok()).is_some_and(manifest::anonymous_action));
+            let needs_anonymous = manifest::route(&self.identity.manifest, route).map_err(|_| RequestError::InvalidRequest)?.forms.iter().any(|id| manifest::web_action(&self.identity.manifest,*id).ok().and_then(|a| ActionCore::of(a.core).ok()).and_then(|a| manifest::operation(&self.identity.manifest,a.first_operation()).ok()).is_some_and(manifest::anonymous_action));
             let (anonymous, new_cookie) = if needs_anonymous {
                 if let Some(token) = anonymous_cookie.and_then(|c| self.keys.anonymous(c, now).ok()) { (Some(token), None) }
                 else { let (token,cookie) = self.keys.issue(TokenKind::Anonymous, "", now, security::ANONYMOUS_TTL).map_err(|_| RequestError::Rejected)?; (Some(token),Some(cookie)) }
@@ -211,9 +211,9 @@ impl Application {
                 result_limit: noxide_protocol::MAX_RESULT_BYTES,
                 truncated: false,
                 see_all: Vec::new(),
-                plans: self.plans.clone(),
+                plans: self.identity.plans.clone(),
                 tx,
-                manifest: self.manifest.clone(),
+                manifest: self.identity.manifest.clone(),
                 principal,
                 request: request.clone(),
                 grants: BTreeMap::new(),
@@ -225,7 +225,7 @@ impl Application {
                 more: None,
             };
             let _wasm = self
-                .admission_limits
+                .limits.admission
                 .wasm()
                 .acquire()
                 .await
@@ -252,7 +252,7 @@ impl Application {
             }
             let next_page = effects.more.take().map(|after| {
                 let (_,encoded)=self.keys.issue(TokenKind::Cursor {scope:scope.clone(),after},"",now,900).map_err(|_|RequestError::Rejected)?;
-                let path = crate::routing::resolve(&self.manifest,&reference).expect("validated route");
+                let path = crate::routing::resolve(&self.identity.manifest,&reference).expect("validated route");
                 Ok(format!("{path}{}cursor={encoded}", if params.is_empty() { "?" } else { "&" }))
             }).transpose()?;
             self.complete_target_forms(&mut effects, &response, &mut forms, session.as_ref(), anonymous.as_ref(), now).await.map_err(RequestError::database)?;
@@ -260,9 +260,9 @@ impl Application {
                 &response,
                 &RenderContext {
                     checkpoint: RequestScope::checkpoint_current,
-                    presentation: &self.presentation,
-                    assets: &self.assets,
-                    manifest: Some(&self.manifest),
+                    presentation: &self.web.presentation,
+                    assets: &self.web.assets,
+                    manifest: Some(&self.identity.manifest),
                     forms,
                     logout_csrf: session
                         .as_ref()
@@ -276,7 +276,7 @@ impl Application {
             )
             .map_err(RequestError::database)?;
             if let ResponseIntent::Page(doc) | ResponseIntent::NotFound(doc) = &response
-                && doc.nodes.iter().any(|n| matches!(n, Instruction::Form { action } if manifest::web_action(&self.manifest,*action).ok().and_then(|a| ActionCore::of(a.core).ok()).and_then(|a| manifest::operation(&self.manifest,a.first_operation()).ok()).is_some_and(manifest::anonymous_action))) { rendered.anonymous_cookie = new_cookie; }
+                && doc.nodes.iter().any(|n| matches!(n, Instruction::Form { action } if manifest::web_action(&self.identity.manifest,*action).ok().and_then(|a| ActionCore::of(a.core).ok()).and_then(|a| manifest::operation(&self.identity.manifest,a.first_operation()).ok()).is_some_and(manifest::anonymous_action))) { rendered.anonymous_cookie = new_cookie; }
             Self::finish_commit(&mut effects.tx, rendered).await
         })
         .await

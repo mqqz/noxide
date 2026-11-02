@@ -398,7 +398,7 @@ async fn flow(db: Database) {
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    let blobs = app.blobs.as_ref().unwrap();
+    let blobs = app.services.blobs.as_ref().unwrap();
     let key = ObjectKey::parse(
         blobs
             .workers()
@@ -773,7 +773,7 @@ async fn sqlite_quota_race_reserves_before_bytes_and_reclaims_unstarted_upload()
     );
     assert_eq!(usize::from(one.is_ok()) + usize::from(two.is_ok()), 1);
     assert_eq!(case.state().await.2, "1024");
-    let store = &case.app.blobs.as_ref().unwrap().store();
+    let store = &case.app.services.blobs.as_ref().unwrap().store();
     let guard = IoGuard::new(
         std::time::Instant::now() + std::time::Duration::from_secs(2),
         Arc::new(AtomicBool::new(false)),
@@ -799,7 +799,7 @@ async fn sqlite_quota_race_reserves_before_bytes_and_reclaims_unstarted_upload()
 #[tokio::test]
 async fn sqlite_unknown_file_is_charged_retained_and_blocks_new_uploads() {
     let case = Case::new(None, declarations()).await;
-    let blobs = case.app.blobs.as_ref().unwrap();
+    let blobs = case.app.services.blobs.as_ref().unwrap();
     let key = ObjectKey::random().unwrap();
     let guard = IoGuard::new(
         std::time::Instant::now() + std::time::Duration::from_secs(2),
@@ -937,6 +937,7 @@ async fn sqlite_truncated_file_waits_for_physical_stop_before_gc() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let workers: Vec<_> = case
         .app
+        .services
         .blobs
         .as_ref()
         .unwrap()
@@ -982,7 +983,7 @@ async fn restart_after_finalize(db: Option<Database>, finalized: bool) {
     let PreparedUpload::Created(row, lease) = prepared else {
         panic!("fresh reservation")
     };
-    let blobs = case.app.blobs.as_ref().unwrap();
+    let blobs = case.app.services.blobs.as_ref().unwrap();
     let key = row.metadata.key.clone();
     let guard = IoGuard::new(
         std::time::Instant::now() + std::time::Duration::from_secs(2),
@@ -1027,7 +1028,7 @@ async fn restart_after_finalize(db: Option<Database>, finalized: bool) {
     )
     .unwrap();
     app.activate().await.unwrap();
-    let blobs = app.blobs.as_ref().unwrap();
+    let blobs = app.services.blobs.as_ref().unwrap();
     assert!(!blobs.quarantined().load(Ordering::Acquire));
     assert!(
         blobs
@@ -1430,6 +1431,7 @@ async fn sqlite_download_slot_and_no_poll_watchdog_hold_until_actual_native_stop
     let permit = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         case.app
+            .services
             .blobs
             .as_ref()
             .unwrap()
@@ -1510,6 +1512,7 @@ async fn sqlite_canceled_committed_gc_claim_recovers_without_restart() {
     let barrier = Arc::new(Barrier::default());
     *case
         .app
+        .services
         .blobs
         .as_ref()
         .unwrap()
@@ -1527,6 +1530,7 @@ async fn sqlite_canceled_committed_gc_claim_recovers_without_restart() {
     assert!(task.await.unwrap_err().is_cancelled());
     *case
         .app
+        .services
         .blobs
         .as_ref()
         .unwrap()
@@ -1541,6 +1545,7 @@ async fn sqlite_canceled_committed_gc_claim_recovers_without_restart() {
     );
     assert!(
         case.app
+            .services
             .blobs
             .as_ref()
             .unwrap()
@@ -1589,6 +1594,7 @@ async fn attachment_wins_gc(db: Option<Database>) {
     let state = case.state().await;
     let key = ObjectKey::parse(
         case.app
+            .services
             .blobs
             .as_ref()
             .unwrap()
@@ -1615,6 +1621,7 @@ async fn attachment_wins_gc(db: Option<Database>) {
     let barrier = Arc::new(Barrier::default());
     *case
         .app
+        .services
         .blobs
         .as_ref()
         .unwrap()
@@ -1655,7 +1662,7 @@ async fn attachment_wins_gc(db: Option<Database>) {
                 let result = MetadataContext { tx: &mut tx }
                     .claim_collectable(
                         &row,
-                        app.blobs.as_ref().unwrap().process(),
+                        app.services.blobs.as_ref().unwrap().process(),
                         row.metadata.expires,
                     )
                     .await;
@@ -1754,6 +1761,7 @@ async fn sqlite_slow_prefix_and_file_enforce_original_root_and_idle_deadlines() 
         assert!(response.status().is_client_error());
         let workers: Vec<_> = case
             .app
+            .services
             .blobs
             .as_ref()
             .unwrap()
@@ -1922,7 +1930,7 @@ async fn sqlite_download_instruction_requires_successful_read_and_exact_projecti
 
 async fn lifecycle_clock_safety(db: Option<Database>) {
     let case = Case::new(db, declarations()).await;
-    assert!(authority::uses_time(&case.app.manifest));
+    assert!(authority::uses_time(&case.app.identity.manifest));
     let mut tx = case
         .db
         .begin(std::time::Instant::now() + std::time::Duration::from_secs(2))
@@ -2077,6 +2085,7 @@ async fn absence_and_prefix_are_serialized(db: Option<Database>) {
     let barrier = Arc::new(Barrier::default());
     *case
         .app
+        .services
         .blobs
         .as_ref()
         .unwrap()
