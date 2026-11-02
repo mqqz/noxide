@@ -122,6 +122,46 @@ async fn traps_loops_memory_growth_and_host_call_limits_terminate() {
     assert!(app.render_only(request()).await.is_err());
 }
 
+#[tokio::test]
+async fn running_out_of_time_or_capacity_is_distinct_from_guest_failure() {
+    use noxide_sandbox::GuestBusy;
+    let limits = Limits {
+        fuel: 100_000_000,
+        wall_time: std::time::Duration::from_millis(1),
+        ..Limits::default()
+    };
+    let spinning = Runtime::compile(&component("(loop $forever br $forever)", ""), limits).unwrap();
+    let error = spinning.render_only(request()).await.unwrap_err();
+    assert_eq!(error.downcast_ref(), Some(&GuestBusy::Deadline), "{error}");
+    let limits = Limits {
+        concurrency: 1,
+        fuel: 100_000_000,
+        ..Limits::default()
+    };
+    let single = Runtime::compile(&component("(loop $forever br $forever)", ""), limits).unwrap();
+    let (first, second) =
+        tokio::join!(single.render_only(request()), single.render_only(request()));
+    let errors = [first.unwrap_err(), second.unwrap_err()];
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.downcast_ref() == Some(&GuestBusy::Capacity))
+    );
+    // Exhausting its own fuel or trapping is the guest's doing, so it stays a failure.
+    for (body, fuel) in [
+        ("unreachable", 1_000_000),
+        ("(loop $forever br $forever)", 1_000),
+    ] {
+        let limits = Limits {
+            fuel,
+            ..Limits::default()
+        };
+        let failing = Runtime::compile(&component(body, ""), limits).unwrap();
+        let error = failing.render_only(request()).await.unwrap_err();
+        assert!(error.downcast_ref::<GuestBusy>().is_none(), "{error}");
+    }
+}
+
 #[test]
 fn reject_unapproved_imports_native_artifacts_and_core_modules() {
     for wasm in [

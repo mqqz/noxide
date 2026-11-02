@@ -69,6 +69,23 @@ impl ResourceLimiter for MemoryBudget {
     }
 }
 
+/// The guest stopped for lack of time or capacity, not because of what it did. The
+/// same request can succeed later, so callers report busy and not a rejection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuestBusy {
+    Deadline,
+    Capacity,
+}
+impl std::fmt::Display for GuestBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Deadline => "guest deadline",
+            Self::Capacity => "runtime capacity",
+        })
+    }
+}
+impl std::error::Error for GuestBusy {}
+
 /// Storage authority a host grants to one guest attempt. The sandbox only routes
 /// calls; authorization remains the implementor's, enforced outside the guest.
 pub trait HostCalls: Send + 'static {
@@ -115,10 +132,11 @@ struct State<H> {
 impl<H> State<H> {
     fn charge(&mut self) -> wasmtime::Result<()> {
         wasmtime::ensure!(self.active, "capability unavailable in this phase");
-        wasmtime::ensure!(
-            self.calls > 0 && Instant::now() < self.deadline,
-            "host budget exceeded"
-        );
+        wasmtime::ensure!(self.calls > 0, "host budget exceeded");
+        if Instant::now() >= self.deadline {
+            self.failure = Some(GuestBusy::Deadline.into());
+            wasmtime::bail!("guest deadline");
+        }
         self.calls -= 1;
         Ok(())
     }
@@ -373,7 +391,7 @@ impl<H: HostCalls> Runtime<H> {
         let _permit = self
             .permits
             .try_acquire()
-            .map_err(|_| anyhow::anyhow!("runtime capacity"))?;
+            .map_err(|_| GuestBusy::Capacity)?;
         let request = serde_json::to_vec(&request)?;
         ensure!(request.len() <= MAX_REQUEST_BYTES, "request limit");
         let mut store = Store::new(
@@ -418,7 +436,7 @@ impl<H: HostCalls> Runtime<H> {
             return Err(error);
         }
         execution
-            .map_err(|_| anyhow::anyhow!("guest deadline"))?
+            .map_err(|_| GuestBusy::Deadline)?
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         decode_response(&state.output).map_err(anyhow::Error::msg)
     }

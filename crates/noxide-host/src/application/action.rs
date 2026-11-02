@@ -348,7 +348,9 @@ impl Application {
                 if error.is::<crate::repository::ReferenceUnavailable>() {
                     return Ok(Attempt::Settled(Settled::Unavailable));
                 }
-                return Ok(Attempt::Aborted { error });
+                return Ok(Attempt::Aborted {
+                    error: super::guest_error(error),
+                });
             }
         };
         if let ResponseIntent::Rejected {

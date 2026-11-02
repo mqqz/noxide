@@ -241,6 +241,15 @@ mod query_compatibility_tests {
 }
 
 pub use crate::database::RequestError;
+/// Time or capacity running out is the host's state, and the caller may retry later.
+/// Anything else a guest attempt returns keeps its own classification.
+pub(crate) fn guest_error(error: anyhow::Error) -> anyhow::Error {
+    if error.is::<noxide_sandbox::GuestBusy>() {
+        crate::database::lifecycle::Unavailable::Deadline.into()
+    } else {
+        error
+    }
+}
 pub(crate) fn authentication_error(error: auth::AuthError) -> RequestError {
     match error {
         auth::AuthError::Invalid => RequestError::Authentication,
@@ -1587,7 +1596,9 @@ impl Application {
                 )
                 .await;
             let mut effects = attempt.effects.ok_or(RequestError::Rejected)?;
-            let response = attempt.result.map_err(RequestError::database)?;
+            let response = attempt
+                .result
+                .map_err(|error| RequestError::database(guest_error(error)))?;
             if !matches!(
                 response,
                 ResponseIntent::Page(_) | ResponseIntent::NotFound(_) | ResponseIntent::Redirect(_)
@@ -1618,7 +1629,7 @@ impl Application {
                     downloads: self.download_links(&effects, session.as_ref(), now).map_err(RequestError::database)?,
                 },
             )
-            .map_err(|_| RequestError::Rejected)?;
+            .map_err(RequestError::database)?;
             if let ResponseIntent::Page(doc) | ResponseIntent::NotFound(doc) = &response
                 && doc.nodes.iter().any(|n| matches!(n, Instruction::Form { action } if manifest::web_action(&self.manifest,*action).ok().and_then(|a| ActionCore::of(a.core).ok()).and_then(|a| manifest::operation(&self.manifest,a.first_operation()).ok()).is_some_and(manifest::anonymous_action))) { rendered.anonymous_cookie = new_cookie; }
             Self::finish_commit(&mut effects.tx, rendered).await
@@ -2079,6 +2090,19 @@ mod deadline_tests {
         assert!(matches!(
             RequestError::database(elapsed.into()),
             RequestError::Busy
+        ));
+        for busy in [
+            noxide_sandbox::GuestBusy::Deadline,
+            noxide_sandbox::GuestBusy::Capacity,
+        ] {
+            assert!(matches!(
+                RequestError::database(guest_error(busy.into())),
+                RequestError::Busy
+            ));
+        }
+        assert!(matches!(
+            RequestError::database(guest_error(anyhow::anyhow!("guest trap"))),
+            RequestError::Rejected
         ));
         assert!(matches!(
             RequestError::database(anyhow::anyhow!("stored schema differs from manifest")),
