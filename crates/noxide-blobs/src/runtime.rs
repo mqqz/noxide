@@ -350,7 +350,6 @@ impl BlobRuntime {
     }
 
     /// Plan one known row from its physical state. Returns whether it removed an object.
-    #[allow(clippy::too_many_lines)]
     async fn reconcile_row(
         &self,
         host: &impl ReconcileHost,
@@ -359,40 +358,8 @@ impl BlobRuntime {
         deadline: Instant,
     ) -> Result<bool> {
         use crate::inspect::{FindingKind, InspectionPage, SnapshotItem};
-        let store = self.store.clone();
-        let key = row.metadata.key.clone();
-        let physical = self
-            .uploads
-            .try_start(
-                key.clone(),
-                row.metadata.generation,
-                deadline.into_std(),
-                Arc::new(AtomicBool::new(false)),
-                move |guard| Ok(Snapshot(store.snapshot(&key, &guard)?)),
-            )?
-            .finish()
-            .await?
-            .0;
-        let matching = |witness: &IoWitness| {
-            witness
-                .stopped()
-                .is_some_and(|proof| proof.generation() == row.metadata.generation)
-        };
-        let witness = self
-            .workers
-            .lock()
-            .unwrap()
-            .get(row.metadata.key.as_str())
-            .filter(|w| matching(w))
-            .cloned()
-            .or_else(|| {
-                self.undispatched
-                    .lock()
-                    .unwrap()
-                    .get(row.metadata.key.as_str())
-                    .filter(|w| matching(w))
-                    .cloned()
-            });
+        let physical = self.row_snapshot(row, deadline).await?;
+        let witness = self.stopped_witness(row);
         let stopped = witness.as_ref().and_then(IoWitness::stopped);
         let stopped_refs: Vec<_> = stopped.iter().collect();
         let page = InspectionPage::plan(
@@ -475,6 +442,64 @@ impl BlobRuntime {
                 return Ok(false);
             }
         };
+        let dispatch = self.arm_deletion(row, witness, &claim);
+        commit(&mut tx).await?;
+        ensure!(tx.commit_acknowledged(), "blob deletion claim unconfirmed");
+        self.delete_claimed(host, row, &claimed, &claim, dispatch, now, deadline)
+            .await
+    }
+
+    async fn row_snapshot(
+        &self,
+        row: &BlobRow,
+        deadline: Instant,
+    ) -> Result<Option<crate::inspect::PhysicalSnapshot>> {
+        let store = self.store.clone();
+        let key = row.metadata.key.clone();
+        Ok(self
+            .uploads
+            .try_start(
+                key.clone(),
+                row.metadata.generation,
+                deadline.into_std(),
+                Arc::new(AtomicBool::new(false)),
+                move |guard| Ok(Snapshot(store.snapshot(&key, &guard)?)),
+            )?
+            .finish()
+            .await?
+            .0)
+    }
+
+    /// A stop proof for this row's generation, from its worker or its undispatched claim.
+    fn stopped_witness(&self, row: &BlobRow) -> Option<IoWitness> {
+        let matching = |witness: &IoWitness| {
+            witness
+                .stopped()
+                .is_some_and(|proof| proof.generation() == row.metadata.generation)
+        };
+        self.workers
+            .lock()
+            .unwrap()
+            .get(row.metadata.key.as_str())
+            .filter(|w| matching(w))
+            .cloned()
+            .or_else(|| {
+                self.undispatched
+                    .lock()
+                    .unwrap()
+                    .get(row.metadata.key.as_str())
+                    .filter(|w| matching(w))
+                    .cloned()
+            })
+    }
+
+    /// Keep stop proof and arm the claim's witness before the claim commits.
+    fn arm_deletion(
+        &self,
+        row: &BlobRow,
+        witness: Option<IoWitness>,
+        claim: &crate::state::GcClaim,
+    ) -> ReservationLease {
         // Retain stopped proof for both possible commit
         // generations until native dispatch is authoritative.
         if let Some(witness) = witness {
@@ -488,12 +513,24 @@ impl BlobRuntime {
             .lock()
             .unwrap()
             .insert(row.metadata.key.as_str().into(), pending.clone());
-        let dispatch = ReservationLease {
+        ReservationLease {
             witness: pending,
             armed: true,
-        };
-        commit(&mut tx).await?;
-        ensure!(tx.commit_acknowledged(), "blob deletion claim unconfirmed");
+        }
+    }
+
+    /// With the claim committed, remove the object and record that under a new fence.
+    #[allow(clippy::too_many_arguments)]
+    async fn delete_claimed(
+        &self,
+        host: &impl ReconcileHost,
+        row: &BlobRow,
+        claimed: &BlobRow,
+        claim: &crate::state::GcClaim,
+        dispatch: ReservationLease,
+        now: Timestamp,
+        deadline: Instant,
+    ) -> Result<bool> {
         #[cfg(any(test, feature = "test-support"))]
         {
             let barrier = { self.gc_after_commit.lock().unwrap().clone() };
@@ -523,7 +560,7 @@ impl BlobRuntime {
         let mut tx = host.database().begin(deadline.into_std()).await?;
         host.fence(&mut tx).await?;
         MetadataContext { tx: &mut tx }
-            .deleted(&claimed, &claim, self.store.identity(), now)
+            .deleted(claimed, claim, self.store.identity(), now)
             .await?;
         commit(&mut tx).await?;
         ensure!(

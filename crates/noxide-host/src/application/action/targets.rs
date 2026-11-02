@@ -80,7 +80,6 @@ impl Application {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_lines)]
     pub(in crate::application) fn web_target_grants(
         &self,
         token: &Token,
@@ -114,32 +113,7 @@ impl Application {
         );
         let mut grants = BTreeMap::new();
         for (name, target) in targets {
-            let declaration = manifest::action_target(action.targets, name)?;
-            let page = match &declaration.source {
-                TargetSource::Page { .. } => true,
-                TargetSource::Reference { target, .. } => matches!(
-                    manifest::action_target(action.targets, target)?.source,
-                    TargetSource::Page { .. }
-                ),
-                _ => false,
-            };
-            ensure!(
-                page && Self::valid_target_identity(declaration, target),
-                RequestError::InvalidRequest
-            );
-            if matches!(declaration.source, TargetSource::Page { .. }) {
-                let route = manifest::route(
-                    &self.identity.manifest,
-                    target.route.ok_or(RequestError::InvalidRequest)?,
-                )?;
-                ensure!(
-                    route.resource == Some(declaration.resource)
-                        && route.forms.contains(&binding.id),
-                    RequestError::InvalidRequest
-                );
-            } else {
-                ensure!(target.route.is_none(), RequestError::InvalidRequest);
-            }
+            self.check_signed_target(action, binding, name, target)?;
             grants.insert(
                 name.clone(),
                 TargetGrant {
@@ -155,68 +129,15 @@ impl Application {
             .iter()
             .filter(|target| matches!(target.source, TargetSource::Selected { .. }))
         {
-            let handle = selections
-                .get(&declaration.name)
-                .ok_or(RequestError::InvalidRequest)?;
-            let proof = self
-                .keys
-                .verify_selection(handle, now)
-                .map_err(|_| RequestError::InvalidRequest)?;
-            let security::TokenKind::Selection {
-                contract,
-                action: id,
-                binding: bound,
-                name,
-                query,
-                eligible,
-                targets,
-            } = proof.kind
-            else {
-                anyhow::bail!(RequestError::InvalidRequest)
-            };
-            let TargetSource::Selected {
-                query: expected_query,
-                eligible: expected_read,
-                ..
-            } = declaration.source
-            else {
-                unreachable!()
-            };
-            ensure!(
-                contract == self.submission_contract()
-                    && id == action.id
-                    && bound == binding.id
-                    && name == declaration.name
-                    && query == expected_query
-                    && eligible == expected_read
-                    && proof.subject == subject
-                    && proof.expires - proof.issued <= 600,
-                RequestError::InvalidRequest
-            );
-            let expected: BTreeSet<_> = action.targets.iter().filter(|target| target.name == declaration.name || matches!(&target.source, TargetSource::Reference { target, .. } if target == &declaration.name)).map(|target| target.name.as_str()).collect();
-            ensure!(
-                targets.keys().map(String::as_str).collect::<BTreeSet<_>>() == expected,
-                RequestError::InvalidRequest
-            );
-            for (name, target) in targets {
-                ensure!(
-                    target.route.is_none()
-                        && Self::valid_target_identity(
-                            manifest::action_target(action.targets, &name)?,
-                            &target
-                        )
-                        && !grants.contains_key(&name),
-                    RequestError::InvalidRequest
-                );
-                grants.insert(
-                    name,
-                    TargetGrant {
-                        target,
-                        expires: Some(proof.expires),
-                        service: false,
-                    },
-                );
-            }
+            self.insert_selected_grants(
+                action,
+                binding,
+                declaration,
+                selections,
+                &subject,
+                now,
+                &mut grants,
+            )?;
         }
         ensure!(
             grants.len() == action.targets.len()
@@ -227,6 +148,184 @@ impl Application {
             RequestError::InvalidRequest
         );
         Ok(grants)
+    }
+
+    /// A signed target must be a page target, or a reference from one.
+    fn check_signed_target(
+        &self,
+        action: ActionCore<'_>,
+        binding: &noxide_protocol::WebBinding,
+        name: &str,
+        target: &RecordTarget,
+    ) -> Result<()> {
+        let declaration = manifest::action_target(action.targets, name)?;
+        let page = match &declaration.source {
+            TargetSource::Page { .. } => true,
+            TargetSource::Reference { target, .. } => matches!(
+                manifest::action_target(action.targets, target)?.source,
+                TargetSource::Page { .. }
+            ),
+            _ => false,
+        };
+        ensure!(
+            page && Self::valid_target_identity(declaration, target),
+            RequestError::InvalidRequest
+        );
+        if matches!(declaration.source, TargetSource::Page { .. }) {
+            let route = manifest::route(
+                &self.identity.manifest,
+                target.route.ok_or(RequestError::InvalidRequest)?,
+            )?;
+            ensure!(
+                route.resource == Some(declaration.resource) && route.forms.contains(&binding.id),
+                RequestError::InvalidRequest
+            );
+        } else {
+            ensure!(target.route.is_none(), RequestError::InvalidRequest);
+        }
+        Ok(())
+    }
+
+    /// Verify a picker's signed choice, then grant the targets it names.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_selected_grants(
+        &self,
+        action: ActionCore<'_>,
+        binding: &noxide_protocol::WebBinding,
+        declaration: &ActionTarget,
+        selections: &BTreeMap<String, String>,
+        subject: &str,
+        now: i64,
+        grants: &mut BTreeMap<String, TargetGrant>,
+    ) -> Result<()> {
+        let handle = selections
+            .get(&declaration.name)
+            .ok_or(RequestError::InvalidRequest)?;
+        let proof = self
+            .keys
+            .verify_selection(handle, now)
+            .map_err(|_| RequestError::InvalidRequest)?;
+        let security::TokenKind::Selection {
+            contract,
+            action: id,
+            binding: bound,
+            name,
+            query,
+            eligible,
+            targets,
+        } = proof.kind
+        else {
+            anyhow::bail!(RequestError::InvalidRequest)
+        };
+        let TargetSource::Selected {
+            query: expected_query,
+            eligible: expected_read,
+            ..
+        } = declaration.source
+        else {
+            unreachable!()
+        };
+        ensure!(
+            contract == self.submission_contract()
+                && id == action.id
+                && bound == binding.id
+                && name == declaration.name
+                && query == expected_query
+                && eligible == expected_read
+                && proof.subject == subject
+                && proof.expires - proof.issued <= 600,
+            RequestError::InvalidRequest
+        );
+        let expected: BTreeSet<_> = action.targets.iter().filter(|target| target.name == declaration.name || matches!(&target.source, TargetSource::Reference { target, .. } if target == &declaration.name)).map(|target| target.name.as_str()).collect();
+        ensure!(
+            targets.keys().map(String::as_str).collect::<BTreeSet<_>>() == expected,
+            RequestError::InvalidRequest
+        );
+        for (name, target) in targets {
+            ensure!(
+                target.route.is_none()
+                    && Self::valid_target_identity(
+                        manifest::action_target(action.targets, &name)?,
+                        &target
+                    )
+                    && !grants.contains_key(&name),
+                RequestError::InvalidRequest
+            );
+            grants.insert(
+                name,
+                TargetGrant {
+                    target,
+                    expires: Some(proof.expires),
+                    service: false,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// Load each row once per attempt. A row only a non-page target names costs budget.
+    async fn load_target_once(
+        &self,
+        tx: &mut Transaction,
+        action: ActionCore<'_>,
+        grants: &BTreeMap<String, TargetGrant>,
+        target: &RecordTarget,
+        records: &mut BTreeMap<(u32, u64), StoredRecord>,
+        budget: &mut ExecutionBudget,
+    ) -> Result<()> {
+        let key = (target.resource, target.id);
+        if let std::collections::btree_map::Entry::Vacant(entry) = records.entry(key) {
+            let original_page = action
+                .targets
+                .iter()
+                .filter(|target| matches!(target.source, TargetSource::Page { .. }))
+                .any(|target| {
+                    grants
+                        .get(&target.name)
+                        .is_some_and(|proof| (proof.target.resource, proof.target.id) == key)
+                });
+            if !original_page {
+                budget.spend(2)?;
+            }
+            entry.insert(
+                repository::load(tx, &self.identity.manifest, target.resource, target.id)
+                    .await?
+                    .ok_or(repository::ReferenceUnavailable)?,
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether a row is live for this target, under its eligible read when it has one.
+    fn target_unexpired(
+        &self,
+        declaration: &ActionTarget,
+        stored: &StoredRecord,
+        authority: &crate::authority::Authority,
+        principal: &auth::Principal,
+    ) -> Result<bool> {
+        let eligible = match &declaration.source {
+            TargetSource::Service { eligible } | TargetSource::Reference { eligible, .. } => {
+                Some(manifest::operation(&self.identity.manifest, *eligible)?)
+            }
+            _ => None,
+        };
+        let unexpired = if let Some(operation) = eligible {
+            crate::expiry::available_to(
+                manifest::resource(&self.identity.manifest, stored.record.resource)?,
+                &stored.record.fields,
+                authority.time(),
+                operation,
+                principal,
+            )?
+        } else {
+            crate::expiry::available(
+                manifest::resource(&self.identity.manifest, stored.record.resource)?,
+                &stored.record.fields,
+                authority.time(),
+            )?
+        };
+        Ok(unexpired)
     }
 
     fn valid_target_identity(declaration: &ActionTarget, target: &RecordTarget) -> bool {
@@ -263,7 +362,6 @@ impl Application {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_lines)]
     pub(in crate::application) async fn resolve_action_targets(
         &self,
         tx: &mut Transaction,
@@ -289,47 +387,10 @@ impl Application {
             );
             let target = &proof.target;
             let key = (target.resource, target.id);
-            if let std::collections::btree_map::Entry::Vacant(entry) = records.entry(key) {
-                let original_page = action
-                    .targets
-                    .iter()
-                    .filter(|target| matches!(target.source, TargetSource::Page { .. }))
-                    .any(|target| {
-                        grants
-                            .get(&target.name)
-                            .is_some_and(|proof| (proof.target.resource, proof.target.id) == key)
-                    });
-                if !original_page {
-                    budget.spend(2)?;
-                }
-                entry.insert(
-                    repository::load(tx, &self.identity.manifest, target.resource, target.id)
-                        .await?
-                        .ok_or(repository::ReferenceUnavailable)?,
-                );
-            }
+            self.load_target_once(tx, action, grants, target, &mut records, budget)
+                .await?;
             let stored = &records[&key];
-            let eligible = match &declaration.source {
-                TargetSource::Service { eligible } | TargetSource::Reference { eligible, .. } => {
-                    Some(manifest::operation(&self.identity.manifest, *eligible)?)
-                }
-                _ => None,
-            };
-            let unexpired = if let Some(operation) = eligible {
-                crate::expiry::available_to(
-                    manifest::resource(&self.identity.manifest, stored.record.resource)?,
-                    &stored.record.fields,
-                    authority.time(),
-                    operation,
-                    principal,
-                )?
-            } else {
-                crate::expiry::available(
-                    manifest::resource(&self.identity.manifest, stored.record.resource)?,
-                    &stored.record.fields,
-                    authority.time(),
-                )?
-            };
+            let unexpired = self.target_unexpired(declaration, stored, authority, principal)?;
             ensure!(unexpired, repository::ReferenceUnavailable);
             ensure!(
                 stored.incarnation == target.incarnation,

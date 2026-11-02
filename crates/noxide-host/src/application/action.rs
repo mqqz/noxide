@@ -181,14 +181,12 @@ fn action_request(
 }
 
 impl Application {
-    #[allow(clippy::too_many_lines)]
     pub(super) async fn attempt_action(
         &self,
         mut tx: Transaction,
         context: InvocationContext<'_>,
         budget: &mut ExecutionBudget,
     ) -> Result<Attempt> {
-        let deadline = budget.deadline;
         let InvocationContext {
             action: a,
             input,
@@ -214,33 +212,13 @@ impl Application {
                 .lock_form(scope.store.identity())
                 .await?;
         }
-        let claimed = tx
-            .run(
-                &stmt::CLAIM_ACTION_RECEIPT,
-                &[
-                    nonce.as_str().into(),
-                    subject.as_str().into(),
-                    self.identity.contract.as_str().into(),
-                    Param::Number(a.id.into()),
-                    input_hash.into(),
-                    Param::Number(expires),
-                ],
-            )
+        let claimed = self
+            .claim_action_receipt(&mut tx, &nonce, &subject, a, input_hash, expires)
             .await?;
         if claimed == 0 {
-            let [digest, outcome] = self
-                .load_receipt(&mut tx, &nonce, &subject)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("receipt unavailable"))?;
-            ensure!(digest == input_hash, RequestError::InvalidRequest);
-            return Ok(Attempt::Replay {
-                tx,
-                receipt: Committed {
-                    payload: outcome,
-                    targets: sealed,
-                    principal,
-                },
-            });
+            return self
+                .replay_attempt(tx, &nonce, &subject, input_hash, sealed, principal)
+                .await;
         }
         let time = self.attempt_time(&mut tx, a, admitted_time, budget).await?;
         let upload = upload
@@ -274,6 +252,94 @@ impl Application {
                     .await;
             }
         };
+        self.charge_redirect_attempt(navigation, budget)?;
+        let original = records.clone();
+        let response_principal = principal.clone();
+        let request = action_request(a, &sealed, &records, &input);
+        let effects = self.action_effects(
+            tx,
+            authority,
+            upload,
+            principal,
+            request.clone(),
+            capability_grant,
+            sealed.clone(),
+            records,
+            budget.database_calls,
+        );
+        let (mut effects, result) = self.run_action_guest(request, effects, budget).await?;
+        if let Some(settled) = self.settle_guest_outcome(&mut effects, a, result).await? {
+            return Ok(settled);
+        }
+        self.execute_action(
+            effects,
+            a,
+            time,
+            &original,
+            navigation,
+            sealed,
+            response_principal,
+            nonce,
+            budget,
+        )
+        .await
+    }
+
+    /// A claimed receipt must be for the same input. Its stored outcome answers again.
+    async fn replay_attempt(
+        &self,
+        mut tx: Transaction,
+        nonce: &str,
+        subject: &str,
+        input_hash: &str,
+        sealed: std::collections::BTreeMap<String, RecordTarget>,
+        principal: auth::Principal,
+    ) -> Result<Attempt> {
+        let [digest, outcome] = self
+            .load_receipt(&mut tx, nonce, subject)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("receipt unavailable"))?;
+        ensure!(digest == input_hash, RequestError::InvalidRequest);
+        Ok(Attempt::Replay {
+            tx,
+            receipt: Committed {
+                payload: outcome,
+                targets: sealed,
+                principal,
+            },
+        })
+    }
+
+    /// Claim this submission's single-use receipt. Zero means it was already claimed.
+    async fn claim_action_receipt(
+        &self,
+        tx: &mut Transaction,
+        nonce: &str,
+        subject: &str,
+        a: ActionCore<'_>,
+        input_hash: &str,
+        expires: i64,
+    ) -> Result<u64> {
+        tx.run(
+            &stmt::CLAIM_ACTION_RECEIPT,
+            &[
+                nonce.into(),
+                subject.into(),
+                self.identity.contract.as_str().into(),
+                Param::Number(a.id.into()),
+                input_hash.into(),
+                Param::Number(expires),
+            ],
+        )
+        .await
+    }
+
+    /// A parent redirect spends the navigation budget, more for a gated destination.
+    fn charge_redirect_attempt(
+        &self,
+        navigation: Option<NavigationPlan<'_>>,
+        budget: &mut ExecutionBudget,
+    ) -> Result<()> {
         let gated_destination = navigation
             .and_then(|plan| plan.destination_resource)
             .map(|id| manifest::resource(&self.identity.manifest, id))
@@ -282,10 +348,24 @@ impl Application {
         if navigation.is_some() {
             budget.parent_redirect_attempt(gated_destination)?;
         }
-        let original = records.clone();
-        let response_principal = principal.clone();
-        let request = action_request(a, &sealed, &records, &input);
-        let effects = Effects {
+        Ok(())
+    }
+
+    /// What the guest may touch during this attempt.
+    #[allow(clippy::too_many_arguments)]
+    fn action_effects(
+        &self,
+        tx: Transaction,
+        authority: crate::authority::Authority,
+        upload: Option<noxide_blobs::upload::UploadContext>,
+        principal: auth::Principal,
+        request: RequestView,
+        capability_grant: Option<RecordTarget>,
+        sealed: std::collections::BTreeMap<String, RecordTarget>,
+        records: std::collections::BTreeMap<(u32, u64), repository::StoredRecord>,
+        database_calls: u32,
+    ) -> Effects {
+        Effects {
             authority,
             upload,
             blob_reads: Default::default(),
@@ -301,15 +381,26 @@ impl Application {
             tx,
             manifest: self.identity.manifest.clone(),
             principal,
-            request: request.clone(),
+            request,
             capability_grant,
-            grants: sealed.clone(),
+            grants: sealed,
             target_rows: records,
             written_rows: Default::default(),
-            calls: budget.database_calls,
+            calls: database_calls,
             cursor: None,
             more: None,
-        };
+        }
+    }
+
+    /// Run the guest under this attempt's remaining fuel and calls. The guest permit
+    /// stays in the budget, so it is held for the rest of the invocation.
+    async fn run_action_guest(
+        &self,
+        request: RequestView,
+        effects: Effects,
+        budget: &mut ExecutionBudget,
+    ) -> Result<(Effects, Result<ResponseIntent>)> {
+        let deadline = budget.deadline;
         budget.wasm = Some(
             self.limits
                 .admission
@@ -330,16 +421,27 @@ impl Application {
             .await;
         budget.fuel = attempt.fuel_left;
         budget.host_calls = attempt.calls_left;
-        let mut effects = attempt
+        let effects = attempt
             .effects
             .ok_or_else(|| anyhow::anyhow!("missing request state"))?;
         budget.database_calls = effects.calls;
-        if let Some(settled) = self
-            .settle_guest_outcome(&mut effects, a, attempt.result)
-            .await?
-        {
-            return Ok(settled);
-        }
+        Ok((effects, attempt.result))
+    }
+
+    /// The guest approved: run the declared transaction, queue its work and seal a receipt.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_action(
+        &self,
+        mut effects: Effects,
+        a: ActionCore<'_>,
+        time: Option<crate::lifecycle_clock::AttemptTime>,
+        original: &std::collections::BTreeMap<(u32, u64), repository::StoredRecord>,
+        navigation: Option<NavigationPlan<'_>>,
+        sealed: std::collections::BTreeMap<String, RecordTarget>,
+        response_principal: auth::Principal,
+        nonce: String,
+        budget: &mut ExecutionBudget,
+    ) -> Result<Attempt> {
         let outcomes = match effects.execute_transaction(a, time).await {
             Ok(outcomes) => outcomes,
             Err(error) => {
@@ -351,14 +453,7 @@ impl Application {
         };
         budget.database_calls = effects.calls;
         if let Err(error) = self
-            .enqueue_action_jobs(&mut effects, a, &original, &outcomes, time, &nonce)
-            .await
-        {
-            budget.database_calls = effects.calls;
-            return settle_enqueue_failure(&mut effects, error).await;
-        }
-        if let Err(error) = self
-            .enqueue_action_effects(&mut effects, a, &original, &outcomes, time, &nonce)
+            .enqueue_action_work(&mut effects, a, original, &outcomes, time, &nonce)
             .await
         {
             budget.database_calls = effects.calls;
@@ -366,7 +461,7 @@ impl Application {
         }
         budget.database_calls = effects.calls;
         let destination = if let Some(plan) = navigation {
-            self.capture_destination(&mut effects.tx, plan, &sealed, &original, &outcomes)
+            self.capture_destination(&mut effects.tx, plan, &sealed, original, &outcomes)
                 .await?
         } else {
             None
@@ -381,6 +476,22 @@ impl Application {
             },
             nonce,
         })
+    }
+
+    /// Queue the action's jobs, then its effects, in the transaction that wrote its rows.
+    async fn enqueue_action_work(
+        &self,
+        effects: &mut Effects,
+        a: ActionCore<'_>,
+        original: &std::collections::BTreeMap<(u32, u64), repository::StoredRecord>,
+        outcomes: &[noxide_protocol::MutationOutcome],
+        time: Option<crate::lifecycle_clock::AttemptTime>,
+        nonce: &str,
+    ) -> Result<()> {
+        self.enqueue_action_jobs(effects, a, original, outcomes, time, nonce)
+            .await?;
+        self.enqueue_action_effects(effects, a, original, outcomes, time, nonce)
+            .await
     }
 
     /// The time this attempt observes, read only when something it does depends on time.
