@@ -1,6 +1,7 @@
 //! Provider scan instrumentation for the exact specialized batch lookup SQL.
 use super::*;
 use crate::authority::witnesses::Witnesses;
+use crate::database::Param;
 use crate::membership::{LookupScope, ProtectedRow};
 
 async fn work(database: Database) {

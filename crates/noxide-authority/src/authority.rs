@@ -23,7 +23,7 @@ pub struct DeploymentScope {
 }
 
 impl DeploymentScope {
-    fn borrowed(&self) -> Deployment<'_> {
+    pub fn borrowed(&self) -> Deployment<'_> {
         Deployment {
             contract: &self.contract,
             incarnation: &self.incarnation,
