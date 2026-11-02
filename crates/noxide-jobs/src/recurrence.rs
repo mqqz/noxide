@@ -10,6 +10,10 @@ use noxide_protocol::{
 use noxide_store::statements::jobs as stmt;
 use std::collections::BTreeMap;
 
+/// What `QueueContext::emit_recurrence` may spend, including its enqueue: at most nine
+/// actual statements and two logical calls. `finish_recurrence` uses one of each.
+pub const EMIT_STATEMENTS: u16 = 9;
+
 pub struct RecurrenceCursor {
     pub(super) scope: JobScope,
     pub(super) name: String,

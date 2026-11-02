@@ -6,6 +6,7 @@
 pub mod job_deployment;
 mod operator;
 pub mod recurrence;
+pub mod selection;
 pub mod store;
 pub mod types;
 pub use operator::{JobOperatorCommand, JobOperatorResult, JobSummary};
