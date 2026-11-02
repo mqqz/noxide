@@ -330,15 +330,15 @@ impl Effects {
         )
     }
 
-    pub(crate) async fn authority_sql(
+    pub(crate) async fn authority_filter(
         &mut self,
         operation: &Operation,
         params: &mut Vec<Param>,
-    ) -> Result<Vec<Sql>> {
+    ) -> Result<crate::policy::AuthorizedFilter> {
         let mut calls = self.list_calls;
         let result = self
             .authority
-            .sql(
+            .filter(
                 &mut self.tx,
                 &self.manifest,
                 &self.principal,

@@ -430,15 +430,15 @@ async fn provider(database: Database) {
         "new attempt cannot reuse a prior context's witnesses"
     );
     let mut params = vec![workspaces.into()];
-    let sql = authority
-        .sql(&mut tx, &m, &user(), &m.operations[0], &mut params, &mut 16)
+    let filter = authority
+        .filter(&mut tx, &m, &user(), &m.operations[0], &mut params, &mut 16)
         .await
         .unwrap();
     let actual = tx
         .fetch::<1>(
             &format!(
                 "SELECT CAST(id AS TEXT) FROM nx_records WHERE resource=$1 AND ({}) ORDER BY id",
-                crate::sql::Sql::join(&sql, " OR ")
+                filter.sql()
             ),
             &params,
         )

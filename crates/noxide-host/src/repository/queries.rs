@@ -225,13 +225,12 @@ impl FrontierContext<'_> {
         let order = self.query_order(plan)?;
         for policy in policies {
             let mut params = vec![storage.into()];
-            let policy = crate::policy::sql(
+            let filter = crate::policy::filter(
                 self.tx.query_provider()?,
                 &policy,
                 self.principal,
                 &mut params,
-            )
-            .joined(" OR ");
+            );
             let restrictions = self.query_restrictions(op, plan, &mut params)?;
             let keyset = self.query_keyset(plan, after, &mut params)?;
             let upper = self.upper_clause("created_seq", &mut params)?;
@@ -239,11 +238,18 @@ impl FrontierContext<'_> {
                 ListOrder::Field { field, .. } => self.tx.field_expression(field)?,
                 _ => Sql::statement("CAST(created_seq AS TEXT)"),
             };
-            let sql = sql!(
-                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),incarnation,CAST(revision AS TEXT),{scalar} FROM nx_records WHERE resource=$1 AND resource={storage} AND ({policy}){restrictions}{keyset}{upper} ORDER BY {order} LIMIT {per}"
-            );
+            let scan = RecordScan {
+                columns: sql!(
+                    "CAST(created_seq AS TEXT),CAST(id AS TEXT),incarnation,CAST(revision AS TEXT),{scalar}"
+                ),
+                storage,
+                filter: &filter,
+                restrictions: sql!("{restrictions}{keyset}{upper}"),
+                order: order.clone(),
+                limit: per,
+            };
             self.budget.spend(1)?;
-            let rows = self.tx.fetch::<5>(&sql, &params).await?;
+            let rows = self.tx.scan_records::<5>(scan, &params).await?;
             streams.push(
                 rows.into_iter()
                     .map(|[seq, record, inc, rev, value]| {

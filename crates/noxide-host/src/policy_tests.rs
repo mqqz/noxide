@@ -126,10 +126,11 @@ async fn sql_and_row_decisions_agree_for_all_predicates_and_empty_rules() {
             for owner in ["alice", "bob", ""] {
                 for tenant in ["one", "two", ""] {
                     let mut params = vec![Param::from(owner), Param::from(tenant)];
-                    let clauses = sql(tx.query_provider().unwrap(), policy, principal, &mut params);
+                    let filter =
+                        filter(tx.query_provider().unwrap(), policy, principal, &mut params);
                     let statement = format!(
                         "SELECT ({}) FROM (SELECT $1 AS owner, $2 AS tenant, '{{\"recipient\":\"bob\"}}' AS fields)",
-                        crate::sql::Sql::join(&clauses, " OR ")
+                        filter.sql()
                     );
                     let mut query = sqlx::query(&statement);
                     for param in params {

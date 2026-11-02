@@ -3,8 +3,9 @@ use crate::{
     principal::Principal,
     query_plan::NativeProvider,
     sql::{Param, Sql, sql},
+    temporal::AttemptTime,
 };
-use noxide_protocol::{Policy, Predicate};
+use noxide_protocol::{Policy, Predicate, Resource};
 
 #[derive(Debug)]
 pub enum ListStrategy {
@@ -172,19 +173,56 @@ pub fn allowed_with(
             })
     })
 }
-pub fn sql(
+/// Row predicate compiled from an admitted policy for one principal.
+///
+/// Record scans in the store require one, so leaving out the policy check does
+/// not compile. No constructor accepts SQL. This stops mistakes, not trusted
+/// host code that compiles the wrong policy: `tools/check_layers.py` limits who
+/// may call the constructors, because Rust has no friend crates.
+#[derive(Clone, Debug)]
+pub struct AuthorizedFilter {
+    clauses: Vec<Sql>,
+}
+
+impl AuthorizedFilter {
+    /// Narrow every clause to records that have not expired.
+    pub fn unexpired(
+        self,
+        provider: NativeProvider,
+        resource: &Resource,
+        time: Option<AttemptTime>,
+        params: &mut Vec<Param>,
+    ) -> anyhow::Result<Self> {
+        let expires = crate::expiry::sql(provider, resource, time, "nx_records", params)?;
+        Ok(Self {
+            clauses: self
+                .clauses
+                .into_iter()
+                .map(|clause| sql!("({clause}){expires}"))
+                .collect(),
+        })
+    }
+
+    pub fn sql(&self) -> Sql {
+        Sql::join(&self.clauses, " OR ")
+    }
+}
+
+/// Compile a policy whose membership predicates are denied. Residual scans use
+/// this relaxed form and authorize the loaded candidates afterwards.
+pub fn filter(
     provider: NativeProvider,
     policy: &Policy,
     principal: &Principal,
     params: &mut Vec<Param>,
-) -> Vec<Sql> {
-    sql_with(provider, policy, principal, params, |_, _| {
+) -> AuthorizedFilter {
+    filter_with(provider, policy, principal, params, |_, _| {
         Ok(Sql::statement("1=0"))
     })
     .expect("infallible base policy")
 }
 
-pub fn sql_with(
+pub fn filter_with(
     provider: NativeProvider,
     policy: &Policy,
     principal: &Principal,
@@ -193,11 +231,13 @@ pub fn sql_with(
         &noxide_protocol::membership::ExistsRelated,
         &mut Vec<Param>,
     ) -> anyhow::Result<Sql>,
-) -> anyhow::Result<Vec<Sql>> {
+) -> anyhow::Result<AuthorizedFilter> {
     if policy.any.is_empty() {
-        return Ok(vec![Sql::statement("1=0")]);
+        return Ok(AuthorizedFilter {
+            clauses: vec![Sql::statement("1=0")],
+        });
     }
-    policy
+    let clauses = policy
         .any
         .iter()
         .map(|rule| {
@@ -235,7 +275,8 @@ pub fn sql_with(
                 .collect::<anyhow::Result<Vec<_>>>()?;
             Ok(sql!("({})", Sql::join(&terms, " AND ")))
         })
-        .collect()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(AuthorizedFilter { clauses })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]

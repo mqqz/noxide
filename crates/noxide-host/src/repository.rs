@@ -5,7 +5,7 @@ pub(crate) mod queries;
 pub(crate) mod search;
 use crate::{
     auth::Principal,
-    database::{Param, Transaction},
+    database::{Param, RecordScan, Transaction},
     manifest,
     security::RecordTarget,
 };
@@ -959,7 +959,7 @@ impl Effects {
             self.cursor.clone()
         };
         let mut params = vec![Param::Number(storage_resource)];
-        let clauses = self.authority_sql(op, &mut params).await?;
+        let filter = self.authority_filter(op, &mut params).await?;
         let visibility = self.visibility_clause(op, &mut params)?;
         let mut parent_clause = Sql::empty();
         if let Some(scope) = &plan.scope {
@@ -987,13 +987,21 @@ impl Effects {
             let batch = (size - records.len()).min(3);
             let mut page_params = params.clone();
             let keyset = plan.keyset(last.as_ref(), &mut page_params)?;
-            let sql = sql!(
-                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({}){visibility}{parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT {batch}",
-                self.tx.bounded_text("fields", 20_000),
-                clauses.joined(" OR ")
-            );
+            let restrictions = sql!("{visibility}{parent_clause}{selection}{keyset}");
+            let order = sql!("nx_records.created_seq {direction}");
+            let scan = RecordScan {
+                columns: sql!(
+                    "CAST(created_seq AS TEXT),CAST(id AS TEXT),COALESCE(owner,''),tenant,{}",
+                    self.tx.bounded_text("fields", 20_000)
+                ),
+                storage: storage_resource,
+                filter: &filter,
+                restrictions,
+                order,
+                limit: batch,
+            };
             self.charge_list_calls(1)?;
-            let rows = self.tx.fetch::<5>(&sql, &page_params).await?;
+            let rows = self.tx.scan_records::<5>(scan, &page_params).await?;
             let count = rows.len();
             let parsed: Vec<Fields> = rows
                 .iter()
@@ -1038,7 +1046,15 @@ impl Effects {
             let mut page_params = params.clone();
             let keyset = plan.keyset(last.as_ref(), &mut page_params)?;
             self.charge_list_calls(1)?;
-            let next=self.tx.fetch::<1>(&sql!("SELECT CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({}){visibility}{parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT 1",clauses.joined(" OR ")),&page_params).await?;
+            let scan = RecordScan {
+                columns: Sql::statement("CAST(created_seq AS TEXT)"),
+                storage: storage_resource,
+                filter: &filter,
+                restrictions: sql!("{visibility}{parent_clause}{selection}{keyset}"),
+                order: sql!("nx_records.created_seq {direction}"),
+                limit: 1,
+            };
+            let next = self.tx.scan_records::<1>(scan, &page_params).await?;
             if !next.is_empty() {
                 self.truncated = true;
                 self.more = last.clone();
@@ -1067,13 +1083,12 @@ impl Effects {
             let exact = scan.exact;
             let scan_policy = crate::policy::scan_policy(&op.policy, scan);
             let mut scan_params = vec![Param::Number(storage_resource)];
-            let clause = crate::policy::sql(
+            let filter = crate::policy::filter(
                 self.tx.query_provider()?,
                 &scan_policy,
                 &self.principal,
                 &mut scan_params,
-            )
-            .joined(" OR ");
+            );
             let selection = plan.selection_sql(
                 self.tx.query_provider()?,
                 &mut scan_params,
@@ -1099,11 +1114,16 @@ impl Effects {
             } else {
                 (256 / op.policy.any.len()).min(64)
             };
-            let sql = sql!(
-                "SELECT CAST(created_seq AS TEXT),CAST(id AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage_resource} AND ({clause}){visibility}{parent_clause}{selection}{keyset} ORDER BY nx_records.created_seq {direction} LIMIT {limit}"
-            );
+            let scan = RecordScan {
+                columns: Sql::statement("CAST(created_seq AS TEXT),CAST(id AS TEXT)"),
+                storage: storage_resource,
+                filter: &filter,
+                restrictions: sql!("{visibility}{parent_clause}{selection}{keyset}"),
+                order: sql!("nx_records.created_seq {direction}"),
+                limit,
+            };
             self.charge_list_calls(1)?;
-            let rows = self.tx.fetch::<2>(&sql, &scan_params).await?;
+            let rows = self.tx.scan_records::<2>(scan, &scan_params).await?;
             if !exact && rows.len() == limit {
                 let last = rows.last().expect("nonempty")[0].parse()?;
                 boundary = if plan.descending() {

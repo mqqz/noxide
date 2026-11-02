@@ -118,8 +118,30 @@ def crate_failures():
     return failures
 
 
+# Rust has no friend crates, so these calls are confined here instead.
+POLICY_COMPILERS = {
+    "filter_with": {"noxide-authority"},
+    "filter": {"noxide-authority", "noxide-host"},
+}
+
+
+def filter_failures():
+    failures = []
+    for crate in sorted((ROOT / "crates").iterdir()):
+        if crate.name == "noxide-admission":
+            continue
+        for path in sorted((crate / "src").rglob("*.rs")):
+            if SKIP.search("/" + path.relative_to(crate).as_posix()):
+                continue
+            code = production(path.read_text())
+            for name, allowed in POLICY_COMPILERS.items():
+                if crate.name not in allowed and re.search(rf"\bpolicy::{name}\b", code):
+                    failures.append(f"{path.relative_to(ROOT)}: must not compile a policy filter")
+    return failures
+
+
 def main():
-    failures = crate_failures()
+    failures = crate_failures() + filter_failures()
     for path in sorted(SRC.rglob("*.rs")):
         relative = path.relative_to(SRC).as_posix()
         if SKIP.search("/" + relative) or relative == "lib.rs":

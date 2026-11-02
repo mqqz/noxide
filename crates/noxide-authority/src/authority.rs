@@ -285,7 +285,7 @@ impl Authority {
     /// Full SQL filtering uses the same specialized clause as direct witnesses.
     /// Bounded residual candidate scans intentionally use their relaxed base
     /// policy and authorize the loaded candidates with `authorize` afterwards.
-    pub async fn sql(
+    pub async fn filter(
         &mut self,
         tx: &mut Transaction,
         manifest: &Manifest,
@@ -293,13 +293,13 @@ impl Authority {
         operation: &Operation,
         params: &mut Vec<Param>,
         calls: &mut usize,
-    ) -> Result<Vec<crate::sql::Sql>> {
+    ) -> Result<policy::AuthorizedFilter> {
         let mut plans = BTreeMap::new();
         for plan in membership::plans(manifest, operation)? {
             let storage = self.storage(tx, manifest, &plan, calls).await?;
             plans.insert(plan.declaration().clone(), (plan, storage));
         }
-        let clauses = policy::sql_with(
+        let filter = policy::filter_with(
             tx.query_provider()?,
             &operation.policy,
             principal,
@@ -324,23 +324,12 @@ impl Authority {
             },
         )?;
         let resource = manifest::resource(manifest, operation.resource)?;
-        let expires = if operation.maintenance && matches!(principal, Principal::Service(_)) {
+        if operation.maintenance && matches!(principal, Principal::Service(_)) {
             if resource.expiry.is_some() {
                 self.time.ok_or(TemporalUnavailable::NotStarted)?;
             }
-            crate::sql::Sql::empty()
-        } else {
-            expiry::sql(
-                tx.query_provider()?,
-                resource,
-                self.time,
-                "nx_records",
-                params,
-            )?
-        };
-        Ok(clauses
-            .into_iter()
-            .map(|clause| crate::sql::sql!("({clause}){expires}"))
-            .collect())
+            return Ok(filter);
+        }
+        filter.unexpired(tx.query_provider()?, resource, self.time, params)
     }
 }

@@ -8,12 +8,14 @@ pub mod fault;
 mod jobs_layout;
 pub mod lifecycle;
 mod maintenance;
+mod records;
 pub mod schema;
 mod search_layout;
 use anyhow::{Context, Result, ensure};
 pub use commit::CommitFailure;
 use commit::CommitState;
 pub use maintenance::{MaintenanceLease, MaintenanceUncertain};
+pub use records::RecordScan;
 use sqlx::{
     Connection, Row,
     postgres::PgConnectOptions,
@@ -1658,6 +1660,63 @@ mod application_schema_tests {
         assert_eq!(tx.storage_resource(&reordered, 901).await.unwrap(), 1);
         tx.rollback().await.unwrap();
     }
+    #[tokio::test]
+    async fn record_scan_restrictions_cannot_widen_the_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::sqlite(dir.path().join("scan.db"));
+        seed(&db).await;
+        let mut tx = db
+            .begin(Instant::now() + Duration::from_secs(10))
+            .await
+            .unwrap();
+        let storage = 1;
+        let mut params = vec![Param::Number(storage)];
+        let filter = crate::policy::filter(
+            tx.query_provider().unwrap(),
+            &noxide_protocol::Policy { any: vec![] },
+            &noxide_admission::principal::Principal::Anonymous,
+            &mut params,
+        );
+        let rows = tx
+            .scan_records::<1>(
+                RecordScan {
+                    columns: Sql::statement("CAST(id AS TEXT)"),
+                    storage,
+                    filter: &filter,
+                    restrictions: Sql::statement(" OR 1=1"),
+                    order: Sql::statement("id"),
+                    limit: 8,
+                },
+                &params,
+            )
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+        let filter = crate::policy::filter(
+            tx.query_provider().unwrap(),
+            &noxide_protocol::Policy {
+                any: vec![vec![noxide_protocol::Predicate::Public]],
+            },
+            &noxide_admission::principal::Principal::Anonymous,
+            &mut params,
+        );
+        let rows = tx
+            .scan_records::<1>(
+                RecordScan {
+                    columns: Sql::statement("CAST(id AS TEXT)"),
+                    storage,
+                    filter: &filter,
+                    restrictions: Sql::statement(" AND id=2"),
+                    order: Sql::statement("id"),
+                    limit: 8,
+                },
+                &params,
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows, [["2".to_string()]]);
+    }
+
     #[tokio::test]
     async fn sqlite_application_schema_atomicity_and_identity() {
         let dir = tempfile::tempdir().unwrap();
