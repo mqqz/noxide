@@ -15,7 +15,7 @@ the [explicit examples](../sdk-lowering.md).
 | `noxide-keys` | Host key material and the key service protocol; callers never receive key bytes |
 | `noxide-confine` | Landlock and seccomp policy for deployed processes |
 | `noxide-test-support` | Test fixtures; a dev-dependency only |
-| `noxide-store` | Transactions, schema activation, storage layout, the request lifecycle and durable time; the only crate that links a database driver |
+| `noxide-store` | Transactions, schema activation, storage layout, every SQL statement, the request lifecycle and durable time; the only crate that links a database driver |
 | `noxide-effects` | Effect approval, the outbox and operator commands; opens no outbound socket |
 | `noxide-effect-delivery` | The delivery worker, Tor SOCKS client and TLS transport; only `noxide-cli` depends on it |
 | `noxide-blobs` | The blob directory, blob metadata and upload authority |
@@ -28,14 +28,42 @@ the [explicit examples](../sdk-lowering.md).
 
 `tools/check_layers.py` runs in CI. It fails if a crate gains a restricted dependency
 such as `sqlx`, `rustls`, `wasmtime` or `image`, if a pure crate depends on an
-impure one, if a deployed binary enables a `test-support` feature, or if a module
-inside `noxide-host` depends on a higher layer. `tools/check_binaries.py` checks the
+impure one, if a deployed binary enables a `test-support` feature, if a module
+inside `noxide-host` depends on a higher layer, or if a crate outside its allowed
+list compiles a policy filter. `tools/check_binaries.py` checks the
 symbols of each deployed binary, because `noxide-cli` builds them all.
 
 `noxide-host` still contains the repository, application orchestration and HTTP as
-modules, separated by that lint and not by the compiler. `Transaction` accepts only `Sql`, so
-runtime strings cannot become statement text anywhere, but the statements for those
-modules still live beside them, and any crate depending on the store can run them.
+modules, separated by that lint and not by the compiler.
+
+### SQL boundary
+
+All statement text lives in `noxide-store`. `Transaction::execute` and `fetch` are
+private to that crate; a `test-support` feature, which no deployed binary enables,
+opens them for fixtures. Other crates run a named `Statement<P, C>` from
+`noxide_store::statements`, or one of a few store methods. Only the store can
+construct a `Statement`, and the compiler checks its parameter and column counts.
+
+Filtered reads of application records go through `Transaction::scan_records`, which
+requires an `AuthorizedFilter`. That filter has no constructor taking SQL: it comes
+from compiling a policy for a principal. The store keeps further restrictions in
+their own parentheses, so a restriction narrows the filter but cannot widen it.
+
+These checks stop mistakes. They do not stop a compromised or careless host crate:
+
+- Rust has no friend crates, so `noxide-admission` must expose the filter
+  constructors. `tools/check_layers.py` limits which crates call them, by text search.
+- A caller can compile the wrong policy for an operation. The type proves that a
+  policy was compiled, not that it was the right one.
+- `filter_with` accepts membership predicates as `Sql` from its caller.
+- `RecordScan` columns, restrictions and order, and the arguments to
+  `records_by_ids`, `posting_candidates`, `postings_matching_all` and
+  `membership_witnesses`, are still `Sql` built above the store. That text comes from
+  the `sql!` macro and never from runtime strings.
+- `records_by_ids` and `record_by_id` apply no filter. Their callers must authorize
+  each row in Rust, and the compiler does not check that they do.
+- Statement parameters are `Param` values, so the compiler checks how many there
+  are but not their types or meaning.
 
 ## Deployed processes
 

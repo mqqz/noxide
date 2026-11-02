@@ -920,7 +920,16 @@ impl Transaction {
         };
         sql!("CASE WHEN {size}<={maximum} THEN {column} ELSE NULL END")
     }
+    /// Raw SQL stays inside the store; `test-support` opens it for fixtures.
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn execute(&mut self, sql: impl Into<Sql>, params: &[Param]) -> Result<u64> {
+        self.execute_raw(sql, params).await
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub(crate) async fn execute(&mut self, sql: impl Into<Sql>, params: &[Param]) -> Result<u64> {
+        self.execute_raw(sql, params).await
+    }
+    async fn execute_raw(&mut self, sql: impl Into<Sql>, params: &[Param]) -> Result<u64> {
         ensure!(!self.read_only, "read-only transaction");
         self.execute_internal(sql.into().as_str(), params).await
     }
@@ -953,7 +962,23 @@ impl Transaction {
     }
     // Trusted queries cast selected columns to TEXT, keeping backend conversion
     // rules out of the semantic repository and receipt contracts.
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn fetch<const N: usize>(
+        &mut self,
+        sql: impl Into<Sql>,
+        params: &[Param],
+    ) -> Result<Vec<[String; N]>> {
+        self.fetch_raw(sql, params).await
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub(crate) async fn fetch<const N: usize>(
+        &mut self,
+        sql: impl Into<Sql>,
+        params: &[Param],
+    ) -> Result<Vec<[String; N]>> {
+        self.fetch_raw(sql, params).await
+    }
+    async fn fetch_raw<const N: usize>(
         &mut self,
         sql: impl Into<Sql>,
         params: &[Param],
