@@ -3,6 +3,7 @@
 #![cfg_attr(not(feature = "query-metrics"), forbid(unsafe_code))]
 pub mod database;
 pub mod lifecycle_clock;
+pub mod statements;
 pub use database::{Database, SidecarHold, StoreResources};
 pub(crate) use noxide_admission::{
     ids, manifest, membership, policy, query_plan, schema, search, sql, temporal,

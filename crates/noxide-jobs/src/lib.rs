@@ -12,7 +12,7 @@ pub use operator::{JobOperatorCommand, JobOperatorResult, JobSummary};
 #[cfg(test)]
 mod operator_tests;
 pub use crate::manifest::job_contract::validate_recurring_targets;
-pub(crate) use noxide_admission::{action_contract, ids, manifest, principal, query_plan, sql};
+pub(crate) use noxide_admission::{action_contract, ids, manifest, principal};
 pub(crate) use noxide_store::database;
 #[cfg(test)]
 pub(crate) use noxide_store::{Database, lifecycle_clock};

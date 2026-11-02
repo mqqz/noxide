@@ -1,13 +1,13 @@
 //! Resumable operator recurrence bookkeeping. Query execution/authorization uses
 //! the existing query adapter; this module stores its bounded internal frontier.
 use super::{store::QueueContext, types::*};
-use crate::sql::sql;
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::{
     Fields,
     jobs::*,
     time::{Duration, Timestamp},
 };
+use noxide_store::statements::jobs as stmt;
 use std::collections::BTreeMap;
 
 pub struct RecurrenceCursor {
@@ -94,10 +94,30 @@ impl QueueContext<'_> {
         );
         let (contract, epoch, runtime_state) = self.lock_runtime(scope).await?;
         let (grant, grant_state) = self.lock_grant(scope, &declaration.worker).await?;
-        let changed = self.tx.execute("UPDATE nx_job_recurring SET version=version WHERE deployment=$1 AND tenant=$2 AND name=$3", &[scope.deployment.as_str().into(), scope.tenant.as_str().into(), declaration.name.as_str().into()]).await?;
+        let changed = self
+            .tx
+            .run(
+                &stmt::LOCK_RECURRING,
+                &[
+                    scope.deployment.as_str().into(),
+                    scope.tenant.as_str().into(),
+                    declaration.name.as_str().into(),
+                ],
+            )
+            .await?;
         ensure!(changed == 1, "recurring schedule not installed");
-        let cursor = self.tx.bounded_text("cursor", 4096);
-        let rows = self.tx.fetch::<9>(&sql!("SELECT contract,epoch,CAST(grant_version AS TEXT),CAST(version AS TEXT),state,CAST(next_ms AS TEXT),CAST(cutoff_ms AS TEXT),CAST(cutoff_seq AS TEXT),{cursor} FROM nx_job_recurring WHERE deployment=$1 AND tenant=$2 AND name=$3"), &[scope.deployment.as_str().into(), scope.tenant.as_str().into(), declaration.name.as_str().into()]).await?;
+        let query = stmt::recurring_schedule(self.tx);
+        let rows = self
+            .tx
+            .rows(
+                &query,
+                &[
+                    scope.deployment.as_str().into(),
+                    scope.tenant.as_str().into(),
+                    declaration.name.as_str().into(),
+                ],
+            )
+            .await?;
         let [
             stored_contract,
             stored_epoch,
@@ -123,7 +143,16 @@ impl QueueContext<'_> {
             || grant.epoch != epoch
             || grant.version != integer(grant_version)?
         {
-            self.tx.execute("UPDATE nx_job_recurring SET state='paused' WHERE deployment=$1 AND tenant=$2 AND name=$3", &[scope.deployment.as_str().into(), scope.tenant.as_str().into(), declaration.name.as_str().into()]).await?;
+            self.tx
+                .run(
+                    &stmt::PAUSE_RECURRING,
+                    &[
+                        scope.deployment.as_str().into(),
+                        scope.tenant.as_str().into(),
+                        declaration.name.as_str().into(),
+                    ],
+                )
+                .await?;
             return Ok(None);
         }
         if now.unix_millis() < integer(next)? {
@@ -139,13 +168,7 @@ impl QueueContext<'_> {
         );
         let mut cutoff = Timestamp::from_unix_millis(integer(cutoff)?)?;
         let mut cutoff_seq = integer(cutoff_seq)?;
-        let rows = self
-            .tx
-            .fetch::<1>(
-                "SELECT CAST(value AS TEXT) FROM nx_creation_counter WHERE singleton=1",
-                &[],
-            )
-            .await?;
+        let rows = self.tx.rows(&stmt::CREATION_COUNTER, &[]).await?;
         let current_seq = integer(&rows.first().context("creation counter unavailable")?[0])?;
         if cursor.is_empty() {
             cutoff = now;
@@ -231,7 +254,18 @@ impl QueueContext<'_> {
             expiry,
             &batch.grant.contract,
         )?;
-        let seen = self.tx.fetch::<1>("SELECT job FROM nx_job_occurrences WHERE deployment=$1 AND tenant=$2 AND schedule=$3 AND occurrence=$4", &[batch.position.scope.deployment.as_str().into(), batch.position.scope.tenant.as_str().into(), batch.position.name.as_str().into(), occurrence.as_str().into()]).await?;
+        let seen = self
+            .tx
+            .rows(
+                &stmt::OCCURRENCE_JOB,
+                &[
+                    batch.position.scope.deployment.as_str().into(),
+                    batch.position.scope.tenant.as_str().into(),
+                    batch.position.name.as_str().into(),
+                    occurrence.as_str().into(),
+                ],
+            )
+            .await?;
         if !seen.is_empty() {
             return Ok(false);
         }
@@ -254,7 +288,18 @@ impl QueueContext<'_> {
         job.validate()?;
         batch.grant.permits(&job)?;
         let inserted = self.enqueue(&job, batch.now, tenant_limit).await?;
-        self.tx.execute("INSERT INTO nx_job_occurrences(deployment,tenant,schedule,occurrence,job) VALUES($1,$2,$3,$4,$5)", &[batch.position.scope.deployment.as_str().into(), batch.position.scope.tenant.as_str().into(), batch.position.name.as_str().into(), occurrence.into(), job.id()?.into()]).await?;
+        self.tx
+            .run(
+                &stmt::INSERT_OCCURRENCE,
+                &[
+                    batch.position.scope.deployment.as_str().into(),
+                    batch.position.scope.tenant.as_str().into(),
+                    batch.position.name.as_str().into(),
+                    occurrence.into(),
+                    job.id()?.into(),
+                ],
+            )
+            .await?;
         Ok(inserted)
     }
     /// `next_cursor` is a canonical INTERNAL query frontier, never a browser
@@ -276,7 +321,32 @@ impl QueueContext<'_> {
             batch.declaration.interval.as_millis(),
         )?)?;
         let continued = next_cursor.is_some();
-        let changed = self.tx.execute("UPDATE nx_job_recurring SET version=version+1,next_ms=$1,cutoff_ms=$2,cutoff_seq=$3,cursor=$4 WHERE deployment=$5 AND tenant=$6 AND name=$7 AND version=$8 AND state='active' AND version<9223372036854775807", &[next.unix_millis().into(), (if continued { batch.position.cutoff.unix_millis() } else { 0 }).into(), (if continued { batch.position.cutoff_seq } else { 0 }).into(), next_cursor.unwrap_or("").into(), batch.position.scope.deployment.as_str().into(), batch.position.scope.tenant.as_str().into(), batch.position.name.as_str().into(), batch.position.version.into()]).await?;
+        let changed = self
+            .tx
+            .run(
+                &stmt::ADVANCE_RECURRING_CURSOR,
+                &[
+                    next.unix_millis().into(),
+                    (if continued {
+                        batch.position.cutoff.unix_millis()
+                    } else {
+                        0
+                    })
+                    .into(),
+                    (if continued {
+                        batch.position.cutoff_seq
+                    } else {
+                        0
+                    })
+                    .into(),
+                    next_cursor.unwrap_or("").into(),
+                    batch.position.scope.deployment.as_str().into(),
+                    batch.position.scope.tenant.as_str().into(),
+                    batch.position.name.as_str().into(),
+                    batch.position.version.into(),
+                ],
+            )
+            .await?;
         ensure!(changed == 1, "recurring cursor changed");
         Ok(())
     }
@@ -292,7 +362,22 @@ impl QueueContext<'_> {
             "recurring deferral requires a persisted scan frontier"
         );
         let next = batch.now.checked_add(Duration::from_millis(1_000)?)?;
-        let changed = self.tx.execute("UPDATE nx_job_recurring SET version=version+1,next_ms=$1 WHERE deployment=$2 AND tenant=$3 AND name=$4 AND version=$5 AND state='active' AND version<9223372036854775807 AND cutoff_ms=$6 AND cutoff_seq=$7 AND cursor=$8", &[next.unix_millis().into(), batch.position.scope.deployment.as_str().into(), batch.position.scope.tenant.as_str().into(), batch.position.name.as_str().into(), batch.position.version.into(), batch.position.cutoff.unix_millis().into(), batch.position.cutoff_seq.into(), batch.position.cursor.as_str().into()]).await?;
+        let changed = self
+            .tx
+            .run(
+                &stmt::ADVANCE_RECURRING_DUE,
+                &[
+                    next.unix_millis().into(),
+                    batch.position.scope.deployment.as_str().into(),
+                    batch.position.scope.tenant.as_str().into(),
+                    batch.position.name.as_str().into(),
+                    batch.position.version.into(),
+                    batch.position.cutoff.unix_millis().into(),
+                    batch.position.cutoff_seq.into(),
+                    batch.position.cursor.as_str().into(),
+                ],
+            )
+            .await?;
         ensure!(changed == 1, "recurring scan changed before deferral");
         Ok(())
     }

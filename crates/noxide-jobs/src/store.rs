@@ -1,15 +1,14 @@
 use super::types::*;
-use crate::sql::sql;
 use crate::{
     action_contract::ValidatedActionRejection,
     database::{Transaction, lifecycle::RequestScope},
-    query_plan::NativeProvider,
 };
 use anyhow::{Context, Result, ensure};
 use noxide_protocol::{
     jobs::*,
     time::{Duration, Timestamp},
 };
+use noxide_store::statements::jobs as stmt;
 
 pub struct QueueContext<'a> {
     pub tx: &'a mut Transaction,
@@ -83,14 +82,8 @@ impl QueueContext<'_> {
     }
     async fn runtime_snapshot(&mut self, scope: &JobScope) -> Result<RuntimeSnapshot> {
         self.checkpoint()?;
-        let suffix = match self.tx.query_provider()? {
-            NativeProvider::Postgres => " FOR SHARE",
-            NativeProvider::Sqlite => "",
-        };
-        let query = sql!(
-            "SELECT deployment,contract,epoch,state,CAST(pending_limit AS TEXT),CAST(tenant_limit AS TEXT),CAST(concurrency AS TEXT) FROM nx_job_runtime WHERE singleton=1 AND EXISTS(SELECT 1 FROM nx_deployment WHERE singleton=1 AND generation=nx_job_runtime.deployment){suffix}"
-        );
-        let rows = self.tx.fetch::<7>(&query, &[]).await?;
+        let query = stmt::runtime_snapshot(self.tx)?;
+        let rows = self.tx.rows(&query, &[]).await?;
         let [
             deployment,
             contract,
@@ -128,17 +121,10 @@ impl QueueContext<'_> {
         worker: &str,
     ) -> Result<(Grant, String)> {
         self.checkpoint()?;
-        let payload = self.tx.bounded_text("declaration", MAX_JOB_BYTES);
-        let suffix = match self.tx.query_provider()? {
-            NativeProvider::Postgres => " FOR SHARE",
-            NativeProvider::Sqlite => "",
-        };
-        let query = sql!(
-            "SELECT {payload},state,CAST(version AS TEXT),contract,epoch FROM nx_job_grants WHERE deployment=$1 AND tenant=$2 AND worker=$3{suffix}"
-        );
+        let query = stmt::locked_grant(self.tx)?;
         let rows = self
             .tx
-            .fetch::<5>(
+            .rows(
                 &query,
                 &[
                     scope.deployment.as_str().into(),
@@ -165,11 +151,32 @@ impl QueueContext<'_> {
     async fn row(&mut self, claim: &Claim, lock: bool) -> Result<Row> {
         self.checkpoint()?;
         if lock {
-            let changed = self.tx.execute("UPDATE nx_jobs SET fence=fence WHERE id=$1 AND deployment=$2 AND tenant=$3 AND fence=$4", &[claim.id.as_str().into(), claim.scope.deployment.as_str().into(), claim.scope.tenant.as_str().into(), claim.fence.into()]).await?;
+            let changed = self
+                .tx
+                .run(
+                    &stmt::LOCK_JOB_FENCE,
+                    &[
+                        claim.id.as_str().into(),
+                        claim.scope.deployment.as_str().into(),
+                        claim.scope.tenant.as_str().into(),
+                        claim.fence.into(),
+                    ],
+                )
+                .await?;
             ensure!(changed == 1, "job claim superseded");
         }
-        let payload = self.tx.bounded_text("payload", MAX_JOB_BYTES);
-        let rows = self.tx.fetch::<17>(&sql!("SELECT {payload},payload_digest,state,CAST(attempts AS TEXT),CAST(first_eligible_ms AS TEXT),CAST(fence AS TEXT),CAST(lease_until_ms AS TEXT),contract,epoch,worker,CAST(action AS TEXT),CAST(grant_version AS TEXT),CAST(due_ms AS TEXT),CAST(eligible_ms AS TEXT),origin,CAST(ordinal AS TEXT),COALESCE(reconciled_from,'') FROM nx_jobs WHERE id=$1 AND deployment=$2 AND tenant=$3"), &[claim.id.as_str().into(), claim.scope.deployment.as_str().into(), claim.scope.tenant.as_str().into()]).await?;
+        let query = stmt::claimed_job(self.tx);
+        let rows = self
+            .tx
+            .rows(
+                &query,
+                &[
+                    claim.id.as_str().into(),
+                    claim.scope.deployment.as_str().into(),
+                    claim.scope.tenant.as_str().into(),
+                ],
+            )
+            .await?;
         let [
             payload,
             digest,
@@ -250,10 +257,8 @@ impl QueueContext<'_> {
         row: &Row,
         validate: &impl Fn(&str) -> Result<()>,
     ) -> Result<Option<String>> {
-        let outcome = self
-            .tx
-            .bounded_text("outcome", noxide_protocol::MAX_RESULT_BYTES);
-        let receipts = self.tx.fetch::<5>(&sql!("SELECT subject,contract,CAST(action AS TEXT),input,{outcome} FROM nx_receipts WHERE nonce=$1"), &[row.job.id()?.into()]).await?;
+        let query = stmt::job_receipt(self.tx);
+        let receipts = self.tx.rows(&query, &[row.job.id()?.into()]).await?;
         let Some([subject, contract, action, input, outcome]) = receipts.first() else {
             return Ok(None);
         };
@@ -277,7 +282,21 @@ impl QueueContext<'_> {
         eligible: Timestamp,
     ) -> Result<()> {
         self.checkpoint()?;
-        let changed = self.tx.execute("UPDATE nx_jobs SET state=$1,reason=$2,eligible_ms=$3,lease_until_ms=0 WHERE id=$4 AND deployment=$5 AND tenant=$6 AND state='running' AND fence=$7", &[state.into(), reason.into(), eligible.unix_millis().into(), claim.id.as_str().into(), claim.scope.deployment.as_str().into(), claim.scope.tenant.as_str().into(), claim.fence.into()]).await?;
+        let changed = self
+            .tx
+            .run(
+                &stmt::FINISH_RUNNING_JOB,
+                &[
+                    state.into(),
+                    reason.into(),
+                    eligible.unix_millis().into(),
+                    claim.id.as_str().into(),
+                    claim.scope.deployment.as_str().into(),
+                    claim.scope.tenant.as_str().into(),
+                    claim.fence.into(),
+                ],
+            )
+            .await?;
         ensure!(changed == 1, "job finalization superseded");
         Ok(())
     }
@@ -330,13 +349,7 @@ impl QueueContext<'_> {
                 && runtime.epoch == job.epoch,
             "job runtime paused or changed"
         );
-        let changed = self
-            .tx
-            .execute(
-                "UPDATE nx_job_queue SET claim_seq=claim_seq WHERE singleton=1",
-                &[],
-            )
-            .await?;
+        let changed = self.tx.run(&stmt::LOCK_QUEUE, &[]).await?;
         ensure!(changed == 1, "job queue unavailable");
         let (grant, state) = self.lock_grant(&job.scope, &job.worker).await?;
         ensure!(state == "active", "service grant revoked");
@@ -345,10 +358,7 @@ impl QueueContext<'_> {
         let digest = job.invocation_digest()?;
         let existing = self
             .tx
-            .fetch::<1>(
-                "SELECT payload_digest FROM nx_jobs WHERE id=$1",
-                &[id.as_str().into()],
-            )
+            .rows(&stmt::JOB_PAYLOAD_DIGEST, &[id.as_str().into()])
             .await?;
         if let Some([stored]) = existing.first() {
             ensure!(
@@ -359,15 +369,50 @@ impl QueueContext<'_> {
         }
         // The queue write lock serializes both quota checks and insertion.
         // Old paused contracts count until explicitly reconciled by the operator.
-        let counts = self.tx.fetch::<2>("SELECT CAST(COUNT(*) AS TEXT),CAST(COALESCE(SUM(CASE WHEN tenant=$1 THEN 1 ELSE 0 END),0) AS TEXT) FROM (SELECT tenant FROM nx_jobs WHERE state IN ('pending','running','paused') LIMIT 1001) AS active_jobs", &[job.scope.tenant.as_str().into()]).await?;
+        let counts = self
+            .tx
+            .rows(
+                &stmt::ACTIVE_JOB_COUNTS,
+                &[job.scope.tenant.as_str().into()],
+            )
+            .await?;
         ensure!(
             integer(&counts[0][0])? < i64::from(runtime.pending_limit)
                 && integer(&counts[0][1])? < i64::from(tenant_limit.min(runtime.tenant_limit)),
             "job queue full"
         );
-        self.tx.execute("INSERT INTO nx_job_tenants(deployment,tenant,claim_seq) VALUES($1,$2,0) ON CONFLICT(deployment,tenant) DO NOTHING", &[job.scope.deployment.as_str().into(), job.scope.tenant.as_str().into()]).await?;
+        self.tx
+            .run(
+                &stmt::ENSURE_TENANT,
+                &[
+                    job.scope.deployment.as_str().into(),
+                    job.scope.tenant.as_str().into(),
+                ],
+            )
+            .await?;
         let payload = serde_json::to_string(job)?;
-        self.tx.execute("INSERT INTO nx_jobs(id,deployment,tenant,origin,ordinal,worker,action,contract,epoch,grant_version,payload,payload_digest,due_ms,eligible_ms,first_eligible_ms,attempts,fence,lease_until_ms,state,reason,reconciled_from) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,0,0,0,'pending','',NULLIF($15,''))", &[id.into(), job.scope.deployment.as_str().into(), job.scope.tenant.as_str().into(), job.origin.as_str().into(), i64::from(job.ordinal).into(), job.worker.as_str().into(), i64::from(job.action).into(), job.contract.as_str().into(), job.epoch.as_str().into(), job.grant_version.into(), payload.into(), digest.into(), job.due.unix_millis().into(), now.max(job.due).unix_millis().into(), job.reconciled_from().unwrap_or("").into()]).await?;
+        self.tx
+            .run(
+                &stmt::INSERT_JOB,
+                &[
+                    id.into(),
+                    job.scope.deployment.as_str().into(),
+                    job.scope.tenant.as_str().into(),
+                    job.origin.as_str().into(),
+                    i64::from(job.ordinal).into(),
+                    job.worker.as_str().into(),
+                    i64::from(job.action).into(),
+                    job.contract.as_str().into(),
+                    job.epoch.as_str().into(),
+                    job.grant_version.into(),
+                    payload.into(),
+                    digest.into(),
+                    job.due.unix_millis().into(),
+                    now.max(job.due).unix_millis().into(),
+                    job.reconciled_from().unwrap_or("").into(),
+                ],
+            )
+            .await?;
         Ok(true)
     }
     /// One fair bounded claim. Commit this short transaction before launching
@@ -384,19 +429,29 @@ impl QueueContext<'_> {
             })
             .await?;
         ensure!(runtime.state == "active", "job runtime unavailable");
-        let changed = self.tx.execute("UPDATE nx_job_queue SET claim_seq=claim_seq+1 WHERE singleton=1 AND claim_seq<9223372036854775807 AND EXISTS(SELECT 1 FROM nx_job_runtime WHERE singleton=1 AND deployment=$1 AND state='active' AND EXISTS(SELECT 1 FROM nx_deployment WHERE singleton=1 AND generation=nx_job_runtime.deployment))", &[deployment.into()]).await?;
+        let changed = self
+            .tx
+            .run(&stmt::ADVANCE_CLAIM_SEQUENCE, &[deployment.into()])
+            .await?;
         ensure!(changed == 1, "job runtime unavailable");
         // Counting all running rows prevents lease expiry from freeing capacity
         // while an old execution transaction might still be alive.
-        let running = self.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM (SELECT id FROM nx_jobs WHERE state='running' LIMIT 3) AS running_jobs", &[]).await?;
+        let running = self.tx.rows(&stmt::RUNNING_JOB_COUNT, &[]).await?;
         let capacity = integer(&running[0][0])? < i64::from(runtime.concurrency);
         // Never wait on a job row while retaining the queue lock: an existing
         // action may hold that row and enqueue its own admitted next action.
-        let suffix = match self.tx.query_provider()? {
-            NativeProvider::Postgres => " FOR UPDATE OF j SKIP LOCKED",
-            NativeProvider::Sqlite => "",
-        };
-        let rows = self.tx.fetch::<5>(&sql!("SELECT j.id,j.tenant,CAST(j.fence AS TEXT),CAST(j.attempts AS TEXT),j.state FROM nx_jobs j JOIN nx_job_tenants t ON t.deployment=j.deployment AND t.tenant=j.tenant WHERE j.deployment=$1 AND ((j.state='running' AND j.lease_until_ms<=$2) OR (j.state='pending' AND j.eligible_ms<=$2 AND $3=1)) ORDER BY t.claim_seq,j.eligible_ms,j.id LIMIT 1{suffix}"), &[deployment.into(), now.unix_millis().into(), i64::from(capacity).into()]).await?;
+        let query = stmt::next_claimable(self.tx)?;
+        let rows = self
+            .tx
+            .rows(
+                &query,
+                &[
+                    deployment.into(),
+                    now.unix_millis().into(),
+                    i64::from(capacity).into(),
+                ],
+            )
+            .await?;
         let Some([id, tenant, fence, attempts, state]) = rows.first() else {
             return Ok(None);
         };
@@ -409,9 +464,28 @@ impl QueueContext<'_> {
             "invalid job attempts"
         );
         let lease = now.checked_add(Duration::from_millis(JOB_LEASE_MILLIS)?)?;
-        let changed = self.tx.execute("UPDATE nx_jobs SET state='running',fence=$1,lease_until_ms=$2,attempts=$3 WHERE id=$4 AND deployment=$5 AND fence=$6 AND state=$7", &[next_fence.into(), lease.unix_millis().into(), (attempts + i64::from(attempts < i64::from(MAX_JOB_ATTEMPTS))).into(), id.as_str().into(), deployment.into(), integer(fence)?.into(), state.as_str().into()]).await?;
+        let changed = self
+            .tx
+            .run(
+                &stmt::CLAIM_JOB,
+                &[
+                    next_fence.into(),
+                    lease.unix_millis().into(),
+                    (attempts + i64::from(attempts < i64::from(MAX_JOB_ATTEMPTS))).into(),
+                    id.as_str().into(),
+                    deployment.into(),
+                    integer(fence)?.into(),
+                    state.as_str().into(),
+                ],
+            )
+            .await?;
         ensure!(changed == 1, "job claim raced");
-        self.tx.execute("UPDATE nx_job_tenants SET claim_seq=(SELECT claim_seq FROM nx_job_queue WHERE singleton=1) WHERE deployment=$1 AND tenant=$2", &[deployment.into(), tenant.as_str().into()]).await?;
+        self.tx
+            .run(
+                &stmt::RECORD_TENANT_CLAIM,
+                &[deployment.into(), tenant.as_str().into()],
+            )
+            .await?;
         Ok(Some(Claim {
             id: id.clone(),
             scope: JobScope {
