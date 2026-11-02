@@ -7,6 +7,7 @@
 mod config;
 use anyhow::{Context, Result, ensure};
 use config::*;
+use noxide_guest::pool::GuestPool;
 use noxide_host::{Application, HostKeys, assets::AssetBundle, runtime::Limits};
 use noxide_http::{BoundListener, Origin};
 use std::{path::PathBuf, sync::Arc};
@@ -79,32 +80,43 @@ fn main() -> Result<()> {
         &[config.confinement.argument()],
     )?);
     let store = database(&config.database, &base)?;
-    let app = Arc::new(
-        Application::new(
-            &read(&base.join(&config.component), 2 * 1024 * 1024)?,
-            &declarations,
-            approved,
-            store.clone(),
-            keys,
+    let component = read(&base.join(&config.component), 2 * 1024 * 1024)?;
+    let mut app = Application::new(
+        &component,
+        &declarations,
+        approved,
+        store.clone(),
+        keys,
+        Limits::default(),
+        noxide_host::DeploymentResources {
+            effects: config.effect_deployment(&base),
+            jobs: config.jobs.clone(),
+            assets,
+            blobs: config
+                .blobs
+                .as_ref()
+                .map(|deployment| noxide_host::BlobDeployment {
+                    directory: base.join(&deployment.directory),
+                    ceilings: deployment.ceilings.clone(),
+                }),
+        },
+    )?
+    .with_presentation(config.presentation)?
+    .with_signed_in_reserve(config.signed_in_reserve)?
+    .with_database_statement_limit(config.database_statement_limit)?
+    .with_registration(config.registration);
+    if config.guest_workers && !arguments.validate {
+        let mut pool = GuestPool::start(
+            &sibling("noxide-guest")?,
+            &[config.confinement.argument()],
+            &component,
             Limits::default(),
-            noxide_host::DeploymentResources {
-                effects: config.effect_deployment(&base),
-                jobs: config.jobs.clone(),
-                assets,
-                blobs: config
-                    .blobs
-                    .as_ref()
-                    .map(|deployment| noxide_host::BlobDeployment {
-                        directory: base.join(&deployment.directory),
-                        ceilings: deployment.ceilings.clone(),
-                    }),
-            },
-        )?
-        .with_presentation(config.presentation)?
-        .with_signed_in_reserve(config.signed_in_reserve)?
-        .with_database_statement_limit(config.database_statement_limit)?
-        .with_registration(config.registration),
-    );
+        )?;
+        // This process confines itself below, after which it cannot start any more.
+        pool.stop_replacing();
+        app.use_guest_workers(Arc::new(pool));
+    }
+    let app = Arc::new(app);
     let startup = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;

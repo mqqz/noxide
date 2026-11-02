@@ -12,6 +12,7 @@ the [explicit examples](../sdk-lowering.md).
 | `noxide-admission` | Pure manifest admission, policy and query planning, SQL generation and identity values |
 | `noxide-render` | Document IR to bytes, with its budget passed in |
 | `noxide-host-calls` | The storage calls a guest may make, as a trait with no runtime behind it |
+| `noxide-guest` | The worker wire protocol and the server's worker pool; links no guest runtime |
 | `noxide-sandbox` | The Wasmtime boundary and complete guest import surface, behind `HostCalls` |
 | `noxide-keys` | Host key material and the key service protocol; callers never receive key bytes |
 | `noxide-confine` | Landlock and seccomp policy for deployed processes |
@@ -73,6 +74,7 @@ validates and compiles assets, then runs:
 | --- | --- | --- | --- |
 | `noxide-server` | Guest runtime, database connections, blob store, listener | Database files or loopback database port, blob directory, its key service | `rustls`, SOCKS, `cssparser`, `image` |
 | `noxide-keyd` | Host key material | Its one socket | Network, database, Wasmtime, Tokio |
+| `noxide-guest` (optional) | One compiled guest | Its one socket | Keys, database, HTTP, TLS |
 | `noxide-effects-worker` | Effect secret paths, database connections | Database, secret files, loopback Tor proxy port | Host keys, HTTP server, login |
 
 The server and worker start on one thread, bind and activate, then confine
@@ -107,6 +109,28 @@ Form layout generation uses action inputs, independently of resource fields. The
 writable-field checks, approved action binding, credential issuance, escaping,
 headers and final Document IR validation. Navigation presentation is separate from
 host authorization of the destination and credential handover.
+
+### Guest workers
+
+With `guest_workers: true`, guest code runs in `noxide-guest` processes. A worker
+compiles the component, confines itself to the socket from its server, and sends each
+storage call to the server. The server stays the authority: it checks storage access
+on every call, counts calls, limits each message, enforces the deadline and validates
+the output itself. A worker that breaks the protocol is killed and never reused. This
+is off by default and is not yet a finished boundary:
+
+- The server still links Wasmtime and compiles the component as its admission check.
+  An escape from a worker no longer reaches the server, but this deployment still has
+  that code in the server.
+- A confined server cannot start processes, so it starts all workers up front and
+  cannot replace one it loses. Repeated protocol violations or worker crashes use up
+  capacity until restart, and those requests get a busy response.
+- Workers serve many requests. A guest that escapes Wasmtime can read later requests
+  sent to that worker, including those of other accounts.
+- Only the server's deadline binds a compromised worker. Its memory and CPU limits are
+  enforced inside the worker, so they need an operating system limit to hold.
+- Each worker costs about 210 ms of startup CPU and 22 MiB for a 175 KiB release-built
+  application. Those figures are from one machine, and larger components cost more.
 
 ## Mutation and navigation lifecycle
 

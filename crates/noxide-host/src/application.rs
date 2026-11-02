@@ -11,6 +11,7 @@ mod capabilities;
 pub mod clock;
 mod effect_worker;
 mod effects;
+mod guests;
 mod jobs;
 mod navigation;
 mod submission;
@@ -268,7 +269,7 @@ pub struct Application {
     database: Database,
     jobs: Option<job_worker::JobRuntime>,
     effects: Option<effect_worker::EffectRuntime>,
-    runtime: noxide_sandbox::Runtime<Effects>,
+    runtime: guests::Guests,
     contract: String,
     deployment: String,
     generation: OnceLock<String>,
@@ -320,6 +321,12 @@ impl Application {
     #[cfg(feature = "test-support")]
     pub fn test_maintenance_running(&self) -> &std::sync::atomic::AtomicBool {
         &self.maintenance_running
+    }
+
+    /// Run guests in worker processes. Call before the application serves anything;
+    /// the pool's limits must be the ones this application was created with.
+    pub fn use_guest_workers(&mut self, pool: Arc<noxide_guest::pool::GuestPool>) {
+        self.runtime = guests::Guests::Workers(pool);
     }
 
     /// Key access for tests of signed values; a deployed binary has no such route.
@@ -730,7 +737,9 @@ impl Application {
         identity.update(Sha256::digest(component));
         let deployment = URL_SAFE_NO_PAD.encode(identity.finalize());
         let concurrency = limits.concurrency;
-        let runtime = noxide_sandbox::Runtime::compile(component, limits)?;
+        // Compiled here even when workers run the guest: this is its admission check.
+        let runtime =
+            guests::Guests::InProcess(noxide_sandbox::Runtime::compile(component, limits)?);
         let admission_limits = AdmissionLimits::new(
             25,
             m.routes

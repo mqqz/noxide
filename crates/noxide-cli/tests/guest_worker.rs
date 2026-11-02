@@ -174,26 +174,119 @@ async fn a_loop_past_the_deadline_is_reported_as_busy() {
         )
         .await;
     assert!(attempt.result.unwrap_err().is::<GuestBusy>());
+    assert_eq!(
+        pool.idle_workers(),
+        1,
+        "an honest worker survives a deadline"
+    );
 }
 
 #[tokio::test]
-async fn a_failed_worker_is_replaced() {
-    let pool = pool("(loop $forever br $forever)", 1);
+async fn a_lost_worker_is_replaced() {
+    // Hold up the reply past the grace period by making the storage call itself slow.
+    struct Slow;
+    impl HostCalls for Slow {
+        fn storage_allowed(&self) -> bool {
+            true
+        }
+        async fn invoke(&mut self, _: u32, _: u64) -> Result<Vec<u8>> {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok(Vec::new())
+        }
+        fn follow_source(&mut self, _: u32, _: u64) -> Result<()> {
+            Ok(())
+        }
+        async fn follow(&mut self, _: u32) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+    }
+    let pool = pool("i32.const 1 i64.const 0 call $invoke drop", 1);
     let attempt = pool
         .run(
             request(),
-            Some(Storage::default()),
-            u64::MAX / 2,
+            Some(Slow),
+            1_000_000,
             8,
             Instant::now() + Duration::from_millis(50),
         )
         .await;
     assert!(attempt.result.is_err());
-    for _ in 0..200 {
+    for _ in 0..400 {
         if pool.idle_workers() == 1 {
             return;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("worker was not replaced");
+}
+
+#[tokio::test]
+async fn an_application_serves_and_writes_through_a_worker() {
+    use noxide_host::{AccountAdmin as _, Application, Database, DeploymentResources, HostKeys};
+    use noxide_test_support as fixture;
+    let directory = tempfile::tempdir().unwrap();
+    let db = Database::sqlite(directory.path().join("worker.db"));
+    db.initialize().await.unwrap();
+    db.create_account("alice", "worker test password", "")
+        .await
+        .unwrap();
+    let manifest = fixture::manifest();
+    let component = fixture::component(None);
+    let mut app = Application::new(
+        &component,
+        &serde_json::to_vec(&manifest).unwrap(),
+        noxide_host::manifest::digest(&manifest).unwrap(),
+        db,
+        HostKeys::generate().unwrap(),
+        Limits::default(),
+        DeploymentResources {
+            effects: None,
+            jobs: None,
+            assets: noxide_host::assets::AssetBundle::default(),
+            blobs: None,
+        },
+    )
+    .unwrap();
+    let pool = Arc::new(
+        GuestPool::start(
+            Path::new(env!("CARGO_BIN_EXE_noxide-guest")),
+            &["best_effort"],
+            &component,
+            Limits {
+                concurrency: 1,
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+    );
+    app.use_guest_workers(pool.clone());
+    app.activate().await.unwrap();
+    let challenge = app.login_challenge().await.unwrap();
+    let session = app
+        .login(
+            &challenge.cookie,
+            &challenge.csrf,
+            "alice",
+            "worker test password",
+        )
+        .await
+        .unwrap();
+    let page = app.view(&session, 1, None).await.unwrap();
+    let body = String::from_utf8(page.body).unwrap();
+    assert!(body.contains("No notes yet"));
+    let submission = fixture::hidden(&body, "_submission");
+    let csrf = fixture::hidden(&body, "_csrf");
+    app.submit(
+        &session,
+        1,
+        &submission,
+        &csrf,
+        std::collections::BTreeMap::from([("body".to_string(), "through a worker".to_string())]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(pool.idle_workers(), 1);
+    // With no worker left the page fails, so the guest was never in this process.
+    pool.close();
+    assert!(app.view(&session, 1, None).await.is_err());
 }

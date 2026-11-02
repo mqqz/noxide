@@ -10,6 +10,7 @@ description = "Trusted Noxide application runtime"
 [dependencies]
 noxide-protocol.workspace = true
 noxide-sandbox.workspace = true
+noxide-guest.workspace = true
 noxide-sql.workspace = true
 noxide-store.workspace = true
 noxide-blobs.workspace = true

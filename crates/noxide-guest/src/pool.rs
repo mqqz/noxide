@@ -17,6 +17,11 @@ use std::{
 };
 use tokio::{net::UnixStream, time::Instant};
 
+/// How long past the deadline a worker has to report it. A worker stops its guest at
+/// the deadline itself, and reporting keeps it usable; this only limits how long the
+/// server waits for one that does not.
+const WORKER_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Largest component a worker accepts during startup.
 pub const MAX_COMPONENT_BYTES: usize = 64 * 1024 * 1024;
 
@@ -110,7 +115,7 @@ impl Spawner {
 }
 
 impl GuestPool {
-    /// Start `limits.concurrency` workers, each compiling the component. A confined
+    /// Start `limits.concurrency` workers at once. A confined
     /// server cannot start processes, so call this before confining.
     pub fn start(
         program: &Path,
@@ -126,9 +131,17 @@ impl GuestPool {
                 .collect(),
             component: component.into(),
         };
-        let idle = (0..limits.concurrency)
-            .map(|_| spawner.spawn(&limits))
-            .collect::<Result<Vec<_>>>()?;
+        // Each worker compiles the component; these threads end before this returns,
+        // so they do not hold up the server's confinement.
+        let idle = std::thread::scope(|scope| {
+            let starting: Vec<_> = (0..limits.concurrency)
+                .map(|_| scope.spawn(|| spawner.spawn(&limits)))
+                .collect();
+            starting
+                .into_iter()
+                .map(|worker| worker.join().expect("worker start"))
+                .collect::<Result<Vec<_>>>()
+        })?;
         Ok(Self {
             idle: Mutex::new(idle),
             limits,
@@ -147,6 +160,11 @@ impl GuestPool {
 
     pub fn idle_workers(&self) -> usize {
         self.idle.lock().unwrap().len()
+    }
+
+    /// Stop every idle worker; later requests report no capacity.
+    pub fn close(&self) {
+        self.idle.lock().unwrap().clear();
     }
 
     fn checkout(&self) -> Option<Worker> {
@@ -189,7 +207,7 @@ impl GuestPool {
             };
         };
         let exchange = tokio::time::timeout_at(
-            deadline,
+            deadline + WORKER_GRACE,
             exchange(&mut worker, &request, &mut effects, &mut used, deadline),
         )
         .await;

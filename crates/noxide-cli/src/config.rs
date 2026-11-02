@@ -39,6 +39,9 @@ impl Confinement {
 pub struct Config {
     #[serde(default)]
     pub confinement: Confinement,
+    /// Run guest code in `noxide-guest` processes, not in the server.
+    #[serde(default)]
+    pub guest_workers: bool,
     /// Digest of the compiled asset pack, from `noxide assets-compile`.
     #[serde(default)]
     pub approved_assets: Option<String>,

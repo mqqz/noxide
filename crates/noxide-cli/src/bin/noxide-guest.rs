@@ -1,5 +1,7 @@
 //! Runs one application's guest code, over the socket on its stdin. Holds no keys
 //! and no database, and is confined to that socket before any guest code runs.
+//! Exits when the socket closes. No parent-death signal: a replacement can be started
+//! by a thread that ends long before the server does.
 #![forbid(unsafe_code)]
 use anyhow::{Context, Result, ensure};
 use noxide_sandbox::worker::Worker;
@@ -9,7 +11,6 @@ fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
     let mode = args.next();
     ensure!(args.next().is_none(), "usage: noxide-guest [MODE]");
-    rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::TERM))?;
     let mut socket = UnixStream::from(std::io::stdin().as_fd().try_clone_to_owned()?);
     let (limits, component) = noxide_guest::pool::read_init(&mut socket).context("startup")?;
     let worker = Worker::compile(&component, limits)?;

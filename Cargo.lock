@@ -1566,6 +1566,7 @@ dependencies = [
  "noxide-blobs",
  "noxide-effect-delivery",
  "noxide-effects",
+ "noxide-guest",
  "noxide-jobs",
  "noxide-protocol",
  "noxide-render",
