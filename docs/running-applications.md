@@ -468,6 +468,11 @@ The server user reads the key file only through `noxide-keyd`, which it starts b
 confining itself. A stalled or dead key service disables the keys for that process:
 requests needing them return "busy" until you restart it.
 
+## Diagnose rejected requests
+
+Set `NOXIDE_DIAGNOSTICS=1` to write the reason for each rejected request to standard
+error. The reason can quote stored values, so leave it unset in production.
+
 ## Tor deployment
 
 Use `tor_unix` to accept Tor's PROXY v1 circuit information on a private Unix

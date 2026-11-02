@@ -1179,10 +1179,10 @@ impl RequestError {
             return Self::Busy;
         }
         if retryable(&error) {
-            Self::Busy
-        } else {
-            Self::Rejected
+            return Self::Busy;
         }
+        diagnose_rejection(&error);
+        Self::Rejected
     }
 }
 impl std::fmt::Display for RequestError {
@@ -1203,6 +1203,15 @@ impl std::fmt::Display for RequestError {
     }
 }
 impl std::error::Error for RequestError {}
+
+/// With `NOXIDE_DIAGNOSTICS` set, record why a request was rejected. Off by default:
+/// the chain can quote stored values, and logs must stay free of user data.
+fn diagnose_rejection(error: &anyhow::Error) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *ENABLED.get_or_init(|| std::env::var_os("NOXIDE_DIAGNOSTICS").is_some()) {
+        eprintln!("noxide diagnostic: request rejected: {error:#}");
+    }
+}
 
 pub fn retryable(error: &anyhow::Error) -> bool {
     if error.is::<commit::CommitFailure>() {
