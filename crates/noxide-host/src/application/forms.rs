@@ -123,7 +123,7 @@ impl Application {
             .as_ref()
             .filter(|blobs| {
                 blobs
-                    .policy
+                    .policy()
                     .uploads
                     .iter()
                     .any(|u| u.web_binding == action.id)

@@ -6,16 +6,9 @@ use noxide_protocol::{
     Manifest,
     blobs::{BlobCeilings, BlobPolicy},
 };
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BlobDeployment {
-    pub directory: PathBuf,
-    pub ceilings: BlobCeilings,
-}
+pub use noxide_blobs::blob_deployment::BlobDeployment;
 
 /// The constructor accepts one set of local deployment resources. It must
 /// verify approval before opening a store and bind store identity before ready.
@@ -245,11 +238,11 @@ mod tests {
     #[test]
     fn paths_are_outside_effective_policy_and_composite_identity() {
         let a = BlobDeployment {
-            directory: PathBuf::from("/must-not-open/a"),
+            directory: std::path::PathBuf::from("/must-not-open/a"),
             ceilings: BlobCeilings::default(),
         };
         let b = BlobDeployment {
-            directory: PathBuf::from("/must-not-open/b"),
+            directory: std::path::PathBuf::from("/must-not-open/b"),
             ceilings: a.ceilings.clone(),
         };
         let requested = policy();

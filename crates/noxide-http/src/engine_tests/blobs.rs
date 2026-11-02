@@ -6,9 +6,12 @@ use axum::{
 };
 use noxide_authority::authority;
 use noxide_blobs::metadata::MetadataContext;
+use noxide_blobs::runtime::ReconcileHost;
 use noxide_blobs::store::{IoGuard, ObjectKey};
 use noxide_blobs::upload::Barrier;
 use noxide_host::application::blobs::*;
+use noxide_protocol::time::Timestamp;
+use noxide_store::database::Transaction;
 use tokio::time::Instant;
 use tower::ServiceExt;
 fn declarations() -> Manifest {
@@ -396,10 +399,19 @@ async fn flow(db: Database) {
     .unwrap();
     tx.commit().await.unwrap();
     let blobs = app.blobs.as_ref().unwrap();
-    let key =
-        ObjectKey::parse(blobs.workers.lock().unwrap().keys().next().unwrap().clone()).unwrap();
+    let key = ObjectKey::parse(
+        blobs
+            .workers()
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
     blobs
-        .store
+        .store()
         .remove(
             &key,
             &IoGuard::new(
@@ -417,7 +429,7 @@ async fn flow(db: Database) {
         StatusCode::NOT_FOUND
     );
     assert!(
-        blobs.quarantined.load(Ordering::Acquire),
+        blobs.quarantined().load(Ordering::Acquire),
         "a missing object blocks new uploads"
     );
 }
@@ -761,7 +773,7 @@ async fn sqlite_quota_race_reserves_before_bytes_and_reclaims_unstarted_upload()
     );
     assert_eq!(usize::from(one.is_ok()) + usize::from(two.is_ok()), 1);
     assert_eq!(case.state().await.2, "1024");
-    let store = &case.app.blobs.as_ref().unwrap().store;
+    let store = &case.app.blobs.as_ref().unwrap().store();
     let guard = IoGuard::new(
         std::time::Instant::now() + std::time::Duration::from_secs(2),
         Arc::new(AtomicBool::new(false)),
@@ -793,14 +805,17 @@ async fn sqlite_unknown_file_is_charged_retained_and_blocks_new_uploads() {
         std::time::Instant::now() + std::time::Duration::from_secs(2),
         Arc::new(AtomicBool::new(false)),
     );
-    let mut pending = blobs.store.begin(key.clone(), 1024, guard.clone()).unwrap();
+    let mut pending = blobs
+        .store()
+        .begin(key.clone(), 1024, guard.clone())
+        .unwrap();
     pending.write_chunk(b"orphan").unwrap();
     pending.finalize().unwrap();
     case.maintenance().await;
-    assert!(blobs.quarantined.load(Ordering::Acquire));
+    assert!(blobs.quarantined().load(Ordering::Acquire));
     assert_eq!(
         blobs
-            .store
+            .store()
             .open_object(&key, 6, guard)
             .unwrap()
             .read_chunk(&mut [0; 64])
@@ -846,7 +861,7 @@ async fn sqlite_unknown_file_is_charged_retained_and_blocks_new_uploads() {
     case.maintenance().await;
     assert!(
         blobs
-            .store
+            .store()
             .snapshot(
                 &key,
                 &IoGuard::new(
@@ -925,7 +940,7 @@ async fn sqlite_truncated_file_waits_for_physical_stop_before_gc() {
         .blobs
         .as_ref()
         .unwrap()
-        .workers
+        .workers()
         .lock()
         .unwrap()
         .values()
@@ -973,7 +988,7 @@ async fn restart_after_finalize(db: Option<Database>, finalized: bool) {
         std::time::Instant::now() + std::time::Duration::from_secs(2),
         Arc::new(AtomicBool::new(false)),
     );
-    let mut pending = blobs.store.begin(key.clone(), 1024, guard).unwrap();
+    let mut pending = blobs.store().begin(key.clone(), 1024, guard).unwrap();
     pending.write_chunk(b"known reservation").unwrap();
     if finalized {
         pending.finalize().unwrap();
@@ -1013,10 +1028,10 @@ async fn restart_after_finalize(db: Option<Database>, finalized: bool) {
     .unwrap();
     app.activate().await.unwrap();
     let blobs = app.blobs.as_ref().unwrap();
-    assert!(!blobs.quarantined.load(Ordering::Acquire));
+    assert!(!blobs.quarantined().load(Ordering::Acquire));
     assert!(
         blobs
-            .store
+            .store()
             .snapshot(
                 &key,
                 &IoGuard::new(
@@ -1418,7 +1433,7 @@ async fn sqlite_download_slot_and_no_poll_watchdog_hold_until_actual_native_stop
             .blobs
             .as_ref()
             .unwrap()
-            .streams
+            .streams()
             .clone()
             .acquire_owned(),
     )
@@ -1498,7 +1513,7 @@ async fn sqlite_canceled_committed_gc_claim_recovers_without_restart() {
         .blobs
         .as_ref()
         .unwrap()
-        .gc_after_commit
+        .gc_after_commit()
         .lock()
         .unwrap() = Some(barrier.clone());
     let app = case.app.clone();
@@ -1515,7 +1530,7 @@ async fn sqlite_canceled_committed_gc_claim_recovers_without_restart() {
         .blobs
         .as_ref()
         .unwrap()
-        .gc_after_commit
+        .gc_after_commit()
         .lock()
         .unwrap() = None;
     case.maintenance().await;
@@ -1529,7 +1544,7 @@ async fn sqlite_canceled_committed_gc_claim_recovers_without_restart() {
             .blobs
             .as_ref()
             .unwrap()
-            .undispatched
+            .undispatched()
             .lock()
             .unwrap()
             .get(row.metadata.key.as_str())
@@ -1577,7 +1592,7 @@ async fn attachment_wins_gc(db: Option<Database>) {
             .blobs
             .as_ref()
             .unwrap()
-            .workers
+            .workers()
             .lock()
             .unwrap()
             .keys()
@@ -1603,7 +1618,7 @@ async fn attachment_wins_gc(db: Option<Database>) {
         .blobs
         .as_ref()
         .unwrap()
-        .verification
+        .verification()
         .lock()
         .unwrap() = Some(barrier.clone());
     let app = case.app.clone();
@@ -1640,7 +1655,7 @@ async fn attachment_wins_gc(db: Option<Database>) {
                 let result = MetadataContext { tx: &mut tx }
                     .claim_collectable(
                         &row,
-                        &app.blobs.as_ref().unwrap().process,
+                        app.blobs.as_ref().unwrap().process(),
                         row.metadata.expires,
                     )
                     .await;
@@ -1742,7 +1757,7 @@ async fn sqlite_slow_prefix_and_file_enforce_original_root_and_idle_deadlines() 
             .blobs
             .as_ref()
             .unwrap()
-            .workers
+            .workers()
             .lock()
             .unwrap()
             .values()
@@ -2065,7 +2080,7 @@ async fn absence_and_prefix_are_serialized(db: Option<Database>) {
         .blobs
         .as_ref()
         .unwrap()
-        .verification
+        .verification()
         .lock()
         .unwrap() = Some(barrier.clone());
     let app = case.app.clone();
@@ -2217,4 +2232,56 @@ async fn sqlite_inflight_optional_absence_blocks_file_prefix_and_empty_submit_ca
 #[tokio::test]
 async fn sqlite_blob_lifecycle_uses_durable_milliseconds_and_stale_reads_fail_closed() {
     lifecycle_clock_safety(None).await;
+}
+
+/// Delegates to the real host and counts fence calls, so a transaction that skips
+/// the deployment fence after this logic moved into `noxide-blobs` fails here.
+struct CountingFence<'a> {
+    app: &'a Application,
+    fences: std::sync::atomic::AtomicUsize,
+}
+impl ReconcileHost for CountingFence<'_> {
+    fn database(&self) -> &Database {
+        ReconcileHost::database(self.app)
+    }
+    async fn fence<'a>(&'a self, tx: &'a mut Transaction) -> anyhow::Result<()> {
+        self.fences.fetch_add(1, Ordering::SeqCst);
+        ReconcileHost::fence(self.app, tx).await
+    }
+    async fn observed_now<'a>(&'a self, tx: &'a mut Transaction) -> anyhow::Result<Timestamp> {
+        ReconcileHost::observed_now(self.app, tx).await
+    }
+}
+
+#[tokio::test]
+async fn sqlite_every_reconcile_transaction_passes_the_deployment_fence() {
+    let case = Case::new(None, declarations()).await;
+    let prepared = case
+        .app
+        .prepare_upload(
+            &case.session,
+            1,
+            &prefix(&case.page().await, "note"),
+            Some(noxide_blobs::transport::AttachmentName::normalize("file.bin").unwrap()),
+        )
+        .await
+        .unwrap();
+    let PreparedUpload::Created(_, lease) = prepared else {
+        panic!("reservation")
+    };
+    drop(lease);
+    let app = &case.app;
+    let counting = CountingFence {
+        app,
+        fences: Default::default(),
+    };
+    app.test_reconcile_blobs_through(
+        &counting,
+        Instant::now() + std::time::Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+    assert_eq!(case.state().await.0, "deleted");
+    // The inventory page, the deletion claim and the deletion's completion.
+    assert_eq!(counting.fences.load(Ordering::SeqCst), 3);
 }

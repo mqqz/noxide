@@ -2,149 +2,60 @@
 //! share the enclosing request's actual SQL meter and original deadline.
 use super::*;
 use anyhow::Context;
-#[cfg(any(test, feature = "test-support"))]
-use noxide_blobs::upload::Barrier;
+pub use noxide_blobs::runtime::{BlobRuntime, ReservationLease};
 pub use noxide_blobs::upload::UploadScope;
 use noxide_blobs::{
-    inspect::{InventoryBatch, Snapshot},
-    io::{IoPool, IoWitness},
     metadata::{MetadataContext, Reservation, ReservationOutcome},
-    state::{Commitment, UploadBinding},
-    store::{BlobStore, IoGuard, ObjectKey, PairStep},
+    runtime::{ReconcileHost, commit as blob_commit, commitment},
+    state::UploadBinding,
+    store::{IoGuard, ObjectKey},
 };
-use noxide_protocol::blobs::*;
-use std::sync::{Mutex, atomic::AtomicBool};
+use noxide_protocol::{blobs::*, time::Timestamp};
+use std::sync::atomic::AtomicBool;
 
-pub struct BlobRuntime {
-    pub store: BlobStore,
-    pub policy: BlobPolicy,
-    pub process: ObjectKey,
-    fence: noxide_blobs::store::ProcessFence,
-    pub uploads: Arc<IoPool>,
-    pub downloads: Arc<IoPool>,
-    pub streams: Arc<tokio::sync::Semaphore>,
-    pub ready: AtomicBool,
-    inventory: Arc<Mutex<Option<Inventory>>>,
-    inventory_complete: AtomicBool,
-    metadata_cursor: Mutex<String>,
-    pub quarantined: AtomicBool,
-    pub workers: Mutex<BTreeMap<String, IoWitness>>,
-    pub undispatched: Mutex<BTreeMap<String, IoWitness>>,
-    #[cfg(any(test, feature = "test-support"))]
-    pub verification: Mutex<Option<Arc<Barrier>>>,
-    #[cfg(any(test, feature = "test-support"))]
-    pub gc_after_commit: Mutex<Option<Arc<Barrier>>>,
-}
-impl BlobRuntime {
-    pub(super) fn open(deployment: crate::BlobDeployment, policy: BlobPolicy) -> Result<Self> {
-        let store = BlobStore::open(&deployment.directory)?;
-        let fence = store.claim_process()?;
-        Ok(Self {
-            process: fence.process().clone(),
-            fence,
-            store,
-            uploads: Arc::new(IoPool::uploads(policy.limits.uploads)?),
-            downloads: Arc::new(IoPool::downloads(policy.limits.downloads)?),
-            streams: Arc::new(tokio::sync::Semaphore::new(usize::from(
-                policy.limits.downloads,
-            ))),
-            policy,
-            ready: AtomicBool::new(false),
-            inventory: Arc::new(Mutex::new(None)),
-            inventory_complete: AtomicBool::new(false),
-            metadata_cursor: Mutex::new(String::new()),
-            quarantined: AtomicBool::new(false),
-            workers: Mutex::new(BTreeMap::new()),
-            undispatched: Mutex::new(BTreeMap::new()),
-            #[cfg(any(test, feature = "test-support"))]
-            verification: Mutex::new(None),
-            #[cfg(any(test, feature = "test-support"))]
-            gc_after_commit: Mutex::new(None),
-        })
-    }
-    pub fn available(&self) -> Result<()> {
-        ensure!(self.ready.load(Ordering::Acquire), RequestError::Busy);
-        ensure!(
-            self.inventory_complete.load(Ordering::Acquire),
-            RequestError::Busy
-        );
-        ensure!(
-            !self.quarantined.load(Ordering::Acquire),
-            RequestError::Busy
-        );
-        Ok(())
-    }
-}
-
-fn commitment(domain: &str, values: &[&str]) -> Result<Commitment> {
-    let mut hash = Sha256::new();
-    hash.update(domain.as_bytes());
-    hash.update([0]);
-    for value in values {
-        hash.update((value.len() as u64).to_be_bytes());
-        hash.update(value.as_bytes());
-    }
-    Commitment::parse(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
-}
 impl Application {
     pub(super) async fn activate_blobs(&self, deadline: Instant) -> Result<()> {
+        match &self.blobs {
+            Some(blobs) => blobs.activate(&self.database, deadline).await,
+            None => Ok(()),
+        }
+    }
+    /// One maintenance page under its own request scope and admission.
+    pub async fn reconcile_blobs(&self, deadline: Instant) -> Result<()> {
+        self.reconcile_blobs_through(self, deadline).await
+    }
+    /// The same page through a wrapped host, so a test can count its fence calls.
+    #[cfg(feature = "test-support")]
+    pub async fn test_reconcile_blobs_through(
+        &self,
+        host: &impl ReconcileHost,
+        deadline: Instant,
+    ) -> Result<()> {
+        self.reconcile_blobs_through(host, deadline).await
+    }
+    async fn reconcile_blobs_through(
+        &self,
+        host: &impl ReconcileHost,
+        deadline: Instant,
+    ) -> Result<()> {
         let Some(blobs) = &self.blobs else {
             return Ok(());
         };
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let store = blobs.store.clone();
-        let observation = blobs
-            .uploads
-            .try_start(
-                blobs.process.clone(),
-                noxide_blobs::state::Generation::parse(1)?,
-                deadline.into_std(),
-                cancelled.clone(),
-                move |guard| store.observe_pair(&guard),
-            )?
-            .finish()
-            .await?;
-        let mut tx = self.database.begin(deadline.into_std()).await?;
-        tx.check_storage().await?;
-        let prepared = MetadataContext { tx: &mut tx }
-            .prepare_pair(&observation)
-            .await?;
-        ensure!(
-            !prepared.pending_inserted || matches!(prepared.step, PairStep::InstallMarker(_)),
-            "new pairing must install its pending marker"
+        let scope = RequestScope::new(
+            self.request_lifecycle.clone(),
+            deadline,
+            self.runtime.limits().wall_time,
+            self.database_statement_limit,
         );
-        // Unknown acknowledgment cannot authorize a filesystem marker. Restart
-        // recovers the authoritative pending record through the same protocol.
-        Self::blob_commit(&mut tx).await?;
-        ensure!(
-            tx.commit_acknowledged(),
-            "blob pairing commit is unconfirmed"
-        );
-        if !matches!(prepared.step, PairStep::Ready(_)) {
-            let store = blobs.store.clone();
-            let marker = blobs
-                .uploads
-                .try_start(
-                    blobs.process.clone(),
-                    noxide_blobs::state::Generation::parse(1)?,
-                    deadline.into_std(),
-                    cancelled,
-                    move |guard| store.install_pair(&prepared.record, &guard),
-                )?
-                .finish()
-                .await?;
-            let mut tx = self.database.begin(deadline.into_std()).await?;
-            MetadataContext { tx: &mut tx }
-                .acknowledge_pair(&marker)
-                .await?;
-            Self::blob_commit(&mut tx).await?;
-            ensure!(
-                tx.commit_acknowledged(),
-                "blob pairing acknowledgment is unconfirmed"
-            );
-        }
-        blobs.ready.store(true, Ordering::Release);
-        Ok(())
+        scope
+            .run(async {
+                let admission = self.admit_invocation(false).await?;
+                let owner = admission.owner;
+                owner
+                    .run(async { blobs.reconcile_page(host, owner.work_deadline()).await })
+                    .await
+            })
+            .await
     }
     pub(super) fn upload_scope(
         &self,
@@ -157,7 +68,7 @@ impl Application {
             return Ok(None);
         };
         let Some(upload) = blobs
-            .policy
+            .policy()
             .uploads
             .iter()
             .find(|u| u.web_binding == binding)
@@ -176,8 +87,8 @@ impl Application {
         };
         let binding_id = binding.to_string();
         let scope = UploadScope::new(
-            blobs.store.clone(),
-            blobs.uploads.clone(),
+            blobs.store().clone(),
+            blobs.uploads().clone(),
             UploadBinding {
                 slot: commitment("noxide/upload-slot/v1", &[&self.deployment, nonce])?,
                 subject,
@@ -189,7 +100,7 @@ impl Application {
             },
         );
         #[cfg(any(test, feature = "test-support"))]
-        let scope = scope.with_barrier(blobs.verification.lock().unwrap().clone());
+        let scope = scope.with_barrier(blobs.verification().lock().unwrap().clone());
         Ok(Some(scope))
     }
     pub fn upload_ticket(&self, binding: u32, submission: &str) -> Result<String> {
@@ -211,7 +122,7 @@ impl Application {
         let action = manifest::web_action(&self.manifest, binding)?;
         let blobs = self.blobs.as_ref().context("blob deployment missing")?;
         let upload = blobs
-            .policy
+            .policy()
             .uploads
             .iter()
             .find(|u| u.web_binding == binding)
@@ -289,7 +200,7 @@ impl Application {
             fields,
             upload.input.clone(),
             true,
-            max_bytes.min(blobs.policy.limits.file_bytes),
+            max_bytes.min(blobs.policy().limits.file_bytes),
         )
     }
     pub async fn prepare_upload(
@@ -302,7 +213,7 @@ impl Application {
         let blobs = self.blobs.as_ref().context("blobs unavailable")?;
         let action = manifest::web_action(&self.manifest, binding)?;
         let upload = blobs
-            .policy
+            .policy()
             .uploads
             .iter()
             .find(|u| u.web_binding == binding)
@@ -378,7 +289,7 @@ impl Application {
                     .upload_scope(binding, &token.nonce, &session, &principal)?
                     .context("upload context missing")?;
                 MetadataContext { tx: &mut tx }
-                    .lock_form(blobs.store.identity())
+                    .lock_form(blobs.store().identity())
                     .await?;
                 // This is the authoritative prior-commit check before accepting any
                 // file bytes. Existing nonce rows serialize the eventual core claim.
@@ -437,33 +348,18 @@ impl Application {
                         .reserve(Reservation {
                             binding: context.binding.clone(),
                             filename,
-                            limit: max_bytes.min(blobs.policy.limits.file_bytes),
+                            limit: max_bytes.min(blobs.policy().limits.file_bytes),
                             now: time.context("upload lifecycle time missing")?,
-                            policy: &blobs.policy,
+                            policy: blobs.policy(),
                             capability: upload.anonymous,
-                            store: blobs.store.identity(),
-                            process: &blobs.process,
+                            store: blobs.store().identity(),
+                            process: blobs.process(),
                         })
                         .await?;
                     match result {
                         ReservationOutcome::Created(row) => {
-                            let witness = IoWitness::pending(
-                                row.metadata.key.clone(),
-                                row.metadata.generation,
-                            );
-                            let mut workers = blobs.workers.lock().unwrap();
-                            ensure!(
-                                workers.len() < blobs.policy.limits.objects as usize,
-                                "blob reservation registry full"
-                            );
-                            workers.insert(row.metadata.key.as_str().into(), witness.clone());
-                            PreparedUpload::Created(
-                                Box::new(row),
-                                ReservationLease {
-                                    witness,
-                                    armed: true,
-                                },
-                            )
+                            let lease = blobs.reserve(&row)?;
+                            PreparedUpload::Created(Box::new(row), lease)
                         }
                         ReservationOutcome::Existing(row) => {
                             ensure!(
@@ -477,7 +373,7 @@ impl Application {
                     ensure!(input.optional, "required upload missing");
                     PreparedUpload::Absent
                 };
-                Self::blob_commit(&mut tx).await?;
+                blob_commit(&mut tx).await?;
                 ensure!(tx.commit_acknowledged(), RequestError::OutcomeUnknown);
                 Ok(prepared)
             })
@@ -500,9 +396,9 @@ impl Application {
                 let now = self.temporal_after_admission(&mut tx).await?.timestamp();
                 let guard = IoGuard::new(deadline.into_std(), Arc::new(AtomicBool::new(false)));
                 let staged = MetadataContext { tx: &mut tx }
-                    .publish(row, object, now, blobs.store.identity(), &guard)
+                    .publish(row, object, now, blobs.store().identity(), &guard)
                     .await?;
-                Self::blob_commit(&mut tx).await?;
+                blob_commit(&mut tx).await?;
                 ensure!(tx.commit_acknowledged(), RequestError::OutcomeUnknown);
                 Ok(staged.metadata.handle.as_str().into())
             })
@@ -576,10 +472,10 @@ impl Application {
     }
     pub async fn open_download(&self, cookie: Option<&str>, ticket: &str) -> Result<Download> {
         let blobs = self.blobs.as_ref().context("blobs unavailable")?;
-        ensure!(blobs.ready.load(Ordering::Acquire), "blobs unavailable");
+        ensure!(blobs.is_ready(), "blobs unavailable");
         let permit = Arc::new(
             blobs
-                .streams
+                .streams()
                 .clone()
                 .try_acquire_owned()
                 .context("download concurrency limit")?,
@@ -691,14 +587,14 @@ impl Application {
                 );
                 let cancelled = Arc::new(AtomicBool::new(false));
                 let cancel = cancelled.clone();
-                let store = blobs.store.clone();
+                let store = blobs.store().clone();
                 let key = row.metadata.key.clone();
                 let bytes = row.metadata.bytes;
                 let digest = row.metadata.digest.context("download digest missing")?;
                 let transfer_deadline = transfer.work_deadline();
                 let native_permit = permit.clone();
                 let opened = blobs
-                    .downloads
+                    .downloads()
                     .try_start(
                         key.clone(),
                         row.metadata.generation,
@@ -719,7 +615,7 @@ impl Application {
                     .await?;
                 // The immutable descriptor is captured while current authority and
                 // association share this read transaction. No transaction streams.
-                Self::blob_commit(&mut tx).await?;
+                blob_commit(&mut tx).await?;
                 ensure!(
                     tx.commit_acknowledged(),
                     "download read transaction unconfirmed"
@@ -739,7 +635,7 @@ impl Application {
         if result.as_ref().err().is_some_and(|error: &anyhow::Error| {
             error.is::<noxide_blobs::store::PhysicalMismatch>()
         }) {
-            blobs.quarantined.store(true, Ordering::Release);
+            blobs.quarantine();
         }
         result
     }
@@ -751,7 +647,7 @@ impl Application {
             .as_ref()
             .filter(|blobs| {
                 blobs
-                    .policy
+                    .policy()
                     .uploads
                     .iter()
                     .any(|u| u.web_binding == binding)
@@ -760,414 +656,15 @@ impl Application {
     }
 }
 
-pub struct ReservationLease {
-    witness: IoWitness,
-    armed: bool,
-}
-impl ReservationLease {
-    pub fn dispatched(mut self) {
-        self.armed = false;
+impl ReconcileHost for Application {
+    fn database(&self) -> &Database {
+        &self.database
     }
-}
-impl Drop for ReservationLease {
-    fn drop(&mut self) {
-        if self.armed {
-            self.witness.stop_unstarted();
-        }
+    async fn fence<'a>(&'a self, tx: &'a mut Transaction) -> Result<()> {
+        self.admission(tx, false).await
     }
-}
-
-struct Inventory {
-    scans: [noxide_blobs::store::ObjectScan; 2],
-    directory: usize,
-    pending: std::collections::VecDeque<ObjectKey>,
-}
-impl Inventory {
-    fn new(store: &BlobStore) -> Result<Self> {
-        use noxide_blobs::store::ObjectLocation;
-        Ok(Self {
-            scans: [
-                store.scan(ObjectLocation::Partial)?,
-                store.scan(ObjectLocation::Final)?,
-            ],
-            directory: 0,
-            pending: Default::default(),
-        })
-    }
-    fn batch(&mut self, store: &BlobStore, guard: &IoGuard) -> Result<InventoryBatch> {
-        let mut items = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
-        while items.len() < noxide_blobs::inspect::INSPECTION_PAGE {
-            guard.check()?;
-            if let Some(key) = self.pending.pop_front() {
-                if seen.insert(key.clone()) {
-                    items.push((key.clone(), store.snapshot(&key, guard)?));
-                }
-                continue;
-            }
-            if self.directory == 2 {
-                break;
-            }
-            let batch = self.scans[self.directory].next_batch(guard)?;
-            if batch.is_empty() {
-                self.directory += 1;
-            }
-            self.pending.extend(batch.into_iter().map(|(_, key)| key));
-        }
-        Ok(InventoryBatch {
-            items,
-            complete: self.directory == 2 && self.pending.is_empty(),
-        })
-    }
-}
-impl Application {
-    /// One bounded maintenance page. Unknown objects are charged and retained;
-    /// only authoritative known metadata can produce a fenced deletion claim.
-    pub async fn reconcile_blobs(&self, deadline: Instant) -> Result<()> {
-        use noxide_blobs::inspect::{FindingKind, InspectionPage, SnapshotItem};
-        let Some(blobs) = &self.blobs else {
-            return Ok(());
-        };
-        let scope = RequestScope::new(
-            self.request_lifecycle.clone(),
-            deadline,
-            self.runtime.limits().wall_time,
-            self.database_statement_limit,
-        );
-        let result = scope
-            .run(async {
-                let admission = self.admit_invocation(false).await?;
-                let owner = admission.owner;
-                owner
-                    .run(async {
-                        let deadline = owner.work_deadline();
-                        let inventory = blobs.inventory.clone();
-                        let store = blobs.store.clone();
-                        let batch = blobs
-                            .uploads
-                            .try_start(
-                                blobs.process.clone(),
-                                noxide_blobs::state::Generation::parse(1)?,
-                                deadline.into_std(),
-                                Arc::new(AtomicBool::new(false)),
-                                move |guard| {
-                                    let mut inventory = inventory.lock().unwrap();
-                                    if inventory.is_none() {
-                                        *inventory = Some(Inventory::new(&store)?);
-                                    }
-                                    let batch =
-                                        inventory.as_mut().unwrap().batch(&store, &guard)?;
-                                    if batch.complete {
-                                        *inventory = None;
-                                    }
-                                    Ok(batch)
-                                },
-                            )?
-                            .finish()
-                            .await?;
-                        let mut tx = self.database.begin(deadline.into_std()).await?;
-                        self.admission(&mut tx, false).await?;
-                        self.observe_clock_write(&mut tx, security::now()?).await?;
-                        let now = self.temporal_after_admission(&mut tx).await?.timestamp();
-                        for (key, physical) in batch.items {
-                            let row = MetadataContext { tx: &mut tx }.object(&key).await?;
-                            if row.is_none()
-                                && let Some(physical) = physical
-                            {
-                                blobs.quarantined.store(true, Ordering::Release);
-                                let bytes = physical
-                                    .partial
-                                    .unwrap_or(0)
-                                    .checked_add(physical.finalized.unwrap_or(0))
-                                    .context("unknown blob length overflow")?;
-                                let paths = u8::from(physical.partial.is_some())
-                                    + u8::from(physical.finalized.is_some());
-                                MetadataContext { tx: &mut tx }
-                                    .quarantine_unknown(
-                                        &key,
-                                        bytes,
-                                        paths,
-                                        blobs.store.identity(),
-                                        &blobs.process,
-                                        now,
-                                    )
-                                    .await?;
-                            }
-                        }
-                        let after = blobs.metadata_cursor.lock().unwrap().clone();
-                        let rows = MetadataContext { tx: &mut tx }.page(&after).await?;
-                        Self::blob_commit(&mut tx).await?;
-                        ensure!(
-                            tx.commit_acknowledged(),
-                            "blob inventory commit unconfirmed"
-                        );
-                        if batch.complete {
-                            blobs.inventory_complete.store(true, Ordering::Release);
-                        }
-                        *blobs.metadata_cursor.lock().unwrap() = rows
-                            .last()
-                            .filter(|_| rows.len() == noxide_blobs::inspect::INSPECTION_PAGE)
-                            .map(|r| r.metadata.binding.slot.as_str().into())
-                            .unwrap_or_default();
-                        // At most four deletions per page, always with committed CAS
-                        // claims and physical-stop witnesses for this process's work.
-                        let mut deleted = 0;
-                        for row in rows {
-                            if deleted == 4 {
-                                break;
-                            }
-                            let store = blobs.store.clone();
-                            let key = row.metadata.key.clone();
-                            let physical = blobs
-                                .uploads
-                                .try_start(
-                                    key.clone(),
-                                    row.metadata.generation,
-                                    deadline.into_std(),
-                                    Arc::new(AtomicBool::new(false)),
-                                    move |guard| Ok(Snapshot(store.snapshot(&key, &guard)?)),
-                                )?
-                                .finish()
-                                .await?
-                                .0;
-                            let matching = |witness: &IoWitness| {
-                                witness.stopped().is_some_and(|proof| {
-                                    proof.generation() == row.metadata.generation
-                                })
-                            };
-                            let witness = blobs
-                                .workers
-                                .lock()
-                                .unwrap()
-                                .get(row.metadata.key.as_str())
-                                .filter(|w| matching(w))
-                                .cloned()
-                                .or_else(|| {
-                                    blobs
-                                        .undispatched
-                                        .lock()
-                                        .unwrap()
-                                        .get(row.metadata.key.as_str())
-                                        .filter(|w| matching(w))
-                                        .cloned()
-                                });
-                            let stopped = witness.as_ref().and_then(IoWitness::stopped);
-                            let stopped_refs: Vec<_> = stopped.iter().collect();
-                            let page = InspectionPage::plan(
-                                blobs.store.identity(),
-                                &blobs.process,
-                                &[SnapshotItem {
-                                    key: row.metadata.key.clone(),
-                                    physical,
-                                    metadata: Some(row.clone()),
-                                }],
-                                &stopped_refs,
-                                now,
-                            )?;
-                            let _digest = page.digest()?;
-                            let kind = page.findings[0].kind;
-                            ensure!(row.claimed <= now, "blob claim is ahead of observed clock");
-                            if kind.requires_operator() {
-                                blobs.quarantined.store(true, Ordering::Release);
-                                continue;
-                            }
-                            if kind == FindingKind::RetainTombstone {
-                                blobs
-                                    .workers
-                                    .lock()
-                                    .unwrap()
-                                    .remove(row.metadata.key.as_str());
-                                blobs
-                                    .undispatched
-                                    .lock()
-                                    .unwrap()
-                                    .remove(row.metadata.key.as_str());
-                            }
-                            if !kind.recoverable_hint() {
-                                continue;
-                            }
-                            if kind == FindingKind::CleanKnownDeletedObject {
-                                // Tombstones name only their original opaque key. A
-                                // current transaction rechecks them before native I/O.
-                                self.clean_tombstone(blobs, &row, deadline).await?;
-                                deleted += 1;
-                                continue;
-                            }
-                            let mut tx = self.database.begin(deadline.into_std()).await?;
-                            self.admission(&mut tx, false).await?;
-                            let current = MetadataContext { tx: &mut tx }
-                                .slot(&row.metadata.binding.slot)
-                                .await?
-                                .context("blob recovery row missing")?;
-                            if current.metadata.generation != row.metadata.generation
-                                || current.metadata.state != row.metadata.state
-                            {
-                                tx.rollback().await?;
-                                continue;
-                            }
-                            let (claimed, claim) = match kind {
-                                FindingKind::ClaimExpiredStage | FindingKind::ClaimUnreferenced => {
-                                    MetadataContext { tx: &mut tx }
-                                        .claim_collectable(&current, &blobs.process, now)
-                                        .await?
-                                }
-                                FindingKind::ClaimStoppedUpload => {
-                                    MetadataContext { tx: &mut tx }
-                                        .claim_stopped_upload(
-                                            &current,
-                                            &blobs.process,
-                                            now,
-                                            stopped
-                                                .as_ref()
-                                                .context("stopped upload proof missing")?,
-                                        )
-                                        .await?
-                                }
-                                FindingKind::RecoverPriorProcessUpload => {
-                                    MetadataContext { tx: &mut tx }
-                                        .recover_prior_upload(&current, &blobs.fence, now)
-                                        .await?
-                                }
-                                FindingKind::ResumeStoppedDeletion
-                                | FindingKind::RecoverPriorProcessDeletion => {
-                                    MetadataContext { tx: &mut tx }
-                                        .resume_deletion(
-                                            &current,
-                                            &blobs.fence,
-                                            now,
-                                            stopped.as_ref(),
-                                        )
-                                        .await?
-                                }
-                                _ => {
-                                    tx.rollback().await?;
-                                    continue;
-                                }
-                            };
-                            // Retain stopped proof for both possible commit
-                            // generations until native dispatch is authoritative.
-                            if let Some(witness) = witness {
-                                blobs
-                                    .workers
-                                    .lock()
-                                    .unwrap()
-                                    .insert(row.metadata.key.as_str().into(), witness);
-                            }
-                            let pending =
-                                IoWitness::pending(claim.key().clone(), claim.generation());
-                            blobs
-                                .undispatched
-                                .lock()
-                                .unwrap()
-                                .insert(row.metadata.key.as_str().into(), pending.clone());
-                            let dispatch = ReservationLease {
-                                witness: pending,
-                                armed: true,
-                            };
-                            Self::blob_commit(&mut tx).await?;
-                            ensure!(tx.commit_acknowledged(), "blob deletion claim unconfirmed");
-                            #[cfg(any(test, feature = "test-support"))]
-                            {
-                                let barrier = { blobs.gc_after_commit.lock().unwrap().clone() };
-                                if let Some(barrier) = barrier {
-                                    barrier.wait().await;
-                                }
-                            }
-                            let store = blobs.store.clone();
-                            let key = claim.key().clone();
-                            let job = blobs.uploads.try_start(
-                                key.clone(),
-                                claim.generation(),
-                                deadline.into_std(),
-                                Arc::new(AtomicBool::new(false)),
-                                move |guard| store.remove(&key, &guard),
-                            )?;
-                            blobs
-                                .workers
-                                .lock()
-                                .unwrap()
-                                .insert(row.metadata.key.as_str().into(), job.witness());
-                            blobs
-                                .undispatched
-                                .lock()
-                                .unwrap()
-                                .remove(row.metadata.key.as_str());
-                            dispatch.dispatched();
-                            job.finish().await?;
-                            let mut tx = self.database.begin(deadline.into_std()).await?;
-                            self.admission(&mut tx, false).await?;
-                            MetadataContext { tx: &mut tx }
-                                .deleted(&claimed, &claim, blobs.store.identity(), now)
-                                .await?;
-                            Self::blob_commit(&mut tx).await?;
-                            ensure!(
-                                tx.commit_acknowledged(),
-                                "blob deletion completion unconfirmed"
-                            );
-                            blobs
-                                .workers
-                                .lock()
-                                .unwrap()
-                                .remove(row.metadata.key.as_str());
-                            deleted += 1;
-                        }
-                        Ok(())
-                    })
-                    .await
-            })
-            .await;
-        if result.as_ref().err().is_some_and(|error: &anyhow::Error| {
-            error.is::<noxide_blobs::store::PhysicalMismatch>()
-        }) {
-            blobs.quarantined.store(true, Ordering::Release);
-        }
-        result
-    }
-    async fn clean_tombstone(
-        &self,
-        blobs: &BlobRuntime,
-        row: &noxide_blobs::metadata::BlobRow,
-        deadline: Instant,
-    ) -> Result<()> {
-        let mut tx = self.database.begin(deadline.into_std()).await?;
-        self.admission(&mut tx, false).await?;
-        let current = MetadataContext { tx: &mut tx }
-            .slot(&row.metadata.binding.slot)
-            .await?
-            .context("blob tombstone missing")?;
-        ensure!(
-            current.metadata.generation == row.metadata.generation
-                && current.metadata.state == noxide_blobs::state::State::Deleted,
-            "blob tombstone changed"
-        );
-        Self::blob_commit(&mut tx).await?;
-        ensure!(tx.commit_acknowledged(), "blob tombstone read unconfirmed");
-        let key = row.metadata.key.clone();
-        let store = blobs.store.clone();
-        blobs
-            .uploads
-            .try_start(
-                key.clone(),
-                row.metadata.generation,
-                deadline.into_std(),
-                Arc::new(AtomicBool::new(false)),
-                move |guard| store.remove(&key, &guard),
-            )?
-            .finish()
-            .await
-    }
-}
-
-impl Application {
-    async fn blob_commit(tx: &mut Transaction) -> Result<()> {
-        let result = tx.commit().await;
-        if tx.commit_acknowledged() {
-            return Ok(());
-        }
-        if tx.commit_may_have_succeeded() {
-            return Err(RequestError::OutcomeUnknown.into());
-        }
-        result?;
-        anyhow::bail!("blob metadata commit lacks acknowledgment")
+    async fn observed_now<'a>(&'a self, tx: &'a mut Transaction) -> Result<Timestamp> {
+        self.observe_clock_write(tx, security::now()?).await?;
+        Ok(self.temporal_after_admission(tx).await?.timestamp())
     }
 }

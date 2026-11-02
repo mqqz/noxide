@@ -91,7 +91,7 @@ pub(super) async fn upload(gateway: Arc<Gateway>, request: Request) -> Response 
             .blobs
             .as_ref()
             .context("blob runtime missing")?
-            .policy
+            .policy()
             .uploads
             .iter()
             .find(|u| u.web_binding == binding)
@@ -125,7 +125,7 @@ pub(super) async fn upload(gateway: Arc<Gateway>, request: Request) -> Response 
             }
             PreparedUpload::Created(row, lease) => {
                 let blobs = app.blobs.as_ref().context("blob runtime missing")?;
-                let store = blobs.store.clone();
+                let store = blobs.store().clone();
                 let key = row.metadata.key.clone();
                 let limit = row.metadata.reserved;
                 let mut file_decoder = ready.into_body();
@@ -133,7 +133,7 @@ pub(super) async fn upload(gateway: Arc<Gateway>, request: Request) -> Response 
                     tokio::sync::mpsc::channel::<Option<axum::body::Bytes>>(1);
                 let runtime = tokio::runtime::Handle::current();
                 let deadline = transfer.work_deadline();
-                let job = blobs.uploads.try_start(
+                let job = blobs.uploads().try_start(
                     key.clone(),
                     row.metadata.generation,
                     deadline.into_std(),
@@ -164,11 +164,7 @@ pub(super) async fn upload(gateway: Arc<Gateway>, request: Request) -> Response 
                     },
                 )?;
                 let _publication = PublicationLease(job.witness());
-                blobs
-                    .workers
-                    .lock()
-                    .unwrap()
-                    .insert(row.metadata.key.as_str().into(), job.witness());
+                blobs.record_worker(&row, job.witness());
                 lease.dispatched();
                 let object = transfer
                     .run(async {
@@ -355,7 +351,7 @@ pub(super) async fn download(gateway: Arc<Gateway>, request: Request) -> Respons
             done: AtomicBool::new(false),
             expired: AtomicBool::new(false),
         });
-        let job = blobs.downloads.try_start(
+        let job = blobs.downloads().try_start(
             download.key,
             download.generation,
             download.deadline.into_std(),
