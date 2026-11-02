@@ -9,5 +9,5 @@ pub mod state;
 pub mod store;
 pub mod transport;
 pub mod upload;
-pub(crate) use noxide_admission::{action_contract, sql};
+pub(crate) use noxide_admission::action_contract;
 pub(crate) use noxide_store::{database, lifecycle_clock};
