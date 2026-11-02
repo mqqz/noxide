@@ -295,11 +295,18 @@ impl Case {
         &self,
         job: &CapturedJob,
     ) -> (String, String, usize) {
-        let mut tx = self
-            .db
-            .begin_read(std::time::Instant::now() + std::time::Duration::from_secs(2))
-            .await
-            .unwrap();
+        // Another connection's setup can hold the lock under load; only retry that.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut tx = loop {
+            match self.db.begin_read(deadline).await {
+                Ok(tx) => break tx,
+                Err(error) if crate::database::retryable(&error) => {
+                    assert!(std::time::Instant::now() < deadline, "{error}");
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
         let queue = tx
             .fetch::<2>(
                 "SELECT state,reason FROM nx_jobs WHERE id=$1",
