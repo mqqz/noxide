@@ -760,7 +760,7 @@ async fn filtered_lists(db: Database) {
                         let direction = if descending { "DESC" } else { "ASC" };
                         let comparison = if descending { "<" } else { ">" };
                         let sql = format!(
-                            "SELECT id FROM nx_records WHERE {} AND created_seq{comparison}${} ORDER BY nx_records.created_seq {direction} LIMIT 21",
+                            "SELECT id FROM nx_records WHERE (1=1 AND {} AND created_seq{comparison}${}) ORDER BY nx_records.created_seq {direction} LIMIT 21",
                             predicates.join(" AND "),
                             values.len()
                         );
