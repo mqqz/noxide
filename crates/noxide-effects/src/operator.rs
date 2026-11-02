@@ -8,7 +8,11 @@ use crate::{
     types::*,
 };
 use anyhow::{Context, Result, ensure};
-use noxide_protocol::time::{Duration, Timestamp};
+use noxide_protocol::{
+    Manifest,
+    time::{Duration, Timestamp},
+};
+use noxide_store::database::RequestError;
 use noxide_store::statements::effects as stmt;
 use serde::Serialize;
 
@@ -564,4 +568,91 @@ impl EffectOperatorTransaction for Transaction {
         ensure!(changed == 1, "effect fence exhausted");
         Ok(())
     }
+}
+
+/// What an operator command is checked against.
+pub struct OperatorContext<'a> {
+    pub generation: &'a str,
+    pub contract: &'a str,
+    pub manifest: &'a Manifest,
+    /// Commands that use the approved deployment are rejected when effects are off.
+    pub effective: Option<&'a EffectiveEffectDeployment>,
+    pub time: Timestamp,
+}
+
+/// Run one operator command inside the caller's admitted transaction.
+pub async fn run_command(
+    tx: &mut Transaction,
+    context: OperatorContext<'_>,
+    command: EffectOperatorCommand,
+) -> std::result::Result<EffectOperatorResult, RequestError> {
+    use {EffectOperatorCommand as Command, EffectOperatorResult as Output};
+    let retry = matches!(&command, Command::Retry { .. });
+    let output = match command {
+        Command::Inspect { after } => Output::Effects(
+            tx.inspect_effects(context.generation, &after)
+                .await
+                .map_err(RequestError::database)?,
+        ),
+        Command::Cancel { id } => {
+            tx.cancel_effect(context.generation, &id)
+                .await
+                .map_err(RequestError::database)?;
+            Output::Done
+        }
+        Command::RevokeEndpoint { tenant, endpoint } => {
+            tx.revoke_effect_endpoint(context.generation, &tenant, &endpoint)
+                .await
+                .map_err(RequestError::database)?;
+            Output::Done
+        }
+        Command::RevokeSecret { slot } => {
+            tx.revoke_effect_secret(context.generation, &slot)
+                .await
+                .map_err(RequestError::database)?;
+            Output::Done
+        }
+        Command::GrantEndpoint { tenant, endpoint } => {
+            let effective = context.effective.ok_or(RequestError::Rejected)?;
+            let binding = effective
+                .grants
+                .iter()
+                .find(|b| b.tenant == tenant && b.endpoint.name == endpoint)
+                .ok_or(RequestError::Rejected)?;
+            tx.grant_effect_endpoint(context.generation, context.contract, binding)
+                .await
+                .map_err(RequestError::database)?;
+            Output::Done
+        }
+        Command::GrantSecret { slot } => {
+            let effective = context.effective.ok_or(RequestError::Rejected)?;
+            tx.grant_effect_secret(context.generation, context.contract, &slot, effective)
+                .await
+                .map_err(RequestError::database)?;
+            Output::Done
+        }
+        Command::Retry { id } | Command::Resume { id } => {
+            let effective = context.effective.ok_or(RequestError::Rejected)?;
+            let source = tx
+                .effect_operator_source(context.generation, &id)
+                .await
+                .map_err(RequestError::database)?;
+            let action =
+                noxide_admission::manifest::action(context.manifest, source.source_action().0)
+                    .map_err(RequestError::database)?;
+            tx.resume_effect(
+                context.generation,
+                context.contract,
+                effective,
+                &id,
+                action.version,
+                context.time,
+                retry,
+            )
+            .await
+            .map_err(RequestError::database)?;
+            Output::Done
+        }
+    };
+    Ok(output)
 }

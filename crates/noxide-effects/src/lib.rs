@@ -2,6 +2,7 @@
 //! Links no TLS client and opens no outbound socket; delivery is a separate crate
 //! that the serving process does not depend on.
 #![forbid(unsafe_code)]
+pub mod capture;
 pub mod directory;
 pub mod effect_deployment;
 pub mod operator;

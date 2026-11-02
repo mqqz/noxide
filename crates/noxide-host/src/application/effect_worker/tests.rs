@@ -19,6 +19,66 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 
+impl Application {
+    pub(crate) fn effect_test_parts(
+        &self,
+    ) -> (
+        Arc<Manifest>,
+        String,
+        String,
+        EffectiveEffectDeployment,
+        u16,
+        Option<rustls::RootCertStore>,
+    ) {
+        let runtime = self.effects.as_ref().expect("effect runtime");
+        (
+            self.manifest.clone(),
+            self.deployment.clone(),
+            self.contract.clone(),
+            runtime.effective.clone(),
+            self.database_statement_limit,
+            runtime.test_roots.lock().unwrap().clone(),
+        )
+    }
+    /// One delivery context per test application, standing in for the worker process.
+    pub(crate) async fn effect_delivery(&self) -> Arc<EffectDelivery> {
+        let runtime = self.effects.as_ref().expect("effect runtime");
+        runtime
+            .delivery
+            .get_or_init(|| async {
+                let delivery =
+                    Arc::new(effect_delivery_from_test_parts(self, self.database.clone()));
+                delivery.activate().await.expect("activate effect delivery");
+                delivery
+            })
+            .await
+            .clone()
+    }
+    pub(crate) async fn run_effect_once(
+        &self,
+    ) -> std::result::Result<Option<EffectRunOutcome>, RequestError> {
+        self.effect_delivery().await.run_effect_once().await
+    }
+    pub(crate) async fn start_effect_service(&self) -> Result<Option<EffectService>> {
+        self.effect_delivery()
+            .await
+            .start_effect_service()
+            .map(Some)
+    }
+}
+
+/// A delivery context over `database`, as a worker process would build one.
+pub(in crate::application) fn effect_delivery_from_test_parts(
+    app: &Application,
+    database: Database,
+) -> EffectDelivery {
+    let (manifest, deployment, contract, effective, limit, roots) = app.effect_test_parts();
+    let delivery =
+        EffectDelivery::from_parts(database, manifest, deployment, contract, effective, limit);
+    *delivery.runtime.test_roots.lock().unwrap() = roots;
+    delivery
+}
+
 fn roots() -> rustls::RootCertStore {
     let mut roots = rustls::RootCertStore::empty();
     roots

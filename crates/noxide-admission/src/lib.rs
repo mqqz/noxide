@@ -14,6 +14,7 @@ pub mod presentation;
 pub mod principal;
 pub mod query_plan;
 pub mod routing;
+pub mod scalar;
 pub mod schema;
 pub mod search;
 pub mod sql;
