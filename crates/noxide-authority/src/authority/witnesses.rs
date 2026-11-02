@@ -128,7 +128,7 @@ impl Witnesses {
             let witnesses = tx
                 .membership_witnesses(
                     &requested.joined(" UNION ALL "),
-                    &predicate,
+                    predicate.sql(),
                     MAX_BATCH,
                     &params,
                 )

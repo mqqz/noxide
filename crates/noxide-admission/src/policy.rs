@@ -1,5 +1,6 @@
 //! Principal binding is shared by row checks and parameterized query filtering.
 use crate::{
+    membership::MembershipClause,
     principal::Principal,
     query_plan::NativeProvider,
     sql::{Param, Sql, sql},
@@ -217,7 +218,7 @@ pub fn filter(
     params: &mut Vec<Param>,
 ) -> AuthorizedFilter {
     filter_with(provider, policy, principal, params, |_, _| {
-        Ok(Sql::statement("1=0"))
+        Ok(MembershipClause::deny())
     })
     .expect("infallible base policy")
 }
@@ -230,7 +231,7 @@ pub fn filter_with(
     mut related: impl FnMut(
         &noxide_protocol::membership::ExistsRelated,
         &mut Vec<Param>,
-    ) -> anyhow::Result<Sql>,
+    ) -> anyhow::Result<MembershipClause>,
 ) -> anyhow::Result<AuthorizedFilter> {
     if policy.any.is_empty() {
         return Ok(AuthorizedFilter {
@@ -248,7 +249,9 @@ pub fn filter_with(
                 .iter()
                 .map(|p| {
                     Ok(match bind(p, principal) {
-                        Condition::Related(predicate) => return related(predicate, params),
+                        Condition::Related(predicate) => {
+                            return Ok(related(predicate, params)?.sql().clone());
+                        }
                         Condition::Account { field, id } => {
                             params.push(id.into());
                             sql!(

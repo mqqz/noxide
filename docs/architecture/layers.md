@@ -55,7 +55,6 @@ These checks stop mistakes. They do not stop a compromised or careless host crat
   constructors. `tools/check_layers.py` limits which crates call them, by text search.
 - A caller can compile the wrong policy for an operation. The type proves that a
   policy was compiled, not that it was the right one.
-- `filter_with` accepts membership predicates as `Sql` from its caller.
 - `RecordScan` columns, restrictions and order, and the arguments to
   `records_by_ids`, `posting_candidates`, `postings_matching_all` and
   `membership_witnesses`, are still `Sql` built above the store. That text comes from
@@ -110,32 +109,43 @@ host authorization of the destination and credential handover.
 
 Guest code runs in `noxide-guest` processes. The server links no Wasmtime, which
 `tools/check_binaries.py` enforces; in-process guests exist only for tests, behind
-`test-support`. A worker compiles the component, confines itself to the socket from
-its server, and sends each storage call to the server. The server stays the authority:
-it checks storage access on every call, counts calls, limits each message, enforces
-the deadline and validates the output itself. A worker that breaks the protocol is
-killed and never reused. The first worker's compile is the component's admission check.
+`test-support`. A worker compiles the component and then gives up everything but the
+socket from its server. The server stays the authority: it checks storage access on
+every call, counts calls, limits each message, enforces the deadline and validates the
+output itself. A worker that breaks the protocol is killed and never reused. The first
+worker's compile is the component's admission check.
 
-A confined server cannot start processes, so a broker (`noxide-guest --broker`) starts
-workers and passes each socket back. It runs no guest code and never reads worker
-messages. Workers start on demand up to the concurrency limit, and a request waits for
-one up to its deadline. A worker is replaced after `guest_worker_requests` requests.
+**Isolation.** A worker serves one account or one service identity, never another, so
+a guest that escapes Wasmtime cannot read other accounts' requests. Anonymous requests
+that submit input or use a capability get a worker used once. Anonymous page reads
+share a worker. Each worker is replaced after `guest_worker_requests` requests.
+
+**Limits on a compromised worker.** Before running guest code a worker sets hard limits
+on address space, CPU time, open files, file size and locked memory, makes itself
+undumpable, and applies Landlock and seccomp with no filesystem, threads, new sockets
+or signals. The server kills a worker that misses its deadline.
+
+**The broker.** A confined server cannot start processes, so `noxide-guest --broker`
+starts workers and passes each socket back. It runs no guest code and never reads
+worker messages. It can run only its own binary and the dynamic linker, and read system
+libraries. If it dies the server stops with an error, so that a supervisor restarts both.
 
 What this does not do:
 
-- Workers still serve several requests by default, so a guest that escapes Wasmtime
-  can read later requests sent to that worker, including those of other accounts,
-  until it is retired. `guest_worker_requests: 1` prevents that at the cost of one
-  compile per request.
-- Only the server's deadline binds a compromised worker. Its memory and CPU limits are
-  enforced inside the worker, so they need an operating system limit to hold.
-- The broker keeps the right to start programs. Landlock limits that to its own binary
-  and system libraries, and it can read `/proc`, because each new worker counts its
-  threads there before confining itself.
-- A broker that dies takes replacement with it: running workers carry on, and requests
-  fail once they are gone.
-- Each worker costs about 210 ms of startup CPU and 22 MiB for a 175 KiB release-built
-  application. Those figures are from one machine, and larger components cost more.
+- Anonymous page reads share a worker, so an escaped guest can see the URLs other
+  anonymous visitors request, including query parameters.
+- A worker keeps its account's earlier requests in memory, and an escaped guest can
+  corrupt the responses for that account until the worker is retired.
+- The kernel limits are per process and coarse. The CPU limit covers a worker's whole
+  life, about 13 minutes at the defaults, so an escaped guest can spin between requests
+  until then. A worker can hold up to its 2 GiB address space, plus memfds it creates
+  and unmaps, up to its 32 files at the guest memory limit each. Many workers add up: a
+  hard total needs a cgroup, which is an operator's choice.
+- Landlock and seccomp reduce a kernel attack surface; they do not remove it. An escape
+  from Wasmtime followed by a kernel exploit is outside this boundary.
+- Many accounts cost compiles: each new account takes a fresh worker, about 210 ms of
+  CPU and 22 MiB for a 175 KiB release-built application, measured on one machine.
+  A request that finds none ready waits, and fails as busy at its deadline.
 
 ## Mutation and navigation lifecycle
 

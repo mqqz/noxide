@@ -307,7 +307,7 @@ impl Authority {
             |predicate, params| {
                 let user = principal.user()?;
                 if user.tenant.is_empty() {
-                    return Ok("1=0".into());
+                    return Ok(membership::MembershipClause::deny());
                 }
                 let deployment = self
                     .deployment

@@ -106,6 +106,7 @@ async fn work(database: Database) {
             &mut params,
         )
         .unwrap();
+    let predicate = predicate.sql();
     let mut query = format!(
         "WITH requested AS ({requested}) SELECT reference_id,CASE WHEN {predicate} THEN '1' ELSE '0' END FROM requested LIMIT 64"
     );

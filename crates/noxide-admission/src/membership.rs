@@ -81,6 +81,22 @@ fn unique_fields<'a>(
 
 /// Construct only from admitted resources, never from a guest request. The
 /// storage ID must come from this transaction's resource catalog.
+/// A membership check compiled from an admitted plan. Policy filters accept only this,
+/// so a caller cannot widen one with SQL of its own.
+#[derive(Clone, Debug)]
+pub struct MembershipClause(Sql);
+
+impl MembershipClause {
+    /// Matches nothing, for a principal that cannot be a member.
+    pub fn deny() -> Self {
+        Self(Sql::statement("1=0"))
+    }
+
+    pub fn sql(&self) -> &Sql {
+        &self.0
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Plan {
     declaration: ExistsRelated,
@@ -218,7 +234,7 @@ impl Plan {
         scope: &LookupScope<'_>,
         protected_row: bool,
         params: &mut Vec<Param>,
-    ) -> Result<Sql> {
+    ) -> Result<MembershipClause> {
         let LookupScope {
             account,
             tenant,
@@ -280,11 +296,11 @@ impl Plan {
             "EXISTS(SELECT 1 FROM nx_records m WHERE {}{expiry} LIMIT 1)",
             Sql::join(&clauses, " AND ")
         );
-        Ok(if protected_row {
+        Ok(MembershipClause(if protected_row {
             sql!("(nx_records.tenant=${tenant_parameter} AND {exists})")
         } else {
             exists
-        })
+        }))
     }
 
     pub fn key(&self, row: &ProtectedRow<'_>) -> Result<String> {
