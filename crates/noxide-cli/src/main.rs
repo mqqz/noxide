@@ -150,7 +150,10 @@ async fn main() -> Result<()> {
                 .validate(true)
                 .encode()?;
             // Wrapping never grants imports or trusts generated declarations.
-            noxide_host::runtime::Runtime::compile(&bytes, Limits::default())?;
+            noxide_sandbox::Runtime::<noxide_sandbox::NoHostCalls>::compile(
+                &bytes,
+                Limits::default(),
+            )?;
             create(Path::new(&args[2]), &bytes, false)?;
         }
         "init" => {

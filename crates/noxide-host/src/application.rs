@@ -244,7 +244,7 @@ pub use crate::database::RequestError;
 /// Time or capacity running out is the host's state, and the caller may retry later.
 /// Anything else a guest attempt returns keeps its own classification.
 pub(crate) fn guest_error(error: anyhow::Error) -> anyhow::Error {
-    if error.is::<noxide_sandbox::GuestBusy>() {
+    if error.is::<noxide_guest::GuestBusy>() {
         crate::database::lifecycle::Unavailable::Deadline.into()
     } else {
         error
@@ -321,12 +321,6 @@ impl Application {
     #[cfg(feature = "test-support")]
     pub fn test_maintenance_running(&self) -> &std::sync::atomic::AtomicBool {
         &self.maintenance_running
-    }
-
-    /// Run guests in worker processes. Call before the application serves anything;
-    /// the pool's limits must be the ones this application was created with.
-    pub fn use_guest_workers(&mut self, pool: Arc<noxide_guest::pool::GuestPool>) {
-        self.runtime = guests::Guests::Workers(pool);
     }
 
     /// Key access for tests of signed values; a deployed binary has no such route.
@@ -699,8 +693,53 @@ impl Application {
             self.generation.get().expect("admission precedes token use")
         )
     }
-    /// The approval digest comes from operator policy, separately from the
-    /// application bundle. Compilation retains immutable admitted bytes.
+    /// An application that runs guest code in `pool`'s workers. The pool compiled
+    /// `component` when it started, which is its admission check.
+    pub fn with_workers(
+        pool: Arc<noxide_guest::pool::GuestPool>,
+        component: &[u8],
+        declarations: &[u8],
+        approved: [u8; 32],
+        database: Database,
+        keys: HostKeys,
+        resources: crate::DeploymentResources,
+    ) -> Result<Self> {
+        Self::build(
+            guests::Guests::workers(pool),
+            component,
+            declarations,
+            approved,
+            database,
+            keys,
+            resources,
+        )
+    }
+
+    /// For operator commands that use the deployment's storage and run no guest code.
+    /// Anything needing a guest reports no capacity.
+    pub fn without_guests(
+        component: &[u8],
+        declarations: &[u8],
+        approved: [u8; 32],
+        database: Database,
+        keys: HostKeys,
+        limits: Limits,
+        resources: crate::DeploymentResources,
+    ) -> Result<Self> {
+        Self::build(
+            guests::Guests::none(limits),
+            component,
+            declarations,
+            approved,
+            database,
+            keys,
+            resources,
+        )
+    }
+
+    /// Runs guest code in this process, so tests need no worker binary. Deployed
+    /// binaries cannot call this: it needs `test-support`, and links Wasmtime.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(
         component: &[u8],
         declarations: &[u8],
@@ -708,6 +747,28 @@ impl Application {
         database: Database,
         keys: HostKeys,
         limits: Limits,
+        resources: crate::DeploymentResources,
+    ) -> Result<Self> {
+        Self::build(
+            guests::Guests::in_process(component, limits)?,
+            component,
+            declarations,
+            approved,
+            database,
+            keys,
+            resources,
+        )
+    }
+
+    /// The approval digest comes from operator policy, separately from the
+    /// application bundle.
+    fn build(
+        runtime: guests::Guests,
+        component: &[u8],
+        declarations: &[u8],
+        approved: [u8; 32],
+        database: Database,
+        keys: HostKeys,
         resources: crate::DeploymentResources,
     ) -> Result<Self> {
         let m = manifest::parse(declarations)?;
@@ -736,10 +797,7 @@ impl Application {
         identity.update(digest);
         identity.update(Sha256::digest(component));
         let deployment = URL_SAFE_NO_PAD.encode(identity.finalize());
-        let concurrency = limits.concurrency;
-        // Compiled here even when workers run the guest: this is its admission check.
-        let runtime =
-            guests::Guests::InProcess(noxide_sandbox::Runtime::compile(component, limits)?);
+        let concurrency = runtime.limits().concurrency;
         let admission_limits = AdmissionLimits::new(
             25,
             m.routes
@@ -2027,8 +2085,8 @@ mod deadline_tests {
             RequestError::Busy
         ));
         for busy in [
-            noxide_sandbox::GuestBusy::Deadline,
-            noxide_sandbox::GuestBusy::Capacity,
+            noxide_guest::GuestBusy::Deadline,
+            noxide_guest::GuestBusy::Capacity,
         ] {
             assert!(matches!(
                 RequestError::database(guest_error(busy.into())),

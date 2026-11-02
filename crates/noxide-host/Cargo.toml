@@ -9,7 +9,7 @@ description = "Trusted Noxide application runtime"
 
 [dependencies]
 noxide-protocol.workspace = true
-noxide-sandbox.workspace = true
+noxide-sandbox = { workspace = true, optional = true }
 noxide-guest.workspace = true
 noxide-sql.workspace = true
 noxide-store.workspace = true
@@ -34,10 +34,14 @@ url = "2"
 [features]
 # Internals for HTTP tests. Never enabled by a deployed binary;
 # tools/check_layers.py verifies the production feature set.
-test-support = ["noxide-store/test-support", "noxide-repository/test-support", "noxide-authority/test-support", "noxide-blobs/test-support", "noxide-jobs/test-support", "noxide-admission/test-support"]
+test-support = ["dep:noxide-sandbox", "noxide-store/test-support", "noxide-repository/test-support", "noxide-authority/test-support", "noxide-blobs/test-support", "noxide-jobs/test-support", "noxide-admission/test-support"]
 query-metrics = ["noxide-store/query-metrics", "noxide-repository/query-metrics"]
 
 [dev-dependencies]
+# In-process guests for this crate's integration tests, which link the library
+# without cfg(test). Dev-dependencies never reach a deployed binary.
+noxide-host = { path = ".", features = ["test-support"] }
+noxide-sandbox.workspace = true
 noxide-authority = { workspace = true, features = ["test-support"] }
 noxide-jobs = { workspace = true, features = ["test-support"] }
 noxide-repository = { workspace = true, features = ["test-support"] }

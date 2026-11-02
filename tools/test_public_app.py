@@ -24,7 +24,6 @@ def main():
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--guest-workers", action="store_true")
     parser.add_argument("--host-cli", type=Path, default=ROOT / "target/debug/noxide")
     args = parser.parse_args()
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -41,7 +40,6 @@ def main():
         "assets": str(args.assets.resolve()),
         "approved_contract": digest, "origin": f"http://localhost:{port}",
         "listen": {"tcp": f"127.0.0.1:{port}"},
-        "guest_workers": args.guest_workers,
     }))
     subprocess.run([binary, "init", config], check=True, timeout=10)
     subprocess.run([binary, "schema", "indexes", config], check=True, timeout=10)
@@ -60,8 +58,7 @@ def main():
     with (args.output / "server.log").open("wb") as log:
         server = subprocess.Popen([binary, "serve", config], stdout=log, stderr=subprocess.STDOUT)
         try:
-            # Each worker compiles the component before the server starts listening.
-            for _ in range(600 if args.guest_workers else 100):
+            for _ in range(100):
                 assert server.poll() is None, "host exited; inspect server.log"
                 try:
                     status, _, _ = get("/")
@@ -128,14 +125,6 @@ def main():
             for query in ("", "?category=unknown", "?category=Books", "?category=books&category=games", "?other=books", "?category=books&other=x", "?category=%GG"):
                 invalid = get("/categories" + query)
                 assert invalid[0] == missing[0] == 404 and invalid[2] == missing[2]
-            if args.guest_workers:
-                # Sixteen workers still running after every request above.
-                workers = [path.parent for path in Path("/proc").glob("[0-9]*/comm")
-                           if path.is_file() and path.read_text().strip() == "noxide-guest"]
-                assert len(workers) == 16, workers
-                sizes = [next(line.split()[1] for line in (worker / "status").read_text().splitlines()
-                              if line.startswith("VmRSS:")) for worker in workers]
-                print(f"worker RSS KiB: {max(map(int, sizes))} max, {sum(map(int, sizes))} total")
             (args.output / "results.json").write_text(json.dumps({
                 "public_list": True, "public_read": True, "unpublished_hidden": True,
                 "private_projection_hidden": True, "escaped": True,

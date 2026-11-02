@@ -169,7 +169,10 @@ pub async fn build(command: &str, args: &[OsString]) -> Result<()> {
             .module(&core)?
             .validate(true)
             .encode()?;
-        noxide_host::runtime::Runtime::compile(&component, Default::default())?;
+        noxide_sandbox::Runtime::<noxide_sandbox::NoHostCalls>::compile(
+            &component,
+            Default::default(),
+        )?;
         super::create(
             &output.join(format!("{name}.component.wasm")),
             &component,
@@ -197,16 +200,23 @@ pub async fn build(command: &str, args: &[OsString]) -> Result<()> {
         let database = noxide_host::Database::sqlite(state.path().join("test.db"));
         database.initialize().await?;
         database.reconcile_query_indexes(&contract).await?;
-        let app = noxide_host::Application::new(
-            &super::read(
-                &output.join(format!("{name}.component.wasm")),
-                2 * 1024 * 1024,
-            )?,
+        let component = super::read(
+            &output.join(format!("{name}.component.wasm")),
+            2 * 1024 * 1024,
+        )?;
+        let pool = noxide_guest::pool::GuestPool::start(
+            &super::sibling("noxide-guest")?,
+            "best_effort",
+            &component,
+            Default::default(),
+        )?;
+        let app = noxide_host::Application::with_workers(
+            std::sync::Arc::new(pool),
+            &component,
             &super::read(&output.join("manifest.json"), 32768)?,
             digest,
             database,
             noxide_host::HostKeys::generate()?,
-            Default::default(),
             noxide_host::DeploymentResources {
                 effects: None,
                 jobs: None,

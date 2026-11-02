@@ -39,9 +39,7 @@ pub use effects::{EffectOperatorCommand, EffectOperatorResult, EffectSummary};
 pub use job_deployment::{JobDeployment, JobGrant, JobLimits};
 pub use jobs::{JobOperatorCommand, JobOperatorResult, JobSummary};
 pub mod runtime {
-    pub use noxide_sandbox::Limits;
-    /// A guest with no storage grant, for admission checks outside an application.
-    pub type Runtime = noxide_sandbox::Runtime<noxide_sandbox::NoHostCalls>;
+    pub use noxide_guest::Limits;
 }
 pub use auth::{AccountAdmin, Registration, account_id};
 pub use noxide_store::{Database, StoreResources};

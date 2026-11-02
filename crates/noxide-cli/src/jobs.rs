@@ -97,7 +97,7 @@ async fn load(path: &Path, restore_fork: bool) -> Result<Application> {
     };
     let component = super::read(&base.join(&config.component), 2 * 1024 * 1024)?;
     let keys = super::host_keys(&base.join(&config.keys))?;
-    let app = Application::new(
+    let app = Application::without_guests(
         &component,
         &declarations,
         approved,

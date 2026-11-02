@@ -232,21 +232,6 @@ async fn an_application_serves_and_writes_through_a_worker() {
         .unwrap();
     let manifest = fixture::manifest();
     let component = fixture::component(None);
-    let mut app = Application::new(
-        &component,
-        &serde_json::to_vec(&manifest).unwrap(),
-        noxide_host::manifest::digest(&manifest).unwrap(),
-        db,
-        HostKeys::generate().unwrap(),
-        Limits::default(),
-        DeploymentResources {
-            effects: None,
-            jobs: None,
-            assets: noxide_host::assets::AssetBundle::default(),
-            blobs: None,
-        },
-    )
-    .unwrap();
     let pool = Arc::new(
         GuestPool::start(
             Path::new(env!("CARGO_BIN_EXE_noxide-guest")),
@@ -259,7 +244,21 @@ async fn an_application_serves_and_writes_through_a_worker() {
         )
         .unwrap(),
     );
-    app.use_guest_workers(pool.clone());
+    let app = Application::with_workers(
+        pool.clone(),
+        &component,
+        &serde_json::to_vec(&manifest).unwrap(),
+        noxide_host::manifest::digest(&manifest).unwrap(),
+        db,
+        HostKeys::generate().unwrap(),
+        DeploymentResources {
+            effects: None,
+            jobs: None,
+            assets: noxide_host::assets::AssetBundle::default(),
+            blobs: None,
+        },
+    )
+    .unwrap();
     app.activate().await.unwrap();
     let challenge = app.login_challenge().await.unwrap();
     let session = app

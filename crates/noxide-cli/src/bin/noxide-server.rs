@@ -81,13 +81,20 @@ fn main() -> Result<()> {
     )?);
     let store = database(&config.database, &base)?;
     let component = read(&base.join(&config.component), 2 * 1024 * 1024)?;
-    let mut app = Application::new(
+    // The first worker's compile is the component's admission check.
+    let pool = Arc::new(GuestPool::start(
+        &sibling("noxide-guest")?,
+        config.confinement.argument(),
+        &component,
+        Limits::default(),
+    )?);
+    let app = Application::with_workers(
+        pool,
         &component,
         &declarations,
         approved,
         store.clone(),
         keys,
-        Limits::default(),
         noxide_host::DeploymentResources {
             effects: config.effect_deployment(&base),
             jobs: config.jobs.clone(),
@@ -105,15 +112,6 @@ fn main() -> Result<()> {
     .with_signed_in_reserve(config.signed_in_reserve)?
     .with_database_statement_limit(config.database_statement_limit)?
     .with_registration(config.registration);
-    if config.guest_workers && !arguments.validate {
-        let pool = GuestPool::start(
-            &sibling("noxide-guest")?,
-            config.confinement.argument(),
-            &component,
-            Limits::default(),
-        )?;
-        app.use_guest_workers(Arc::new(pool));
-    }
     let app = Arc::new(app);
     let startup = tokio::runtime::Builder::new_current_thread()
         .enable_all()

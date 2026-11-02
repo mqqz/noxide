@@ -379,12 +379,6 @@ jobs:
             --manifest "$RUNNER_TEMP/noxide-ci/public/manifest.json" \
             --assets "$RUNNER_TEMP/noxide-ci/public/assets.pack" \
             --output "$RUNNER_TEMP/noxide-ci/public-http"
-          python3 tools/test_public_app.py \
-            --component "$RUNNER_TEMP/noxide-ci/public/public_articles.component.wasm" \
-            --manifest "$RUNNER_TEMP/noxide-ci/public/manifest.json" \
-            --assets "$RUNNER_TEMP/noxide-ci/public/assets.pack" \
-            --guest-workers \
-            --output "$RUNNER_TEMP/noxide-ci/public-http-workers"
           python3 tools/test_packaged_assets.py \
             --bundle "$RUNNER_TEMP/noxide-ci/public" \
             --cli target/debug/noxide \

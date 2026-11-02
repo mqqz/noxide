@@ -51,7 +51,7 @@ pub async fn prepare(project: &Path, development: bool, approval: Option<&str>) 
         )?,
     )?;
     let component = bundle.join(format!("{}.component.wasm", descriptor.name));
-    noxide_host::runtime::Runtime::compile(
+    noxide_sandbox::Runtime::<noxide_sandbox::NoHostCalls>::compile(
         &super::read(&component, 2 * 1024 * 1024)?,
         Default::default(),
     )?;
