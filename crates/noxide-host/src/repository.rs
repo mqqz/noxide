@@ -1,4 +1,5 @@
-use crate::sql::{JoinSql, Sql, sql};
+use crate::sql::{Sql, sql};
+use noxide_store::statements::records as stmt;
 mod authority;
 mod computation;
 pub(crate) mod queries;
@@ -178,14 +179,10 @@ pub(crate) async fn load(
 ) -> Result<Option<StoredRecord>> {
     ensure!(id > 0 && id <= i64::MAX as u64, "invalid resource target");
     let storage_resource = tx.storage_resource(m, resource).await?;
-    let sql = sql!(
-        "SELECT COALESCE(owner,''),tenant,{}, {},CAST(revision AS TEXT),COALESCE(CAST(cap_version AS TEXT),'') FROM nx_records WHERE resource=$1 AND id=$2",
-        tx.bounded_text("fields", 20_000),
-        tx.bounded_text("incarnation", 64)
-    );
+    let query = stmt::record_by_id(tx);
     let rows = tx
-        .fetch::<6>(
-            &sql,
+        .rows(
+            &query,
             &[Param::Number(storage_resource), Param::Number(id as i64)],
         )
         .await?;
@@ -729,10 +726,7 @@ impl Effects {
             let creator = self.principal.user().map_err(|_| ReferenceUnavailable)?;
             let rows = self
                 .tx
-                .fetch::<1>(
-                    "SELECT tenant FROM nx_accounts WHERE id=$1 AND state='active' AND tenant<>''",
-                    &[creator.id.as_str().into()],
-                )
+                .rows(&stmt::ACTIVE_ACCOUNT_TENANT, &[creator.id.as_str().into()])
                 .await?;
             let tenant = rows.first().ok_or(ReferenceUnavailable)?;
             ensure!(tenant[0] == creator.tenant, ReferenceUnavailable);
@@ -742,7 +736,17 @@ impl Effects {
                 .filter(|f| matches!(f.kind, FieldKind::Account { .. }))
             {
                 let id = fields.get(&field.name).ok_or(ReferenceUnavailable)?;
-                ensure!(!self.tx.fetch::<1>("SELECT id FROM nx_accounts WHERE id=$1 AND state='active' AND tenant=$2", &[id.as_str().into(), tenant[0].as_str().into()]).await?.is_empty(), ReferenceUnavailable);
+                ensure!(
+                    !self
+                        .tx
+                        .rows(
+                            &stmt::ACTIVE_ACCOUNT_IN_TENANT,
+                            &[id.as_str().into(), tenant[0].as_str().into()]
+                        )
+                        .await?
+                        .is_empty(),
+                    ReferenceUnavailable
+                );
             }
         }
         self.authorize_create_row(op, &fields).await?;
@@ -750,17 +754,47 @@ impl Effects {
             .guards(step, action)?;
         let storage_resource = self.tx.storage_resource(&m, op.resource).await?;
         if let Some(user) = &user {
-            let used = self.tx.fetch::<1>("SELECT CAST(COUNT(*) AS TEXT) FROM (SELECT id FROM nx_records WHERE resource=$1 AND owner=$2 LIMIT 10000) AS quota", &[storage_resource.into(), user.id.as_str().into()]).await?;
+            let used = self
+                .tx
+                .rows(
+                    &stmt::OWNER_RECORD_QUOTA,
+                    &[storage_resource.into(), user.id.as_str().into()],
+                )
+                .await?;
             ensure!(used[0][0].parse::<usize>()? < 10_000, "record quota");
         }
         let id = crate::security::record_id()?;
         let incarnation = crate::security::random_id()?;
         let created_seq = self.tx.allocate_creation().await?;
         if public {
-            self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,cap_version,created_seq) VALUES($1,$2,NULL,'',$3,$4,1,1,$5)", &[storage_resource.into(), (id as i64).into(), serde_json::to_string(&fields)?.into(), incarnation.as_str().into(), created_seq.into()]).await?;
+            self.tx
+                .run(
+                    &stmt::INSERT_UNOWNED_RECORD,
+                    &[
+                        storage_resource.into(),
+                        (id as i64).into(),
+                        serde_json::to_string(&fields)?.into(),
+                        incarnation.as_str().into(),
+                        created_seq.into(),
+                    ],
+                )
+                .await?;
         } else {
             let user = user.as_ref().expect("authorized private creation");
-            self.tx.execute("INSERT INTO nx_records(resource,id,owner,tenant,fields,incarnation,revision,created_seq) VALUES($1,$2,$3,$4,$5,$6,1,$7)", &[storage_resource.into(), (id as i64).into(), user.id.as_str().into(), user.tenant.as_str().into(), serde_json::to_string(&fields)?.into(), incarnation.as_str().into(), created_seq.into()]).await?;
+            self.tx
+                .run(
+                    &stmt::INSERT_OWNED_RECORD,
+                    &[
+                        storage_resource.into(),
+                        (id as i64).into(),
+                        user.id.as_str().into(),
+                        user.tenant.as_str().into(),
+                        serde_json::to_string(&fields)?.into(),
+                        incarnation.as_str().into(),
+                        created_seq.into(),
+                    ],
+                )
+                .await?;
         }
         self.update_search(op.resource, storage_resource, id, &incarnation, 1, &fields)
             .await?;
@@ -813,7 +847,20 @@ impl Effects {
             .tx
             .storage_resource(&self.manifest, op.resource)
             .await?;
-        let changed = self.tx.execute("UPDATE nx_records SET fields=$5,revision=$6 WHERE resource=$1 AND id=$2 AND incarnation=$3 AND revision=$4", &[storage_resource.into(), (stored.record.id as i64).into(), stored.incarnation.as_str().into(), stored.revision.into(), serde_json::to_string(&fields)?.into(), next.into()]).await?;
+        let changed = self
+            .tx
+            .run(
+                &stmt::UPDATE_RECORD,
+                &[
+                    storage_resource.into(),
+                    (stored.record.id as i64).into(),
+                    stored.incarnation.as_str().into(),
+                    stored.revision.into(),
+                    serde_json::to_string(&fields)?.into(),
+                    next.into(),
+                ],
+            )
+            .await?;
         ensure!(changed == 1, ConditionalConflict);
         self.update_search(
             op.resource,
@@ -853,7 +900,11 @@ impl Effects {
                 {
                     let storage = self.tx.storage_resource(&self.manifest, child.id).await?;
                     let expression = self.tx.field_expression(&field.name)?;
-                    let rows = self.tx.fetch::<1>(&sql!("SELECT CAST(id AS TEXT) FROM nx_records WHERE resource={storage} AND {expression}=$1 LIMIT 1"), &[stored.record.id.to_string().into()]).await?;
+                    let query = stmt::child_referencing(storage, &expression);
+                    let rows = self
+                        .tx
+                        .rows(&query, &[stored.record.id.to_string().into()])
+                        .await?;
                     ensure!(rows.is_empty(), "parent has children");
                 }
             }
@@ -888,7 +939,18 @@ impl Effects {
                 )
                 .await?;
         }
-        let changed = self.tx.execute("DELETE FROM nx_records WHERE resource=$1 AND id=$2 AND incarnation=$3 AND revision=$4", &[storage_resource.into(), (stored.record.id as i64).into(), stored.incarnation.as_str().into(), stored.revision.into()]).await?;
+        let changed = self
+            .tx
+            .run(
+                &stmt::DELETE_RECORD,
+                &[
+                    storage_resource.into(),
+                    (stored.record.id as i64).into(),
+                    stored.incarnation.as_str().into(),
+                    stored.revision.into(),
+                ],
+            )
+            .await?;
         ensure!(changed == 1, ConditionalConflict);
         Ok(MutationOutcome {
             kind: MutationKind::Deleted,
@@ -1312,18 +1374,12 @@ impl Effects {
                 .tx
                 .storage_resource(&self.manifest, op.resource)
                 .await?;
-            let mut params = vec![Param::Number(storage)];
-            let mut slots = Vec::new();
-            for id in unique {
-                params.push(Param::Number(id as i64));
-                slots.push(sql!("${}", params.len()));
-            }
-            let sql = sql!(
-                "SELECT CAST(id AS TEXT),COALESCE(owner,''),tenant,{} FROM nx_records WHERE resource=$1 AND id IN ({})",
-                self.tx.bounded_text("fields", 20_000),
-                slots.joined(",")
+            let ids: Vec<_> = unique.into_iter().map(|id| id as i64).collect();
+            let columns = sql!(
+                "CAST(id AS TEXT),COALESCE(owner,''),tenant,{}",
+                self.tx.bounded_text("fields", 20_000)
             );
-            let rows = self.tx.fetch::<4>(&sql, &params).await?;
+            let rows = self.tx.records_by_ids::<4>(&columns, storage, &ids).await?;
             // Gate target reads are batched separately below; no per-record round trips.
             let mut loaded = Vec::new();
             for [id, owner, tenant, fields] in rows {
@@ -1378,20 +1434,18 @@ impl Effects {
                     .tx
                     .storage_resource(&self.manifest, target_resource)
                     .await?;
-                let mut params = vec![Param::Number(storage)];
-                let mut slots = Vec::new();
+                let mut ids = Vec::new();
                 for record in &candidates {
-                    params.push(Param::Number(record.fields[&gate.field].parse()?));
-                    slots.push(sql!("${}", params.len()));
+                    ids.push(record.fields[&gate.field].parse::<i64>()?);
                 }
                 let mut visible = std::collections::BTreeSet::new();
-                if !slots.is_empty() {
-                    let sql = sql!(
-                        "SELECT CAST(id AS TEXT),{} FROM nx_records WHERE resource=$1 AND id IN ({})",
-                        self.tx.bounded_text("fields", 20_000),
-                        slots.joined(",")
+                if !ids.is_empty() {
+                    let columns = sql!(
+                        "CAST(id AS TEXT),{}",
+                        self.tx.bounded_text("fields", 20_000)
                     );
-                    for [id, fields] in self.tx.fetch::<2>(&sql, &params).await? {
+                    for [id, fields] in self.tx.records_by_ids::<2>(&columns, storage, &ids).await?
+                    {
                         let fields = serde_json::from_str(&fields)?;
                         manifest::validate_fields(
                             manifest::resource(&self.manifest, target_resource)?,

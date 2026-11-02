@@ -4,6 +4,7 @@ pub mod accounts;
 pub mod blobs;
 pub mod effects;
 pub mod jobs;
+pub mod records;
 
 use crate::database::{Param, Sql, Transaction};
 use anyhow::Result;

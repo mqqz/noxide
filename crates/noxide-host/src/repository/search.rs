@@ -1,6 +1,7 @@
 //! Search updates share the resource mutation and receipt transaction.
 use super::*;
 use crate::database::{lifecycle::RequestScope, schema::replace_postings};
+use noxide_store::statements::records as stmt;
 
 impl Effects {
     pub(super) async fn update_search(
@@ -30,14 +31,28 @@ impl Effects {
         let payload =
             crate::search::PreparedPostings::new(&indexed, RequestScope::checkpoint_current)?;
         // Check activation inside the same transaction before modifying postings.
-        let state = self.tx.fetch::<2>("SELECT tokenizer,declaration FROM nx_search_state WHERE resource=$1 AND version=1 AND state='ready'", &[storage.into()]).await?;
+        let state = self
+            .tx
+            .rows(&stmt::READY_SEARCH_STATE, &[storage.into()])
+            .await?;
         ensure!(
             state.len() == 1
                 && state[0][0] == index.tokenizer
                 && serde_json::from_str::<query::SearchIndex>(&state[0][1])? == *index,
             "search index is not activated"
         );
-        let rows = self.tx.fetch::<1>("SELECT CAST(created_seq AS TEXT) FROM nx_records WHERE resource=$1 AND id=$2 AND incarnation=$3 AND revision=$4", &[storage.into(), i64::try_from(id)?.into(), incarnation.into(), revision.into()]).await?;
+        let rows = self
+            .tx
+            .rows(
+                &stmt::RECORD_SEQUENCE,
+                &[
+                    storage.into(),
+                    i64::try_from(id)?.into(),
+                    incarnation.into(),
+                    revision.into(),
+                ],
+            )
+            .await?;
         let created_seq: i64 = rows
             .first()
             .ok_or_else(|| anyhow::anyhow!("search row disappeared"))?[0]

@@ -143,21 +143,18 @@ pub(super) async fn load_batch(
     );
     let mut records = std::collections::BTreeMap::new();
     for chunk in ids.chunks(3) {
-        let mut params = vec![storage.into()];
-        let mut slots = Vec::new();
+        let mut record_ids = Vec::new();
         for id in chunk {
             ensure!(*id > 0 && *id <= i64::MAX as u64, "invalid resource target");
-            params.push((*id as i64).into());
-            slots.push(sql!("${}", params.len()));
+            record_ids.push(*id as i64);
         }
         *calls = calls
             .checked_sub(1)
             .ok_or_else(|| anyhow::anyhow!("list database call budget"))?;
-        let sql = sql!(
-            "SELECT CAST(id AS TEXT),COALESCE(owner,''),tenant,{},{},CAST(revision AS TEXT),COALESCE(CAST(cap_version AS TEXT),'') FROM nx_records WHERE resource=$1 AND resource={storage} AND id IN ({}) LIMIT 3",
+        let columns = sql!(
+            "CAST(id AS TEXT),COALESCE(owner,''),tenant,{},{},CAST(revision AS TEXT),COALESCE(CAST(cap_version AS TEXT),'')",
             tx.bounded_text("fields", 20_000),
-            tx.bounded_text("incarnation", 64),
-            slots.joined(",")
+            tx.bounded_text("incarnation", 64)
         );
         for [
             id,
@@ -167,7 +164,9 @@ pub(super) async fn load_batch(
             incarnation,
             revision,
             cap_version,
-        ] in tx.fetch::<7>(&sql, &params).await?
+        ] in tx
+            .records_by_ids::<7>(&columns, storage, &record_ids)
+            .await?
         {
             let id = id.parse()?;
             ensure!(chunk.contains(&id), "unexpected batch record");

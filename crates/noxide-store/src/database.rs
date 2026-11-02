@@ -8,14 +8,13 @@ pub mod fault;
 mod jobs_layout;
 pub mod lifecycle;
 mod maintenance;
-mod records;
 pub mod schema;
 mod search_layout;
+pub use crate::statements::records::RecordScan;
 use anyhow::{Context, Result, ensure};
 pub use commit::CommitFailure;
 use commit::CommitState;
 pub use maintenance::{MaintenanceLease, MaintenanceUncertain};
-pub use records::RecordScan;
 use sqlx::{
     Connection, Row,
     postgres::PgConnectOptions,

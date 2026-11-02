@@ -53,3 +53,4 @@ pub const INSERT_ROLE: Statement<3, 0> =
     Statement::new("INSERT INTO nx_roles(principal,name,tenant) VALUES($1,$2,$3)");
 pub const DELETE_ROLE: Statement<3, 0> =
     Statement::new("DELETE FROM nx_roles WHERE principal=$1 AND name=$2 AND tenant=$3");
+pub const DELETE_SESSION: Statement<1, 0> = Statement::new("DELETE FROM nx_sessions WHERE id=$1");

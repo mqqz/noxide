@@ -274,63 +274,176 @@ impl Application {
             return Ok(());
         }
         let scope = self.job_request_scope()?;
-        scope.run(async {
-            let admission = self.admit_job_invocation_work().await?;
-            admission.owner.run(async {
-                let mut tx = self.database.begin(admission.owner.work_deadline().into_std()).await.map_err(RequestError::database)?;
-                let time = self.temporal_attempt(&mut tx).await?;
-                let generation = self.generation.get().ok_or(RequestError::Busy)?;
-                let rows = tx.fetch::<2>("SELECT tenant,name FROM nx_job_recurring WHERE deployment=$1 AND state='active' AND next_ms<=$2 ORDER BY next_ms,tenant,name LIMIT 1", &[generation.as_str().into(), time.timestamp().unix_millis().into()]).await.map_err(RequestError::database)?;
-                let Some([tenant, name]) = rows.first() else { return Self::finish_commit(&mut tx, ()).await };
-                let declaration = self.manifest.jobs.as_ref().and_then(|contract| contract.recurring.iter().find(|schedule| schedule.name == *name)).ok_or(RequestError::Rejected)?;
-                let scope = crate::jobs::JobScope { deployment: generation.clone(), tenant: tenant.clone() };
-                // Durable time and the due-schedule selection each consume one
-                // call from the same allowance used by selection and enqueue.
-                let mut calls = 14;
-                let proof = QueueContext { tx: &mut tx, calls: &mut calls }.schedule_grant(&scope, &declaration.worker, &self.contract).await.map_err(RequestError::database)?;
-                let Some(mut batch) = (QueueContext { tx: &mut tx, calls: &mut calls }).begin_recurrence(&scope, declaration, time.timestamp()).await.map_err(RequestError::database)? else { return Self::finish_commit(&mut tx, ()).await };
-                let input = declaration.inputs.iter().map(|(name, literal)| {
-                    use noxide_protocol::computation::Literal;
-                    let value = match literal {
-                        Literal::Text(v) | Literal::Choice(v) | Literal::Account(v) => v.clone(),
-                        Literal::Integer(v) => v.to_string(), Literal::Boolean(v) => v.to_string(),
-                        Literal::Timestamp(v) => v.unix_millis().to_string(), Literal::Duration(v) => v.as_millis().to_string(),
-                    };
-                    (name.clone(), value)
-                }).collect();
-                let input = self.canonical_job_input(declaration.action, &input).map_err(RequestError::database)?;
-                let version = manifest::action(&self.manifest, declaration.action).map_err(RequestError::database)?.version;
-                let next = if declaration.selection.is_some() {
-                    // Query/finalization reserves remain in the existing budget;
-                    // fanout 20 never grants twenty additional database calls.
-                    let limit = batch.remaining();
-                    let page = self.select_recurring(&mut tx, &proof, declaration, time, batch.cutoff(), batch.cutoff_seq().try_into().map_err(|_| RequestError::Rejected)?, batch.cursor(), limit, &mut calls).await.map_err(RequestError::database)?;
-                    if page.items.is_empty()
-                        && !page.complete
-                        && page.next_cursor.as_deref() == batch.cursor()
-                    {
-                        // Preserve the genuine scan frontier and let another
-                        // due tenant proceed before this scan's next attempt.
-                        QueueContext { tx: &mut tx, calls: &mut calls }
-                            .defer_recurrence(batch).await.map_err(RequestError::database)?;
-                        return Self::finish_commit(&mut tx, ()).await;
-                    }
-                    for item in page.items {
-                        // Q returns an independently List-authorized row sealed
-                        // through A's current eligible-read helper. Reauthorizing
-                        // it here would spend the same budget twice.
-                        let targets = item.targets;
-                        QueueContext { tx: &mut tx, calls: &mut calls }.emit_recurrence(&mut batch, version, input.clone(), targets, item.expiry, jobs.effective.limits.pending_per_tenant).await.map_err(RequestError::database)?;
-                    }
-                    page.next_cursor
-                } else {
-                    QueueContext { tx: &mut tx, calls: &mut calls }.emit_recurrence(&mut batch, version, input, BTreeMap::new(), None, jobs.effective.limits.pending_per_tenant).await.map_err(RequestError::database)?;
-                    None
-                };
-                QueueContext { tx: &mut tx, calls: &mut calls }.finish_recurrence(batch, next.as_deref()).await.map_err(RequestError::database)?;
-                Self::finish_commit(&mut tx, ()).await
-            }).await
-        }).await
+        scope
+            .run(async {
+                let admission = self.admit_job_invocation_work().await?;
+                admission
+                    .owner
+                    .run(async {
+                        let mut tx = self
+                            .database
+                            .begin(admission.owner.work_deadline().into_std())
+                            .await
+                            .map_err(RequestError::database)?;
+                        let time = self.temporal_attempt(&mut tx).await?;
+                        let generation = self.generation.get().ok_or(RequestError::Busy)?;
+                        let rows = tx
+                            .rows(
+                                &noxide_store::statements::jobs::NEXT_DUE_RECURRING,
+                                &[
+                                    generation.as_str().into(),
+                                    time.timestamp().unix_millis().into(),
+                                ],
+                            )
+                            .await
+                            .map_err(RequestError::database)?;
+                        let Some([tenant, name]) = rows.first() else {
+                            return Self::finish_commit(&mut tx, ()).await;
+                        };
+                        let declaration = self
+                            .manifest
+                            .jobs
+                            .as_ref()
+                            .and_then(|contract| {
+                                contract
+                                    .recurring
+                                    .iter()
+                                    .find(|schedule| schedule.name == *name)
+                            })
+                            .ok_or(RequestError::Rejected)?;
+                        let scope = crate::jobs::JobScope {
+                            deployment: generation.clone(),
+                            tenant: tenant.clone(),
+                        };
+                        // Durable time and the due-schedule selection each consume one
+                        // call from the same allowance used by selection and enqueue.
+                        let mut calls = 14;
+                        let proof = QueueContext {
+                            tx: &mut tx,
+                            calls: &mut calls,
+                        }
+                        .schedule_grant(&scope, &declaration.worker, &self.contract)
+                        .await
+                        .map_err(RequestError::database)?;
+                        let Some(mut batch) = (QueueContext {
+                            tx: &mut tx,
+                            calls: &mut calls,
+                        })
+                        .begin_recurrence(&scope, declaration, time.timestamp())
+                        .await
+                        .map_err(RequestError::database)?
+                        else {
+                            return Self::finish_commit(&mut tx, ()).await;
+                        };
+                        let input = declaration
+                            .inputs
+                            .iter()
+                            .map(|(name, literal)| {
+                                use noxide_protocol::computation::Literal;
+                                let value = match literal {
+                                    Literal::Text(v) | Literal::Choice(v) | Literal::Account(v) => {
+                                        v.clone()
+                                    }
+                                    Literal::Integer(v) => v.to_string(),
+                                    Literal::Boolean(v) => v.to_string(),
+                                    Literal::Timestamp(v) => v.unix_millis().to_string(),
+                                    Literal::Duration(v) => v.as_millis().to_string(),
+                                };
+                                (name.clone(), value)
+                            })
+                            .collect();
+                        let input = self
+                            .canonical_job_input(declaration.action, &input)
+                            .map_err(RequestError::database)?;
+                        let version = manifest::action(&self.manifest, declaration.action)
+                            .map_err(RequestError::database)?
+                            .version;
+                        let next = if declaration.selection.is_some() {
+                            // Query/finalization reserves remain in the existing budget;
+                            // fanout 20 never grants twenty additional database calls.
+                            let limit = batch.remaining();
+                            let page = self
+                                .select_recurring(
+                                    &mut tx,
+                                    &proof,
+                                    declaration,
+                                    time,
+                                    batch.cutoff(),
+                                    batch
+                                        .cutoff_seq()
+                                        .try_into()
+                                        .map_err(|_| RequestError::Rejected)?,
+                                    batch.cursor(),
+                                    limit,
+                                    &mut calls,
+                                )
+                                .await
+                                .map_err(RequestError::database)?;
+                            if page.items.is_empty()
+                                && !page.complete
+                                && page.next_cursor.as_deref() == batch.cursor()
+                            {
+                                // Preserve the genuine scan frontier and let another
+                                // due tenant proceed before this scan's next attempt.
+                                QueueContext {
+                                    tx: &mut tx,
+                                    calls: &mut calls,
+                                }
+                                .defer_recurrence(batch)
+                                .await
+                                .map_err(RequestError::database)?;
+                                return Self::finish_commit(&mut tx, ()).await;
+                            }
+                            for item in page.items {
+                                // Q returns an independently List-authorized row sealed
+                                // through A's current eligible-read helper. Reauthorizing
+                                // it here would spend the same budget twice.
+                                let targets = item.targets;
+                                QueueContext {
+                                    tx: &mut tx,
+                                    calls: &mut calls,
+                                }
+                                .emit_recurrence(
+                                    &mut batch,
+                                    version,
+                                    input.clone(),
+                                    targets,
+                                    item.expiry,
+                                    jobs.effective.limits.pending_per_tenant,
+                                )
+                                .await
+                                .map_err(RequestError::database)?;
+                            }
+                            page.next_cursor
+                        } else {
+                            QueueContext {
+                                tx: &mut tx,
+                                calls: &mut calls,
+                            }
+                            .emit_recurrence(
+                                &mut batch,
+                                version,
+                                input,
+                                BTreeMap::new(),
+                                None,
+                                jobs.effective.limits.pending_per_tenant,
+                            )
+                            .await
+                            .map_err(RequestError::database)?;
+                            None
+                        };
+                        QueueContext {
+                            tx: &mut tx,
+                            calls: &mut calls,
+                        }
+                        .finish_recurrence(batch, next.as_deref())
+                        .await
+                        .map_err(RequestError::database)?;
+                        Self::finish_commit(&mut tx, ()).await
+                    })
+                    .await
+            })
+            .await
     }
 
     /// One bounded attempt, useful for supervised operation and fixtures. The

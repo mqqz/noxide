@@ -1,6 +1,7 @@
 //! Core action execution and transactional replay semantics.
 #[cfg(test)]
 use crate::auth::AccountAdmin as _;
+use noxide_store::statements::records as stmt;
 #[cfg(test)]
 mod computation_tests;
 #[cfg(test)]
@@ -164,9 +165,19 @@ impl Application {
                 .lock_form(scope.store.identity())
                 .await?;
         }
-        let claimed = tx.execute("INSERT INTO nx_receipts(nonce,subject,contract,action,input,outcome,expires) VALUES($1,$2,$3,$4,$5,'',$6) ON CONFLICT(nonce) DO NOTHING", &[
-            nonce.as_str().into(), subject.as_str().into(), self.contract.as_str().into(), Param::Number(a.id.into()), input_hash.into(), Param::Number(expires),
-        ]).await?;
+        let claimed = tx
+            .run(
+                &stmt::CLAIM_ACTION_RECEIPT,
+                &[
+                    nonce.as_str().into(),
+                    subject.as_str().into(),
+                    self.contract.as_str().into(),
+                    Param::Number(a.id.into()),
+                    input_hash.into(),
+                    Param::Number(expires),
+                ],
+            )
+            .await?;
         if claimed == 0 {
             let [digest, outcome] = self
                 .load_receipt(&mut tx, &nonce, &subject)
@@ -687,11 +698,8 @@ impl Application {
         payload: &str,
         deadline: Instant,
     ) -> Result<()> {
-        tx.execute(
-            "UPDATE nx_receipts SET outcome=$1 WHERE nonce=$2",
-            &[payload.into(), nonce.into()],
-        )
-        .await?;
+        tx.run(&stmt::SET_RECEIPT_OUTCOME, &[payload.into(), nonce.into()])
+            .await?;
         ensure!(Instant::now() < deadline, "request deadline");
         Ok(())
     }

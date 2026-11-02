@@ -1,6 +1,5 @@
 #[cfg(test)]
 use crate::auth::AccountAdmin as _;
-use crate::sql::sql;
 mod action;
 mod authority;
 pub(crate) mod blobs;
@@ -973,8 +972,8 @@ impl Application {
                         self.keys
                             .verify_csrf(&session.nonce, csrf)
                             .map_err(|_| RequestError::InvalidRequest)?;
-                        tx.execute(
-                            "DELETE FROM nx_sessions WHERE id=$1",
+                        tx.run(
+                            &noxide_store::statements::accounts::DELETE_SESSION,
                             &[session.nonce.into()],
                         )
                         .await

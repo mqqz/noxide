@@ -1,4 +1,5 @@
 use super::*;
+use noxide_store::statements::records as stmt;
 
 impl Application {
     pub async fn submit(
@@ -491,11 +492,8 @@ impl Application {
         nonce: &str,
         subject: &str,
     ) -> Result<Option<[String; 2]>> {
-        let sql = sql!(
-            "SELECT subject,contract,input,{} FROM nx_receipts WHERE nonce=$1",
-            tx.bounded_text("outcome", 4096)
-        );
-        let rows = tx.fetch::<4>(&sql, &[nonce.into()]).await?;
+        let query = stmt::receipt(tx, 4096);
+        let rows = tx.rows(&query, &[nonce.into()]).await?;
         let Some([stored_subject, contract, digest, outcome]) = rows.into_iter().next() else {
             return Ok(None);
         };

@@ -1,4 +1,5 @@
 use super::*;
+use noxide_store::statements::records as stmt;
 
 impl Application {
     fn capability_route(&self, resource: u32) -> Result<u32> {
@@ -293,13 +294,21 @@ impl Application {
         let input = URL_SAFE_NO_PAD.encode(Sha256::digest(serde_json::to_vec(&(
             VERSION, resource, id, secret,
         ))?));
-        let claimed = tx.execute("INSERT INTO nx_receipts(nonce,subject,contract,action,input,outcome,expires) VALUES($1,$2,$3,0,$4,'',$5) ON CONFLICT(nonce) DO NOTHING", &[token.nonce.as_str().into(), anonymous.nonce.as_str().into(), self.contract.as_str().into(), input.as_str().into(), token.expires.into()]).await?;
+        let claimed = tx
+            .run(
+                &stmt::CLAIM_CAPABILITY_RECEIPT,
+                &[
+                    token.nonce.as_str().into(),
+                    anonymous.nonce.as_str().into(),
+                    self.contract.as_str().into(),
+                    input.as_str().into(),
+                    token.expires.into(),
+                ],
+            )
+            .await?;
         if claimed == 0 {
-            let sql = sql!(
-                "SELECT subject,contract,input,{} FROM nx_receipts WHERE nonce=$1",
-                tx.bounded_text("outcome", 1024)
-            );
-            let rows = tx.fetch::<4>(&sql, &[token.nonce.as_str().into()]).await?;
+            let query = stmt::receipt(&tx, 1024);
+            let rows = tx.rows(&query, &[token.nonce.as_str().into()]).await?;
             let [subject, contract, digest, outcome] =
                 rows.first().ok_or(RequestError::InvalidRequest)?;
             ensure!(
@@ -346,7 +355,20 @@ impl Application {
             .verify_edit(secret, u32::try_from(storage)?, id, current)
             .map_err(|_| RequestError::InvalidRequest)?;
         let next = current.checked_add(1).ok_or(RequestError::Rejected)?;
-        ensure!(tx.execute("UPDATE nx_records SET cap_version=$1 WHERE resource=$2 AND id=$3 AND cap_version=$4", &[next.into(), storage.into(), (id as i64).into(), current.into()]).await? == 1, "capability changed");
+        ensure!(
+            tx.run(
+                &stmt::ADVANCE_CAPABILITY_VERSION,
+                &[
+                    next.into(),
+                    storage.into(),
+                    (id as i64).into(),
+                    current.into()
+                ]
+            )
+            .await?
+                == 1,
+            "capability changed"
+        );
         let receipt = EditReceipt {
             resource,
             id,
@@ -354,8 +376,8 @@ impl Application {
             cap_version: next as u64,
             key_id: self.keys.signing_edit_key()?,
         };
-        tx.execute(
-            "UPDATE nx_receipts SET outcome=$1 WHERE nonce=$2",
+        tx.run(
+            &stmt::SET_RECEIPT_OUTCOME,
             &[serde_json::to_string(&receipt)?.into(), token.nonce.into()],
         )
         .await?;

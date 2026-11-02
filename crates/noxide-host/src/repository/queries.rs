@@ -1,5 +1,6 @@
 //! Fixed bounded frontiers extending the existing list executor.
 use super::*;
+use crate::sql::JoinSql;
 use crate::{
     database::lifecycle::RequestScope,
     query_plan::{ListPlan, NativeProvider},
@@ -182,13 +183,11 @@ impl FrontierContext<'_> {
                 let keyset = plan.keyset_on(after, &mut params, "p.created_seq", "p.record_id")?;
                 let upper = self.upper_clause("p.created_seq", &mut params)?;
                 // Posting index fixes resource/field/token before ordered LIMIT.
-                let sql = sql!(
-                    "SELECT CAST(p.created_seq AS TEXT),CAST(p.record_id AS TEXT),p.incarnation,CAST(p.revision AS TEXT) FROM nx_search_postings p WHERE p.resource=$1 AND p.field=$2 AND p.token=$3{keyset}{upper} ORDER BY p.created_seq {},p.record_id {} LIMIT {per}",
-                    plan.direction(),
-                    plan.direction()
-                );
                 self.budget.spend(1)?;
-                let rows = self.tx.fetch::<4>(&sql, &params).await?;
+                let rows = self
+                    .tx
+                    .posting_candidates(&sql!("{keyset}{upper}"), plan.direction(), per, &params)
+                    .await?;
                 streams.push(
                     rows.into_iter()
                         .map(|[seq, record, inc, rev]| {
@@ -288,7 +287,10 @@ impl Effects {
             .clone();
         crate::search::require_tokenizer(&index.tokenizer)?;
         self.charge_list_calls(1)?;
-        let rows = self.tx.fetch::<2>("SELECT tokenizer,declaration FROM nx_search_state WHERE resource=$1 AND version=1 AND state='ready'", &[storage.into()]).await?;
+        let rows = self
+            .tx
+            .rows(&stmt::READY_SEARCH_STATE, &[storage.into()])
+            .await?;
         ensure!(
             rows.len() == 1
                 && rows[0][0] == index.tokenizer
@@ -379,14 +381,18 @@ impl Effects {
                 slots.push(sql!("${}", params.len()));
             }
             // All grouping is restricted to the already sealed finite identity set.
-            let sql = sql!(
-                "SELECT CAST(record_id AS TEXT),incarnation,CAST(revision AS TEXT) FROM nx_search_postings WHERE resource=$1 AND record_id IN ({}) AND field IN ({fields}) AND token IN ({}) GROUP BY record_id,incarnation,revision HAVING COUNT(DISTINCT token)={} LIMIT 64",
-                ids.joined(","),
-                slots.joined(","),
-                tokens.len()
-            );
             self.charge_list_calls(1)?;
-            for [record, incarnation, revision] in self.tx.fetch::<3>(&sql, &params).await? {
+            let matching = self
+                .tx
+                .postings_matching_all(
+                    &ids.joined(","),
+                    &fields,
+                    &slots.joined(","),
+                    tokens.len(),
+                    &params,
+                )
+                .await?;
+            for [record, incarnation, revision] in matching {
                 let record = record.parse()?;
                 let revision: i64 = revision.parse()?;
                 ensure!(
@@ -658,16 +664,13 @@ impl Effects {
         );
         for group in candidates.chunks(chunk) {
             RequestScope::checkpoint_current()?;
-            let mut params = vec![storage.into()];
-            let mut slots = Vec::new();
+            let mut ids = Vec::with_capacity(group.len());
             for candidate in group {
-                params.push(i64::try_from(id(&candidate.key))?.into());
-                slots.push(sql!("${}", params.len()));
+                ids.push(i64::try_from(id(&candidate.key))?);
             }
             self.charge_list_calls(1)?;
-            let sql = sql!(
-                "SELECT CAST(id AS TEXT),COALESCE(owner,''),tenant,incarnation,CAST(revision AS TEXT),CAST(created_seq AS TEXT),CAST({projection} AS TEXT) FROM nx_records WHERE resource=$1 AND resource={storage} AND id IN ({}) LIMIT {chunk}",
-                slots.joined(",")
+            let columns = sql!(
+                "CAST(id AS TEXT),COALESCE(owner,''),tenant,incarnation,CAST(revision AS TEXT),CAST(created_seq AS TEXT),CAST({projection} AS TEXT)"
             );
             for [
                 record,
@@ -677,7 +680,7 @@ impl Effects {
                 revision,
                 sequence,
                 fields,
-            ] in self.tx.fetch::<7>(&sql, &params).await?
+            ] in self.tx.records_by_ids::<7>(&columns, storage, &ids).await?
             {
                 let record = record.parse()?;
                 let revision: i64 = revision.parse()?;

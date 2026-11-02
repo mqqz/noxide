@@ -196,3 +196,6 @@ pub const LOCK_RECONCILABLE_JOB: Statement<3, 0> = Statement::new(
 pub const RECONCILE_JOB: Statement<2, 0> = Statement::new(
     "UPDATE nx_jobs SET state='rejected',reason='operator_reconciled',lease_until_ms=0 WHERE id=$1 AND deployment=$2",
 );
+pub const NEXT_DUE_RECURRING: Statement<2, 2> = Statement::new(
+    "SELECT tenant,name FROM nx_job_recurring WHERE deployment=$1 AND state='active' AND next_ms<=$2 ORDER BY next_ms,tenant,name LIMIT 1",
+);
