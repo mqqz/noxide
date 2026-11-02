@@ -1,0 +1,40 @@
+[package]
+name = "noxide-repository"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Noxide record reads and writes, authorized per attempt. Runs no guest code and serves no requests"
+
+[dependencies]
+noxide-protocol.workspace = true
+noxide-host-calls.workspace = true
+noxide-admission.workspace = true
+noxide-store.workspace = true
+noxide-sql.workspace = true
+noxide-authority.workspace = true
+noxide-blobs.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[features]
+query-metrics = ["noxide-store/query-metrics"]
+# Test-only items for other crates' tests. Never enabled by a deployed binary;
+# tools/check_layers.py verifies the production feature set.
+test-support = ["noxide-store/test-support", "noxide-authority/test-support", "noxide-blobs/test-support"]
+
+[dev-dependencies]
+noxide-store = { workspace = true, features = ["test-support"] }
+noxide-authority = { workspace = true, features = ["test-support"] }
+noxide-blobs = { workspace = true, features = ["test-support"] }
+noxide-sql = { workspace = true, features = ["test-support"] }
+noxide-admission = { workspace = true, features = ["test-support"] }
+noxide-test-support.workspace = true
+sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"
+url = "2"

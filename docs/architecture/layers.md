@@ -11,6 +11,7 @@ the [explicit examples](../sdk-lowering.md).
 | `noxide-asset-admission` | Asset pack validation and compilation; never linked by the server |
 | `noxide-admission` | Pure manifest admission, policy and query planning, SQL generation and identity values |
 | `noxide-render` | Document IR to bytes, with its budget passed in |
+| `noxide-host-calls` | The storage calls a guest may make, as a trait with no runtime behind it |
 | `noxide-sandbox` | The Wasmtime boundary and complete guest import surface, behind `HostCalls` |
 | `noxide-keys` | Host key material and the key service protocol; callers never receive key bytes |
 | `noxide-confine` | Landlock and seccomp policy for deployed processes |
@@ -21,7 +22,8 @@ the [explicit examples](../sdk-lowering.md).
 | `noxide-blobs` | The blob directory, blob metadata and upload authority |
 | `noxide-jobs` | Job queue storage, recurrence and operator commands; runs no guest code |
 | `noxide-authority` | Accounts, roles, tokens, admission limits and per-attempt request authority |
-| `noxide-host` | Repository, application orchestration, job execution and HTTP |
+| `noxide-repository` | Record reads and writes, policy filtering, search and aggregates for one request attempt; runs no guest code |
+| `noxide-host` | Application orchestration, job execution and HTTP |
 | `noxide` | Typed resources, queries, actions, forms and pages; WIT bindings and guest entry points |
 | `noxide-macros` | Explicit declaration expansion and optional convenience lowering |
 | `noxide-cli` | Operator build, dependency, approval, lifecycle, schema and role commands |
@@ -33,8 +35,8 @@ inside `noxide-host` depends on a higher layer, or if a crate outside its allowe
 list compiles a policy filter. `tools/check_binaries.py` checks the
 symbols of each deployed binary, because `noxide-cli` builds them all.
 
-`noxide-host` still contains the repository, application orchestration and HTTP as
-modules, separated by that lint and not by the compiler.
+`noxide-host` still contains application orchestration and HTTP as modules,
+separated by that lint and not by the compiler.
 
 ### SQL boundary
 

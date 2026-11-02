@@ -11,15 +11,15 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-pub(crate) struct Candidate {
-    pub(crate) key: CursorKey,
-    pub(crate) incarnation: String,
-    pub(crate) revision: i64,
+pub struct Candidate {
+    pub key: CursorKey,
+    pub incarnation: String,
+    pub revision: i64,
 }
-pub(crate) struct Window {
-    pub(crate) rows: Vec<Candidate>,
-    pub(crate) exhausted: bool,
-    pub(crate) raw_work: usize,
+pub struct Window {
+    pub rows: Vec<Candidate>,
+    pub exhausted: bool,
+    pub raw_work: usize,
 }
 fn id(key: &CursorKey) -> u64 {
     match key {
@@ -63,14 +63,14 @@ fn compare(a: &CursorKey, b: &CursorKey) -> Ordering {
 }
 /// Borrow the existing transaction, policy identity and logical work owner.
 /// A caller-supplied upper bound is host bookkeeping, never a guest query input.
-pub(crate) struct FrontierContext<'a> {
-    pub(crate) tx: &'a mut Transaction,
-    pub(crate) manifest: &'a Manifest,
-    pub(crate) principal: &'a Principal,
-    pub(crate) budget: ReadBudget<'a>,
-    pub(crate) params: &'a Fields,
-    pub(crate) target: Option<u64>,
-    pub(crate) created_seq_upper: Option<u64>,
+pub struct FrontierContext<'a> {
+    pub tx: &'a mut Transaction,
+    pub manifest: &'a Manifest,
+    pub principal: &'a Principal,
+    pub budget: ReadBudget<'a>,
+    pub params: &'a Fields,
+    pub target: Option<u64>,
+    pub created_seq_upper: Option<u64>,
 }
 impl FrontierContext<'_> {
     fn upper_clause(&self, column: &'static str, params: &mut Vec<Param>) -> Result<Sql> {
@@ -151,7 +151,7 @@ impl FrontierContext<'_> {
         }
         Ok(clause)
     }
-    pub(crate) async fn window(
+    pub async fn window(
         &mut self,
         op: &Operation,
         storage: i64,

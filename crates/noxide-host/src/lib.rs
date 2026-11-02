@@ -2,8 +2,10 @@
 #![forbid(unsafe_code)]
 pub use noxide_admission::{Presentation, assets, manifest, schema};
 pub(crate) use noxide_admission::{
-    action_contract, expiry, membership, policy, query_plan, routing, search, sql,
+    action_contract, expiry, membership, query_plan, routing, search,
 };
+#[cfg(test)]
+pub(crate) use noxide_admission::{policy, sql};
 pub(crate) use noxide_authority::{auth, authority, limiter, operator_roles, security};
 pub(crate) use noxide_blobs::{
     inspect as blob_inspect, io as blob_io, metadata as blob_metadata, multipart as blob_multipart,
@@ -47,11 +49,11 @@ pub(crate) use noxide_store::{database, lifecycle_clock};
 pub use operator_roles::{RoleAdmin, RoleAssignment, RoleScope};
 pub use security::HostKeys;
 mod application;
-mod repository;
 pub use application::{
     ActionRejection, Application, JobRunOutcome, LoginChallenge, RequestError,
     ValidatedActionRejection,
 };
+pub(crate) use noxide_repository::repository;
 pub mod http;
 
 #[cfg(test)]
@@ -59,6 +61,9 @@ mod failure_tests;
 
 #[cfg(test)]
 mod public_tests;
+
+#[cfg(test)]
+mod query_receipt_tests;
 
 #[cfg(test)]
 mod anonymous_tests;

@@ -12,7 +12,7 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "crates/noxide-host/src"
 LAYERS = [
-    ["deployment", "repository"],
+    ["deployment"],
     ["application"],
     ["http"],
 ]
@@ -82,7 +82,7 @@ RESTRICTED = {
 # Workspace crates that perform no I/O, and may depend only on each other.
 # The store depends on these and on nothing above them.
 STORE_ALLOWED = {"noxide-protocol", "noxide-admission", "noxide-sql", "noxide-assets", "noxide-sql-macros"}
-PURE = {"noxide-admission", "noxide-assets", "noxide-render", "noxide-sql", "noxide-sql-macros"}
+PURE = {"noxide-admission", "noxide-assets", "noxide-host-calls", "noxide-render", "noxide-sql", "noxide-sql-macros"}
 ROOT = SRC.parent.parent.parent
 TEST_ONLY = {"noxide-test-support"}
 
@@ -121,7 +121,7 @@ def crate_failures():
 # Rust has no friend crates, so these calls are confined here instead.
 POLICY_COMPILERS = {
     "filter_with": {"noxide-authority"},
-    "filter": {"noxide-authority", "noxide-host"},
+    "filter": {"noxide-authority", "noxide-repository"},
 }
 
 

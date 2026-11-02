@@ -2,8 +2,8 @@ use crate::sql::{Sql, sql};
 use noxide_store::statements::records as stmt;
 mod authority;
 mod computation;
-pub(crate) mod queries;
-pub(crate) mod search;
+pub mod queries;
+pub mod search;
 use crate::{
     auth::Principal,
     database::{Param, RecordScan, Transaction},
@@ -11,20 +11,18 @@ use crate::{
     security::RecordTarget,
 };
 use anyhow::{Result, ensure};
-pub(crate) use authority::{ReadBudget, ReadContext};
-#[cfg(test)]
-pub(crate) use authority::{test_authorize_page_resource, test_read_resource};
-pub(crate) use computation::{
-    CalculationUnavailable, Scalar as ScheduleScalar, Values as ScheduleValues,
-};
+pub use authority::{ReadBudget, ReadContext};
+#[cfg(any(test, feature = "test-support"))]
+pub use authority::{test_authorize_page_resource, test_read_resource};
+pub use computation::{CalculationUnavailable, Scalar as ScheduleScalar, Values as ScheduleValues};
 use noxide_protocol::query::CursorKey;
 use noxide_protocol::*;
 use std::sync::Arc;
 
-pub(crate) use crate::action_contract::ReferenceUnavailable;
+pub use crate::action_contract::ReferenceUnavailable;
 
 #[derive(Debug)]
-pub(crate) struct GuardFailure {
+pub struct GuardFailure {
     pub input: Option<String>,
     pub message: String,
 }
@@ -35,7 +33,7 @@ impl std::fmt::Display for GuardFailure {
 }
 impl std::error::Error for GuardFailure {}
 
-pub(crate) use crate::database::ConditionalConflict;
+pub use crate::database::ConditionalConflict;
 
 fn adjust(
     current: i64,
@@ -63,7 +61,7 @@ fn adjust(
 
 /// Candidate-dependent predicates are unknown until the proposed row resolves.
 /// Every other prerequisite remains checked before guest execution and guards.
-pub(crate) fn create_prerequisites(operation: &Operation, principal: &Principal) -> bool {
+pub fn create_prerequisites(operation: &Operation, principal: &Principal) -> bool {
     if manifest::is_public(operation) {
         return true;
     }
@@ -94,7 +92,7 @@ pub(crate) fn create_prerequisites(operation: &Operation, principal: &Principal)
     })
 }
 
-impl noxide_sandbox::HostCalls for Effects {
+impl noxide_host_calls::HostCalls for Effects {
     fn storage_allowed(&self) -> bool {
         matches!(self.request.kind, RequestKind::Route(_))
     }
@@ -109,9 +107,9 @@ impl noxide_sandbox::HostCalls for Effects {
     }
 }
 
-pub(crate) const MAX_LIST_DATABASE_CALLS: usize = 4096;
+pub const MAX_LIST_DATABASE_CALLS: usize = 4096;
 
-pub(crate) struct Effects {
+pub struct Effects {
     pub authority: crate::authority::Authority,
     pub upload: Option<crate::blob_upload::UploadContext>,
     pub blob_reads:
@@ -161,8 +159,8 @@ fn append_prefix(
 }
 
 #[derive(Clone)]
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-pub(crate) struct StoredRecord {
+#[cfg_attr(any(test, feature = "test-support"), derive(Debug, PartialEq, Eq))]
+pub struct StoredRecord {
     pub record: Record,
     pub owner: String,
     pub tenant: String,
@@ -171,7 +169,7 @@ pub(crate) struct StoredRecord {
     pub cap_version: Option<i64>,
 }
 
-pub(crate) async fn load(
+pub async fn load(
     tx: &mut Transaction,
     m: &Manifest,
     resource: u32,
@@ -218,7 +216,7 @@ pub(crate) async fn load(
         .transpose()
 }
 
-pub(crate) use crate::policy::allowed;
+pub use crate::policy::allowed;
 
 /// Common host read authorization and projection; no guest code is executed.
 async fn read_projected_resource(
@@ -243,8 +241,8 @@ async fn read_projected_resource(
     Ok(Some((record, stored.incarnation)))
 }
 
-#[cfg(test)]
-pub(crate) async fn read_resource(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn read_resource(
     context: &mut ReadContext<'_>,
     op: &Operation,
     target: u64,
@@ -254,7 +252,7 @@ pub(crate) async fn read_resource(
         .map(|(record, _)| record))
 }
 
-pub(crate) async fn authorize_stored_read(
+pub async fn authorize_stored_read(
     context: &mut ReadContext<'_>,
     op: &Operation,
     stored: &StoredRecord,
@@ -285,7 +283,7 @@ pub(crate) async fn authorize_stored_read(
     Ok(true)
 }
 
-pub(crate) async fn read_allowed(
+pub async fn read_allowed(
     context: &mut ReadContext<'_>,
     op: &Operation,
     stored: &StoredRecord,
@@ -311,7 +309,7 @@ pub(crate) async fn read_allowed(
     Ok(true)
 }
 
-pub(crate) async fn authorize_page_resource(
+pub async fn authorize_page_resource(
     context: &mut ReadContext<'_>,
     route: &Route,
     resource: u32,
@@ -366,7 +364,7 @@ pub(crate) async fn authorize_page_resource(
 }
 
 impl Effects {
-    pub(crate) async fn execute_transaction(
+    pub async fn execute_transaction(
         &mut self,
         action: crate::action_contract::ActionCore<'_>,
         time: Option<crate::lifecycle_clock::AttemptTime>,
@@ -549,15 +547,15 @@ impl Effects {
                 None => self.written_rows.remove(&(outcome.resource, outcome.id)),
             };
             outcomes.push(outcome);
-            #[cfg(test)]
-            crate::failure_tests::after_effect(&mut self.tx).await?;
+            #[cfg(any(test, feature = "test-support"))]
+            crate::database::fault::after_effect(&mut self.tx).await?;
         }
         Ok(outcomes)
     }
 
     /// Every reused final row must equal what a fresh load would return.
-    #[cfg(test)]
-    pub(crate) async fn assert_written_rows_current(&mut self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn assert_written_rows_current(&mut self) {
         let written = self.written_rows.clone();
         assert!(!written.is_empty(), "no written row to compare");
         for ((resource, id), row) in written {
@@ -625,7 +623,7 @@ impl Effects {
                 .get(&(parent.id, id))
                 .or_else(|| self.target_rows.get(&(parent.id, id)));
             let stored = if let Some(stored) = cached {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 if self.written_rows.contains_key(&(parent.id, id)) {
                     let loaded = load(&mut self.tx, &m, parent.id, id).await?;
                     assert_eq!(
@@ -960,8 +958,8 @@ impl Effects {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn next_request(&mut self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn next_request(&mut self) {
         self.invoked.clear();
         self.provenance.clear();
         self.blob_reads.clear();
@@ -970,7 +968,7 @@ impl Effects {
         self.list_calls = MAX_LIST_DATABASE_CALLS;
         self.see_all.clear();
     }
-    pub(crate) fn charge_list_calls(&mut self, count: usize) -> Result<()> {
+    pub fn charge_list_calls(&mut self, count: usize) -> Result<()> {
         ensure!(self.list_calls >= count, "list database call budget");
         self.list_calls -= count;
         Ok(())
@@ -1324,7 +1322,7 @@ impl Effects {
         Ok(fields)
     }
 
-    pub(crate) fn follow_source(&mut self, resource: u32, id: u64) -> Result<()> {
+    pub fn follow_source(&mut self, resource: u32, id: u64) -> Result<()> {
         ensure!(
             matches!(self.request.kind, RequestKind::Route(_)),
             "storage import during action"
@@ -1333,7 +1331,7 @@ impl Effects {
         self.follow_sources.push((resource, id));
         Ok(())
     }
-    pub(crate) async fn follow(&mut self, operation: u32) -> Result<Vec<u8>> {
+    pub async fn follow(&mut self, operation: u32) -> Result<Vec<u8>> {
         ensure!(
             matches!(self.request.kind, RequestKind::Route(_)),
             "storage import during action"
@@ -1486,7 +1484,7 @@ impl Effects {
         );
         Ok(bytes)
     }
-    pub(crate) async fn picker_records(&mut self, binding: u32, name: &str) -> Result<Vec<Record>> {
+    pub async fn picker_records(&mut self, binding: u32, name: &str) -> Result<Vec<Record>> {
         let RequestKind::Route(route) = self.request.kind else {
             anyhow::bail!("picker outside web route")
         };
@@ -1520,7 +1518,7 @@ impl Effects {
             Ok(serde_json::from_slice(&bytes)?)
         }
     }
-    pub(crate) async fn invoke(&mut self, operation: u32, target: u64) -> Result<Vec<u8>> {
+    pub async fn invoke(&mut self, operation: u32, target: u64) -> Result<Vec<u8>> {
         self.invoke_internal(operation, target, false).await
     }
     async fn invoke_internal(

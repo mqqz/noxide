@@ -14,6 +14,7 @@ noxide-sql.workspace = true
 noxide-store.workspace = true
 noxide-blobs.workspace = true
 noxide-jobs.workspace = true
+noxide-repository.workspace = true
 noxide-authority.workspace = true
 noxide-effects.workspace = true
 noxide-assets.workspace = true
@@ -33,11 +34,12 @@ base64 = "0.22"
 url = "2"
 
 [features]
-query-metrics = ["noxide-store/query-metrics"]
+query-metrics = ["noxide-store/query-metrics", "noxide-repository/query-metrics"]
 
 [dev-dependencies]
 noxide-authority = { workspace = true, features = ["test-support"] }
 noxide-jobs = { workspace = true, features = ["test-support"] }
+noxide-repository = { workspace = true, features = ["test-support"] }
 noxide-blobs = { workspace = true, features = ["test-support"] }
 noxide-effect-delivery = { workspace = true, features = ["test-support"] }
 rustls.workspace = true

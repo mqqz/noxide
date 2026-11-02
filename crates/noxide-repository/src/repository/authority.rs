@@ -2,8 +2,8 @@
 //! existing module. Registration and call sites are applied by the runtime owner.
 use super::*;
 
-#[cfg(test)]
-pub(crate) async fn test_read_resource(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn test_read_resource(
     tx: &mut Transaction,
     m: &Manifest,
     principal: &Principal,
@@ -26,8 +26,8 @@ pub(crate) async fn test_read_resource(
     .await
 }
 
-#[cfg(test)]
-pub(crate) async fn test_authorize_page_resource(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn test_authorize_page_resource(
     tx: &mut Transaction,
     m: &Manifest,
     principal: &Principal,
@@ -54,7 +54,7 @@ pub(crate) async fn test_authorize_page_resource(
     .await
 }
 
-pub(crate) enum ReadBudget<'a> {
+pub enum ReadBudget<'a> {
     Action(&'a mut u32),
     Query(&'a mut usize),
 }
@@ -72,7 +72,7 @@ impl ReadBudget<'_> {
         }
         Ok(())
     }
-    pub(crate) fn spend(&mut self, count: usize) -> Result<()> {
+    pub fn spend(&mut self, count: usize) -> Result<()> {
         let remaining = self
             .remaining()
             .checked_sub(count)
@@ -81,7 +81,7 @@ impl ReadBudget<'_> {
     }
 }
 
-pub(crate) struct ReadContext<'a> {
+pub struct ReadContext<'a> {
     pub tx: &'a mut Transaction,
     pub manifest: &'a Manifest,
     pub principal: &'a Principal,
@@ -89,18 +89,18 @@ pub(crate) struct ReadContext<'a> {
     pub budget: ReadBudget<'a>,
 }
 impl ReadContext<'_> {
-    pub(crate) async fn load(&mut self, resource: u32, id: u64) -> Result<Option<StoredRecord>> {
+    pub async fn load(&mut self, resource: u32, id: u64) -> Result<Option<StoredRecord>> {
         self.budget.spend(2)?;
         load(self.tx, self.manifest, resource, id).await
     }
-    pub(crate) fn unexpired(&self, stored: &StoredRecord) -> Result<bool> {
+    pub fn unexpired(&self, stored: &StoredRecord) -> Result<bool> {
         crate::expiry::available(
             manifest::resource(self.manifest, stored.record.resource)?,
             &stored.record.fields,
             self.authority.time(),
         )
     }
-    pub(crate) async fn authorize(
+    pub async fn authorize(
         &mut self,
         operation: &Operation,
         stored: &StoredRecord,
@@ -203,7 +203,7 @@ pub(super) async fn load_batch(
 }
 
 impl StoredRecord {
-    pub(crate) fn authority_row(&self) -> crate::authority::Row<'_> {
+    pub fn authority_row(&self) -> crate::authority::Row<'_> {
         crate::authority::Row {
             id: self.record.id,
             owner: &self.owner,
@@ -214,7 +214,7 @@ impl StoredRecord {
 }
 
 impl Effects {
-    pub(crate) fn read_context(&mut self) -> ReadContext<'_> {
+    pub fn read_context(&mut self) -> ReadContext<'_> {
         let budget = if matches!(self.request.kind, RequestKind::Action(_)) {
             ReadBudget::Action(&mut self.calls)
         } else {
@@ -228,7 +228,7 @@ impl Effects {
             budget,
         }
     }
-    pub(crate) async fn authorize_rows(
+    pub async fn authorize_rows(
         &mut self,
         operation: &Operation,
         rows: &[crate::authority::Row<'_>],
@@ -258,7 +258,7 @@ impl Effects {
         result
     }
 
-    pub(crate) async fn authorize_existing(
+    pub async fn authorize_existing(
         &mut self,
         operation: &Operation,
         stored: &StoredRecord,
@@ -272,7 +272,7 @@ impl Effects {
             .await?[0])
     }
 
-    pub(crate) async fn authorize_candidate(
+    pub async fn authorize_candidate(
         &mut self,
         operation: &Operation,
         fields: &Fields,
@@ -307,7 +307,7 @@ impl Effects {
         Ok(())
     }
 
-    pub(crate) fn check_expiry_update(
+    pub fn check_expiry_update(
         &self,
         operation: &Operation,
         before: &Fields,
@@ -321,7 +321,7 @@ impl Effects {
         )
     }
 
-    pub(crate) fn row_unexpired(&self, stored: &StoredRecord) -> Result<bool> {
+    pub fn row_unexpired(&self, stored: &StoredRecord) -> Result<bool> {
         crate::expiry::available(
             manifest::resource(&self.manifest, stored.record.resource)?,
             &stored.record.fields,
@@ -329,7 +329,7 @@ impl Effects {
         )
     }
 
-    pub(crate) async fn authority_filter(
+    pub async fn authority_filter(
         &mut self,
         operation: &Operation,
         params: &mut Vec<Param>,

@@ -5,7 +5,7 @@ use noxide_protocol::time::{Duration, Timestamp};
 use std::{cmp::Ordering, collections::BTreeMap};
 
 #[derive(Debug)]
-pub(crate) struct CalculationUnavailable;
+pub struct CalculationUnavailable;
 impl std::fmt::Display for CalculationUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("calculation unavailable")
@@ -14,7 +14,7 @@ impl std::fmt::Display for CalculationUnavailable {
 impl std::error::Error for CalculationUnavailable {}
 
 #[derive(Clone, Debug)]
-pub(crate) enum Scalar {
+pub enum Scalar {
     Text(String),
     Integer(i64),
     Boolean(bool),
@@ -68,7 +68,7 @@ pub(super) struct Context {
     pub time: Option<AttemptTime>,
 }
 
-pub(crate) struct Values<'a> {
+pub struct Values<'a> {
     pub manifest: &'a Manifest,
     pub input: &'a Fields,
     pub principal: &'a Principal,

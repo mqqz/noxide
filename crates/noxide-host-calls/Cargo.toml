@@ -1,0 +1,11 @@
+[package]
+name = "noxide-host-calls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The storage calls a Noxide guest may make, without any guest runtime or storage"
+
+[dependencies]
+anyhow.workspace = true

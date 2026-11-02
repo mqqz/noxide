@@ -1557,6 +1557,7 @@ dependencies = [
  "noxide-jobs",
  "noxide-protocol",
  "noxide-render",
+ "noxide-repository",
  "noxide-sandbox",
  "noxide-sql",
  "noxide-store",
@@ -1574,6 +1575,13 @@ dependencies = [
  "tower",
  "url",
  "wat",
+]
+
+[[package]]
+name = "noxide-host-calls"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]
@@ -1642,10 +1650,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "noxide-repository"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "noxide-admission",
+ "noxide-authority",
+ "noxide-blobs",
+ "noxide-host-calls",
+ "noxide-protocol",
+ "noxide-sql",
+ "noxide-store",
+ "noxide-test-support",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "noxide-sandbox"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "noxide-host-calls",
  "noxide-protocol",
  "serde_json",
  "tokio",
